@@ -49,6 +49,7 @@
 #include <fileformats/tiny_gltf.h>
 
 
+#include "imgui_impl_glfw.h"
 #include "nvh/fileoperations.hpp"
 #include <imgui/imgui_orient.h>
 #include <iostream>
@@ -616,15 +617,17 @@ void VkScene::createRenderPass()
 //--------------------------------------------------------------------------------------------------
 // Overload callback when a key gets hit
 //
-void VkScene::onKeyboardChar(unsigned char key, int mods, int x, int y)
+void VkScene::onKeyboardChar(unsigned char key)
 {
-  AppBase::onKeyboardChar(key, mods, x, y);
+  AppBase::onKeyboardChar(key);
 
   if(key == 'f')
     fitCamera(m_gltfScene.m_dimensions.min, m_gltfScene.m_dimensions.max, false);
 
   if(key == ' ')
   {
+    double x, y;
+    glfwGetCursorPos(m_window, &x, &y);
     float z = getDepth(x, y);
     if(z < 1.0f)  // Not the background
     {
@@ -645,10 +648,8 @@ void VkScene::drawUI()
 {
   static int e = m_upVector;
 
-  // Update imgui configuration
-  auto& imgui_io       = ImGui::GetIO();
-  imgui_io.DisplaySize = ImVec2(m_size.width, m_size.height);
-
+  // Start the Dear ImGui frame
+  ImGui_ImplGlfw_NewFrame();
   ImGui::NewFrame();
   ImGui::SetNextWindowBgAlpha(0.8);
   ImGui::SetNextWindowSize(ImVec2(450, 0), ImGuiCond_FirstUseEver);
@@ -802,11 +803,11 @@ void VkScene::loadImages(tinygltf::Model& gltfModel)
 //--------------------------------------------------------------------------------------------------
 // Overload keyboard hit
 //
-void VkScene::onKeyboard(NVPWindow::KeyCode key, ButtonAction action, int mods, int x, int y)
+void VkScene::onKeyboard(int key, int scancode, int action, int mods)
 {
-  nvvkpp::AppBase::onKeyboard(key, action, mods, x, y);
+  nvvkpp::AppBase::onKeyboard(key, scancode, action, mods);
 
-  if(key == NVPWindow::KEY_HOME)
+  if(key == GLFW_KEY_HOME)
   {
     // Set the camera as to see the model
     fitCamera(m_gltfScene.m_dimensions.min, m_gltfScene.m_dimensions.max, false);
