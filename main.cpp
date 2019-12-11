@@ -34,9 +34,14 @@
 #include <array>
 #include <chrono>
 #include <iostream>
+#include <vulkan/vulkan.hpp>
 
+
+#include "imgui.h"
+#include "imgui_impl_glfw.h"
 #include "nvh/fileoperations.hpp"
 #include "nvh/inputparser.h"
+#include "nvpsystem.hpp"
 #include "nvvkpp/context_vkpp.hpp"
 #include "nvvkpp/utilities_vkpp.hpp"
 #include "scene.hpp"
@@ -82,9 +87,16 @@ int main(int argc, char** argv)
     hdrFilename = nvh::findFile("/data/environment.hdr", defaultSearchPaths);
   }
 
-
   // setup some basic things for the sample, logging file for example
   NVPSystem system(argv[0], PROJECT_NAME);
+
+  // GLFW
+  if(!glfwInit())
+  {
+    return 1;
+  }
+  glfwWindowHint(GLFW_CLIENT_API, GLFW_NO_API);
+  GLFWwindow* window = glfwCreateWindow(SAMPLE_SIZE_WIDTH, SAMPLE_SIZE_HEIGHT, PROJECT_NAME, nullptr, nullptr);
 
   nvvkpp::ContextCreateInfo deviceInfo;
   deviceInfo.addInstanceLayer("VK_LAYER_LUNARG_monitor", true);
@@ -111,11 +123,8 @@ int main(int argc, char** argv)
   example.setScene(filename);
   example.setEnvironmentHdr(hdrFilename);
 
-  // Creating the window
-  example.open(0, 0, SAMPLE_SIZE_WIDTH, SAMPLE_SIZE_HEIGHT, PROJECT_NAME);
-
   // Window need to be opened to get the surface on which to draw
-  const vk::SurfaceKHR surface = example.getVkSurface(vkctx.m_instance);
+  const vk::SurfaceKHR surface = example.getVkSurface(vkctx.m_instance, window);
   vkctx.setGCTQueueWithPresent(surface);
 
   // Printing which GPU we are using
@@ -139,18 +148,24 @@ int main(int argc, char** argv)
     exit(1);
   }
 
+  example.setupGlfwCallbacks(window);
+  ImGui_ImplGlfw_InitForVulkan(window, true);
 
   // Window system loop
-  while(!example.isClosing() && example.pollEvents())
+  while(!glfwWindowShouldClose(window))
   {
-    if(example.isOpen())
-    {
-      CameraManip.updateAnim();
-      example.display();  // infinitely drawing
-    }
+    glfwPollEvents();
+    if(example.isMinimized())
+      continue;
+
+    CameraManip.updateAnim();
+    example.display();  // infinitely drawing
   }
 
   example.destroy();
   vkctx.m_instance.destroySurfaceKHR(surface);
   vkctx.deinit();
+
+  glfwDestroyWindow(window);
+  glfwTerminate();
 }

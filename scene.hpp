@@ -83,8 +83,8 @@ public:
   void destroy() override;
   void onResize(int w, int h) override;
   void createRenderPass() override;
-  void onKeyboardChar(unsigned char key, int mods, int x, int y) override;
-  void onKeyboard(NVPWindow::KeyCode key, ButtonAction action, int mods, int x, int y) override;
+  void onKeyboardChar(unsigned char key) override;
+  void onKeyboard(int key, int scancode, int action, int mods) override;
 
   float         getDepth(int x, int y);
   nvmath::vec3f unProjectScreenPosition(const nvmath::vec3f& screenPos);
