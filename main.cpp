@@ -101,7 +101,12 @@ int main(int argc, char** argv)
   nvvkpp::ContextCreateInfo deviceInfo;
   deviceInfo.addInstanceLayer("VK_LAYER_LUNARG_monitor", true);
   deviceInfo.addInstanceExtension(VK_KHR_SURFACE_EXTENSION_NAME);
+#ifdef _WIN32
   deviceInfo.addInstanceExtension(VK_KHR_WIN32_SURFACE_EXTENSION_NAME);
+#else
+  deviceInfo.addInstanceExtension(VK_KHR_XLIB_SURFACE_EXTENSION_NAME);
+  deviceInfo.addInstanceExtension(VK_KHR_XCB_SURFACE_EXTENSION_NAME);
+#endif
   deviceInfo.addDeviceExtension(VK_KHR_SWAPCHAIN_EXTENSION_NAME);
   deviceInfo.addDeviceExtension(VK_KHR_DEDICATED_ALLOCATION_EXTENSION_NAME);
   deviceInfo.addDeviceExtension(VK_KHR_GET_MEMORY_REQUIREMENTS_2_EXTENSION_NAME);

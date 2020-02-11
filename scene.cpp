@@ -34,9 +34,9 @@
 
 #include "scene.hpp"
 #include <nvvk/profiler_vk.hpp>
-#include <nvvkpp/commands_vkpp.hpp >
+#include <nvvkpp/commands_vkpp.hpp>
 #include <nvvkpp/descriptorsets_vkpp.hpp>
-#include <nvvkpp/images_vkpp.hpp >
+#include <nvvkpp/images_vkpp.hpp>
 #include <nvvkpp/pipeline_vkpp.hpp>
 #include <nvvkpp/renderpass_vkpp.hpp>
 #include <nvvkpp/utilities_vkpp.hpp>
@@ -745,10 +745,10 @@ void VkScene::drawUI()
 
   if(ImGui::CollapsingHeader("Statistics"))
   {
-    ImGui::Text("Nb instances  : %d", m_gltfScene.m_linearNodes.size());
-    ImGui::Text("Nb meshes     : %d", m_gltfScene.m_linearMeshes.size());
-    ImGui::Text("Nb materials  : %d", m_gltfScene.m_materials.size());
-    ImGui::Text("Nb triangles  : %d", m_indices.size() / 3);
+    ImGui::Text("Nb instances  : %zu", m_gltfScene.m_linearNodes.size());
+    ImGui::Text("Nb meshes     : %zu", m_gltfScene.m_linearMeshes.size());
+    ImGui::Text("Nb materials  : %zu", m_gltfScene.m_materials.size());
+    ImGui::Text("Nb triangles  : %zu", m_indices.size() / 3);
   }
 
   ImGui::End();
