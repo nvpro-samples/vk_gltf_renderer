@@ -87,9 +87,9 @@ private:
   nvvk::Buffer m_vertices;
   nvvk::Buffer m_indices;
 
-  uint32_t        m_queueIndex{0};
-  nvvk::Allocator*  m_alloc;
-  nvvk::DebugUtil m_debug;
+  uint32_t         m_queueIndex{0};
+  nvvk::Allocator* m_alloc{nullptr};
+  nvvk::DebugUtil  m_debug;
 
   void createCube();
   void createEnvironmentAccelTexture(const float* pixels, vk::Extent2D& size, nvvk::Texture& accelTex);
@@ -98,7 +98,7 @@ private:
   void prefilterDiffuse(uint32_t dim);
   void prefilterGlossy(uint32_t dim);
   void renderToCube(const vk::RenderPass& renderpass,
-                    nvvk::Texture&          filteredEnv,
+                    nvvk::Texture&        filteredEnv,
                     vk::PipelineLayout    pipelinelayout,
                     vk::Pipeline          pipeline,
                     vk::DescriptorSet     descSet,
@@ -108,7 +108,7 @@ private:
 
   struct Offscreen
   {
-    nvvk::Image               image;
+    nvvk::Image             image;
     vk::DescriptorImageInfo descriptor;
     vk::Framebuffer         framebuffer;
   };
