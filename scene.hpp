@@ -29,14 +29,16 @@
 #include <array>
 #include <nvmath/nvmath.h>
 
-#include "nvvkpp/commands_vkpp.hpp"
-#include "nvvkpp/debug_util_vkpp.hpp"
-#include "nvvkpp/utilities_vkpp.hpp"
+#include "nvh/gltfscene.hpp"
+#include "nvvk/appbase_vkpp.hpp"
+#include "nvvk/commands_vk.hpp"
+#include "nvvk/debug_util_vk.hpp"
+#include "nvvk/descriptorsets_vk.hpp"
+#include "nvvk/gizmos_vk.hpp"
+#include "nvvk/memorymanagement_vk.hpp"
+#include "nvvk/profiler_vk.hpp"
 #include "skydome.hpp"
-#include <nvh/gltfscene.hpp>
-#include <nvvk/memorymanagement_vk.hpp>
-#include <nvvkpp/appbase_vkpp.hpp>
-#include <nvvkpp/axis_vkpp.hpp>
+#include "vkalloc.hpp"
 
 struct gltfScene : nvh::gltf::Scene
 {
@@ -50,30 +52,16 @@ struct gltfScene : nvh::gltf::Scene
     m_materialDSets.resize(m_materials.size());
   }
 
-  vk::DescriptorImageInfo& getDescriptor(nvh::gltf::TextureIDX idx) { return m_textureDescriptors[idx]; }
+  const vk::DescriptorImageInfo& getDescriptor(nvh::gltf::TextureIDX idx) { return m_textureDescriptors[idx]; }
 };
 
 //--------------------------------------------------------------------------------------------------
 // Simple example showing a cube, camera movement and post-process
 //
-class VkScene : public nvvkpp::AppBase
+class VkScene : public nvvk::AppBase
 {
-  using nvvkAlloc    = nvvkpp::AllocatorDma;
-  using nvvkMemAlloc = nvvk::DeviceMemoryAllocator;
-
 public:
-  void setup(const vk::Device& device, const vk::PhysicalDevice& physicalDevice, uint32_t graphicsQueueIndex) override
-  {
-    AppBase::setup(device, physicalDevice, graphicsQueueIndex);
-
-
-    m_memAllocator.init(device, physicalDevice);
-    m_alloc.init(device, &m_memAllocator);
-
-    m_cmdBufs.setup(device, graphicsQueueIndex);
-    m_debug.setup(device);
-    m_skydome.setup(device, physicalDevice, graphicsQueueIndex, m_memAllocator);
-  }
+  void setup(const vk::Instance& instance, const vk::Device& device, const vk::PhysicalDevice& physicalDevice, uint32_t graphicsQueueIndex) override;
 
 
   void initExample();
@@ -124,10 +112,10 @@ public:
     NB_DSET
   };
 
-  std::vector<std::vector<vk::DescriptorSetLayoutBinding>> m_descSetLayoutBind{NB_DSET};
-  std::vector<vk::DescriptorSetLayout>                     m_descSetLayout{NB_DSET};
-  std::vector<vk::DescriptorPool>                          m_descPool{NB_DSET};
-  std::vector<vk::DescriptorSet>                           m_descSet{NB_DSET};
+  std::vector<nvvk::DescriptorSetBindings> m_descSetLayoutBind{NB_DSET};
+  std::vector<vk::DescriptorSetLayout>     m_descSetLayout{NB_DSET};
+  std::vector<vk::DescriptorPool>          m_descPool{NB_DSET};
+  std::vector<vk::DescriptorSet>           m_descSet{NB_DSET};
 
   vk::PipelineLayout m_pipelineLayout    = {};
   vk::Pipeline       m_drawPipeline      = {};
@@ -137,7 +125,7 @@ public:
 
   // GLTF scene model
   gltfScene             m_gltfScene;
-  nvvkpp::TextureDma    m_emptyTexture[2];
+  nvvk::Texture           m_emptyTexture[2];
   nvh::gltf::VertexData m_vertices;
   std::vector<uint32_t> m_indices;
 
@@ -161,31 +149,30 @@ private:
   void drawUI();
   void loadImages(tinygltf::Model& gltfModel);
 
-  std::string    m_filename;
-  std::string    m_hdrFilename;
-  int            m_upVector = 1;
-  nvvkpp::AxisVK m_axis;
+  std::string  m_filename;
+  std::string  m_hdrFilename;
+  int          m_upVector = 1;
+  nvvk::AxisVK m_axis;
 
   vk::RenderPass m_renderPassSky;
   vk::RenderPass m_renderPassUI;
 
-  nvvkpp::BufferDma  m_sceneBuffer;
-  nvvkpp::BufferDma  m_vertexBuffer;
-  nvvkpp::BufferDma  m_normalBuffer;
-  nvvkpp::BufferDma  m_colorBuffer;
-  nvvkpp::BufferDma  m_uvBuffer;
-  nvvkpp::BufferDma  m_indexBuffer;
-  nvvkpp::BufferDma  m_matrixBuffer;
-  nvvkpp::BufferDma  m_pixelBuffer;  // Picking
+  nvvk::Buffer         m_sceneBuffer;
+  nvvk::Buffer         m_vertexBuffer;
+  nvvk::Buffer         m_normalBuffer;
+  nvvk::Buffer         m_colorBuffer;
+  nvvk::Buffer         m_uvBuffer;
+  nvvk::Buffer         m_indexBuffer;
+  nvvk::Buffer         m_matrixBuffer;
+  nvvk::Buffer         m_pixelBuffer;  // Picking
   nvvk::AllocationID m_pixelAlloc;
 
-  std::vector<nvvkpp::TextureDma> m_textures;
+  std::vector<nvvk::Texture> m_textures;
 
   SkydomePbr m_skydome;
 
-  nvvkMemAlloc m_memAllocator{};
-  nvvkAlloc    m_alloc;
+  nvvk::MemAllocator m_memAllocator{};
+  nvvk::Allocator    m_alloc;
 
-  nvvkpp::MultipleCommandBuffers m_cmdBufs;
-  nvvkpp::DebugUtil              m_debug;
+  nvvk::DebugUtil m_debug;
 };

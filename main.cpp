@@ -35,15 +35,15 @@
 #include <chrono>
 #include <iostream>
 #include <vulkan/vulkan.hpp>
-
+VULKAN_HPP_DEFAULT_DISPATCH_LOADER_DYNAMIC_STORAGE
 
 #include "imgui.h"
 #include "imgui_impl_glfw.h"
 #include "nvh/fileoperations.hpp"
 #include "nvh/inputparser.h"
 #include "nvpsystem.hpp"
-#include "nvvkpp/context_vkpp.hpp"
-#include "nvvkpp/utilities_vkpp.hpp"
+#include "nvvk/context_vk.hpp"
+
 #include "scene.hpp"
 
 int const SAMPLE_SIZE_WIDTH  = 800;
@@ -98,7 +98,7 @@ int main(int argc, char** argv)
   glfwWindowHint(GLFW_CLIENT_API, GLFW_NO_API);
   GLFWwindow* window = glfwCreateWindow(SAMPLE_SIZE_WIDTH, SAMPLE_SIZE_HEIGHT, PROJECT_NAME, nullptr, nullptr);
 
-  nvvkpp::ContextCreateInfo deviceInfo;
+  nvvk::ContextCreateInfo deviceInfo;
   deviceInfo.addInstanceLayer("VK_LAYER_LUNARG_monitor", true);
   deviceInfo.addInstanceExtension(VK_KHR_SURFACE_EXTENSION_NAME);
 #ifdef _WIN32
@@ -112,7 +112,7 @@ int main(int argc, char** argv)
   deviceInfo.addDeviceExtension(VK_KHR_GET_MEMORY_REQUIREMENTS_2_EXTENSION_NAME);
 
   // Creating the Vulkan instance and device
-  nvvkpp::Context vkctx{};
+  nvvk::Context vkctx{};
   //  vkctx.init(deviceInfo);
   vkctx.initInstance(deviceInfo);
 
@@ -132,13 +132,15 @@ int main(int argc, char** argv)
   const vk::SurfaceKHR surface = example.getVkSurface(vkctx.m_instance, window);
   vkctx.setGCTQueueWithPresent(surface);
 
-  // Printing which GPU we are using
-  const vk::PhysicalDevice physicalDevice = vkctx.m_physicalDevice;
-  std::cout << "Using " << physicalDevice.getProperties().deviceName << std::endl;
 
   try
   {
-    example.setup(vkctx.m_device, vkctx.m_physicalDevice, vkctx.m_queueGCT.familyIndex);
+    example.setup(vkctx.m_instance, vkctx.m_device, vkctx.m_physicalDevice, vkctx.m_queueGCT.familyIndex);
+
+    // Printing which GPU we are using
+    const vk::PhysicalDevice physicalDevice = vkctx.m_physicalDevice;
+    std::cout << "Using " << physicalDevice.getProperties().deviceName << std::endl;
+
     example.createSurface(surface, SAMPLE_SIZE_WIDTH, SAMPLE_SIZE_HEIGHT);
     example.createDepthBuffer();
     example.createRenderPass();
@@ -168,7 +170,6 @@ int main(int argc, char** argv)
   }
 
   example.destroy();
-  vkctx.m_instance.destroySurfaceKHR(surface);
   vkctx.deinit();
 
   glfwDestroyWindow(window);

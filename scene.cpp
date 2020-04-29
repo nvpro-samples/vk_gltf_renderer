@@ -32,14 +32,18 @@
 
 #include <vulkan/vulkan.hpp>
 
+// Only once - defining VMA functions
+#define VMA_IMPLEMENTATION
+
+
+#include "nvvk/commands_vk.hpp"
+#include "nvvk/descriptorsets_vk.hpp"
+#include "nvvk/images_vk.hpp"
+#include "nvvk/pipeline_vk.hpp"
+#include "nvvk/profiler_vk.hpp"
+#include "nvvk/renderpasses_vk.hpp"
 #include "scene.hpp"
-#include <nvvk/profiler_vk.hpp>
-#include <nvvkpp/commands_vkpp.hpp>
-#include <nvvkpp/descriptorsets_vkpp.hpp>
-#include <nvvkpp/images_vkpp.hpp>
-#include <nvvkpp/pipeline_vkpp.hpp>
-#include <nvvkpp/renderpass_vkpp.hpp>
-#include <nvvkpp/utilities_vkpp.hpp>
+
 
 // Define these only in *one* .cc file.
 #define TINYGLTF_IMPLEMENTATION
@@ -54,6 +58,7 @@
 #include <imgui/imgui_orient.h>
 #include <iostream>
 
+
 nvvk::ProfilerVK g_profilerVK;
 struct stats
 {
@@ -63,14 +68,30 @@ struct stats
 } s_stats;
 
 
-using vkDT = vk::DescriptorType;
-using vkSS = vk::ShaderStageFlagBits;
-using vkCB = vk::CommandBufferUsageFlagBits;
-using vkBU = vk::BufferUsageFlagBits;
-using vkMP = vk::MemoryPropertyFlagBits;
-using vkIU = vk::ImageUsageFlagBits;
-
 extern std::vector<std::string> defaultSearchPaths;
+
+void VkScene::setup(const vk::Instance& instance, const vk::Device& device, const vk::PhysicalDevice& physicalDevice, uint32_t graphicsQueueIndex)
+{
+  AppBase::setup(instance, device, physicalDevice, graphicsQueueIndex);
+
+#ifdef NVVK_ALLOC_DEDICATED
+  m_alloc.init(device, physicalDevice);
+#elif defined(NVVK_ALLOC_DMA)
+  m_memAllocator.init(device, physicalDevice);
+  m_alloc.init(device, physicalDevice, &m_memAllocator);
+#elif defined(NVVK_ALLOC_VMA)
+  VmaAllocatorCreateInfo allocatorInfo = {};
+  allocatorInfo.physicalDevice         = physicalDevice;
+  allocatorInfo.device                 = device;
+  allocatorInfo.instance               = instance;
+  vmaCreateAllocator(&allocatorInfo, &m_memAllocator);
+
+  m_alloc.init(device, physicalDevice, m_memAllocator);
+#endif
+
+  m_debug.setup(device);
+  m_skydome.setup(device, physicalDevice, graphicsQueueIndex, &m_alloc);
+}
 
 //--------------------------------------------------------------------------------------------------
 // Overridden function that is called after the base class create()
@@ -136,7 +157,7 @@ void VkScene::initExample()
   setupDescriptorSets();
   recordCommandBuffer();
 
-  m_alloc.flushStaging();
+  m_alloc.finalizeAndReleaseStaging();
 }
 
 //--------------------------------------------------------------------------------------------------
@@ -179,11 +200,15 @@ void VkScene::destroy()
     m_alloc.destroy(t);
   }
 
-  m_axis.destroy();
+  m_axis.deinit();
   m_skydome.destroy();
-  m_cmdBufs.destroy();
+  m_alloc.deinit();
 
+#if defined(NVVK_ALLOC_DMA)
   m_memAllocator.deinit();
+#elif defined(NVVK_ALLOC_VMA)
+  vmaDestroyAllocator(m_memAllocator);
+#endif
 
   AppBase::destroy();
 }
@@ -198,15 +223,12 @@ void VkScene::display()
 
   drawUI();
 
-  // Making sure all command buffers are finished
-  m_cmdBufs.waitForUpload();
-
   // render the scene
   prepareFrame();
-  const vk::CommandBuffer& cmdBuff = m_commandBuffers[m_curFramebuffer];
+  const vk::CommandBuffer& cmdBuff = m_commandBuffers[getCurFrame()];
   cmdBuff.begin({vk::CommandBufferUsageFlagBits::eOneTimeSubmit});
 
-  std::string name("Render-" + std::to_string(m_curFramebuffer));
+  std::string name("Render-" + std::to_string(getCurFrame()));
   m_debug.setObjectName(cmdBuff, name.c_str());
   auto dbgLabel = m_debug.scopeLabel(cmdBuff, "Start rendering");
 
@@ -214,14 +236,14 @@ void VkScene::display()
   updateUniformBuffer(cmdBuff);
 
   vk::ClearValue clearValues[2];
-  clearValues[0].setColor(nvvkpp::util::clearColor({0.1f, 0.1f, 0.4f, 0.f}));
+  clearValues[0].setColor(std::array<float, 4>({0.1f, 0.1f, 0.4f, 0.f}));
   clearValues[1].setDepthStencil({1.0f, 0});
 
   {
     auto scopeTime = g_profilerVK.timeRecurring("frame", cmdBuff);
 
     // Skybox
-    vk::RenderPassBeginInfo renderPassBeginInfo{m_renderPassSky, m_framebuffers[m_curFramebuffer], {{}, m_size}, 2, clearValues};
+    vk::RenderPassBeginInfo renderPassBeginInfo{m_renderPassSky, m_framebuffers[getCurFrame()], {{}, m_size}, 2, clearValues};
     {
       auto dbgLabel = m_debug.scopeLabel(cmdBuff, "Skybox");
       cmdBuff.beginRenderPass(renderPassBeginInfo, vk::SubpassContents::eInline);
@@ -299,8 +321,9 @@ void VkScene::recordCommandBuffer()
 //
 void VkScene::prepareUniformBuffers()
 {
+  nvvk::CommandPool genCmdBuf(m_device, m_graphicsQueueIndex);
+  auto              cmdBuf = genCmdBuf.createCommandBuffer();
   {
-    auto cmdBuf = m_cmdBufs.getCmdBuffer();
 
     vk::BufferCreateInfo info{{}, sizeof(SceneUBO), vk::BufferUsageFlagBits::eUniformBuffer | vk::BufferUsageFlagBits::eTransferDst};
     m_sceneBuffer = m_alloc.createBuffer(info);
@@ -341,8 +364,8 @@ void VkScene::prepareUniformBuffers()
   m_debug.setObjectName(m_matrixBuffer.buffer, "Matrix");
   m_debug.setObjectName(m_pixelBuffer.buffer, "Pixel");
 
-  auto fence = m_cmdBufs.submit();
-  m_alloc.flushStaging(fence);
+  genCmdBuf.submitAndWait(cmdBuf);
+  m_alloc.finalizeAndReleaseStaging();
 }
 
 //--------------------------------------------------------------------------------------------------
@@ -350,24 +373,24 @@ void VkScene::prepareUniformBuffers()
 //
 void VkScene::preparePipelines()
 {
-  std::vector<std::string>          paths = defaultSearchPaths;
-  nvvkpp::GraphicsPipelineGenerator gpb(m_device, m_pipelineLayout, m_renderPass);
-  gpb.depthStencilState = {true};
+  std::vector<std::string>                paths = defaultSearchPaths;
+  nvvk::GraphicsPipelineGeneratorCombined gpb(m_device, m_pipelineLayout, m_renderPass);
+  gpb.depthStencilState.depthTestEnable = true;
 
   gpb.addShader(nvh::loadFile("shaders/vert_shader.vert.spv", true, paths), vk::ShaderStageFlagBits::eVertex);
   gpb.addShader(nvh::loadFile("shaders/metallic-roughness.frag.spv", true, paths), vk::ShaderStageFlagBits::eFragment);
-  gpb.vertexInputState.bindingDescriptions = {
-      {0, sizeof(nvmath::vec3)}, {1, sizeof(nvmath::vec3)}, {2, sizeof(nvmath::vec3)}, {3, sizeof(nvmath::vec2)}};
-  gpb.vertexInputState.attributeDescriptions = {{0, 0, vk::Format::eR32G32B32Sfloat, 0},  // Position
-                                                {1, 1, vk::Format::eR32G32B32Sfloat, 0},  // Normal
-                                                {2, 2, vk::Format::eR32G32B32Sfloat, 0},  // Color
-                                                {3, 3, vk::Format::eR32G32Sfloat, 0}};    // UV
+  gpb.addBindingDescriptions(
+      {{0, sizeof(nvmath::vec3)}, {1, sizeof(nvmath::vec3)}, {2, sizeof(nvmath::vec3)}, {3, sizeof(nvmath::vec2)}});
+  gpb.addAttributeDescriptions({{0, 0, vk::Format::eR32G32B32Sfloat, 0},  // Position
+                                {1, 1, vk::Format::eR32G32B32Sfloat, 0},  // Normal
+                                {2, 2, vk::Format::eR32G32B32Sfloat, 0},  // Color
+                                {3, 3, vk::Format::eR32G32Sfloat, 0}});   // UV
   gpb.rasterizationState.setCullMode(vk::CullModeFlagBits::eNone);
-  m_drawPipeline = gpb.create();
+  m_drawPipeline = gpb.createPipeline();
 
   m_debug.setObjectName(m_drawPipeline, "ShadingPipeline");
-  m_debug.setObjectName(gpb.shaderStages[0].module, "VertexShader");
-  m_debug.setObjectName(gpb.shaderStages[1].module, "FragmentShader");
+  m_debug.setObjectName(gpb.getShaderModule(0), "VertexShader");
+  m_debug.setObjectName(gpb.getShaderModule(1), "FragmentShader");
 }
 
 
@@ -377,39 +400,39 @@ void VkScene::preparePipelines()
 //
 void VkScene::setupDescriptorSetLayout()
 {
-  m_descSetLayoutBind[eScene].emplace_back(vk::DescriptorSetLayoutBinding(0, vkDT::eUniformBuffer, 1, vkSS::eVertex | vkSS::eFragment));
-  m_descSetLayout[eScene] = nvvkpp::util::createDescriptorSetLayout(m_device, m_descSetLayoutBind[eScene]);
-  m_descPool[eScene]      = nvvkpp::util::createDescriptorPool(m_device, m_descSetLayoutBind[eScene], 1);
-  m_descSet[eScene]       = nvvkpp::util::createDescriptorSet(m_device, m_descPool[eScene], m_descSetLayout[eScene]);
+  m_descSetLayoutBind[eScene].addBinding(vk::DescriptorSetLayoutBinding(0, vkDT::eUniformBuffer, 1, vkSS::eVertex | vkSS::eFragment));
+  m_descSetLayout[eScene] = m_descSetLayoutBind[eScene].createLayout(m_device);
+  m_descPool[eScene]      = m_descSetLayoutBind[eScene].createPool(m_device, 1);
+  m_descSet[eScene]       = nvvk::allocateDescriptorSet(m_device, m_descPool[eScene], m_descSetLayout[eScene]);
   m_debug.setObjectName(m_descSet[eScene], "Scene Desc");
 
-  m_descSetLayoutBind[eMatrix].emplace_back(vk::DescriptorSetLayoutBinding(0, vkDT::eStorageBufferDynamic, 1, vkSS::eVertex));
-  m_descSetLayout[eMatrix] = nvvkpp::util::createDescriptorSetLayout(m_device, m_descSetLayoutBind[eMatrix]);
-  m_descPool[eMatrix]      = nvvkpp::util::createDescriptorPool(m_device, m_descSetLayoutBind[eMatrix], 1);
-  m_descSet[eMatrix]       = nvvkpp::util::createDescriptorSet(m_device, m_descPool[eMatrix], m_descSetLayout[eMatrix]);
+  m_descSetLayoutBind[eMatrix].addBinding(vk::DescriptorSetLayoutBinding(0, vkDT::eStorageBufferDynamic, 1, vkSS::eVertex));
+  m_descSetLayout[eMatrix] = m_descSetLayoutBind[eMatrix].createLayout(m_device);
+  m_descPool[eMatrix]      = m_descSetLayoutBind[eMatrix].createPool(m_device, 1);
+  m_descSet[eMatrix]       = nvvk::allocateDescriptorSet(m_device, m_descPool[eMatrix], m_descSetLayout[eMatrix]);
   m_debug.setObjectName(m_descSet[eScene], "Matrices Desc");
 
 
-  m_descSetLayoutBind[eMaterial].emplace_back(vk::DescriptorSetLayoutBinding(0, vkDT::eCombinedImageSampler, 1, vkSS::eFragment));  // albedo
-  m_descSetLayoutBind[eMaterial].emplace_back(vk::DescriptorSetLayoutBinding(1, vkDT::eCombinedImageSampler, 1, vkSS::eFragment));  // normal
-  m_descSetLayoutBind[eMaterial].emplace_back(vk::DescriptorSetLayoutBinding(2, vkDT::eCombinedImageSampler, 1, vkSS::eFragment));  // occlusion
-  m_descSetLayoutBind[eMaterial].emplace_back(vk::DescriptorSetLayoutBinding(3, vkDT::eCombinedImageSampler, 1, vkSS::eFragment));  // metallic/roughness
-  m_descSetLayoutBind[eMaterial].emplace_back(vk::DescriptorSetLayoutBinding(4, vkDT::eCombinedImageSampler, 1, vkSS::eFragment));  // emission
-  m_descSetLayout[eMaterial] = nvvkpp::util::createDescriptorSetLayout(m_device, m_descSetLayoutBind[eMaterial]);
-  m_descPool[eMaterial]      = nvvkpp::util::createDescriptorPool(m_device, m_descSetLayoutBind[eMaterial],
-                                                             static_cast<uint32_t>(m_gltfScene.m_materials.size()));
+  m_descSetLayoutBind[eMaterial].addBinding(vk::DescriptorSetLayoutBinding(0, vkDT::eCombinedImageSampler, 1, vkSS::eFragment));  // albedo
+  m_descSetLayoutBind[eMaterial].addBinding(vk::DescriptorSetLayoutBinding(1, vkDT::eCombinedImageSampler, 1, vkSS::eFragment));  // normal
+  m_descSetLayoutBind[eMaterial].addBinding(vk::DescriptorSetLayoutBinding(2, vkDT::eCombinedImageSampler, 1, vkSS::eFragment));  // occlusion
+  m_descSetLayoutBind[eMaterial].addBinding(vk::DescriptorSetLayoutBinding(3, vkDT::eCombinedImageSampler, 1, vkSS::eFragment));  // metallic/roughness
+  m_descSetLayoutBind[eMaterial].addBinding(vk::DescriptorSetLayoutBinding(4, vkDT::eCombinedImageSampler, 1, vkSS::eFragment));  // emission
+  m_descSetLayout[eMaterial] = m_descSetLayoutBind[eMaterial].createLayout(m_device);
+  m_descPool[eMaterial] =
+      m_descSetLayoutBind[eMaterial].createPool(m_device, static_cast<uint32_t>(m_gltfScene.m_materials.size()));
   for(auto& material : m_gltfScene.m_materialDSets)
   {
     // Create descriptor set per material
-    material = nvvkpp::util::createDescriptorSet(m_device, m_descPool[eMaterial], m_descSetLayout[eMaterial]);
+    material = nvvk::allocateDescriptorSet(m_device, m_descPool[eMaterial], m_descSetLayout[eMaterial]);
   }
 
-  m_descSetLayoutBind[eEnv].emplace_back(vk::DescriptorSetLayoutBinding(0, vkDT::eCombinedImageSampler, 1, vkSS::eFragment));  // irradiance
-  m_descSetLayoutBind[eEnv].emplace_back(vk::DescriptorSetLayoutBinding(1, vkDT::eCombinedImageSampler, 1, vkSS::eFragment));  // brdfLut
-  m_descSetLayoutBind[eEnv].emplace_back(vk::DescriptorSetLayoutBinding(2, vkDT::eCombinedImageSampler, 1, vkSS::eFragment));  // prefilteredMap
-  m_descSetLayout[eEnv] = nvvkpp::util::createDescriptorSetLayout(m_device, m_descSetLayoutBind[eEnv]);
-  m_descPool[eEnv]      = nvvkpp::util::createDescriptorPool(m_device, m_descSetLayoutBind[eEnv], 1);
-  m_descSet[eEnv]       = nvvkpp::util::createDescriptorSet(m_device, m_descPool[eEnv], m_descSetLayout[eEnv]);
+  m_descSetLayoutBind[eEnv].addBinding(vk::DescriptorSetLayoutBinding(0, vkDT::eCombinedImageSampler, 1, vkSS::eFragment));  // irradiance
+  m_descSetLayoutBind[eEnv].addBinding(vk::DescriptorSetLayoutBinding(1, vkDT::eCombinedImageSampler, 1, vkSS::eFragment));  // brdfLut
+  m_descSetLayoutBind[eEnv].addBinding(vk::DescriptorSetLayoutBinding(2, vkDT::eCombinedImageSampler, 1, vkSS::eFragment));  // prefilteredMap
+  m_descSetLayout[eEnv] = m_descSetLayoutBind[eEnv].createLayout(m_device);
+  m_descPool[eEnv]      = m_descSetLayoutBind[eEnv].createPool(m_device, 1);
+  m_descSet[eEnv]       = nvvk::allocateDescriptorSet(m_device, m_descPool[eEnv], m_descSetLayout[eEnv]);
   m_debug.setObjectName(m_descSet[eEnv], "Env Desc");
 
   // Push constants in the fragment shader
@@ -435,38 +458,36 @@ void VkScene::setupDescriptorSets()
   vk::DescriptorBufferInfo dbiMatrix{m_matrixBuffer.buffer, 0, VK_WHOLE_SIZE};
 
   std::vector<vk::WriteDescriptorSet> writes;
-  writes.emplace_back(nvvkpp::util::createWrite(m_descSet[eScene], m_descSetLayoutBind[eScene][0], &dbiScene));
-  writes.emplace_back(nvvkpp::util::createWrite(m_descSet[eMatrix], m_descSetLayoutBind[eMatrix][0], &dbiMatrix));
+  writes.emplace_back(m_descSetLayoutBind[eScene].makeWrite(m_descSet[eScene], 0, &dbiScene));
+  writes.emplace_back(m_descSetLayoutBind[eMatrix].makeWrite(m_descSet[eMatrix], 0, &dbiMatrix));
 
   size_t idx = 0;
   for(auto& material : m_gltfScene.m_materials)
   {
-    const auto& descSet = m_gltfScene.m_materialDSets[idx];
-    writes.emplace_back(nvvkpp::util::createWrite(descSet, m_descSetLayoutBind[eMaterial][0],
-                                                  material.m_baseColorTexture ? &m_gltfScene.getDescriptor(material.m_baseColorTexture) :
-                                                                                &m_emptyTexture[1].descriptor));
-    writes.emplace_back(nvvkpp::util::createWrite(descSet, m_descSetLayoutBind[eMaterial][1],
-                                                  material.m_normalTexture ? &m_gltfScene.getDescriptor(material.m_normalTexture) :
-                                                                             &m_emptyTexture[0].descriptor));
-    writes.emplace_back(nvvkpp::util::createWrite(descSet, m_descSetLayoutBind[eMaterial][2],
-                                                  material.m_occlusionTexture ? &m_gltfScene.getDescriptor(material.m_occlusionTexture) :
-                                                                                &m_emptyTexture[1].descriptor));
-    writes.emplace_back(nvvkpp::util::createWrite(descSet, m_descSetLayoutBind[eMaterial][3],
-                                                  material.m_metallicRoughnessTexture ?
-                                                      &m_gltfScene.getDescriptor(material.m_metallicRoughnessTexture) :
-                                                      &m_emptyTexture[1].descriptor));
-    writes.emplace_back(nvvkpp::util::createWrite(descSet, m_descSetLayoutBind[eMaterial][4],
-                                                  material.m_emissiveTexture ? &m_gltfScene.getDescriptor(material.m_emissiveTexture) :
-                                                                               &m_emptyTexture[0].descriptor));
+    const auto& descSet   = m_gltfScene.m_materialDSets[idx];
+    const auto& colorInfo = material.m_baseColorTexture ? m_gltfScene.getDescriptor(material.m_baseColorTexture) :
+                                                          m_emptyTexture[1].descriptor;
+    const auto& normalInfo =
+        material.m_normalTexture ? (m_gltfScene.getDescriptor(material.m_normalTexture)) : m_emptyTexture[0].descriptor;
+    const auto& occlusionInfo = material.m_occlusionTexture ? m_gltfScene.getDescriptor(material.m_occlusionTexture) :
+                                                              m_emptyTexture[1].descriptor;
+    const auto& roughnessInfo = material.m_metallicRoughnessTexture ?
+                                    m_gltfScene.getDescriptor(material.m_metallicRoughnessTexture) :
+                                    m_emptyTexture[1].descriptor;
+    const auto& emissiveInfo = material.m_emissiveTexture ? m_gltfScene.getDescriptor(material.m_emissiveTexture) :
+                                                            m_emptyTexture[0].descriptor;
+
+    writes.emplace_back(m_descSetLayoutBind[eMaterial].makeWrite(descSet, 0, &colorInfo));
+    writes.emplace_back(m_descSetLayoutBind[eMaterial].makeWrite(descSet, 1, &normalInfo));
+    writes.emplace_back(m_descSetLayoutBind[eMaterial].makeWrite(descSet, 2, &occlusionInfo));
+    writes.emplace_back(m_descSetLayoutBind[eMaterial].makeWrite(descSet, 3, &roughnessInfo));
+    writes.emplace_back(m_descSetLayoutBind[eMaterial].makeWrite(descSet, 4, &emissiveInfo));
     idx++;
   }
 
-  writes.emplace_back(nvvkpp::util::createWrite(m_descSet[eEnv], m_descSetLayoutBind[eEnv][0],
-                                                &m_skydome.m_textures.prefilteredCube.descriptor));
-  writes.emplace_back(nvvkpp::util::createWrite(m_descSet[eEnv], m_descSetLayoutBind[eEnv][1],
-                                                &m_skydome.m_textures.lutBrdf.descriptor));
-  writes.emplace_back(nvvkpp::util::createWrite(m_descSet[eEnv], m_descSetLayoutBind[eEnv][2],
-                                                &m_skydome.m_textures.irradianceCube.descriptor));
+  writes.emplace_back(m_descSetLayoutBind[eEnv].makeWrite(m_descSet[eEnv], 0, &m_skydome.m_textures.prefilteredCube.descriptor));
+  writes.emplace_back(m_descSetLayoutBind[eEnv].makeWrite(m_descSet[eEnv], 1, &m_skydome.m_textures.lutBrdf.descriptor));
+  writes.emplace_back(m_descSetLayoutBind[eEnv].makeWrite(m_descSet[eEnv], 2, &m_skydome.m_textures.irradianceCube.descriptor));
 
 
   m_device.updateDescriptorSets(static_cast<uint32_t>(writes.size()), writes.data(), 0, nullptr);
@@ -482,19 +503,22 @@ void VkScene::createEmptyTexture()
   std::vector<uint8_t> white      = {255, 255, 255, 255};
   VkDeviceSize         bufferSize = 32;
   vk::Extent2D         imgSize(1, 1);
-
+  nvvk::CommandPool    genCmdBuf(m_device, m_graphicsQueueIndex);
+  vk::CommandBuffer    cmdBuf = genCmdBuf.createCommandBuffer();
   {
-    auto                  cmdBuf = m_cmdBufs.getCmdBuffer();
-    vk::SamplerCreateInfo samplerCreateInfo;  // default values
-    vk::ImageCreateInfo   imageCreateInfo = nvvkpp::image::create2DInfo(imgSize);
+    vk::SamplerCreateInfo   samplerCreateInfo;  // default values
+    vk::ImageCreateInfo     imageCreateInfo = nvvk::makeImage2DCreateInfo(imgSize);
+    vk::ImageViewCreateInfo ivInfo;
 
-    m_emptyTexture[0]            = m_alloc.createImage(cmdBuf, bufferSize, black.data(), imageCreateInfo);
-    m_emptyTexture[0].descriptor = nvvkpp::image::create2DDescriptor(m_device, m_emptyTexture[0].image, samplerCreateInfo);
+    nvvk::Image blackImage = m_alloc.createImage(cmdBuf, bufferSize, black.data(), imageCreateInfo);
+    ivInfo               = nvvk::makeImageViewCreateInfo(blackImage.image, imageCreateInfo);
+    m_emptyTexture[0]    = m_alloc.createTexture(blackImage, ivInfo, samplerCreateInfo);
 
-    m_emptyTexture[1]            = m_alloc.createImage(cmdBuf, bufferSize, white.data(), imageCreateInfo);
-    m_emptyTexture[1].descriptor = nvvkpp::image::create2DDescriptor(m_device, m_emptyTexture[1].image, samplerCreateInfo);
+    nvvk::Image whiteImage = m_alloc.createImage(cmdBuf, bufferSize, white.data(), imageCreateInfo);
+    ivInfo               = nvvk::makeImageViewCreateInfo(whiteImage.image, imageCreateInfo);
+    m_emptyTexture[1]    = m_alloc.createTexture(whiteImage, ivInfo, samplerCreateInfo);
   }
-  m_cmdBufs.submit();
+  genCmdBuf.submitAndWait(cmdBuf);
 
   m_debug.setObjectName(m_emptyTexture[0].image, "BlackImage");
   m_debug.setObjectName(m_emptyTexture[1].image, "WhiteImage");
@@ -605,9 +629,9 @@ void VkScene::updateUniformBuffer(const vk::CommandBuffer& cmdBuffer)
 //
 void VkScene::createRenderPass()
 {
-  m_renderPass    = nvvkpp::util::createRenderPass(m_device, {m_swapChain.colorFormat}, m_depthFormat, 1, false, true);
-  m_renderPassSky = nvvkpp::util::createRenderPass(m_device, {m_swapChain.colorFormat}, m_depthFormat, 1, true, true);
-  m_renderPassUI  = nvvkpp::util::createRenderPass(m_device, {m_swapChain.colorFormat}, m_depthFormat, 1, false, false);
+  m_renderPass    = nvvk::createRenderPass(m_device, {getColorFormat()}, m_depthFormat, 1, false, true);
+  m_renderPassSky = nvvk::createRenderPass(m_device, {getColorFormat()}, m_depthFormat, 1, true, true);
+  m_renderPassUI  = nvvk::createRenderPass(m_device, {getColorFormat()}, m_depthFormat, 1, false, false);
 
   m_debug.setObjectName(m_renderPass, "General Render Pass");
   m_debug.setObjectName(m_renderPassSky, "Environment Render Pass");
@@ -770,21 +794,26 @@ void VkScene::loadImages(tinygltf::Model& gltfModel)
   samplerCreateInfo.maxLod     = FLT_MAX;
 
   // Get available Command Buffer
-  auto cmdBuf = m_cmdBufs.getCmdBuffer();
+  nvvk::CommandPool genCmdBuf(m_device, m_graphicsQueueIndex);
+  vk::CommandBuffer cmdBuf = genCmdBuf.createCommandBuffer();
 
+  g_profilerVK.beginFrame();
+  auto sectionID = g_profilerVK.beginSection("test", cmdBuf, true);
   for(size_t i = 0; i < gltfModel.images.size(); i++)
   {
     LOGI(".");
-    auto&          gltfimage       = gltfModel.images[i];
-    void*          buffer          = &gltfimage.image[0];
-    vk::DeviceSize bufferSize      = gltfimage.image.size();
-    auto           imgSize         = vk::Extent2D(gltfimage.width, gltfimage.height);
-    auto           imageCreateInfo = nvvkpp::image::create2DInfo(imgSize, format, vkIU::eSampled, true);
+    auto&               gltfimage       = gltfModel.images[i];
+    void*               buffer          = &gltfimage.image[0];
+    vk::DeviceSize      bufferSize      = gltfimage.image.size();
+    auto                imgSize         = vk::Extent2D(gltfimage.width, gltfimage.height);
+    vk::ImageCreateInfo imageCreateInfo = nvvk::makeImage2DCreateInfo(imgSize, format, vkIU::eSampled, true);
 
     // Creating an image with staging buffer
-    m_textures[i] = m_alloc.createImage(cmdBuf, bufferSize, buffer, imageCreateInfo);
-    nvvkpp::image::generateMipmaps(cmdBuf, m_textures[i].image, format, imgSize, imageCreateInfo.mipLevels);
-    m_textures[i].descriptor = nvvkpp::image::create2DDescriptor(m_device, m_textures[i].image, samplerCreateInfo);
+    nvvk::Image image = m_alloc.createImage(cmdBuf, bufferSize, buffer, imageCreateInfo);
+    nvvk::cmdGenerateMipmaps(cmdBuf, image.image, format, imgSize, imageCreateInfo.mipLevels);
+    vk::ImageViewCreateInfo ivInfo = nvvk::makeImageViewCreateInfo(image.image, imageCreateInfo);
+    m_textures[i]                  = m_alloc.createTexture(image, ivInfo, samplerCreateInfo);
+
 
     m_gltfScene.m_textureDescriptors[i] = m_textures[i].descriptor;
 
@@ -792,12 +821,18 @@ void VkScene::loadImages(tinygltf::Model& gltfModel)
     m_debug.setObjectName(m_textures[i].image, name.c_str());
   }
 
+  g_profilerVK.endSection(sectionID, cmdBuf);
+  g_profilerVK.endFrame();
   // Submit current command buffer
-  auto fence = m_cmdBufs.submit();
+  genCmdBuf.submitAndWait(cmdBuf);
   // Adds all staging buffers to garbage collection, delete what it can
-  m_alloc.flushStaging(fence);
+  m_alloc.finalizeAndReleaseStaging();
 
-  LOGI(" (%f ms)\n", (g_profilerVK.getMicroSeconds() - t) / 1000);
+  double gpuTime{0.0};
+  g_profilerVK.getSectionTime(sectionID, 0, gpuTime);
+
+
+  LOGI("CPU (%f ms), GPU (%f ms)\n", (g_profilerVK.getMicroSeconds() - t) / 1000, gpuTime / 1000);
 }
 
 //--------------------------------------------------------------------------------------------------
@@ -805,7 +840,7 @@ void VkScene::loadImages(tinygltf::Model& gltfModel)
 //
 void VkScene::onKeyboard(int key, int scancode, int action, int mods)
 {
-  nvvkpp::AppBase::onKeyboard(key, scancode, action, mods);
+  nvvk::AppBase::onKeyboard(key, scancode, action, mods);
 
   if(key == GLFW_KEY_HOME)
   {
@@ -820,31 +855,31 @@ void VkScene::onKeyboard(int key, int scancode, int action, int mods)
 //
 float VkScene::getDepth(int x, int y)
 {
-  vk::CommandBuffer cmdBuff = m_cmdBufs.getCmdBuffer();
+  nvvk::CommandPool genCmdBuf(m_device, m_graphicsQueueIndex);
+  vk::CommandBuffer cmdBuf = genCmdBuf.createCommandBuffer();
 
   // Transit the depth buffer image in eTransferSrcOptimal
   vk::ImageSubresourceRange subresourceRange(vk::ImageAspectFlagBits::eDepth | vk::ImageAspectFlagBits::eStencil, 0, 1, 0, 1);
-  nvvkpp::image::setImageLayout(cmdBuff, m_depthImage, vk::ImageLayout::eDepthStencilAttachmentOptimal,
-                                vk::ImageLayout::eTransferSrcOptimal, subresourceRange);
+  nvvk::cmdBarrierImageLayout(cmdBuf, m_depthImage, vk::ImageLayout::eDepthStencilAttachmentOptimal,
+                              vk::ImageLayout::eTransferSrcOptimal, subresourceRange);
 
   // Copy the pixel under the cursor
   vk::BufferImageCopy copyRegion;
   copyRegion.setImageSubresource({vk::ImageAspectFlagBits::eDepth, 0, 0, 1});
   copyRegion.setImageOffset({x, y, 0});
   copyRegion.setImageExtent({1, 1, 1});
-  cmdBuff.copyImageToBuffer(m_depthImage, vk::ImageLayout::eTransferSrcOptimal, m_pixelBuffer.buffer, {copyRegion});
+  cmdBuf.copyImageToBuffer(m_depthImage, vk::ImageLayout::eTransferSrcOptimal, m_pixelBuffer.buffer, {copyRegion});
 
   // Put back the depth buffer as  it was
-  nvvkpp::image::setImageLayout(cmdBuff, m_depthImage, vk::ImageLayout::eTransferSrcOptimal,
-                                vk::ImageLayout::eDepthStencilAttachmentOptimal, subresourceRange);
-  m_cmdBufs.submit();
-  m_cmdBufs.waitForUpload();
+  nvvk::cmdBarrierImageLayout(cmdBuf, m_depthImage, vk::ImageLayout::eTransferSrcOptimal,
+                              vk::ImageLayout::eDepthStencilAttachmentOptimal, subresourceRange);
+  genCmdBuf.submitAndWait(cmdBuf);
 
   // Grab the value
-  void* mapped = m_memAllocator.map(m_pixelBuffer.allocation);
+  void* mapped = m_alloc.map(m_pixelBuffer);
   float value;
   memcpy(&value, mapped, sizeof(float));
-  m_memAllocator.unmap(m_pixelBuffer.allocation);
+  m_alloc.unmap(m_pixelBuffer);
 
 
   return value;

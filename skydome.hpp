@@ -29,18 +29,15 @@
 #pragma once
 //////////////////////////////////////////////////////////////////////////
 
-#include "nvvkpp/allocator_dma_vkpp.hpp"
-#include "nvvkpp/debug_util_vkpp.hpp"
-#include "nvvkpp/images_vkpp.hpp"
 #include <array>
 #include <vector>
 #include <vulkan/vulkan.hpp>
 
-using nvvkBuffer   = nvvkpp::BufferDma;
-using nvvkTexture  = nvvkpp::TextureDma;
-using nvvkImage    = nvvkpp::ImageDma;
-using nvvkAlloc    = nvvkpp::AllocatorDma;
-using nvvkMemAlloc = nvvk::DeviceMemoryAllocator;
+
+#include "nvvk/allocator_dma_vk.hpp"
+#include "nvvk/debug_util_vk.hpp"
+#include "nvvk/images_vk.hpp"
+#include "vkalloc.hpp"
 
 // Load an environment image (HDR) and create the cubic textures for glossy reflection and diffuse illumination.
 // Creates also the BRDF lookup table and an acceleration structure for lights
@@ -50,10 +47,10 @@ class SkydomePbr
 public:
   SkydomePbr() = default;
 
-  void setup(const vk::Device& device, const vk::PhysicalDevice& physicalDevice, uint32_t familyIndex, nvvkMemAlloc& memAlloc)
+  void setup(const vk::Device& device, const vk::PhysicalDevice& physicalDevice, uint32_t familyIndex, nvvk::Allocator* allocator)
   {
-    m_device = device;
-    m_alloc.init(device, &memAlloc);
+    m_device     = device;
+    m_alloc      = allocator;
     m_queueIndex = familyIndex;
     m_debug.setup(device);
   }
@@ -65,11 +62,11 @@ public:
 
   struct Textures
   {
-    nvvkTexture txtHdr;
-    nvvkTexture lutBrdf;
-    nvvkTexture accelImpSmpl;
-    nvvkTexture irradianceCube;
-    nvvkTexture prefilteredCube;
+    nvvk::Texture txtHdr;
+    nvvk::Texture lutBrdf;
+    nvvk::Texture accelImpSmpl;
+    nvvk::Texture irradianceCube;
+    nvvk::Texture prefilteredCube;
   } m_textures;
 
   enum Descriptors
@@ -87,21 +84,21 @@ public:
   vk::Device              m_device;
 
 private:
-  nvvkBuffer m_vertices;
-  nvvkBuffer m_indices;
+  nvvk::Buffer m_vertices;
+  nvvk::Buffer m_indices;
 
-  uint32_t          m_queueIndex{0};
-  nvvkAlloc         m_alloc;
-  nvvkpp::DebugUtil m_debug;
+  uint32_t        m_queueIndex{0};
+  nvvk::Allocator*  m_alloc;
+  nvvk::DebugUtil m_debug;
 
   void createCube();
-  void createEnvironmentAccelTexture(const float* pixels, vk::Extent2D& size, nvvkTexture& accelTex);
+  void createEnvironmentAccelTexture(const float* pixels, vk::Extent2D& size, nvvk::Texture& accelTex);
   void integrateBrdf(uint32_t dim);
   void createPipelines(const vk::DescriptorBufferInfo& sceneBufferDesc);
   void prefilterDiffuse(uint32_t dim);
   void prefilterGlossy(uint32_t dim);
   void renderToCube(const vk::RenderPass& renderpass,
-                    nvvkTexture&          filteredEnv,
+                    nvvk::Texture&          filteredEnv,
                     vk::PipelineLayout    pipelinelayout,
                     vk::Pipeline          pipeline,
                     vk::DescriptorSet     descSet,
@@ -111,7 +108,7 @@ private:
 
   struct Offscreen
   {
-    nvvkImage               image;
+    nvvk::Image               image;
     vk::DescriptorImageInfo descriptor;
     vk::Framebuffer         framebuffer;
   };
