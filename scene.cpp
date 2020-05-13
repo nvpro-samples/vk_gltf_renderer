@@ -466,16 +466,17 @@ void VkScene::setupDescriptorSets()
   {
     const auto& descSet   = m_gltfScene.m_materialDSets[idx];
     const auto& colorInfo = material.m_baseColorTexture ? m_gltfScene.getDescriptor(material.m_baseColorTexture) :
-                                                          m_emptyTexture[1].descriptor;
-    const auto& normalInfo =
-        material.m_normalTexture ? (m_gltfScene.getDescriptor(material.m_normalTexture)) : m_emptyTexture[0].descriptor;
-    const auto& occlusionInfo = material.m_occlusionTexture ? m_gltfScene.getDescriptor(material.m_occlusionTexture) :
-                                                              m_emptyTexture[1].descriptor;
+                                                          static_cast<vk::DescriptorImageInfo>(m_emptyTexture[1].descriptor);
+    const auto& normalInfo = material.m_normalTexture ? (m_gltfScene.getDescriptor(material.m_normalTexture)) :
+                                                        static_cast<vk::DescriptorImageInfo>(m_emptyTexture[0].descriptor);
+    const auto& occlusionInfo = material.m_occlusionTexture ?
+                                    m_gltfScene.getDescriptor(material.m_occlusionTexture) :
+                                    static_cast<vk::DescriptorImageInfo>(m_emptyTexture[1].descriptor);
     const auto& roughnessInfo = material.m_metallicRoughnessTexture ?
                                     m_gltfScene.getDescriptor(material.m_metallicRoughnessTexture) :
-                                    m_emptyTexture[1].descriptor;
+                                    static_cast<vk::DescriptorImageInfo>(m_emptyTexture[1].descriptor);
     const auto& emissiveInfo = material.m_emissiveTexture ? m_gltfScene.getDescriptor(material.m_emissiveTexture) :
-                                                            m_emptyTexture[0].descriptor;
+                                                            static_cast<vk::DescriptorImageInfo>(m_emptyTexture[0].descriptor);
 
     writes.emplace_back(m_descSetLayoutBind[eMaterial].makeWrite(descSet, 0, &colorInfo));
     writes.emplace_back(m_descSetLayoutBind[eMaterial].makeWrite(descSet, 1, &normalInfo));
