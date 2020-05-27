@@ -98,30 +98,32 @@ int main(int argc, char** argv)
   glfwWindowHint(GLFW_CLIENT_API, GLFW_NO_API);
   GLFWwindow* window = glfwCreateWindow(SAMPLE_SIZE_WIDTH, SAMPLE_SIZE_HEIGHT, PROJECT_NAME, nullptr, nullptr);
 
-  nvvk::ContextCreateInfo deviceInfo;
-  deviceInfo.addInstanceLayer("VK_LAYER_LUNARG_monitor", true);
-  deviceInfo.addInstanceExtension(VK_KHR_SURFACE_EXTENSION_NAME);
+  nvvk::ContextCreateInfo contextInfo;
+  contextInfo.addInstanceLayer("VK_LAYER_LUNARG_monitor", true);
+  contextInfo.addInstanceExtension(VK_KHR_SURFACE_EXTENSION_NAME);
 #ifdef _WIN32
-  deviceInfo.addInstanceExtension(VK_KHR_WIN32_SURFACE_EXTENSION_NAME);
+  contextInfo.addInstanceExtension(VK_KHR_WIN32_SURFACE_EXTENSION_NAME);
 #else
-  deviceInfo.addInstanceExtension(VK_KHR_XLIB_SURFACE_EXTENSION_NAME);
-  deviceInfo.addInstanceExtension(VK_KHR_XCB_SURFACE_EXTENSION_NAME);
+  contextInfo.addInstanceExtension(VK_KHR_XLIB_SURFACE_EXTENSION_NAME);
+  contextInfo.addInstanceExtension(VK_KHR_XCB_SURFACE_EXTENSION_NAME);
 #endif
-  deviceInfo.addDeviceExtension(VK_KHR_SWAPCHAIN_EXTENSION_NAME);
-  deviceInfo.addDeviceExtension(VK_KHR_DEDICATED_ALLOCATION_EXTENSION_NAME);
-  deviceInfo.addDeviceExtension(VK_KHR_GET_MEMORY_REQUIREMENTS_2_EXTENSION_NAME);
+  contextInfo.addDeviceExtension(VK_KHR_SWAPCHAIN_EXTENSION_NAME);
+  contextInfo.addDeviceExtension(VK_KHR_DEDICATED_ALLOCATION_EXTENSION_NAME);
+  contextInfo.addDeviceExtension(VK_KHR_GET_MEMORY_REQUIREMENTS_2_EXTENSION_NAME);
+  vk::PhysicalDeviceDescriptorIndexingFeaturesEXT feature;
+  contextInfo.addDeviceExtension(VK_EXT_DESCRIPTOR_INDEXING_EXTENSION_NAME, false, &feature);
 
   // Creating the Vulkan instance and device
   nvvk::Context vkctx{};
   //  vkctx.init(deviceInfo);
-  vkctx.initInstance(deviceInfo);
+  vkctx.initInstance(contextInfo);
 
   // Find all compatible devices
-  auto compatibleDevices = vkctx.getCompatibleDevices(deviceInfo);
+  auto compatibleDevices = vkctx.getCompatibleDevices(contextInfo);
   assert(!compatibleDevices.empty());
 
   // Use a compatible device
-  vkctx.initDevice(compatibleDevices[0], deviceInfo);
+  vkctx.initDevice(compatibleDevices[0], contextInfo);
 
 
   VkScene example;
