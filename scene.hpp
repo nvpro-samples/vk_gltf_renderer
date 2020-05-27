@@ -40,20 +40,6 @@
 #include "skydome.hpp"
 #include "vkalloc.hpp"
 
-struct gltfScene : nvh::gltf::Scene
-{
-  std::vector<vk::DescriptorSet>       m_materialDSets;
-  std::vector<vk::DescriptorImageInfo> m_textureDescriptors;
-
-  void getMaterials(tinygltf::Model& gltfModel)
-  {
-    Scene::loadMaterials(gltfModel);
-    m_textureDescriptors.resize(m_numTextures);
-    m_materialDSets.resize(m_materials.size());
-  }
-
-  const vk::DescriptorImageInfo& getDescriptor(nvh::gltf::TextureIDX idx) { return m_textureDescriptors[idx]; }
-};
 
 //--------------------------------------------------------------------------------------------------
 // Simple example showing a cube, camera movement and post-process
@@ -124,11 +110,7 @@ public:
   nvmath::vec4f m_clearColor = nvmath::vec4f(0.07f, 0.07f, 0.07f, 1.f);
 
   // GLTF scene model
-  gltfScene             m_gltfScene;
-  nvvk::Texture           m_emptyTexture[2];
-  nvh::gltf::VertexData m_vertices;
-  std::vector<uint32_t> m_indices;
-
+  nvh::GltfScene m_gltfScene;
 
   VkScene()          = default;
   virtual ~VkScene() = default;
@@ -140,14 +122,13 @@ public:
 private:
   void setupDescriptorSetLayout();
   void setupDescriptorSets();
-  void createEmptyTexture();
   void prepareUniformBuffers();
   void preparePipelines();
   void recordCommandBuffer();
   void render(const vk::CommandBuffer& cmdBuff);
   void updateUniformBuffer(const vk::CommandBuffer& cmdBuffer);
   void drawUI();
-  void loadImages(tinygltf::Model& gltfModel);
+  void importImages(tinygltf::Model& gltfModel);
 
   std::string  m_filename;
   std::string  m_hdrFilename;
@@ -157,14 +138,14 @@ private:
   vk::RenderPass m_renderPassSky;
   vk::RenderPass m_renderPassUI;
 
-  nvvk::Buffer         m_sceneBuffer;
-  nvvk::Buffer         m_vertexBuffer;
-  nvvk::Buffer         m_normalBuffer;
-  nvvk::Buffer         m_colorBuffer;
-  nvvk::Buffer         m_uvBuffer;
-  nvvk::Buffer         m_indexBuffer;
-  nvvk::Buffer         m_matrixBuffer;
-  nvvk::Buffer         m_pixelBuffer;  // Picking
+  nvvk::Buffer       m_sceneBuffer;
+  nvvk::Buffer       m_vertexBuffer;
+  nvvk::Buffer       m_normalBuffer;
+  nvvk::Buffer       m_colorBuffer;
+  nvvk::Buffer       m_uvBuffer;
+  nvvk::Buffer       m_indexBuffer;
+  nvvk::Buffer       m_matrixBuffer;
+  nvvk::Buffer       m_pixelBuffer;  // Picking
   nvvk::AllocationID m_pixelAlloc;
 
   std::vector<nvvk::Texture> m_textures;
@@ -175,4 +156,10 @@ private:
   nvvk::Allocator    m_alloc;
 
   nvvk::DebugUtil m_debug;
+
+  struct NodeMatrices
+  {
+    nvmath::mat4f world;    // local to world
+    nvmath::mat4f worldIT;  // local to world, inverse-transpose (to transform normal vectors)
+  };
 };

@@ -124,16 +124,12 @@ void VkScene::initExample()
     {
       auto t = g_profilerVK.getMicroSeconds();
       LOGI("glTF to Vulkan");
-      m_gltfScene.getMaterials(gltfModel);
-      m_vertices.attributes["NORMAL"]     = {0, 1, 0};  // Attributes we are interested in
-      m_vertices.attributes["COLOR_0"]    = {1, 1, 1};
-      m_vertices.attributes["TEXCOORD_0"] = {0, 0};
-      m_gltfScene.loadMeshes(gltfModel, m_indices, m_vertices);
-      m_gltfScene.loadNodes(gltfModel);
+      m_gltfScene.importMaterials(gltfModel);
+      m_gltfScene.importDrawableNodes(gltfModel, nvh::GltfAttributes::Normal | nvh::GltfAttributes::Color_0
+                                                     | nvh::GltfAttributes::Texcoord_0 | nvh::GltfAttributes::Tangent);
       m_gltfScene.computeSceneDimensions();
-      createEmptyTexture();
       LOGI(" (%f ms)\n", (g_profilerVK.getMicroSeconds() - t) / 1000);
-      loadImages(gltfModel);
+      importImages(gltfModel);
     }
 
     // Set the camera as to see the model
@@ -192,10 +188,6 @@ void VkScene::destroy()
     m_device.destroyDescriptorPool(m_descPool[i]);
   }
   for(auto& t : m_textures)
-  {
-    m_alloc.destroy(t);
-  }
-  for(auto& t : m_emptyTexture)
   {
     m_alloc.destroy(t);
   }
@@ -329,23 +321,23 @@ void VkScene::prepareUniformBuffers()
     m_sceneBuffer = m_alloc.createBuffer(info);
 
     // Creating the GPU buffer of the vertices
-    m_vertexBuffer = m_alloc.createBuffer(cmdBuf, m_vertices.position, vkBU::eVertexBuffer | vkBU::eStorageBuffer);
-    m_normalBuffer = m_alloc.createBuffer(cmdBuf, m_vertices.attributes["NORMAL"], vkBU::eVertexBuffer | vkBU::eStorageBuffer);
-    m_colorBuffer = m_alloc.createBuffer(cmdBuf, m_vertices.attributes["COLOR_0"], vkBU::eVertexBuffer | vkBU::eStorageBuffer);
-    m_uvBuffer = m_alloc.createBuffer(cmdBuf, m_vertices.attributes["TEXCOORD_0"], vkBU::eVertexBuffer | vkBU::eStorageBuffer);
+    m_vertexBuffer = m_alloc.createBuffer(cmdBuf, m_gltfScene.m_positions, vkBU::eVertexBuffer | vkBU::eStorageBuffer);
+    m_normalBuffer = m_alloc.createBuffer(cmdBuf, m_gltfScene.m_normals, vkBU::eVertexBuffer | vkBU::eStorageBuffer);
+    m_colorBuffer  = m_alloc.createBuffer(cmdBuf, m_gltfScene.m_colors0, vkBU::eVertexBuffer | vkBU::eStorageBuffer);
+    m_uvBuffer     = m_alloc.createBuffer(cmdBuf, m_gltfScene.m_texcoords0, vkBU::eVertexBuffer | vkBU::eStorageBuffer);
 
 
     // Creating the GPU buffer of the indices
-    m_indexBuffer = m_alloc.createBuffer(cmdBuf, m_indices, vkBU::eIndexBuffer | vkBU::eStorageBuffer);
+    m_indexBuffer = m_alloc.createBuffer(cmdBuf, m_gltfScene.m_indices, vkBU::eIndexBuffer | vkBU::eStorageBuffer);
 
 
     // Adding all matrices of the scene in a single buffer
-    std::vector<nvh::gltf::NodeMatrices> allMatrices;
-    allMatrices.reserve(m_gltfScene.m_linearNodes.size());
-    for(auto& node : m_gltfScene.m_linearNodes)
+    std::vector<NodeMatrices> allMatrices;
+    allMatrices.reserve(m_gltfScene.m_nodes.size());
+    for(auto& node : m_gltfScene.m_nodes)
     {
-      nvh::gltf::NodeMatrices nm;
-      nm.world   = node->worldMatrix();
+      NodeMatrices nm;
+      nm.world   = node.worldMatrix;
       nm.worldIT = nm.world;
       nm.worldIT = nvmath::transpose(nvmath::invert(nm.worldIT));
       allMatrices.push_back(nm);
@@ -380,11 +372,11 @@ void VkScene::preparePipelines()
   gpb.addShader(nvh::loadFile("shaders/vert_shader.vert.spv", true, paths), vk::ShaderStageFlagBits::eVertex);
   gpb.addShader(nvh::loadFile("shaders/metallic-roughness.frag.spv", true, paths), vk::ShaderStageFlagBits::eFragment);
   gpb.addBindingDescriptions(
-      {{0, sizeof(nvmath::vec3)}, {1, sizeof(nvmath::vec3)}, {2, sizeof(nvmath::vec3)}, {3, sizeof(nvmath::vec2)}});
-  gpb.addAttributeDescriptions({{0, 0, vk::Format::eR32G32B32Sfloat, 0},  // Position
-                                {1, 1, vk::Format::eR32G32B32Sfloat, 0},  // Normal
-                                {2, 2, vk::Format::eR32G32B32Sfloat, 0},  // Color
-                                {3, 3, vk::Format::eR32G32Sfloat, 0}});   // UV
+      {{0, sizeof(nvmath::vec3)}, {1, sizeof(nvmath::vec3)}, {2, sizeof(nvmath::vec4)}, {3, sizeof(nvmath::vec2)}});
+  gpb.addAttributeDescriptions({{0, 0, vk::Format::eR32G32B32Sfloat, 0},     // Position
+                                {1, 1, vk::Format::eR32G32B32Sfloat, 0},     // Normal
+                                {2, 2, vk::Format::eR32G32B32A32Sfloat, 0},  // Color
+                                {3, 3, vk::Format::eR32G32Sfloat, 0}});      // UV
   gpb.rasterizationState.setCullMode(vk::CullModeFlagBits::eNone);
   m_drawPipeline = gpb.createPipeline();
 
@@ -413,19 +405,13 @@ void VkScene::setupDescriptorSetLayout()
   m_debug.setObjectName(m_descSet[eScene], "Matrices Desc");
 
 
-  m_descSetLayoutBind[eMaterial].addBinding(vk::DescriptorSetLayoutBinding(0, vkDT::eCombinedImageSampler, 1, vkSS::eFragment));  // albedo
-  m_descSetLayoutBind[eMaterial].addBinding(vk::DescriptorSetLayoutBinding(1, vkDT::eCombinedImageSampler, 1, vkSS::eFragment));  // normal
-  m_descSetLayoutBind[eMaterial].addBinding(vk::DescriptorSetLayoutBinding(2, vkDT::eCombinedImageSampler, 1, vkSS::eFragment));  // occlusion
-  m_descSetLayoutBind[eMaterial].addBinding(vk::DescriptorSetLayoutBinding(3, vkDT::eCombinedImageSampler, 1, vkSS::eFragment));  // metallic/roughness
-  m_descSetLayoutBind[eMaterial].addBinding(vk::DescriptorSetLayoutBinding(4, vkDT::eCombinedImageSampler, 1, vkSS::eFragment));  // emission
+  auto nbTextures = static_cast<uint32_t>(m_textures.size());
+  m_descSetLayoutBind[eMaterial].addBinding(
+      vk::DescriptorSetLayoutBinding(0, vkDT::eCombinedImageSampler, nbTextures, vkSS::eFragment));  // textures
   m_descSetLayout[eMaterial] = m_descSetLayoutBind[eMaterial].createLayout(m_device);
   m_descPool[eMaterial] =
       m_descSetLayoutBind[eMaterial].createPool(m_device, static_cast<uint32_t>(m_gltfScene.m_materials.size()));
-  for(auto& material : m_gltfScene.m_materialDSets)
-  {
-    // Create descriptor set per material
-    material = nvvk::allocateDescriptorSet(m_device, m_descPool[eMaterial], m_descSetLayout[eMaterial]);
-  }
+  m_descSet[eMaterial] = nvvk::allocateDescriptorSet(m_device, m_descPool[eMaterial], m_descSetLayout[eMaterial]);
 
   m_descSetLayoutBind[eEnv].addBinding(vk::DescriptorSetLayoutBinding(0, vkDT::eCombinedImageSampler, 1, vkSS::eFragment));  // irradiance
   m_descSetLayoutBind[eEnv].addBinding(vk::DescriptorSetLayoutBinding(1, vkDT::eCombinedImageSampler, 1, vkSS::eFragment));  // brdfLut
@@ -436,7 +422,7 @@ void VkScene::setupDescriptorSetLayout()
   m_debug.setObjectName(m_descSet[eEnv], "Env Desc");
 
   // Push constants in the fragment shader
-  vk::PushConstantRange pushConstantRanges = {vk::ShaderStageFlagBits::eFragment, 0, sizeof(nvh::gltf::Material::PushC)};
+  vk::PushConstantRange pushConstantRanges = {vk::ShaderStageFlagBits::eFragment, 0, sizeof(nvh::GltfMaterial)};
 
   // Creating the pipeline layout
   vk::PipelineLayoutCreateInfo pipelineLayoutCreateInfo;
@@ -461,30 +447,14 @@ void VkScene::setupDescriptorSets()
   writes.emplace_back(m_descSetLayoutBind[eScene].makeWrite(m_descSet[eScene], 0, &dbiScene));
   writes.emplace_back(m_descSetLayoutBind[eMatrix].makeWrite(m_descSet[eMatrix], 0, &dbiMatrix));
 
-  size_t idx = 0;
-  for(auto& material : m_gltfScene.m_materials)
-  {
-    const auto& descSet   = m_gltfScene.m_materialDSets[idx];
-    const auto& colorInfo = material.m_baseColorTexture ? m_gltfScene.getDescriptor(material.m_baseColorTexture) :
-                                                          static_cast<vk::DescriptorImageInfo>(m_emptyTexture[1].descriptor);
-    const auto& normalInfo = material.m_normalTexture ? (m_gltfScene.getDescriptor(material.m_normalTexture)) :
-                                                        static_cast<vk::DescriptorImageInfo>(m_emptyTexture[0].descriptor);
-    const auto& occlusionInfo = material.m_occlusionTexture ?
-                                    m_gltfScene.getDescriptor(material.m_occlusionTexture) :
-                                    static_cast<vk::DescriptorImageInfo>(m_emptyTexture[1].descriptor);
-    const auto& roughnessInfo = material.m_metallicRoughnessTexture ?
-                                    m_gltfScene.getDescriptor(material.m_metallicRoughnessTexture) :
-                                    static_cast<vk::DescriptorImageInfo>(m_emptyTexture[1].descriptor);
-    const auto& emissiveInfo = material.m_emissiveTexture ? m_gltfScene.getDescriptor(material.m_emissiveTexture) :
-                                                            static_cast<vk::DescriptorImageInfo>(m_emptyTexture[0].descriptor);
+  // Textures
+  std::vector<vk::DescriptorImageInfo> dbiImages;
+  for(const auto& imageDesc : m_textures)
+    dbiImages.emplace_back(imageDesc.descriptor);
 
-    writes.emplace_back(m_descSetLayoutBind[eMaterial].makeWrite(descSet, 0, &colorInfo));
-    writes.emplace_back(m_descSetLayoutBind[eMaterial].makeWrite(descSet, 1, &normalInfo));
-    writes.emplace_back(m_descSetLayoutBind[eMaterial].makeWrite(descSet, 2, &occlusionInfo));
-    writes.emplace_back(m_descSetLayoutBind[eMaterial].makeWrite(descSet, 3, &roughnessInfo));
-    writes.emplace_back(m_descSetLayoutBind[eMaterial].makeWrite(descSet, 4, &emissiveInfo));
-    idx++;
-  }
+  for(int i = 0; i < dbiImages.size(); i++)
+    writes.emplace_back(m_descSet[eMaterial], 0, i, 1, vk::DescriptorType::eCombinedImageSampler, &dbiImages[i]);
+
 
   writes.emplace_back(m_descSetLayoutBind[eEnv].makeWrite(m_descSet[eEnv], 0, &m_skydome.m_textures.prefilteredCube.descriptor));
   writes.emplace_back(m_descSetLayoutBind[eEnv].makeWrite(m_descSet[eEnv], 1, &m_skydome.m_textures.lutBrdf.descriptor));
@@ -492,37 +462,6 @@ void VkScene::setupDescriptorSets()
 
 
   m_device.updateDescriptorSets(static_cast<uint32_t>(writes.size()), writes.data(), 0, nullptr);
-}
-
-
-//--------------------------------------------------------------------------------------------------
-// Creating an empty texture which is used for when the material as no texture. We cannot pass NULL
-//
-void VkScene::createEmptyTexture()
-{
-  std::vector<uint8_t> black      = {0, 0, 0, 0};
-  std::vector<uint8_t> white      = {255, 255, 255, 255};
-  VkDeviceSize         bufferSize = 32;
-  vk::Extent2D         imgSize(1, 1);
-  nvvk::CommandPool    genCmdBuf(m_device, m_graphicsQueueIndex);
-  vk::CommandBuffer    cmdBuf = genCmdBuf.createCommandBuffer();
-  {
-    vk::SamplerCreateInfo   samplerCreateInfo;  // default values
-    vk::ImageCreateInfo     imageCreateInfo = nvvk::makeImage2DCreateInfo(imgSize);
-    vk::ImageViewCreateInfo ivInfo;
-
-    nvvk::Image blackImage = m_alloc.createImage(cmdBuf, bufferSize, black.data(), imageCreateInfo);
-    ivInfo               = nvvk::makeImageViewCreateInfo(blackImage.image, imageCreateInfo);
-    m_emptyTexture[0]    = m_alloc.createTexture(blackImage, ivInfo, samplerCreateInfo);
-
-    nvvk::Image whiteImage = m_alloc.createImage(cmdBuf, bufferSize, white.data(), imageCreateInfo);
-    ivInfo               = nvvk::makeImageViewCreateInfo(whiteImage.image, imageCreateInfo);
-    m_emptyTexture[1]    = m_alloc.createTexture(whiteImage, ivInfo, samplerCreateInfo);
-  }
-  genCmdBuf.submitAndWait(cmdBuf);
-
-  m_debug.setObjectName(m_emptyTexture[0].image, "BlackImage");
-  m_debug.setObjectName(m_emptyTexture[1].image, "WhiteImage");
 }
 
 //--------------------------------------------------------------------------------------------------
@@ -554,32 +493,29 @@ void VkScene::render(const vk::CommandBuffer& cmdBuff)
   cmdBuff.bindIndexBuffer(m_indexBuffer.buffer, 0, vk::IndexType::eUint32);
 
   uint32_t idxNode = 0;
-  for(auto& node : m_gltfScene.m_linearNodes)
+  for(auto& node : m_gltfScene.m_nodes)
   {
     // The offset for the matrix descriptor set, such that it points to the matrix of the gltfNode
-    doffset[0] = static_cast<uint32_t>(idxNode * sizeof(nvh::gltf::NodeMatrices));
+    doffset[0] = static_cast<uint32_t>(idxNode * sizeof(NodeMatrices));
 
 
-    if(node->m_mesh != ~0u)
+    auto dgbLabel = m_debug.scopeLabel(cmdBuff, std::string("Draw Mesh: " + std::to_string(node.primMesh)).c_str());
+
+    auto& primitive = m_gltfScene.m_primMeshes[node.primMesh];
+
+    if(lastMaterial != primitive.materialIndex)
     {
-      auto dgbLabel = m_debug.scopeLabel(cmdBuff, std::string("Draw Mesh: " + std::to_string(node->m_mesh)).c_str());
-      for(auto& primitive : m_gltfScene.m_linearMeshes[node->m_mesh]->m_primitives)
-      {
-        if(lastMaterial != primitive.m_materialIndex)
-        {
-          lastMaterial = primitive.m_materialIndex;
-          nvh::gltf::Material& mat(m_gltfScene.m_materials[lastMaterial]);
-          cmdBuff.pushConstants<nvh::gltf::Material::PushC>(m_pipelineLayout, vk::ShaderStageFlagBits::eFragment, 0, mat.m_mat);
-        }
-
-        // The pipeline uses three descriptor set, one for the scene information, one for the matrix of the instance, one for the textures
-        std::vector<vk::DescriptorSet> descriptorSets = {m_descSet[eScene], m_descSet[eMatrix],
-                                                         m_gltfScene.m_materialDSets[lastMaterial], m_descSet[eEnv]};
-        cmdBuff.bindDescriptorSets(vk::PipelineBindPoint::eGraphics, m_pipelineLayout, 0, descriptorSets, doffset);
-
-        cmdBuff.drawIndexed(primitive.m_indexCount, 1, primitive.m_firstIndex, primitive.m_vertexOffset, 0);
-      }
+      lastMaterial = primitive.materialIndex;
+      nvh::GltfMaterial& mat(m_gltfScene.m_materials[lastMaterial]);
+      cmdBuff.pushConstants<nvh::GltfMaterial>(m_pipelineLayout, vk::ShaderStageFlagBits::eFragment, 0, mat);
     }
+
+    // The pipeline uses four descriptor set, one for the scene information, one for the matrix of the instance, one for the textures and for the environment
+    std::vector<vk::DescriptorSet> descriptorSets = {m_descSet[eScene], m_descSet[eMatrix], m_descSet[eMaterial], m_descSet[eEnv]};
+    cmdBuff.bindDescriptorSets(vk::PipelineBindPoint::eGraphics, m_pipelineLayout, 0, descriptorSets, doffset);
+
+    cmdBuff.drawIndexed(primitive.indexCount, 1, primitive.firstIndex, primitive.vertexOffset, 0);
+
 
     idxNode++;
   }
@@ -680,7 +616,7 @@ void VkScene::drawUI()
   ImGui::SetNextWindowSize(ImVec2(450, 0), ImGuiCond_FirstUseEver);
 
   ImGui::Begin("Hello, Vulkan!", nullptr, ImGuiWindowFlags_AlwaysAutoResize);
-  ImGui::Text("%s", m_physicalDevice.getProperties().deviceName);
+  ImGui::Text("%s", &m_physicalDevice.getProperties().deviceName[0]);
 
   if(ImGui::CollapsingHeader("Camera Up Vector"))
   {
@@ -770,10 +706,10 @@ void VkScene::drawUI()
 
   if(ImGui::CollapsingHeader("Statistics"))
   {
-    ImGui::Text("Nb instances  : %zu", m_gltfScene.m_linearNodes.size());
-    ImGui::Text("Nb meshes     : %zu", m_gltfScene.m_linearMeshes.size());
+    ImGui::Text("Nb instances  : %zu", m_gltfScene.m_nodes.size());
+    ImGui::Text("Nb meshes     : %zu", m_gltfScene.m_primMeshes.size());
     ImGui::Text("Nb materials  : %zu", m_gltfScene.m_materials.size());
-    ImGui::Text("Nb triangles  : %zu", m_indices.size() / 3);
+    ImGui::Text("Nb triangles  : %zu", m_gltfScene.m_indices.size() / 3);
   }
 
   ImGui::End();
@@ -783,8 +719,18 @@ void VkScene::drawUI()
 //--------------------------------------------------------------------------------------------------
 // Convert all images to textures
 //
-void VkScene::loadImages(tinygltf::Model& gltfModel)
+void VkScene::importImages(tinygltf::Model& gltfModel)
 {
+  if(gltfModel.images.empty())
+  {
+    // Make dummy image(1,1), needed as we cannot have an empty array
+    nvvk::ScopeCommandBuffer cmdBuf(m_device, m_graphicsQueueIndex);
+    std::array<uint8_t, 4>   white = {255, 255, 255, 255};
+    m_textures.emplace_back(m_alloc.createTexture(cmdBuf, 4, white.data(), nvvk::makeImage2DCreateInfo(vk::Extent2D{1, 1}), {}));
+    m_debug.setObjectName(m_textures[0].image, "dummy");
+    return;
+  }
+
   m_textures.resize(gltfModel.images.size());
 
   LOGI("Loading %d images ", gltfModel.images.size());
@@ -814,9 +760,6 @@ void VkScene::loadImages(tinygltf::Model& gltfModel)
     nvvk::cmdGenerateMipmaps(cmdBuf, image.image, format, imgSize, imageCreateInfo.mipLevels);
     vk::ImageViewCreateInfo ivInfo = nvvk::makeImageViewCreateInfo(image.image, imageCreateInfo);
     m_textures[i]                  = m_alloc.createTexture(image, ivInfo, samplerCreateInfo);
-
-
-    m_gltfScene.m_textureDescriptors[i] = m_textures[i].descriptor;
 
     std::string name(gltfimage.name.empty() ? "Txt" + std::to_string(i) : gltfimage.name);
     m_debug.setObjectName(m_textures[i].image, name.c_str());

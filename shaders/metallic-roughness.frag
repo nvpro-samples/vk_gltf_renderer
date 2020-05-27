@@ -1,6 +1,8 @@
 #version 450
 #extension GL_ARB_separate_shader_objects : enable
 #extension GL_GOOGLE_include_directive : enable
+#extension GL_EXT_nonuniform_qualifier : enable
+#extension GL_EXT_scalar_block_layout : enable
 
 
 //
@@ -38,7 +40,7 @@ ubo;
 
 layout(location = 0) in vec3 inWorldPos;
 layout(location = 1) in vec3 inNormal;
-layout(location = 2) in vec3 inColor;
+layout(location = 2) in vec4 inColor;
 layout(location = 3) in vec2 inUV0;
 
 #define USE_HDR 1
@@ -55,27 +57,36 @@ layout(location = 3) in vec2 inUV0;
 
 layout(push_constant) uniform shaderInformation
 {
-  vec4  color;
+  int shadingModel;  // 0: metallic-roughness, 1: specular-glossiness
+
+  // PbrMetallicRoughness
+  vec4  pbrBaseColorFactor;
+  int   pbrBaseColorTexture;
+  float pbrMetallicFactor;
+  float pbrRoughnessFactor;
+  int   pbrMetallicRoughnessTexture;
+
+  // KHR_materials_pbrSpecularGlossiness
+  vec4  khrDiffuseFactor;
+  int   khrDiffuseTexture;
+  vec3  khrSpecularFactor;
+  float khrGlossinessFactor;
+  int   khrSpecularGlossinessTexture;
+
+  int   emissiveTexture;
   vec3  emissiveFactor;
-  float metallicFactor;    // 8
-  vec3  specularFactor;    // pbrSpecularGlossiness
-  float roughnessFactor;   // pbrMetallicRoughness
-  int   alphaMode;         //
-  float alphaCutoff;       //
-  float glossinessFactor;  // pbrSpecularGlossiness
-  int   shadingModel;      // 0: metallic-roughness, 1: specular-glossiness
-  int   doubleSided;
-  int   pad0;
-  int   pad1;
-  int   pad2;
+  int   alphaMode;
+  float alphaCutoff;
+  bool  doubleSided;
+
+  int   normalTexture;
+  float normalTextureScale;
+  int   occlusionTexture;
+  float occlusionTextureStrength;
 }
 material;
 
-layout(set = 2, binding = 0) uniform sampler2D albedoMap;
-layout(set = 2, binding = 1) uniform sampler2D normalMap;
-layout(set = 2, binding = 2) uniform sampler2D occlusionMap;
-layout(set = 2, binding = 3) uniform sampler2D metallicRoughness;
-layout(set = 2, binding = 4) uniform sampler2D emissiveMap;
+layout(set = 2, binding = 0) uniform sampler2D texturesMap[];  // All textures
 
 layout(set = 3, binding = 2) uniform samplerCube samplerIrradiance;
 layout(set = 3, binding = 1) uniform sampler2D samplerBRDFLUT;
@@ -289,8 +300,8 @@ void main()
   // Metallic and Roughness material properties are packed together
   // In glTF, these factors can be specified by fixed scalar values
   // or from a metallic-roughness map
-  float perceptualRoughness = 0.0;
-  float metallic            = 0.0;
+  float perceptualRoughness = material.pbrRoughnessFactor;
+  float metallic            = material.pbrMetallicFactor;
   vec4  baseColor           = vec4(0.0, 0.0, 0.0, 1.0);
   vec3  diffuseColor        = vec3(0.0);
   vec3  specularColor       = vec3(0.0);
@@ -298,12 +309,17 @@ void main()
 
   // Roughness is stored in the 'g' channel, metallic is stored in the 'b' channel.
   // This layout intentionally reserves the 'r' channel for (optional) occlusion map data
-  vec4 mrSample       = texture(metallicRoughness, inUV0);
-  perceptualRoughness = mrSample.g * material.roughnessFactor;
-  metallic            = mrSample.b * material.metallicFactor;
+  if(material.pbrMetallicRoughnessTexture > -1)
+  {
+    vec4 mrSample = texture(texturesMap[nonuniformEXT(material.pbrMetallicRoughnessTexture)], inUV0);
+    perceptualRoughness *= mrSample.g;
+    metallic *= mrSample.b;
+  }
 
   // The albedo may be defined from a base texture or a flat color
-  baseColor = SRGBtoLINEAR(texture(albedoMap, inUV0), 2.2) * material.color;
+  baseColor = material.pbrBaseColorFactor;
+  if(material.pbrBaseColorTexture > -1)
+    baseColor *= SRGBtoLINEAR(texture(texturesMap[nonuniformEXT(material.pbrBaseColorTexture)], inUV0), 2.2);
   baseColor *= getVertexColor();
 
   diffuseColor = baseColor.rgb * (vec3(1.0) - f0) * (1.0 - metallic);
@@ -343,7 +359,7 @@ void main()
   // LIGHTING
 
   vec3 color  = vec3(0.0, 0.0, 0.0);
-  vec3 normal = getNormal();
+  vec3 normal = getNormal(material.normalTexture);
   vec3 view   = normalize(ubo.camPos.xyz - inWorldPos);
 
 #ifdef USE_PUNCTUAL
@@ -378,12 +394,14 @@ void main()
 
   // Ambient occulsion
   float ao = 1.0;
-  ao       = texture(occlusionMap, inUV0).r;
-  color    = mix(color, color * ao, 1.0 /*u_OcclusionStrength*/);
+  if(material.occlusionTexture > -1)
+    ao = texture(texturesMap[nonuniformEXT(material.occlusionTexture)], inUV0).r;
+  color = mix(color, color * ao, 1.0 /*u_OcclusionStrength*/);
 
   // Emissive term
-  vec3 emissive = vec3(0);
-  emissive      = SRGBtoLINEAR(texture(emissiveMap, inUV0), 2.2).rgb * material.emissiveFactor;
+  vec3 emissive = material.emissiveFactor;
+  if(material.emissiveTexture > -1)
+    emissive = SRGBtoLINEAR(texture(texturesMap[nonuniformEXT(material.emissiveTexture)], inUV0), 2.2).rgb * material.emissiveFactor;
   color += emissive;
 
 
@@ -400,7 +418,7 @@ void main()
       break;
 
     case DEBUG_NORMAL:
-      outColor.rgb = getNormal();
+      outColor.rgb = getNormal(material.normalTexture);
       break;
 
     case DEBUG_BASECOLOR:
@@ -408,11 +426,17 @@ void main()
       break;
 
     case DEBUG_OCCLUSION:
-      outColor.rgb = texture(occlusionMap, inUV0).rrr;
+      if(material.occlusionTexture > -1)
+        outColor.rgb = texture(texturesMap[nonuniformEXT(material.occlusionTexture)], inUV0).rrr;
+      else
+        outColor.rgb = vec3(1);
       break;
 
     case DEBUG_EMISSIVE:
-      outColor.rgb = texture(emissiveMap, inUV0).rgb * material.emissiveFactor;
+      if(material.emissiveTexture > -1)
+        outColor.rgb = texture(texturesMap[nonuniformEXT(material.emissiveTexture)], inUV0).rrr;
+      else
+        outColor.rgb = vec3(0);
       break;
 
     case DEBUG_F0:
