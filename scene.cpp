@@ -585,7 +585,7 @@ void VkScene::onKeyboardChar(unsigned char key)
   if(key == 'f')
     fitCamera(m_gltfScene.m_dimensions.min, m_gltfScene.m_dimensions.max, false);
 
-  if(key == ' ')
+  if(key == GLFW_KEY_SPACE)
   {
     double x, y;
     glfwGetCursorPos(m_window, &x, &y);
