@@ -566,9 +566,12 @@ void VkScene::updateUniformBuffer(const vk::CommandBuffer& cmdBuffer)
 //
 void VkScene::createRenderPass()
 {
-  m_renderPass    = nvvk::createRenderPass(m_device, {getColorFormat()}, m_depthFormat, 1, false, true);
-  m_renderPassSky = nvvk::createRenderPass(m_device, {getColorFormat()}, m_depthFormat, 1, true, true);
-  m_renderPassUI  = nvvk::createRenderPass(m_device, {getColorFormat()}, m_depthFormat, 1, false, false);
+  m_renderPass    = nvvk::createRenderPass(m_device, {getColorFormat()}, m_depthFormat, 1, false, true,
+                                        vk::ImageLayout::eColorAttachmentOptimal, vk::ImageLayout::eColorAttachmentOptimal);
+  m_renderPassSky = nvvk::createRenderPass(m_device, {getColorFormat()}, m_depthFormat, 1, true, true,
+                                           vk::ImageLayout::eUndefined, vk::ImageLayout::eColorAttachmentOptimal);
+  m_renderPassUI  = nvvk::createRenderPass(m_device, {getColorFormat()}, m_depthFormat, 1, false, false,
+                                          vk::ImageLayout::eColorAttachmentOptimal, vk::ImageLayout::ePresentSrcKHR);
 
   m_debug.setObjectName(m_renderPass, "General Render Pass");
   m_debug.setObjectName(m_renderPassSky, "Environment Render Pass");
