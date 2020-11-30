@@ -143,7 +143,7 @@ int main(int argc, char** argv)
     const vk::PhysicalDevice physicalDevice = vkctx.m_physicalDevice;
     std::cout << "Using " << physicalDevice.getProperties().deviceName << std::endl;
 
-    example.createSurface(surface, SAMPLE_SIZE_WIDTH, SAMPLE_SIZE_HEIGHT);
+    example.createSwapchain(surface, SAMPLE_SIZE_WIDTH, SAMPLE_SIZE_HEIGHT);
     example.createDepthBuffer();
     example.createRenderPass();
     example.createFrameBuffers();
