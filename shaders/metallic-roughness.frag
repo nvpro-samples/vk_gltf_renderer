@@ -55,36 +55,12 @@ layout(location = 3) in vec2 inUV0;
 #define DEBUG_ALPHA 7
 #define DEBUG_ROUGHNESS 8
 
+#include "gltf.glsl"
 layout(push_constant) uniform shaderInformation
 {
-  int shadingModel;  // 0: metallic-roughness, 1: specular-glossiness
+  GltfShadeMaterial material;
+};
 
-  // PbrMetallicRoughness
-  vec4  pbrBaseColorFactor;
-  int   pbrBaseColorTexture;
-  float pbrMetallicFactor;
-  float pbrRoughnessFactor;
-  int   pbrMetallicRoughnessTexture;
-
-  // KHR_materials_pbrSpecularGlossiness
-  vec4  khrDiffuseFactor;
-  int   khrDiffuseTexture;
-  vec3  khrSpecularFactor;
-  float khrGlossinessFactor;
-  int   khrSpecularGlossinessTexture;
-
-  int   emissiveTexture;
-  vec3  emissiveFactor;
-  int   alphaMode;
-  float alphaCutoff;
-  bool  doubleSided;
-
-  int   normalTexture;
-  float normalTextureScale;
-  int   occlusionTexture;
-  float occlusionTextureStrength;
-}
-material;
 
 layout(set = 2, binding = 0) uniform sampler2D texturesMap[];  // All textures
 

@@ -35,6 +35,7 @@
 // Only once - defining VMA functions
 #define VMA_IMPLEMENTATION
 
+#include <iostream>
 
 #include "nvvk/commands_vk.hpp"
 #include "nvvk/descriptorsets_vk.hpp"
@@ -53,11 +54,10 @@
 #include <fileformats/tiny_gltf.h>
 
 
+#include "imgui/imgui_orient.h"
 #include "imgui_impl_glfw.h"
 #include "nvh/fileoperations.hpp"
-#include <imgui/imgui_orient.h>
-#include <iostream>
-
+#include "shaders/gltf.glsl"
 
 nvvk::ProfilerVK g_profilerVK;
 struct stats
@@ -422,7 +422,7 @@ void VkScene::setupDescriptorSetLayout()
   m_debug.setObjectName(m_descSet[eEnv], "Env Desc");
 
   // Push constants in the fragment shader
-  vk::PushConstantRange pushConstantRanges = {vk::ShaderStageFlagBits::eFragment, 0, sizeof(nvh::GltfMaterial)};
+  vk::PushConstantRange pushConstantRanges = {vk::ShaderStageFlagBits::eFragment, 0, sizeof(GltfShadeMaterial)};
 
   // Creating the pipeline layout
   vk::PipelineLayoutCreateInfo pipelineLayoutCreateInfo;
@@ -506,8 +506,31 @@ void VkScene::render(const vk::CommandBuffer& cmdBuff)
     if(lastMaterial != primitive.materialIndex)
     {
       lastMaterial = primitive.materialIndex;
-      nvh::GltfMaterial& mat(m_gltfScene.m_materials[lastMaterial]);
-      cmdBuff.pushConstants<nvh::GltfMaterial>(m_pipelineLayout, vk::ShaderStageFlagBits::eFragment, 0, mat);
+      nvh::GltfMaterial& m(m_gltfScene.m_materials[lastMaterial]);
+
+      GltfShadeMaterial shadeMat = GltfShadeMaterial{m.shadingModel,
+                                                     m.pbrBaseColorFactor,
+                                                     m.pbrBaseColorTexture,
+                                                     m.pbrMetallicFactor,
+                                                     m.pbrRoughnessFactor,
+                                                     m.pbrMetallicRoughnessTexture,
+                                                     m.khrDiffuseFactor,
+                                                     m.khrDiffuseTexture,
+                                                     m.khrSpecularFactor,
+                                                     m.khrGlossinessFactor,
+                                                     m.khrSpecularGlossinessTexture,
+                                                     m.emissiveTexture,
+                                                     m.emissiveFactor,
+                                                     m.alphaMode,
+                                                     m.alphaCutoff,
+                                                     m.doubleSided,
+                                                     m.normalTexture,
+                                                     m.normalTextureScale,
+                                                     m.occlusionTexture,
+                                                     m.occlusionTextureStrength
+
+      };
+      cmdBuff.pushConstants<GltfShadeMaterial>(m_pipelineLayout, vk::ShaderStageFlagBits::eFragment, 0, shadeMat);
     }
 
     // The pipeline uses four descriptor set, one for the scene information, one for the matrix of the instance, one for the textures and for the environment
@@ -641,12 +664,7 @@ void VkScene::drawUI()
   if(ImGui::CollapsingHeader("Lighting"))
   {
     ImVec3 vecDir(m_ubo.lightDirection.x, m_ubo.lightDirection.y, m_ubo.lightDirection.z);
-    if(ImGui::DirectionGizmo("Directional Light", vecDir))
-    {
-      m_ubo.lightDirection.x = vecDir.x;
-      m_ubo.lightDirection.y = vecDir.y;
-      m_ubo.lightDirection.z = vecDir.z;
-    }
+    ImGui::DirectionGizmo("Directional Light", &m_ubo.lightDirection.x);
     ImGui::SliderFloat("Light Intensity", &m_ubo.lightIntensity, 0.0f, 10.f);
     ImGui::SliderFloat("Exposure", &m_ubo.exposure, 0.0f, 10.f);
     ImGui::SliderFloat("Gamma", &m_ubo.gamma, 1.0f, 2.2f);
