@@ -176,8 +176,8 @@ void SkydomePbr::createPipelines(const vk::DescriptorBufferInfo& sceneBufferDesc
 
   std::vector<std::string>                paths = defaultSearchPaths;
   nvvk::GraphicsPipelineGeneratorCombined gpg(m_device, m_pipelineLayout, m_renderPass);
-  gpg.addShader(nvh::loadFile("shaders/skybox.vert.spv", true, paths), vk::ShaderStageFlagBits::eVertex);
-  gpg.addShader(nvh::loadFile("shaders/skybox.frag.spv", true, paths), vk::ShaderStageFlagBits::eFragment);
+  gpg.addShader(nvh::loadFile("spv//skybox.vert.spv", true, paths), vk::ShaderStageFlagBits::eVertex);
+  gpg.addShader(nvh::loadFile("spv//skybox.frag.spv", true, paths), vk::ShaderStageFlagBits::eFragment);
   gpg.depthStencilState.depthTestEnable = false;
   gpg.rasterizationState.setCullMode(vk::CullModeFlagBits::eNone);
   gpg.addBindingDescriptions({{0, sizeof(nvmath::vec3f)}});
@@ -208,7 +208,7 @@ void SkydomePbr::loadEnvironment(const std::string& hrdImage)
 
   {
     nvvk::ScopeCommandBuffer cmdBuf(m_device, m_queueIndex);
-    nvvk::Image                image  = m_alloc->createImage(cmdBuf, bufferSize, pixels, icInfo);
+    nvvk::Image              image  = m_alloc->createImage(cmdBuf, bufferSize, pixels, icInfo);
     vk::ImageViewCreateInfo  ivInfo = nvvk::makeImageViewCreateInfo(image.image, icInfo);
     m_textures.txtHdr               = m_alloc->createTexture(image, ivInfo, samplerCreateInfo);
   }
@@ -252,7 +252,7 @@ static float build_alias_map(const std::vector<float>& data, std::vector<Env_acc
   for(float d : data)
     sum += d;
 
-  float fsize = data.size();
+  float fsize = static_cast<float>(data.size());
   for(uint32_t i = 0; i < data.size(); ++i)
     accel[i].q = fsize * data[i] / sum;
 
@@ -318,7 +318,7 @@ void SkydomePbr::createEnvironmentAccelTexture(const float* pixels, vk::Extent2D
     vk::ImageCreateInfo icInfo     = nvvk::makeImage2DCreateInfo({rx, ry}, format);
     vk::DeviceSize      bufferSize = rx * ry * sizeof(Env_accel);
 
-    nvvk::Image               image         = m_alloc->createImage(cmdBuf, bufferSize, env_accel.data(), icInfo);
+    nvvk::Image             image         = m_alloc->createImage(cmdBuf, bufferSize, env_accel.data(), icInfo);
     vk::ImageViewCreateInfo imageViewInfo = nvvk::makeImageViewCreateInfo(image.image, icInfo);
     accelTex                              = m_alloc->createTexture(image, imageViewInfo, samplerCreateInfo);
   }
@@ -392,8 +392,8 @@ void SkydomePbr::integrateBrdf(uint32_t dim)
   // Pipeline
   std::vector<std::string>                paths = defaultSearchPaths;
   nvvk::GraphicsPipelineGeneratorCombined pipelineGenerator(m_device, pipelinelayout, renderpass);
-  pipelineGenerator.addShader(nvh::loadFile("shaders/integrate_brdf.vert.spv", true, paths), vk::ShaderStageFlagBits::eVertex);
-  pipelineGenerator.addShader(nvh::loadFile("shaders/integrate_brdf.frag.spv", true, paths), vk::ShaderStageFlagBits::eFragment);
+  pipelineGenerator.addShader(nvh::loadFile("spv//integrate_brdf.vert.spv", true, paths), vk::ShaderStageFlagBits::eVertex);
+  pipelineGenerator.addShader(nvh::loadFile("spv//integrate_brdf.frag.spv", true, paths), vk::ShaderStageFlagBits::eFragment);
   pipelineGenerator.rasterizationState.setCullMode(vk::CullModeFlagBits::eNone);
   vk::Pipeline pipeline = pipelineGenerator.createPipeline();
 
@@ -451,7 +451,7 @@ void SkydomePbr::prefilterDiffuse(uint32_t dim)
     samplerCreateInfo.minFilter  = vk::Filter::eLinear;
     samplerCreateInfo.magFilter  = vk::Filter::eLinear;
     samplerCreateInfo.mipmapMode = vk::SamplerMipmapMode::eLinear;
-    samplerCreateInfo.maxLod     = numMips;
+    samplerCreateInfo.maxLod     = static_cast<float>(numMips);
 
     vk::ImageCreateInfo imageCreateInfo =
         nvvk::makeImageCubeCreateInfo(size, format, vk::ImageUsageFlagBits::eColorAttachment | vk::ImageUsageFlagBits::eSampled, true);
@@ -459,7 +459,7 @@ void SkydomePbr::prefilterDiffuse(uint32_t dim)
 
     {
       nvvk::ScopeCommandBuffer cmdBuf(m_device, m_queueIndex);
-      nvvk::Image                image         = m_alloc->createImage(cmdBuf, bufferSize, nullptr, imageCreateInfo);
+      nvvk::Image              image         = m_alloc->createImage(cmdBuf, bufferSize, nullptr, imageCreateInfo);
       vk::ImageViewCreateInfo  imageViewInfo = nvvk::makeImageViewCreateInfo(image.image, imageCreateInfo, true);
       filteredEnv                            = m_alloc->createTexture(image, imageViewInfo, samplerCreateInfo);
     }
@@ -492,8 +492,8 @@ void SkydomePbr::prefilterDiffuse(uint32_t dim)
   // Pipeline
   std::vector<std::string>                paths = defaultSearchPaths;
   nvvk::GraphicsPipelineGeneratorCombined pipelineGenerator(m_device, pipelinelayout, renderpass);
-  pipelineGenerator.addShader(nvh::loadFile("shaders/filtercube.vert.spv", true, paths), vk::ShaderStageFlagBits::eVertex);
-  pipelineGenerator.addShader(nvh::loadFile("shaders/prefilter_diffuse.frag.spv", true, paths), vk::ShaderStageFlagBits::eFragment);
+  pipelineGenerator.addShader(nvh::loadFile("spv//filtercube.vert.spv", true, paths), vk::ShaderStageFlagBits::eVertex);
+  pipelineGenerator.addShader(nvh::loadFile("spv//prefilter_diffuse.frag.spv", true, paths), vk::ShaderStageFlagBits::eFragment);
   pipelineGenerator.rasterizationState.setCullMode(vk::CullModeFlagBits::eNone);
   pipelineGenerator.addBindingDescriptions({{0, sizeof(nvmath::vec3f)}});
   pipelineGenerator.addAttributeDescriptions({{0, 0, vk::Format::eR32G32B32Sfloat, 0}});
@@ -530,7 +530,7 @@ void SkydomePbr::prefilterGlossy(uint32_t dim)
     samplerCreateInfo.minFilter  = vk::Filter::eLinear;
     samplerCreateInfo.magFilter  = vk::Filter::eLinear;
     samplerCreateInfo.mipmapMode = vk::SamplerMipmapMode::eLinear;
-    samplerCreateInfo.maxLod     = numMips;
+    samplerCreateInfo.maxLod     = static_cast<float>(numMips);
 
     vk::ImageCreateInfo imageCreateInfo =
         nvvk::makeImageCubeCreateInfo(size, format, vk::ImageUsageFlagBits::eTransferDst | vk::ImageUsageFlagBits::eSampled, true);
@@ -538,7 +538,7 @@ void SkydomePbr::prefilterGlossy(uint32_t dim)
 
     {
       nvvk::ScopeCommandBuffer cmdBuf(m_device, m_queueIndex);
-      nvvk::Image                image         = m_alloc->createImage(cmdBuf, bufferSize, nullptr, imageCreateInfo);
+      nvvk::Image              image         = m_alloc->createImage(cmdBuf, bufferSize, nullptr, imageCreateInfo);
       vk::ImageViewCreateInfo  imageViewInfo = nvvk::makeImageViewCreateInfo(image.image, imageCreateInfo, true);
       filteredEnv                            = m_alloc->createTexture(image, imageViewInfo, samplerCreateInfo);
     }
@@ -570,8 +570,8 @@ void SkydomePbr::prefilterGlossy(uint32_t dim)
   // Pipeline
   std::vector<std::string>                paths = defaultSearchPaths;
   nvvk::GraphicsPipelineGeneratorCombined pipelineGenerator(m_device, pipelinelayout, renderpass);
-  pipelineGenerator.addShader(nvh::loadFile("shaders/filtercube.vert.spv", true, paths), vk::ShaderStageFlagBits::eVertex);
-  pipelineGenerator.addShader(nvh::loadFile("shaders/prefilter_glossy.frag.spv", true, paths), vk::ShaderStageFlagBits::eFragment);
+  pipelineGenerator.addShader(nvh::loadFile("spv//filtercube.vert.spv", true, paths), vk::ShaderStageFlagBits::eVertex);
+  pipelineGenerator.addShader(nvh::loadFile("spv//prefilter_glossy.frag.spv", true, paths), vk::ShaderStageFlagBits::eFragment);
   pipelineGenerator.rasterizationState.setCullMode(vk::CullModeFlagBits::eNone);
   pipelineGenerator.addBindingDescriptions({{0, sizeof(nvmath::vec3f)}});
   pipelineGenerator.addAttributeDescriptions({{0, 0, vk::Format::eR32G32B32Sfloat, 0}});
@@ -594,7 +594,7 @@ void SkydomePbr::prefilterGlossy(uint32_t dim)
 
 
 void SkydomePbr::renderToCube(const vk::RenderPass& renderpass,
-                              nvvk::Texture&          filteredEnv,
+                              nvvk::Texture&        filteredEnv,
                               vk::PipelineLayout    pipelinelayout,
                               vk::Pipeline          pipeline,
                               vk::DescriptorSet     descSet,

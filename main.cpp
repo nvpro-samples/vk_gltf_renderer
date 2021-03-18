@@ -37,8 +37,7 @@
 #include <vulkan/vulkan.hpp>
 VULKAN_HPP_DEFAULT_DISPATCH_LOADER_DYNAMIC_STORAGE
 
-#include "imgui.h"
-#include "imgui_impl_glfw.h"
+#include "imgui/backends/imgui_impl_glfw.h"
 #include "nvh/fileoperations.hpp"
 #include "nvh/inputparser.h"
 #include "nvpsystem.hpp"
@@ -50,20 +49,23 @@ int const SAMPLE_SIZE_WIDTH  = 800;
 int const SAMPLE_SIZE_HEIGHT = 600;
 
 // Default search path for shaders
-std::vector<std::string> defaultSearchPaths{
-    "./",
-    "../",
-    std::string(PROJECT_NAME),
-    std::string("SPV_" PROJECT_NAME),
-    PROJECT_ABSDIRECTORY,
-    NVPSystem::exePath() + std::string(PROJECT_RELDIRECTORY),
-};
+std::vector<std::string> defaultSearchPaths;
 
 //--------------------------------------------------------------------------------------------------
 //
 //
 int main(int argc, char** argv)
 {
+  // setup some basic things for the sample, logging file for example
+  NVPSystem system(PROJECT_NAME);
+
+  defaultSearchPaths = {
+      NVPSystem::exePath() + PROJECT_NAME,
+      NVPSystem::exePath() + R"(media)",
+      NVPSystem::exePath() + PROJECT_RELDIRECTORY,
+      NVPSystem::exePath() + PROJECT_DOWNLOAD_RELDIRECTORY,
+  };
+
 
   // Parsing the command line: mandatory '-f' for the filename of the scene
   InputParser parser(argc, argv);
@@ -78,17 +80,15 @@ int main(int argc, char** argv)
   }
   else
   {
-    filename = nvh::findFile("data/FlightHelmet.gltf", defaultSearchPaths);
+    filename = nvh::findFile("FlightHelmet/FlightHelmet.gltf", defaultSearchPaths, true);
   }
 
   std::string hdrFilename = parser.getString("-e");
   if(hdrFilename.empty())
   {
-    hdrFilename = nvh::findFile("/data/environment.hdr", defaultSearchPaths);
+    hdrFilename = nvh::findFile("environment.hdr", defaultSearchPaths, true);
   }
 
-  // setup some basic things for the sample, logging file for example
-  NVPSystem system(argv[0], PROJECT_NAME);
 
   // GLFW
   if(!glfwInit())
