@@ -54,8 +54,8 @@
 #include <fileformats/tiny_gltf.h>
 
 
-#include "imgui/imgui_orient.h"
-#include "imgui_impl_glfw.h"
+#include "imgui/backends/imgui_impl_glfw.h"
+#include "imgui/extras/imgui_orient.h"
 #include "nvh/fileoperations.hpp"
 #include "shaders/gltf.glsl"
 
@@ -260,7 +260,7 @@ void VkScene::display()
       auto dbgLabel = m_debug.scopeLabel(cmdBuff, "Rendering UI");
       renderPassBeginInfo.setRenderPass(m_renderPassUI);
       cmdBuff.beginRenderPass(renderPassBeginInfo, vk::SubpassContents::eInline);
-      ImGui::RenderDrawDataVK(cmdBuff, ImGui::GetDrawData());
+      ImGui_ImplVulkan_RenderDrawData(ImGui::GetDrawData(), cmdBuff);
     }
 
     // Rendering axis in same render pass
@@ -369,8 +369,8 @@ void VkScene::preparePipelines()
   nvvk::GraphicsPipelineGeneratorCombined gpb(m_device, m_pipelineLayout, m_renderPass);
   gpb.depthStencilState.depthTestEnable = true;
 
-  gpb.addShader(nvh::loadFile("shaders/vert_shader.vert.spv", true, paths), vk::ShaderStageFlagBits::eVertex);
-  gpb.addShader(nvh::loadFile("shaders/metallic-roughness.frag.spv", true, paths), vk::ShaderStageFlagBits::eFragment);
+  gpb.addShader(nvh::loadFile("spv//vert_shader.vert.spv", true, paths), vk::ShaderStageFlagBits::eVertex);
+  gpb.addShader(nvh::loadFile("spv//metallic-roughness.frag.spv", true, paths), vk::ShaderStageFlagBits::eFragment);
   gpb.addBindingDescriptions(
       {{0, sizeof(nvmath::vec3)}, {1, sizeof(nvmath::vec3)}, {2, sizeof(nvmath::vec4)}, {3, sizeof(nvmath::vec2)}});
   gpb.addAttributeDescriptions({{0, 0, vk::Format::eR32G32B32Sfloat, 0},     // Position
@@ -509,16 +509,16 @@ void VkScene::render(const vk::CommandBuffer& cmdBuff)
       nvh::GltfMaterial& m(m_gltfScene.m_materials[lastMaterial]);
 
       GltfShadeMaterial shadeMat = GltfShadeMaterial{m.shadingModel,
-                                                     m.pbrBaseColorFactor,
-                                                     m.pbrBaseColorTexture,
-                                                     m.pbrMetallicFactor,
-                                                     m.pbrRoughnessFactor,
-                                                     m.pbrMetallicRoughnessTexture,
-                                                     m.khrDiffuseFactor,
-                                                     m.khrDiffuseTexture,
-                                                     m.khrSpecularFactor,
-                                                     m.khrGlossinessFactor,
-                                                     m.khrSpecularGlossinessTexture,
+                                                     m.baseColorFactor,
+                                                     m.baseColorTexture,
+                                                     m.metallicFactor,
+                                                     m.roughnessFactor,
+                                                     m.metallicRoughnessTexture,
+                                                     m.specularGlossiness.diffuseFactor,
+                                                     m.specularGlossiness.diffuseTexture,
+                                                     m.specularGlossiness.specularFactor,
+                                                     m.specularGlossiness.glossinessFactor,
+                                                     m.specularGlossiness.specularGlossinessTexture,
                                                      m.emissiveTexture,
                                                      m.emissiveFactor,
                                                      m.alphaMode,
@@ -615,7 +615,7 @@ void VkScene::onKeyboardChar(unsigned char key)
   {
     double x, y;
     glfwGetCursorPos(m_window, &x, &y);
-    float z = getDepth(x, y);
+    float z = getDepth(static_cast<int>(x), static_cast<int>(y));
     if(z < 1.0f)  // Not the background
     {
       nvmath::vec3f worldPos = unProjectScreenPosition({x, y, z});
@@ -638,7 +638,7 @@ void VkScene::drawUI()
   // Start the Dear ImGui frame
   ImGui_ImplGlfw_NewFrame();
   ImGui::NewFrame();
-  ImGui::SetNextWindowBgAlpha(0.8);
+  ImGui::SetNextWindowBgAlpha(0.8f);
   ImGui::SetNextWindowSize(ImVec2(450, 0), ImGuiCond_FirstUseEver);
 
   ImGui::Begin("Hello, Vulkan!", nullptr, ImGuiWindowFlags_AlwaysAutoResize);
@@ -700,8 +700,8 @@ void VkScene::drawUI()
     double curTime           = g_profilerVK.getMicroSeconds();
     double diffTime          = curTime - perfTime;
     perfTime                 = curTime;
-    valuesFPS[values_offset] = 50.0f / diffTime * 1000000.0f;
-    valuesRnd[values_offset] = frameGpu;
+    valuesFPS[values_offset] = 50.0f / static_cast<float>(diffTime) * 1000000.0f;
+    valuesRnd[values_offset] = static_cast<float>(frameGpu);
     valueMax                 = std::min(std::max(valueMax, valuesFPS[values_offset]), 1000.0f);
     valueMSMax               = std::max(valueMSMax, valuesRnd[values_offset]);
     values_offset            = (values_offset + 1) % IM_ARRAYSIZE(valuesFPS);
@@ -857,8 +857,8 @@ nvmath::vec3f VkScene::unProjectScreenPosition(const nvmath::vec3f& screenPos)
 {
   // Transformation of normalized coordinates between -1 and 1
   nvmath::vec4f winNorm;
-  winNorm[0] = screenPos.x / (float)m_size.width * 2.0 - 1.0;
-  winNorm[1] = screenPos.y / (float)m_size.height * 2.0 - 1.0;
+  winNorm[0] = screenPos.x / (float)m_size.width * 2.0f - 1.0f;
+  winNorm[1] = screenPos.y / (float)m_size.height * 2.0f - 1.0f;
   winNorm[2] = screenPos.z;
   winNorm[3] = 1.0;
 
