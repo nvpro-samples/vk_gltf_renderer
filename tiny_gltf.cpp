@@ -17,22 +17,12 @@
  * SPDX-License-Identifier: Apache-2.0
  */
  
-#version 450
+// Visual Studio warnings
+#ifdef _MSC_VER
+#pragma warning(disable : 4996)  // 'This function or variable may be unsafe': strcpy, strdup, sprintf, vsnprintf, sscanf, fopen
+#endif
 
-layout (location = 0) in vec3 inPos;
-
-layout(push_constant) uniform PushConsts {
-	layout (offset = 0) mat4 mvp;
-} pushConsts;
-
-layout (location = 0) out vec3 outUVW;
-
-out gl_PerVertex {
-	vec4 gl_Position;
-};
-
-void main() 
-{
-	outUVW = inPos;
-	gl_Position = pushConsts.mvp * vec4(inPos.xyz, 1.0);
-}
+#define TINYGLTF_IMPLEMENTATION
+#define STB_IMAGE_IMPLEMENTATION
+#define STB_IMAGE_WRITE_IMPLEMENTATION
+#include "tiny_gltf.h"
