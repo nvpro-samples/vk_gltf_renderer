@@ -18,7 +18,6 @@
  */
 
 
-
 //--------------------------------------------------------------------------------------------------
 // This example is loading a glTF scene and renders it with a very simple material
 //
@@ -407,7 +406,9 @@ void VkScene::setupDescriptorSetLayout()
 void VkScene::setupDescriptorSets()
 {
   vk::DescriptorBufferInfo dbiScene{m_sceneBuffer.buffer, 0, VK_WHOLE_SIZE};
-  vk::DescriptorBufferInfo dbiMatrix{m_matrixBuffer.buffer, 0, VK_WHOLE_SIZE};
+
+  // Not accessing more than one matrix at a time.
+  vk::DescriptorBufferInfo dbiMatrix{m_matrixBuffer.buffer, 0, sizeof(NodeMatrices)};
 
   std::vector<vk::WriteDescriptorSet> writes;
   writes.emplace_back(m_descSetLayoutBind[eScene].makeWrite(m_descSet[eScene], 0, &dbiScene));
@@ -465,7 +466,7 @@ void VkScene::render(const vk::CommandBuffer& cmdBuff)
     doffset[0] = static_cast<uint32_t>(idxNode * sizeof(NodeMatrices));
 
 
-    auto dgbLabel = m_debug.scopeLabel(cmdBuff, std::string("Draw Mesh: " + std::to_string(node.primMesh)).c_str());
+    auto dgbLabel = m_debug.scopeLabel(cmdBuff, std::string("Draw Mesh: " + std::to_string(node.primMesh)));
 
     auto& primitive = m_gltfScene.m_primMeshes[node.primMesh];
 
