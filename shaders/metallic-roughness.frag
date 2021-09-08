@@ -16,7 +16,7 @@
  * SPDX-FileCopyrightText: Copyright (c) 2019-2021 NVIDIA CORPORATION
  * SPDX-License-Identifier: Apache-2.0
  */
- 
+
 #version 450
 #extension GL_ARB_separate_shader_objects : enable
 #extension GL_GOOGLE_include_directive : enable
@@ -75,7 +75,7 @@ layout(location = 3) in vec2 inUV0;
 #define DEBUG_ROUGHNESS 8
 
 #include "gltf.glsl"
-layout(push_constant) uniform shaderInformation
+layout(push_constant, scalar) uniform shaderInformation
 {
   GltfShadeMaterial material;
 };
@@ -156,8 +156,8 @@ vec3 getIBLContribution(MaterialInfo materialInfo, vec3 n, vec3 v)
   vec3 diffuseLight  = diffuseSample.rgb;
   vec3 specularLight = specularSample.rgb;
 #else
-  vec3 diffuseLight   = SRGBtoLINEAR(diffuseSample).rgb;
-  vec3 specularLight  = SRGBtoLINEAR(specularSample).rgb;
+  vec3 diffuseLight  = SRGBtoLINEAR(diffuseSample).rgb;
+  vec3 specularLight = SRGBtoLINEAR(specularSample).rgb;
 #endif
 
   vec3 diffuse  = diffuseLight * materialInfo.diffuseColor;
