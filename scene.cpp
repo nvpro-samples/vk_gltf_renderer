@@ -337,7 +337,7 @@ void VkScene::preparePipelines()
   gpb.addShader(nvh::loadFile("spv//vert_shader.vert.spv", true, paths), vk::ShaderStageFlagBits::eVertex);
   gpb.addShader(nvh::loadFile("spv//metallic-roughness.frag.spv", true, paths), vk::ShaderStageFlagBits::eFragment);
   gpb.addBindingDescriptions(
-      {{0, sizeof(nvmath::vec3)}, {1, sizeof(nvmath::vec3)}, {2, sizeof(nvmath::vec4)}, {3, sizeof(nvmath::vec2)}});
+      {{0, sizeof(nvmath::vec3f)}, {1, sizeof(nvmath::vec3f)}, {2, sizeof(nvmath::vec4f)}, {3, sizeof(nvmath::vec2f)}});
   gpb.addAttributeDescriptions({{0, 0, vk::Format::eR32G32B32Sfloat, 0},     // Position
                                 {1, 1, vk::Format::eR32G32B32Sfloat, 0},     // Normal
                                 {2, 2, vk::Format::eR32G32B32A32Sfloat, 0},  // Color
