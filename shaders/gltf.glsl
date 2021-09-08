@@ -17,6 +17,12 @@
  * SPDX-License-Identifier: Apache-2.0
  */
 
+#ifdef __cplusplus
+// GLSL Type
+using vec3 = nvmath::vec3f;
+using vec4 = nvmath::vec4f;
+#endif
+
 struct GltfShadeMaterial
 {
   int shadingModel;  // 0: metallic-roughness, 1: specular-glossiness
