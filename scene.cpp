@@ -230,7 +230,7 @@ void VkScene::display()
 
     // Rendering axis in same render pass
     dbgLabel.setLabel("Drawing Axis");
-    m_axis.display(cmdBuff, CameraManip.getMatrix(), m_size);
+    m_axis.display(cmdBuff, CameraManip.getMatrix(), static_cast<VkExtent2D>(m_size));
     cmdBuff.endRenderPass();
   }
 
