@@ -1,2 +1,5 @@
 /spv/*
 /build/*
+
+.vs/
+*/_autogen/

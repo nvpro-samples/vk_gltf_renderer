@@ -1,22 +1,10 @@
-#*****************************************************************************
-# Copyright 2020 NVIDIA Corporation. All rights reserved.
-#*****************************************************************************
-cmake_minimum_required(VERSION 3.9.6 FATAL_ERROR)
+# Common default Cmake header for Nvpro-core samples
+cmake_minimum_required(VERSION 3.15.0 FATAL_ERROR)
+get_filename_component(PROJECT_NAME ${CMAKE_CURRENT_SOURCE_DIR} NAME)
+project(${PROJECT_NAME} LANGUAGES C CXX)
 
-
-#--------------------------------------------------------------------------------------------------
-# Project setting
-get_filename_component(PROJNAME ${CMAKE_CURRENT_SOURCE_DIR} NAME)
-set(PROJNAME ${PROJNAME})
-project(${PROJNAME} LANGUAGES C CXX)
-message(STATUS "-------------------------------")
-message(STATUS "Processing Project ${PROJNAME}:")
-
-#--------------------------------------------------------------------------------------------------
-# C++ target and defines
+set_property(GLOBAL PROPERTY USE_FOLDERS ON)
 set(CMAKE_CXX_STANDARD 17)
-add_executable(${PROJNAME})
-
 
 #--------------------------------------------------------------------------------------------------
 # look for nvpro_core 1) as a sub-folder 2) at some other locations
@@ -37,83 +25,22 @@ if(EXISTS ${BASE_DIRECTORY}/nvpro_core/cmake/setup.cmake)
 else()
   message(FATAL_ERROR "could not find base directory, please set BASE_DIRECTORY to folder containing nvpro_core")
 endif()
-    
 
+set(NVPRO_CORE_DIR ${BASE_DIRECTORY}/nvpro_core)
+
+if(MSVC)
+    add_definitions(/wd26812)  # 'enum class' over 'enum'
+    add_definitions(/wd26451)  # Arithmetic overflow, casting 4 byte value to 8 byte value
+endif()
 
 #--------------------------------------------------------------------------------------------------
-# Resources
-#
- download_files(FILENAMES FlightHelmet.zip EXTRACT)
- download_files(FILENAMES environment.hdr)
-
-#--------------------------------------------------------------------------------------------------
-# Packages
+# Package shared by all projects
 _add_package_VulkanSDK()
 _add_package_ImGUI()
-# This should be added after all packages
 _add_nvpro_core_lib()
 
 
 #--------------------------------------------------------------------------------------------------
-# Default definitions: PROJECT_RELDIRECTORY, ... 
-_add_project_definitions(${PROJNAME})
-
-
-
-#--------------------------------------------------------------------------------------------------
-# Source files for this project
-#
-file(GLOB SOURCE_FILES *.cpp *.hpp *.inl *.h *.c)
-
-#--------------------------------------------------------------------------------------------------
-# GLSL to SPIR-V custom build
-compile_glsl_directory(
-    SRC "${CMAKE_CURRENT_SOURCE_DIR}/shaders" 
-    DST "${CMAKE_CURRENT_SOURCE_DIR}/spv" 
-    VULKAN_TARGET "vulkan1.1"
-    )
-
-
-
-#--------------------------------------------------------------------------------------------------
-# Sources
-target_sources(${PROJNAME} PUBLIC ${SOURCE_FILES} ${HEADER_FILES})
-target_sources(${PROJNAME} PUBLIC ${COMMON_SOURCE_FILES})
-target_sources(${PROJNAME} PUBLIC ${PACKAGE_SOURCE_FILES})
-target_sources(${PROJNAME} PUBLIC ${GLSL_SOURCES})
-target_sources(${PROJNAME} PUBLIC ${GLSL_HEADERS})
-
-
-#--------------------------------------------------------------------------------------------------
-# Sub-folders in Visual Studio
-#
-source_group("Common"         FILES ${COMMON_SOURCE_FILES} ${PACKAGE_SOURCE_FILES})
-source_group("Sources"        FILES ${SOURCE_FILES})
-source_group("Headers"        FILES ${HEADER_FILES})
-source_group("Shader Sources" FILES ${GLSL_SOURCES})
-source_group("Shader Headers" FILES ${GLSL_HEADERS})
-
-
-
-#####################################################################################
-# Linkage
-#
-target_link_libraries(${PROJNAME} ${PLATFORM_LIBRARIES} nvpro_core)
-
-foreach(DEBUGLIB ${LIBRARIES_DEBUG})
-  target_link_libraries(${PROJNAME} debug ${DEBUGLIB})
-endforeach(DEBUGLIB)
-
-foreach(RELEASELIB ${LIBRARIES_OPTIMIZED})
-  target_link_libraries(${PROJNAME} optimized ${RELEASELIB})
-endforeach(RELEASELIB)
-
-#####################################################################################
-# copies binaries that need to be put next to the exe files (ZLib, etc.)
-#
-
-_finalize_target( ${PROJNAME} )
-
-install(FILES ${SPV_OUTPUT} CONFIGURATIONS Release DESTINATION "bin_${ARCH}/${PROJNAME}/spv")
-install(FILES ${SPV_OUTPUT} CONFIGURATIONS Debug DESTINATION "bin_${ARCH}_debug/${PROJNAME}/spv")
+# Add example
+add_subdirectory(gltf_viewer)
 

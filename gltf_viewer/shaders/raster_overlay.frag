@@ -16,23 +16,20 @@
  * SPDX-FileCopyrightText: Copyright (c) 2019-2021 NVIDIA CORPORATION
  * SPDX-License-Identifier: Apache-2.0
  */
- 
+
 #version 450
 
-layout (location = 0) in vec3 inPos;
+// Incoming
+layout(location = 1) in vec2 i_texCoord;
+layout(location = 2) in vec3 i_normal;
+layout(location = 3) in vec3 i_viewDir;
+layout(location = 4) in vec3 i_pos;
+layout(location = 5) in vec4 i_tangent;
 
-layout(push_constant) uniform PushConsts {
-	layout (offset = 0) mat4 mvp;
-} pushConsts;
+// Outgoing
+layout(location = 0) out vec4 outColor;
 
-layout (location = 0) out vec3 outUVW;
-
-out gl_PerVertex {
-	vec4 gl_Position;
-};
-
-void main() 
+void main()
 {
-	outUVW = inPos;
-	gl_Position = pushConsts.mvp * vec4(inPos.xyz, 1.0);
+  outColor = vec4(0.4, 0.01, 0.01, 1);
 }
