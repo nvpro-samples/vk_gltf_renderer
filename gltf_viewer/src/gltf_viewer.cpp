@@ -30,8 +30,6 @@
 #include <thread>
 #include <vulkan/vulkan_core.h>
 
-#include <glm/glm.hpp>
-
 #define VMA_IMPLEMENTATION
 #include "imgui/imgui_camera_widget.h"
 #include "imgui/imgui_helper.h"
