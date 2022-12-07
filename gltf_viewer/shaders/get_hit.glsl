@@ -7,21 +7,9 @@
 #extension GL_EXT_shader_explicit_arithmetic_types_int64 : require
 
 #include "nvvkhl/shaders/ray_util.glsl"
+#include "hit_state.h"
 
 precision highp float;
-
-//-----------------------------------------------------------------------
-// Hit state information
-struct HitState
-{
-  vec3  pos;
-  vec3  nrm;
-  vec3  geonrm;
-  vec2  uv;
-  vec3  tangent;
-  vec3  bitangent;
-  float bitangentSign;
-};
 
 
 //-----------------------------------------------------------------------
@@ -78,7 +66,6 @@ HitState getHitState(uint64_t vertexAddress, uint64_t indexAddress)
   hit.tangent       = vec3(gl_ObjectToWorldEXT * vec4(hit.tangent, 0.0));
   hit.tangent       = normalize(hit.tangent - hit.nrm * dot(hit.nrm, hit.tangent));
   hit.bitangent     = cross(hit.nrm, hit.tangent) * tng0.w;
-  hit.bitangentSign = tng0.w;
 
   // Adjusting normal
   const vec3 V = -gl_WorldRayDirectionEXT;
