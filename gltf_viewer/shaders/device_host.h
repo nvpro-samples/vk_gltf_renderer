@@ -36,7 +36,7 @@ struct FrameInfo
   mat4  projInv;
   mat4  viewInv;
   Light light[MAX_NB_LIGHTS];
-  vec4  clearColor;
+  vec4  envColor;
   vec3  camPos;
   int   useSky;
   int   nbLights;

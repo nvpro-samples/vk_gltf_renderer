@@ -80,13 +80,13 @@ struct HitState
 vec3 getDiffuseLight(vec3 n)
 {
   vec3 dir = rotate(n, vec3(0, 1, 0), -frameInfo.envRotation);
-  return texture(u_LambertianEnvSampler, dir).rgb * frameInfo.clearColor.rgb;
+  return texture(u_LambertianEnvSampler, dir).rgb * frameInfo.envColor.rgb;
 }
 
 vec4 getSpecularSample(vec3 reflection, float lod)
 {
   vec3 dir = rotate(reflection, vec3(0, 1, 0), -frameInfo.envRotation);
-  return textureLod(u_GGXEnvSampler, dir, lod) * frameInfo.clearColor;
+  return textureLod(u_GGXEnvSampler, dir, lod) * frameInfo.envColor;
 }
 
 // Calculation of the lighting contribution
@@ -185,7 +185,7 @@ void main()
   for(int i = 0; i < frameInfo.nbLights; i++)
   {
     Light        light        = frameInfo.light[i];
-    LightContrib lightContrib = lightContribution(light, hit.pos, pbrMat.normal, toEye);
+    LightContrib lightContrib = singleLightContribution(light, hit.pos, pbrMat.normal, toEye);
 
     float pdf      = 0;
     vec3  brdf     = pbrEval(pbrMat, toEye, -lightContrib.incidentVector, pdf);
