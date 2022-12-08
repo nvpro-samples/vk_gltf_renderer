@@ -28,7 +28,7 @@ namespace nvvk {
 class AxisVK;
 class DebugUtil;
 class DescriptorSetContainer;
-class RayPickerKHR;
+struct RayPickerKHR;
 class SBTWrapper;
 }  // namespace nvvk
 
@@ -41,7 +41,7 @@ class Scene;
 class SceneRtx;
 class SceneVk;
 class SkyDome;
-class TonemapperPostProcess;
+struct TonemapperPostProcess;
 }  // namespace nvvkhl
 
 
