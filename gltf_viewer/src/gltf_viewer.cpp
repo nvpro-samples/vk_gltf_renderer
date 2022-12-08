@@ -19,6 +19,8 @@
 
 #include "gltf_viewer.hpp"
 
+#include <thread>
+
 #include "imgui.h"
 #include "imgui/imgui_camera_widget.h"
 #include "imgui/imgui_helper.h"

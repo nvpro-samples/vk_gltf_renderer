@@ -24,6 +24,8 @@
 #include <windows.h>
 #endif
 
+#include <thread>
+
 #include "nvh/commandlineparser.hpp"
 #include "nvh/fileoperations.hpp"
 #include "nvp/nvpsystem.hpp"
