@@ -1,5 +1,5 @@
 /*
- * Copyright (c) 2022, NVIDIA CORPORATION.  All rights reserved.
+ * Copyright (c) 2022-2023, NVIDIA CORPORATION.  All rights reserved.
  *
  * Licensed under the Apache License, Version 2.0 (the "License");
  * you may not use this file except in compliance with the License.
@@ -62,6 +62,8 @@ extern std::shared_ptr<nvvkhl::ElementCamera> g_elem_camera;
 #define RASTER_SS_SIZE 2.0F
 
 #include "GLFW/glfw3.h"
+#include "nvml_monitor.hpp"
+
 
 //--------------------------------------------------------------------------------------------------
 // This is called by the Application, when this "Element" is added.
@@ -96,8 +98,8 @@ void GltfViewer::onAttach(nvvkhl::Application* app)
   // Create an extra queue for loading in parallel
   m_qGCT1 = ctx->createQueue(VK_QUEUE_GRAPHICS_BIT | VK_QUEUE_COMPUTE_BIT | VK_QUEUE_TRANSFER_BIT, "GCT1", 1.0F);
 
-  m_hdrEnv->loadEnvironment("");
-  m_hdrDome->create(m_hdrEnv->getDescriptorSet(), m_hdrEnv->getDescriptorSetLayout());
+  m_hdrEnv->loadEnvironment("");  // Initialize the environment with nothing (constant white: for now)
+  m_hdrDome->create(m_hdrEnv->getDescriptorSet(), m_hdrEnv->getDescriptorSetLayout());  // Same as above
 
   // Requesting ray tracing properties
   VkPhysicalDeviceRayTracingPipelinePropertiesKHR rt_prop{VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_RAY_TRACING_PIPELINE_PROPERTIES_KHR};
@@ -108,7 +110,7 @@ void GltfViewer::onAttach(nvvkhl::Application* app)
   // Create utilities to create the Shading Binding Table (SBT)
   m_sbt->setup(m_app->getDevice(), t_queue_index, m_alloc.get(), rt_prop);
 
-  // Create resources
+  // Create Vulkan resources
   createGbuffers(m_viewSize);
   createVulkanBuffers();
 
@@ -188,10 +190,10 @@ void GltfViewer::onFileDrop(const char* filename)
     return;
 
   namespace fs = std::filesystem;
-  vkDeviceWaitIdle(m_device);
   m_busy                  = true;
   const std::string tfile = filename;
   std::thread([&, tfile]() {
+    vkDeviceWaitIdle(m_device);
     const std::string extension = fs::path(tfile).extension().string();
     if(extension == ".gltf" || extension == ".glb")
     {
@@ -268,8 +270,8 @@ void GltfViewer::onUIRender()
           freeRecordCommandBuffer();
         PE::treePop();
       }
-      static const std::array<char*, 6> dbg_items = {"None",   "Metallic",   "Roughness",
-                                                     "Normal", "Base Color", "Emissive"};
+      static const std::array<const char*, 6> dbg_items = {"None",   "Metallic",   "Roughness",
+                                                           "Normal", "Base Color", "Emissive"};
       reset |= PE::entry("Debug Method", [&] {
         return ImGui::Combo("##DebugMode", &m_frameInfo.dbgMethod, dbg_items.data(), static_cast<int>(dbg_items.size()));
       });
@@ -316,14 +318,19 @@ void GltfViewer::onUIRender()
     {
       if(m_scene->valid())
       {
+        ImGui::PushID("Stat_Val");
         const auto& gltf = m_scene->scene();
         const auto& tiny = m_scene->model();
-        ImGui::Text("Instances:  %zu", gltf.m_nodes.size());
-        ImGui::Text("Mesh:  %zu", gltf.m_primMeshes.size());
-        ImGui::Text("Materials:  %zu", gltf.m_materials.size());
-        ImGui::Text("Triangles:  %zu", gltf.m_indices.size() / 3);
-        ImGui::Text("Lights:  %zu", gltf.m_lights.size());
-        ImGui::Text("Textures/Images:  %zu/%zu", tiny.textures.size(), tiny.images.size());
+        PE::begin();
+        PE::entry("Instances", std::to_string(gltf.m_nodes.size()));
+        PE::entry("Mesh", std::to_string(gltf.m_primMeshes.size()));
+        PE::entry("Materials", std::to_string(gltf.m_materials.size()));
+        PE::entry("Triangles", std::to_string(gltf.m_indices.size() / 3));
+        PE::entry("Lights", std::to_string(gltf.m_lights.size()));
+        PE::entry("Textures", std::to_string(tiny.textures.size()));
+        PE::entry("Images", std::to_string(tiny.images.size()));
+        PE::end();
+        ImGui::PopID();
       }
     }
 
@@ -426,6 +433,12 @@ void GltfViewer::onRender(VkCommandBuffer cmd)
 //
 void GltfViewer::createScene(const std::string& filename)
 {
+  // Early freeing up memory and resources
+  m_scene->destroy();
+  m_sceneVk->destroy();
+  m_sceneRtx->destroy();
+
+  // Loading the scene
   m_scene->load(filename);
   nvvkhl::setCameraFromScene(filename, m_scene->scene());               // Camera auto-scene-fitting
   g_elem_camera->setSceneRadius(m_scene->scene().m_dimensions.radius);  // Navigation help
@@ -442,10 +455,10 @@ void GltfViewer::createScene(const std::string& filename)
 
     m_sceneRtx->create(*m_scene, *m_sceneVk);  // Create BLAS / TLAS
 
-    m_picker->setTlas(m_sceneRtx->tlas());
+    m_picker->setTlas(m_sceneRtx->tlas());  // The screen picker is using the TLAS
   }
 
-  // Find which nodes are solid or translucent
+  // Find which nodes are solid or translucent, helps for raster rendering
   const auto& gltf_scene = m_scene->scene();
   m_solidMatNodes.clear();
   m_blendMatNodes.clear();
@@ -462,15 +475,18 @@ void GltfViewer::createScene(const std::string& filename)
       m_blendMatNodes.push_back(i);
   }
 
-  // Need to record the scene
+  // Need to record the scene (raster)
   freeRecordCommandBuffer();
 
-  // Descriptor Set and Pipelines
+  // Creating descriptor set and writing values
   createSceneSet();
   createRtxSet();
-  createRtxPipeline();  // must recreate due to texture changes
   writeSceneSet();
   writeRtxSet();
+
+  // Create the pipelines, must be per scene due to number of texture and
+  // relation to the scene
+  createRtxPipeline();
   createRasterPipeline();
 }
 
@@ -978,7 +994,9 @@ void GltfViewer::createRecordCommandBuffer()
 //
 void GltfViewer::freeRecordCommandBuffer()
 {
+  vkDeviceWaitIdle(m_device);
   vkFreeCommandBuffers(m_device, m_app->getCommandPool(), 1, &m_recordedSceneCmd);
+
   m_recordedSceneCmd = VK_NULL_HANDLE;
 }
 

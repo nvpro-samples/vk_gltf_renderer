@@ -43,10 +43,15 @@
 #include "nvvkhl/hdr_env_dome.hpp"
 #include "nvvkhl/sky.hpp"
 #include "nvvkhl/tonemap_postprocess.hpp"
+#include "nvvkhl/element_logger.hpp"
 
 #include "gltf_viewer.hpp"
+#include "nvml_monitor.hpp"
+#include "element_nvml.hpp"
 
-std::shared_ptr<nvvkhl::ElementCamera> g_elem_camera; // Is accessed elsewhere in the App
+std::shared_ptr<nvvkhl::ElementCamera> g_elem_camera;  // Is accessed elsewhere in the App
+
+
 
 //////////////////////////////////////////////////////////////////////////
 ///
@@ -54,6 +59,10 @@ std::shared_ptr<nvvkhl::ElementCamera> g_elem_camera; // Is accessed elsewhere i
 ///
 auto main(int argc, char** argv) -> int
 {
+  static nvvkhl::SampleAppLog g_logger;
+  nvprintSetCallback([](int level, const char* fmt) { g_logger.addLog(level, "%s", fmt); });
+  g_logger.setLogLevel(LOGBITS_INFO);
+
   nvvkhl::ApplicationCreateInfo spec;
   spec.name             = PROJECT_NAME " Example";
   spec.vSync            = false;
@@ -83,9 +92,11 @@ auto main(int argc, char** argv) -> int
   auto gltf_viewer = std::make_shared<GltfViewer>();
   g_elem_camera    = std::make_shared<nvvkhl::ElementCamera>();
 
-  app->addElement(g_elem_camera);                                   // Controlling the camera movement
-  app->addElement(gltf_viewer);                                     // Our sample
-  app->addElement(std::make_shared<nvvkhl::ElementDefaultMenu>());  // Menu / Quit
+  app->addElement(g_elem_camera);                                              // Controlling the camera movement
+  app->addElement(gltf_viewer);                                                // Our sample
+  app->addElement(std::make_shared<nvvkhl::ElementDefaultMenu>());             // Menu / Quit
+  app->addElement(std::make_unique<nvvkhl::ElementLogger>(&g_logger, false));  // Add logger window
+  app->addElement(std::make_unique<nvvkhl::ElementNvml>(false));               // Add logger window
 
   // Search paths
   const std::vector<std::string> default_search_paths = {NVPSystem::exePath() + PROJECT_DOWNLOAD_RELDIRECTORY};

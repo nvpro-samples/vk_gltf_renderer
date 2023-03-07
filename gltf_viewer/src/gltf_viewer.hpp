@@ -24,6 +24,7 @@
 #include "shaders/device_host.h"
 
 
+
 namespace nvvk {
 class AxisVK;
 class DebugUtil;
@@ -43,7 +44,6 @@ class SceneVk;
 class SkyDome;
 struct TonemapperPostProcess;
 }  // namespace nvvkhl
-
 
 //////////////////////////////////////////////////////////////////////////
 /*
@@ -110,7 +110,7 @@ public:
   void onUIRender() override;
   void onRender(VkCommandBuffer cmd) override;
 
-  bool isBusy() { return m_busy; }
+  bool isBusy() const { return m_busy; }
 
 private:
   void createScene(const std::string& filename);

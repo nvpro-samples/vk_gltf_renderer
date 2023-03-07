@@ -27,6 +27,7 @@ else()
 endif()
 
 set(NVPRO_CORE_DIR ${BASE_DIRECTORY}/nvpro_core)
+set(COMMON_DIR ${CMAKE_CURRENT_SOURCE_DIR}/common)
 
 if(MSVC)
     add_definitions(/wd26812)  # 'enum class' over 'enum'
@@ -38,6 +39,7 @@ endif()
 _add_package_VulkanSDK()
 _add_package_ImGUI()
 _add_nvpro_core_lib()
+_add_package_NVML()
 
 
 #--------------------------------------------------------------------------------------------------
