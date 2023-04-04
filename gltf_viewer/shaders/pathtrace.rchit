@@ -37,9 +37,10 @@ hitAttributeEXT vec2 attribs;
 // clang-format off
 layout(location = 0) rayPayloadInEXT HitPayload payload;
 
-layout(buffer_reference, scalar) readonly buffer Vertices { Vertex v[]; };
-layout(buffer_reference, scalar) readonly buffer Indices { uvec3 i[]; };
-layout(buffer_reference, scalar) readonly buffer PrimMeshInfos { PrimMeshInfo i[]; };
+layout(buffer_reference, scalar) readonly buffer VertexBuf          { Vertex v[]; };
+layout(buffer_reference, scalar) readonly buffer IndicesBuf         { uvec3 i[]; };
+layout(buffer_reference, scalar) readonly buffer PrimMeshInfoBuf    { PrimMeshInfo i[]; };
+
 
 layout(set = 1, binding = eSceneDesc) readonly buffer SceneDesc_ { SceneDescription sceneDesc; };
   // clang-format on
@@ -57,10 +58,13 @@ layout(constant_id = 0) const int USE_SER = 0;
 void main()
 {
   // Retrieve the Primitive mesh buffer information
-  PrimMeshInfos pInfo_ = PrimMeshInfos(sceneDesc.primInfoAddress);
-  PrimMeshInfo  pinfo  = pInfo_.i[gl_InstanceCustomIndexEXT];
+  PrimMeshInfo primMeshInfo = PrimMeshInfoBuf(sceneDesc.primInfoAddress).i[gl_InstanceCustomIndexEXT];
+
+  const vec3 barycentrics = vec3(1.0 - attribs.x - attribs.y, attribs.x, attribs.y);
+  bool       frontFacing  = (gl_HitKindEXT == gl_HitKindFrontFacingTriangleEXT);
 
   payload.hitT          = gl_HitTEXT;
   payload.instanceIndex = gl_InstanceCustomIndexEXT;
-  payload.hit           = getHitState(pinfo.vertexAddress, pinfo.indexAddress);
+  payload.hit = getHitState(primMeshInfo.vertexAddress, primMeshInfo.indexAddress, barycentrics, gl_PrimitiveID,
+                            gl_WorldRayOriginEXT, gl_ObjectToWorldEXT, gl_WorldToObjectEXT);
 }

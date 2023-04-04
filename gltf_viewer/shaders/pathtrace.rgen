@@ -43,21 +43,19 @@
 // clang-format off
 layout(location = 0) rayPayloadEXT HitPayload payload;
 
-layout(buffer_reference, scalar) readonly buffer Materials { GltfShadeMaterial m[]; };
-layout(buffer_reference, scalar) readonly buffer InstanceInfos { InstanceInfo i[]; };
-layout(buffer_reference, scalar) readonly buffer PrimMeshInfos { PrimMeshInfo i[]; };
+layout(buffer_reference, scalar) readonly buffer GltfMaterialBuf    { GltfShadeMaterial m[]; };
+layout(buffer_reference, scalar) readonly buffer PrimMeshInfoBuf    { PrimMeshInfo i[]; };
+layout(buffer_reference, scalar) readonly buffer InstanceInfoBuf    { InstanceInfo i[]; };
 
 
-layout(set = 0, binding = eTlas)                      uniform accelerationStructureEXT topLevelAS;
-layout(set = 0, binding = eOutImage, rgba32f)         uniform image2D image;
-
-layout(set = 1, binding = eFrameInfo) uniform FrameInfo_ { FrameInfo frameInfo; };
-layout(set = 1, binding = eSceneDesc) readonly buffer SceneDesc_ { SceneDescription sceneDesc; };
-layout(set = 1, binding = eTextures)  uniform sampler2D texturesMap[]; // all textures
-layout(set = 2, binding = eSkyParam) uniform SkyInfo_ { ProceduralSkyShaderParameters skyInfo; };
-layout(set = 3, binding = eImpSamples, scalar)	buffer _EnvAccel { EnvAccel envSamplingData[]; };
-layout(set = 3, binding = eHdr) uniform sampler2D hdrTexture;
-
+layout(set = 0, binding = eTlas)                uniform accelerationStructureEXT topLevelAS;
+layout(set = 0, binding = eOutImage, rgba32f)   uniform image2D                 image;
+layout(set = 1, binding = eFrameInfo, scalar)   uniform                         FrameInfo_ { FrameInfo frameInfo; };
+layout(set = 1, binding = eSceneDesc)           readonly buffer                 SceneDesc_ { SceneDescription sceneDesc; };
+layout(set = 1, binding = eTextures)            uniform sampler2D               texturesMap[]; // all textures
+layout(set = 2, binding = eSkyParam)            uniform                         SkyInfo_ { ProceduralSkyShaderParameters skyInfo; };
+layout(set = 3, binding = eImpSamples, scalar)  readonly buffer                 EnvAccel_ { EnvAccel envSamplingData[]; };
+layout(set = 3, binding = eHdr)                 uniform sampler2D               hdrTexture;
 // clang-format on
 
 #include "nvvkhl/shaders/mat_eval.glsl"
@@ -77,6 +75,8 @@ struct Ray
   vec3 direction;
 };
 
+#define EPSILON 1.0F / 256.0F
+
 //-----------------------------------------------------------------------
 // Shoot a ray an return the information of the closest hit, in the
 // PtPayload structure (PRD)
@@ -86,7 +86,7 @@ void traceRay(Ray r, inout uint seed)
   payload.hitT  = 0.0F;
   payload.seed  = seed;
   uint rayFlags = gl_RayFlagsCullBackFacingTrianglesEXT;
-  traceRayEXT(topLevelAS, rayFlags, 0xFF, 0, 0, 0, r.origin, 0.0, r.direction, INFINITE, 0);
+  traceRayEXT(topLevelAS, rayFlags, 0xFF, 0, 0, 0, r.origin, EPSILON, r.direction, INFINITE, 0);
   seed = payload.seed;
 }
 
@@ -97,7 +97,7 @@ bool traceShadow(Ray r, float maxDist)
 {
   payload.hitT = 0.0F;
   uint rayFlags = gl_RayFlagsTerminateOnFirstHitEXT | gl_RayFlagsCullBackFacingTrianglesEXT | gl_RayFlagsSkipClosestHitShaderEXT;
-  traceRayEXT(topLevelAS, rayFlags, 0xFF, 0, 0, 0, r.origin, 0.0, r.direction, maxDist, 0);
+  traceRayEXT(topLevelAS, rayFlags, 0xFF, 0, 0, 0, r.origin, EPSILON, r.direction, maxDist, 0);
   bool isHit = (payload.hitT != INFINITE);  // payload will change if miss shader is invoked
   return isHit;
 }
@@ -110,7 +110,7 @@ vec3 pathTrace(Ray r, inout uint seed)
   vec3 radiance   = vec3(0.0F);
   vec3 throughput = vec3(1.0F);
 
-  Materials materials = Materials(sceneDesc.materialAddress);
+  GltfMaterialBuf materials = GltfMaterialBuf(sceneDesc.materialAddress);
 
 
   for(int depth = 0; depth < pc.maxDepth; depth++)
@@ -140,8 +140,7 @@ vec3 pathTrace(Ray r, inout uint seed)
     }
 
     // Retrieve the Instance buffer information
-    PrimMeshInfos pInfo_ = PrimMeshInfos(sceneDesc.primInfoAddress);
-    PrimMeshInfo  pInfo  = pInfo_.i[payload.instanceIndex];
+    PrimMeshInfo pInfo = PrimMeshInfoBuf(sceneDesc.primInfoAddress).i[payload.instanceIndex];
 
     // Setting up the material
     PbrMaterial       pbrMat;
@@ -182,8 +181,8 @@ vec3 pathTrace(Ray r, inout uint seed)
     }
 
     // Setting next ray
-    r.direction = ray_direction;
     r.origin    = offsetRay(hit.pos, hit.nrm);
+    r.direction = ray_direction;
 
     // Shoot shadow ray if the light is visible
     if(vis_contrib.visible)
@@ -259,13 +258,12 @@ vec3 debugRendering()
     return vec3(0);
 
   // Retrieve the Instance buffer information
-  PrimMeshInfos pInfo_ = PrimMeshInfos(sceneDesc.primInfoAddress);
-  PrimMeshInfo  pInfo  = pInfo_.i[payload.instanceIndex];
+  PrimMeshInfo pInfo = PrimMeshInfoBuf(sceneDesc.primInfoAddress).i[payload.instanceIndex];
 
   // Setting up the material
-  Materials         materials = Materials(sceneDesc.materialAddress);  // Buffer of materials
-  int               matIndex  = max(0, pInfo.materialIndex);           // material ID of hit mesh
-  GltfShadeMaterial matetrial = materials.m[matIndex];                 // Material of the hit object
+  GltfMaterialBuf   materials = GltfMaterialBuf(sceneDesc.materialAddress);  // Buffer of materials
+  int               matIndex  = max(0, pInfo.materialIndex);                 // material ID of hit mesh
+  GltfShadeMaterial matetrial = materials.m[matIndex];                       // Material of the hit object
   PbrMaterial       pbrMat    = evaluateMaterial(matetrial, hit.nrm, hit.tangent, hit.bitangent, hit.uv);
 
   switch(frameInfo.dbgMethod)

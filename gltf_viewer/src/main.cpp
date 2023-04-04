@@ -26,19 +26,15 @@
 
 #include <thread>
 
+
 #include "nvh/commandlineparser.hpp"
 #include "nvh/fileoperations.hpp"
-#include "nvp/nvpsystem.hpp"
-#include "nvvk/gizmos_vk.hpp"
 #include "nvvk/raypicker_vk.hpp"
 #include "nvvk/sbtwrapper_vk.hpp"
-#include "nvvkhl/application.hpp"
 #include "nvvkhl/element_camera.hpp"
 #include "nvvkhl/element_gui.hpp"
 #include "nvvkhl/gbuffer.hpp"
-#include "nvvkhl/gltf_scene.hpp"
 #include "nvvkhl/gltf_scene_rtx.hpp"
-#include "nvvkhl/gltf_scene_vk.hpp"
 #include "nvvkhl/hdr_env.hpp"
 #include "nvvkhl/hdr_env_dome.hpp"
 #include "nvvkhl/sky.hpp"
@@ -46,7 +42,6 @@
 #include "nvvkhl/element_logger.hpp"
 
 #include "gltf_viewer.hpp"
-#include "nvml_monitor.hpp"
 #include "element_nvml.hpp"
 
 std::shared_ptr<nvvkhl::ElementCamera> g_elem_camera;  // Is accessed elsewhere in the App
@@ -81,6 +76,8 @@ auto main(int argc, char** argv) -> int
   VkPhysicalDeviceRayQueryFeaturesKHR ray_query_features{VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_RAY_QUERY_FEATURES_KHR};
   spec.vkSetup.addDeviceExtension(VK_KHR_RAY_QUERY_EXTENSION_NAME, false, &ray_query_features);  // Used for picking
   spec.vkSetup.addDeviceExtension(VK_KHR_PUSH_DESCRIPTOR_EXTENSION_NAME);
+  VkPhysicalDeviceFragmentShaderBarycentricFeaturesNV baryFeatures{VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_FRAGMENT_SHADER_BARYCENTRIC_FEATURES_NV};
+  spec.vkSetup.addDeviceExtension(VK_NV_FRAGMENT_SHADER_BARYCENTRIC_EXTENSION_NAME, false, &baryFeatures);
 
   // Request for extra Queue for loading in parallel
   spec.vkSetup.addRequestedQueue(VK_QUEUE_GRAPHICS_BIT | VK_QUEUE_COMPUTE_BIT | VK_QUEUE_TRANSFER_BIT, 1, 1.0F);
