@@ -87,5 +87,9 @@ target_sources(${PROJECT_NAME} PRIVATE ${GLSL_SOURCES} ${GLSL_HEADERS})
 source_group("Shaders/src"   FILES ${GLSL_SOURCES} )
 source_group("Shaders/hdr"   FILES ${GLSL_HEADERS} )
 
+# Resources
+download_files(FILENAMES FlightHelmet.zip EXTRACT)
+download_files(FILENAMES daytime.hdr std_env.hdr)
+
 # Copy binary
 _finalize_target( ${PROJECT_NAME} )

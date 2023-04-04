@@ -20,11 +20,11 @@
 #version 450
 
 // Incoming
-layout(location = 1) in vec2 i_texCoord;
-layout(location = 2) in vec3 i_normal;
-layout(location = 3) in vec3 i_viewDir;
-layout(location = 4) in vec3 i_pos;
-layout(location = 5) in vec4 i_tangent;
+layout(location = 0) in Interpolants
+{
+  vec3 pos;
+}
+IN;
 
 // Outgoing
 layout(location = 0) out vec4 outColor;

@@ -41,15 +41,13 @@ layout(push_constant) uniform RasterPushConstant_
   PushConstant pc;
 };
 
-layout(location = 0) in vec4 i_pos;
-layout(location = 1) in vec4 i_normal;
-layout(location = 2) in vec4 i_tangent;
+layout(location = 0) in vec3 i_pos;
 
-layout(location = 1) out vec2 o_texCoord;
-layout(location = 2) out vec3 o_normal;
-layout(location = 3) out vec3 o_viewDir;
-layout(location = 4) out vec3 o_pos;
-layout(location = 5) out vec4 o_tangent;
+layout(location = 0) out Interpolants
+{
+  vec3 pos;
+}
+OUT;
 
 out gl_PerVertex
 {
@@ -60,18 +58,7 @@ out gl_PerVertex
 void main()
 {
   InstancesInfo instances = InstancesInfo(sceneDesc.instInfoAddress);
-  InstanceInfo  instinfo  = instances.i[pc.instanceId];
-
-  vec3 origin   = vec3(frameInfo.viewInv * vec4(0, 0, 0, 1));
-  vec3 position = i_pos.xyz;
-  vec3 normal   = i_normal.xyz;
-
-  o_pos         = vec3(instinfo.objMatrix * vec4(position, 1.0));
-  o_viewDir     = vec3(o_pos - origin);
-  o_normal      = vec3(instinfo.objMatrixIT * vec4(normal, 0.0));
-  o_texCoord    = vec2(i_pos.w, i_normal.w);
-  o_tangent.xyz = (vec3(mat4(instinfo.objMatrix) * vec4(i_tangent.xyz, 0)));
-  o_tangent.w   = i_tangent.w;
-
-  gl_Position = frameInfo.proj * frameInfo.view * vec4(o_pos, 1.0);
+  InstanceInfo  instinfo  = instances.i[pc.instanceID];
+  OUT.pos                 = vec3(instinfo.objectToWorld * vec4(i_pos, 1.0));
+  gl_Position             = frameInfo.proj * frameInfo.view * vec4(OUT.pos, 1.0);
 }

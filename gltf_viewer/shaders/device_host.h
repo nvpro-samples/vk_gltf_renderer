@@ -14,8 +14,9 @@ struct PushConstant
   int frame;       // For RTX
   int maxDepth;    // For RTX
   int maxSamples;  // For RTX
-  int materialId;  // For raster
-  int instanceId;
+  int materialID;  // For raster
+  int instanceID;  // Instance nodel ID
+  int meshID;      // Mesh ID of the node
 };
 
 

@@ -21,9 +21,10 @@
 #extension GL_EXT_nonuniform_qualifier : enable
 #extension GL_GOOGLE_include_directive : enable
 #extension GL_EXT_scalar_block_layout : enable
-
 #extension GL_EXT_shader_explicit_arithmetic_types_int64 : require
 #extension GL_EXT_buffer_reference2 : require
+#extension GL_NV_fragment_shader_barycentric : enable
+
 
 #include "device_host.h"
 #include "dh_bindings.h"
@@ -35,18 +36,21 @@
 
 // clang-format off
 // Incoming 
-layout(location = 1) in vec2 i_texCoord;
-layout(location = 2) in vec3 i_normal;
-layout(location = 3) in vec3 i_viewDir;
-layout(location = 4) in vec3 i_pos;
-layout(location = 5) in vec4 i_tangent;
+layout(location = 0) in Interpolants {
+    vec3 pos;
+} IN;
 
 // Outgoing
 layout(location = 0) out vec4 outColor;
 
 // Buffers
-layout(buffer_reference, scalar) buffer  GltfMaterials { GltfShadeMaterial m[]; };
-layout(set = 0, binding = eFrameInfo) uniform FrameInfo_ { FrameInfo frameInfo; };
+layout(buffer_reference, scalar) readonly buffer GltfMaterialBuf    { GltfShadeMaterial m[]; };
+layout(buffer_reference, scalar) readonly buffer VertexBuf          { Vertex v[]; };
+layout(buffer_reference, scalar) readonly buffer IndicesBuf         { uvec3 i[]; };
+layout(buffer_reference, scalar) readonly buffer PrimMeshInfoBuf    { PrimMeshInfo i[]; };
+layout(buffer_reference, scalar) readonly buffer InstanceInfoBuf    { InstanceInfo i[]; };
+
+layout(set = 0, binding = eFrameInfo, scalar) uniform FrameInfo_ { FrameInfo frameInfo; };
 layout(set = 0, binding = eSceneDesc) readonly buffer SceneDesc_ { SceneDescription sceneDesc; } ;
 layout(set = 0, binding = eTextures) uniform sampler2D[] texturesMap;
 
@@ -60,22 +64,13 @@ layout(set = 2, binding = eSkyParam) uniform SkyInfo_ { ProceduralSkyShaderParam
 
 
 #include "nvvkhl/shaders/mat_eval.glsl"
+#include "get_hit.glsl"
 
 layout(push_constant) uniform RasterPushConstant_
 {
   PushConstant pc;
 };
 
-//-----------------------------------------------------------------------
-// Hit state information
-struct HitState
-{
-  vec3 pos;
-  vec3 nrm;
-  vec2 uv;
-  vec3 tangent;
-  vec3 bitangent;
-};
 
 vec3 getDiffuseLight(vec3 n)
 {
@@ -111,22 +106,18 @@ vec3 getIBLContribution(vec3 n, vec3 v, float roughness, vec3 diffuseColor, vec3
 void main()
 {
   // Material of the object
-  GltfMaterials     gltfMats = GltfMaterials(sceneDesc.materialAddress);
-  GltfShadeMaterial gltfMat  = gltfMats.m[pc.materialId];
+  GltfShadeMaterial gltfMat  = GltfMaterialBuf(sceneDesc.materialAddress).m[pc.materialID];
 
-  HitState hit;
-  hit.pos       = i_pos;
-  hit.nrm       = normalize(i_normal);
-  hit.uv        = i_texCoord;
-  hit.tangent   = normalize(i_tangent.xyz);
-  hit.bitangent = cross(hit.nrm, hit.tangent) * i_tangent.w;
+  // Current Instance
+  InstanceInfo    instInfo      = InstanceInfoBuf(sceneDesc.instInfoAddress).i[pc.instanceID];
 
-  if(gl_FrontFacing == false)
-  {
-    hit.tangent *= -1.0;
-    hit.bitangent *= -1.0;
-    hit.nrm *= -1.0;
-  }
+  // Mesh used by instance
+  PrimMeshInfo    primMeshInfo  = PrimMeshInfoBuf(sceneDesc.primInfoAddress).i[pc.meshID];
+
+  // Using same hit code as for ray tracing
+  const vec3 worldRayOrigin = vec3(frameInfo.viewInv[3].x, frameInfo.viewInv[3].y, frameInfo.viewInv[3].z);
+  HitState   hit = getHitState(primMeshInfo.vertexAddress, primMeshInfo.indexAddress, gl_BaryCoordNV, gl_PrimitiveID,
+                               worldRayOrigin, mat4x3(instInfo.objectToWorld), mat4x3(instInfo.worldToObject));
 
   PbrMaterial pbrMat = evaluateMaterial(gltfMat, hit.nrm, hit.tangent, hit.bitangent, hit.uv);
 

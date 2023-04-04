@@ -14,19 +14,23 @@ precision highp float;
 
 //-----------------------------------------------------------------------
 //-----------------------------------------------------------------------
-HitState getHitState(uint64_t vertexAddress, uint64_t indexAddress)
+HitState getHitState(in uint64_t vertexAddress,   // Buffer address of the Vertex (positon, normal, uv, ..)
+                     in uint64_t indexAddress,    // Buffer address of the triangle indices
+                     in vec3     barycentrics,    // Barycentics of the triangle
+                     in int      triangleID,      // Triangle ID
+                     in vec3     worldRayOrigin,  // Origin of the ray
+                     in mat4x3   objectToWorld,   // Matrix
+                     in mat4x3   worldToObject    // Matrix
+)
 {
   HitState hit;
 
   // Vextex and indices of the primitive
-  Vertices vertices = Vertices(vertexAddress);
-  Indices  indices  = Indices(indexAddress);
-
-  // Barycentric coordinate on the triangle
-  const vec3 barycentrics = vec3(1.0 - attribs.x - attribs.y, attribs.x, attribs.y);
+  VertexBuf  vertices = VertexBuf(vertexAddress);
+  IndicesBuf indices  = IndicesBuf(indexAddress);
 
   // Getting the 3 indices of the triangle (local)
-  uvec3 triangleIndex = indices.i[gl_PrimitiveID];
+  uvec3 triangleIndex = indices.i[triangleID];
 
   // All vertex attributes of the triangle.
   Vertex v0 = vertices.v[triangleIndex.x];
@@ -50,25 +54,25 @@ HitState getHitState(uint64_t vertexAddress, uint64_t indexAddress)
   // Position
   hit.pos = mixBary(pos0, pos1, pos2, barycentrics);
   hit.pos = pointOffset(hit.pos, pos0, pos1, pos2, nrm0, nrm1, nrm2, barycentrics);  // Shadow offset position - hacking shadow terminator
-  hit.pos = vec3(gl_ObjectToWorldEXT * vec4(hit.pos, 1.0));
+  hit.pos = vec3(objectToWorld * vec4(hit.pos, 1.0));
 
   // Normal
   hit.nrm    = normalize(mixBary(nrm0, nrm1, nrm2, barycentrics));
-  hit.nrm    = normalize(vec3(hit.nrm * gl_WorldToObjectEXT));
+  hit.nrm    = normalize(vec3(hit.nrm * worldToObject));
   hit.geonrm = normalize(cross(pos1 - pos0, pos2 - pos0));
-  hit.geonrm = normalize(vec3(hit.geonrm * gl_WorldToObjectEXT));
+  hit.geonrm = normalize(vec3(hit.geonrm * worldToObject));
 
   // TexCoord
   hit.uv = mixBary(uv0, uv1, uv2, barycentrics);
 
   // Tangent - Bitangent
-  hit.tangent       = normalize(mixBary(tng0.xyz, tng1.xyz, tng2.xyz, barycentrics));
-  hit.tangent       = vec3(gl_ObjectToWorldEXT * vec4(hit.tangent, 0.0));
-  hit.tangent       = normalize(hit.tangent - hit.nrm * dot(hit.nrm, hit.tangent));
-  hit.bitangent     = cross(hit.nrm, hit.tangent) * tng0.w;
+  hit.tangent   = normalize(mixBary(tng0.xyz, tng1.xyz, tng2.xyz, barycentrics));
+  hit.tangent   = vec3(objectToWorld * vec4(hit.tangent, 0.0));
+  hit.tangent   = normalize(hit.tangent - hit.nrm * dot(hit.nrm, hit.tangent));
+  hit.bitangent = cross(hit.nrm, hit.tangent) * tng0.w;
 
   // Adjusting normal
-  const vec3 V = -gl_WorldRayDirectionEXT;
+  const vec3 V = (worldRayOrigin - hit.pos);
   if(dot(hit.geonrm, V) < 0)  // Flip if back facing
     hit.geonrm = -hit.geonrm;
 

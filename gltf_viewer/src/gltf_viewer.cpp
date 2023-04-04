@@ -17,36 +17,32 @@
  * SPDX-License-Identifier: Apache-2.0
  */
 
-#include "gltf_viewer.hpp"
+#if defined(WIN32)
+#define WIN32_LEAN_AND_MEAN
+#include <windows.h>
+#endif
 
+#include <GLFW/glfw3.h>
 #include <thread>
 
-#include "imgui.h"
-#include "imgui/imgui_camera_widget.h"
-#include "imgui/imgui_helper.h"
-
+#include "gltf_viewer.hpp"
 #include "busy_window.hpp"
-#include "nvh/timesampler.hpp"
-#include "nvvk/debug_util_vk.hpp"
-#include "nvvk/descriptorsets_vk.hpp"
+#include "imgui_axis.hpp"
+#include "imgui_helper.h"
 #include "nvvk/dynamicrendering_vk.hpp"
-#include "nvvk/gizmos_vk.hpp"
+#include "nvvk/pipeline_vk.hpp"
 #include "nvvk/raypicker_vk.hpp"
 #include "nvvk/renderpasses_vk.hpp"
 #include "nvvk/sbtwrapper_vk.hpp"
-#include "nvvkhl/alloc_vma.hpp"
 #include "nvvkhl/element_camera.hpp"
 #include "nvvkhl/gbuffer.hpp"
-#include "nvvkhl/gltf_scene.hpp"
 #include "nvvkhl/gltf_scene_rtx.hpp"
-#include "nvvkhl/gltf_scene_vk.hpp"
 #include "nvvkhl/hdr_env.hpp"
 #include "nvvkhl/hdr_env_dome.hpp"
 #include "nvvkhl/scene_camera.hpp"
 #include "nvvkhl/shaders/dh_scn_desc.h"
 #include "nvvkhl/sky.hpp"
 #include "nvvkhl/tonemap_postprocess.hpp"
-#include "shaders/device_host.h"
 #include "shaders/dh_bindings.h"
 
 extern std::shared_ptr<nvvkhl::ElementCamera> g_elem_camera;
@@ -59,10 +55,8 @@ extern std::shared_ptr<nvvkhl::ElementCamera> g_elem_camera;
 #include "_autogen/raster.vert.h"
 #include "_autogen/raster_overlay.frag.h"
 
-#define RASTER_SS_SIZE 2.0F
 
-#include "GLFW/glfw3.h"
-#include "nvml_monitor.hpp"
+#define RASTER_SS_SIZE 2.0F  // Change this for the default Super-Sampling resolution multiplier for raster
 
 
 //--------------------------------------------------------------------------------------------------
@@ -75,25 +69,26 @@ void GltfViewer::onAttach(nvvkhl::Application* app)
   m_app    = app;
   m_device = m_app->getDevice();
 
-  const auto&    ctx             = app->getContext();
+  nvvk::Context* ctx             = m_app->getContext().get();
   const uint32_t gct_queue_index = ctx->m_queueGCT.familyIndex;
   const uint32_t t_queue_index   = ctx->m_queueT.familyIndex;
   const uint32_t c_queue_index   = ctx->m_queueC.familyIndex;
 
-  m_dutil   = std::make_unique<nvvk::DebugUtil>(m_device);                                  // Debug utility
-  m_alloc   = std::make_unique<nvvkhl::AllocVma>(m_app->getContext().get());                // Allocator
-  m_scene   = std::make_unique<nvvkhl::Scene>();                                            // GLTF scene
-  m_sceneVk = std::make_unique<nvvkhl::SceneVk>(m_app->getContext().get(), m_alloc.get());  // GLTF Scene buffers
-  m_sceneRtx = std::make_unique<nvvkhl::SceneRtx>(m_app->getContext().get(), m_alloc.get(), c_queue_index);  // GLTF Scene BLAS/TLAS
-  m_tonemapper = std::make_unique<nvvkhl::TonemapperPostProcess>(m_app->getContext().get(), m_alloc.get());
-  m_sbt        = std::make_unique<nvvk::SBTWrapper>();  // Shader Binding Table
-  m_sky        = std::make_unique<nvvkhl::SkyDome>(m_app->getContext().get(), m_alloc.get());
-  m_picker     = std::make_unique<nvvk::RayPickerKHR>(m_app->getContext().get(), m_alloc.get(), c_queue_index);
-  m_vkAxis     = std::make_unique<nvvk::AxisVK>();
-  m_hdrEnv = std::make_unique<nvvkhl::HdrEnv>(m_app->getContext().get(), m_alloc.get(), c_queue_index);  // HDR Generic
-  m_hdrDome = std::make_unique<nvvkhl::HdrEnvDome>(m_app->getContext().get(), m_alloc.get(), c_queue_index);  // HDR raster
-  m_rtxSet   = std::make_unique<nvvk::DescriptorSetContainer>(m_device);
-  m_sceneSet = std::make_unique<nvvk::DescriptorSetContainer>(m_device);
+  m_dutil      = std::make_unique<nvvk::DebugUtil>(m_device);                            // Debug utility
+  m_alloc      = std::make_unique<nvvkhl::AllocVma>(ctx);                                // Allocator
+  m_scene      = std::make_unique<nvvkhl::Scene>();                                      // GLTF scene
+  m_sceneVk    = std::make_unique<nvvkhl::SceneVk>(ctx, m_alloc.get());                  // GLTF Scene buffers
+  m_sceneRtx   = std::make_unique<nvvkhl::SceneRtx>(ctx, m_alloc.get(), c_queue_index);  // GLTF Scene BLAS/TLAS
+  m_tonemapper = std::make_unique<nvvkhl::TonemapperPostProcess>(ctx, m_alloc.get());    // Tonemapper on rendered image
+  m_sbt        = std::make_unique<nvvk::SBTWrapper>();                                   // Shader Binding Table
+  m_sky        = std::make_unique<nvvkhl::SkyDome>(ctx, m_alloc.get());                  // Sun&Sky
+  m_picker     = std::make_unique<nvvk::RayPickerKHR>(ctx, m_alloc.get(), c_queue_index);  // RTX Picking utility
+  //m_vkAxis     = std::make_unique<nvvk::AxisVK>();                                         // Display Axis
+  m_hdrEnv   = std::make_unique<nvvkhl::HdrEnv>(ctx, m_alloc.get(), c_queue_index);      // HDR Generic
+  m_hdrDome  = std::make_unique<nvvkhl::HdrEnvDome>(ctx, m_alloc.get(), c_queue_index);  // HDR raster
+  m_rtxSet   = std::make_unique<nvvk::DescriptorSetContainer>(m_device);                 // Descriptor set for RTX
+  m_sceneSet = std::make_unique<nvvk::DescriptorSetContainer>(m_device);    // Descriptor set for the scene elements
+  m_gBuffers = std::make_unique<nvvkhl::GBuffer>(m_device, m_alloc.get());  // All the G-Buffers
 
   // Create an extra queue for loading in parallel
   m_qGCT1 = ctx->createQueue(VK_QUEUE_GRAPHICS_BIT | VK_QUEUE_COMPUTE_BIT | VK_QUEUE_TRANSFER_BIT, "GCT1", 1.0F);
@@ -114,11 +109,11 @@ void GltfViewer::onAttach(nvvkhl::Application* app)
   createGbuffers(m_viewSize);
   createVulkanBuffers();
 
-  // Axis in the bottom left corner
-  nvvk::AxisVK::CreateAxisInfo ainfo;
-  ainfo.colorFormat = {m_gBuffers->getColorFormat(eLdr)};
-  ainfo.depthFormat = m_gBuffers->getDepthFormat();
-  m_vkAxis->init(m_device, ainfo);
+  //// Axis in the bottom left corner
+  //nvvk::AxisVK::CreateAxisInfo ainfo;
+  //ainfo.colorFormat = {m_gBuffers->getColorFormat(eLdr)};
+  //ainfo.depthFormat = m_gBuffers->getDepthFormat();
+  //m_vkAxis->init(m_device, ainfo);
 
   m_tonemapper->createComputePipeline();
 }
@@ -189,11 +184,11 @@ void GltfViewer::onFileDrop(const char* filename)
   if(m_busy)
     return;
 
-  namespace fs = std::filesystem;
+  namespace fs            = std::filesystem;
   m_busy                  = true;
   const std::string tfile = filename;
+  vkDeviceWaitIdle(m_device);
   std::thread([&, tfile]() {
-    vkDeviceWaitIdle(m_device);
     const std::string extension = fs::path(tfile).extension().string();
     if(extension == ".gltf" || extension == ".glb")
     {
@@ -267,7 +262,10 @@ void GltfViewer::onUIRender()
         const bool b = m_settings.showWireframe;
         PE::entry("Show Wireframe", [&] { return ImGui::Checkbox("##4", &m_settings.showWireframe); });
         if(b != m_settings.showWireframe)
+        {
+          vkDeviceWaitIdle(m_device);
           freeRecordCommandBuffer();
+        }
         PE::treePop();
       }
       static const std::array<const char*, 6> dbg_items = {"None",   "Metallic",   "Roughness",
@@ -299,10 +297,12 @@ void GltfViewer::onUIRender()
       if(PE::treeNode("Hdr"))
       {
         reset |= PE::entry(
-            "Color", [&] { return ImGui::ColorEdit3("##Color", &m_settings.envColor.x, ImGuiColorEditFlags_Float); }, "Color multiplier");
+            "Color", [&] { return ImGui::ColorEdit3("##Color", &m_settings.envColor.x, ImGuiColorEditFlags_Float); },
+            "Color multiplier");
 
         reset |= PE::entry(
-            "Rotation", [&] { return ImGui::SliderAngle("Rotation", &m_settings.envRotation); }, "Rotating the environment");
+            "Rotation", [&] { return ImGui::SliderAngle("Rotation", &m_settings.envRotation); },
+            "Rotating the environment");
         PE::treePop();
       }
       ImGui::EndDisabled();
@@ -348,6 +348,17 @@ void GltfViewer::onUIRender()
 
     // Display the G-Buffer image
     ImGui::Image(m_gBuffers->getDescriptorSet(eLdr), ImGui::GetContentRegionAvail());
+
+    // Adding Axis at the bottom left corner of the viewport
+    if(m_settings.showAxis)
+    {
+      float  size        = 25.F;
+      ImVec2 window_pos  = ImGui::GetWindowPos();
+      ImVec2 window_size = ImGui::GetWindowSize();
+      ImVec2 offset      = ImVec2(size * 1.1F, -size * 1.1F) * ImGui::GetWindowDpiScale();
+      ImVec2 pos         = ImVec2(window_pos.x, window_pos.y + window_size.y) + offset;
+      ImGuiH::Axis(pos, CameraManip.getMatrix(), size);
+    }
 
     ImGui::End();
     ImGui::PopStyleVar();
@@ -417,12 +428,6 @@ void GltfViewer::onRender(VkCommandBuffer cmd)
 
   // Apply tonemapper - take GBuffer-1 and output to GBuffer-0
   m_tonemapper->runCompute(cmd, m_gBuffers->getSize());
-
-  // Render corner axis
-  if(m_settings.showAxis)
-  {
-    renderAxis(cmd);
-  }
 }
 
 //--------------------------------------------------------------------------------------------------
@@ -458,22 +463,6 @@ void GltfViewer::createScene(const std::string& filename)
     m_picker->setTlas(m_sceneRtx->tlas());  // The screen picker is using the TLAS
   }
 
-  // Find which nodes are solid or translucent, helps for raster rendering
-  const auto& gltf_scene = m_scene->scene();
-  m_solidMatNodes.clear();
-  m_blendMatNodes.clear();
-  m_allNodes.clear();
-  for(uint32_t i = 0; i < gltf_scene.m_nodes.size(); i++)
-  {
-    const auto  prim_mesh = gltf_scene.m_nodes[i].primMesh;
-    const auto  mat_id    = gltf_scene.m_primMeshes[prim_mesh].materialIndex;
-    const auto& mat       = gltf_scene.m_materials[mat_id];
-    m_allNodes.push_back(i);
-    if(mat.alphaMode == 0)
-      m_solidMatNodes.push_back(i);
-    else
-      m_blendMatNodes.push_back(i);
-  }
 
   // Need to record the scene (raster)
   freeRecordCommandBuffer();
@@ -490,6 +479,40 @@ void GltfViewer::createScene(const std::string& filename)
   createRasterPipeline();
 }
 
+//-------------------------------------------------------------------------------------------------
+// Find which nodes are solid or translucent, helps for raster rendering
+//
+std::vector<uint32_t> GltfViewer::getShadedNodes(PipelineType type)
+{
+  std::vector<uint32_t> result;
+  const auto&           gltf_scene = m_scene->scene();
+  for(uint32_t i = 0; i < gltf_scene.m_nodes.size(); i++)
+  {
+    const auto  prim_mesh = gltf_scene.m_nodes[i].primMesh;
+    const auto  mat_id    = gltf_scene.m_primMeshes[prim_mesh].materialIndex;
+    const auto& mat       = gltf_scene.m_materials[mat_id];
+    switch(type)
+    {
+      case GltfViewer::eRasterSolid:
+        if(mat.alphaMode == 0 && !mat.doubleSided)
+          result.push_back(i);
+        break;
+      case GltfViewer::eRasterSolidDoubleSided:
+        if(mat.alphaMode == 0 && mat.doubleSided)
+          result.push_back(i);
+        break;
+      case GltfViewer::eRasterBlend:
+        if(mat.alphaMode != 0)
+          result.push_back(i);
+        break;
+      case GltfViewer::eRasterWireframe:
+        result.push_back(i);
+        break;
+    }
+  }
+  return result;
+}
+
 //--------------------------------------------------------------------------------------------------
 // Create all G-Buffers needed when rendering the scene
 //
@@ -499,6 +522,7 @@ void GltfViewer::createGbuffers(const nvmath::vec2f& size)
 
   m_viewSize = size;
 
+
   // For raster we are rendering in a 2x image, which is making nice AA
   if(m_settings.renderSystem == Settings::eRaster)
   {
@@ -507,11 +531,11 @@ void GltfViewer::createGbuffers(const nvmath::vec2f& size)
 
   // Two GBuffers: RGBA8 and RGBA32F, rendering to RGBA32F and tone mapped to RGBA8
   const std::vector<VkFormat> color_buffers = {VK_FORMAT_R8G8B8A8_UNORM, VK_FORMAT_R32G32B32A32_SFLOAT};
+  VkExtent2D                  buffer_size = {static_cast<uint32_t>(m_viewSize.x), static_cast<uint32_t>(m_viewSize.y)};
+
   // Creation of the GBuffers
-  m_gBuffers =
-      std::make_unique<nvvkhl::GBuffer>(m_device, m_alloc.get(),
-                                        VkExtent2D{static_cast<uint32_t>(m_viewSize.x), static_cast<uint32_t>(m_viewSize.y)},
-                                        color_buffers, depth_format);
+  m_gBuffers->destroy();
+  m_gBuffers->create(buffer_size, color_buffers, depth_format);
 
   m_sky->setOutImage(m_gBuffers->getDescriptorImageInfo(eResult));
   m_hdrDome->setOutImage(m_gBuffers->getDescriptorImageInfo(eResult));
@@ -602,9 +626,7 @@ void GltfViewer::createRasterPipeline()
   gpb.createInfo.pNext = &rf_info;
   gpb.addBindingDescriptions({{0, sizeof(Vertex)}});
   gpb.addAttributeDescriptions({
-      {0, 0, VK_FORMAT_R32G32B32A32_SFLOAT, offsetof(Vertex, position)},  // Position + texcoord U
-      {1, 0, VK_FORMAT_R32G32B32A32_SFLOAT, offsetof(Vertex, normal)},    // Normal + texcoord V
-      {2, 0, VK_FORMAT_R32G32B32A32_SFLOAT, offsetof(Vertex, tangent)},   // Tangents
+      {0, 0, VK_FORMAT_R32G32B32_SFLOAT, offsetof(Vertex, position)},  // Position
   });
 
   {
@@ -612,10 +634,15 @@ void GltfViewer::createRasterPipeline()
     gpb.rasterizationState.depthBiasEnable         = VK_TRUE;
     gpb.rasterizationState.depthBiasConstantFactor = -1;
     gpb.rasterizationState.depthBiasSlopeFactor    = 1;
+    gpb.rasterizationState.cullMode                = VK_CULL_MODE_BACK_BIT;
     gpb.addShader(vertex_shader, VK_SHADER_STAGE_VERTEX_BIT);
     gpb.addShader(frag_shader, VK_SHADER_STAGE_FRAGMENT_BIT);
     m_rasterPipe.plines.push_back(gpb.createPipeline());
-    m_dutil->DBG_NAME(m_rasterPipe.plines[0]);
+    m_dutil->DBG_NAME(m_rasterPipe.plines[eRasterSolid]);
+    // Double Sided
+    gpb.rasterizationState.cullMode = VK_CULL_MODE_NONE;
+    m_rasterPipe.plines.push_back(gpb.createPipeline());
+    m_dutil->DBG_NAME(m_rasterPipe.plines[eRasterSolidDoubleSided]);
 
     // Blend
     gpb.rasterizationState.cullMode = VK_CULL_MODE_NONE;
@@ -627,7 +654,7 @@ void GltfViewer::createRasterPipeline()
     blend_state.srcAlphaBlendFactor = VK_BLEND_FACTOR_ONE_MINUS_SRC_ALPHA;
     gpb.setBlendAttachmentState(0, blend_state);
     m_rasterPipe.plines.push_back(gpb.createPipeline());
-    m_dutil->DBG_NAME(m_rasterPipe.plines[1]);
+    m_dutil->DBG_NAME(m_rasterPipe.plines[eRasterBlend]);
 
     // Revert Blend Mode
     blend_state.blendEnable = VK_FALSE;
@@ -642,10 +669,10 @@ void GltfViewer::createRasterPipeline()
     gpb.addShader(frag_shader, VK_SHADER_STAGE_FRAGMENT_BIT);
     gpb.rasterizationState.depthBiasEnable = VK_FALSE;
     gpb.rasterizationState.polygonMode     = VK_POLYGON_MODE_LINE;
-    gpb.rasterizationState.lineWidth       = 2.0F;
+    gpb.rasterizationState.lineWidth       = 1.0F;
     gpb.depthStencilState.depthWriteEnable = VK_FALSE;
     m_rasterPipe.plines.push_back(gpb.createPipeline());
-    m_dutil->DBG_NAME(m_rasterPipe.plines[2]);
+    m_dutil->DBG_NAME(m_rasterPipe.plines[eRasterWireframe]);
   }
 }
 
@@ -928,29 +955,6 @@ void GltfViewer::screenPicking()
 }
 
 //--------------------------------------------------------------------------------------------------
-// Render the axis in the bottom left corner of the screen
-//
-void GltfViewer::renderAxis(VkCommandBuffer cmd)
-{
-  auto scope_dbg = m_dutil->DBG_SCOPE(cmd);
-
-  float axis_size = 50.0F;
-  if(m_settings.renderSystem == Settings::eRaster)
-  {
-    axis_size *= RASTER_SS_SIZE;
-  }
-
-  nvvk::createRenderingInfo r_info({{0, 0}, m_gBuffers->getSize()}, {m_gBuffers->getColorImageView(eLdr)},
-                                   m_gBuffers->getDepthImageView(), VK_ATTACHMENT_LOAD_OP_LOAD, VK_ATTACHMENT_LOAD_OP_CLEAR);
-  r_info.pStencilAttachment = nullptr;
-  // Rendering the axis
-  vkCmdBeginRendering(cmd, &r_info);
-  m_vkAxis->setAxisSize(axis_size);
-  m_vkAxis->display(cmd, CameraManip.getMatrix(), m_gBuffers->getSize());
-  vkCmdEndRendering(cmd);
-}
-
-//--------------------------------------------------------------------------------------------------
 // Calling the path tracer RTX
 //
 void GltfViewer::raytraceScene(VkCommandBuffer cmd)
@@ -994,7 +998,6 @@ void GltfViewer::createRecordCommandBuffer()
 //
 void GltfViewer::freeRecordCommandBuffer()
 {
-  vkDeviceWaitIdle(m_device);
   vkFreeCommandBuffers(m_device, m_app->getCommandPool(), 1, &m_recordedSceneCmd);
 
   m_recordedSceneCmd = VK_NULL_HANDLE;
@@ -1029,7 +1032,7 @@ void GltfViewer::recordRasterScene()
 //--------------------------------------------------------------------------------------------------
 // Rendering the GLTF nodes (instances) contained in the list
 // The list should be: solid, blendable, all
-void GltfViewer::renderNodes(VkCommandBuffer cmd, std::vector<uint32_t>& nodeIDs)
+void GltfViewer::renderNodes(VkCommandBuffer cmd, const std::vector<uint32_t>& nodeIDs)
 {
   auto scope_dbg = m_dutil->DBG_SCOPE(cmd);
 
@@ -1041,8 +1044,9 @@ void GltfViewer::renderNodes(VkCommandBuffer cmd, std::vector<uint32_t>& nodeIDs
     const auto& node      = gltf_scene.m_nodes[node_id];
     const auto& primitive = gltf_scene.m_primMeshes[node.primMesh];
 
-    m_pushConst.materialId = primitive.materialIndex;
-    m_pushConst.instanceId = static_cast<int>(node_id);
+    m_pushConst.materialID = primitive.materialIndex;
+    m_pushConst.instanceID = static_cast<int>(node_id);
+    m_pushConst.meshID     = node.primMesh;
     vkCmdPushConstants(cmd, m_rasterPipe.layout, VK_SHADER_STAGE_VERTEX_BIT | VK_SHADER_STAGE_FRAGMENT_BIT, 0,
                        sizeof(PushConstant), &m_pushConst);
 
@@ -1073,17 +1077,20 @@ void GltfViewer::renderRasterScene(VkCommandBuffer cmd)
   vkCmdBindDescriptorSets(cmd, VK_PIPELINE_BIND_POINT_GRAPHICS, m_rasterPipe.layout, 0,
                           static_cast<uint32_t>(dset.size()), dset.data(), 0, nullptr);
   // Draw solid
-  vkCmdBindPipeline(cmd, VK_PIPELINE_BIND_POINT_GRAPHICS, m_rasterPipe.plines[0]);
-  renderNodes(cmd, m_solidMatNodes);
+  vkCmdBindPipeline(cmd, VK_PIPELINE_BIND_POINT_GRAPHICS, m_rasterPipe.plines[eRasterSolid]);
+  renderNodes(cmd, getShadedNodes(eRasterSolid));
+  //
+  vkCmdBindPipeline(cmd, VK_PIPELINE_BIND_POINT_GRAPHICS, m_rasterPipe.plines[eRasterSolidDoubleSided]);
+  renderNodes(cmd, getShadedNodes(eRasterSolidDoubleSided));
   // Draw blend-able
-  vkCmdBindPipeline(cmd, VK_PIPELINE_BIND_POINT_GRAPHICS, m_rasterPipe.plines[1]);
-  renderNodes(cmd, m_blendMatNodes);
+  vkCmdBindPipeline(cmd, VK_PIPELINE_BIND_POINT_GRAPHICS, m_rasterPipe.plines[eRasterBlend]);
+  renderNodes(cmd, getShadedNodes(eRasterBlend));
 
   if(m_settings.showWireframe)
   {
     // Draw wireframe
-    vkCmdBindPipeline(cmd, VK_PIPELINE_BIND_POINT_GRAPHICS, m_rasterPipe.plines[2]);
-    renderNodes(cmd, m_allNodes);
+    vkCmdBindPipeline(cmd, VK_PIPELINE_BIND_POINT_GRAPHICS, m_rasterPipe.plines[eRasterWireframe]);
+    renderNodes(cmd, getShadedNodes(eRasterWireframe));
   }
 }
 
@@ -1167,7 +1174,6 @@ void GltfViewer::destroyResources()
   m_sbt->destroy();
   m_sky->destroy();
   m_picker->destroy();
-  m_vkAxis->deinit();
 
   m_tonemapper.reset();
 }

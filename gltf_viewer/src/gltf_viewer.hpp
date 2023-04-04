@@ -24,9 +24,7 @@
 #include "shaders/device_host.h"
 
 
-
 namespace nvvk {
-class AxisVK;
 class DebugUtil;
 class DescriptorSetContainer;
 struct RayPickerKHR;
@@ -113,29 +111,37 @@ public:
   bool isBusy() const { return m_busy; }
 
 private:
-  void createScene(const std::string& filename);
-  void createGbuffers(const nvmath::vec2f& size);
-  void createVulkanBuffers();
-  void createRtxSet();
-  void createSceneSet();
-  void createRasterPipeline();
-  void createRtxPipeline();
-  void writeRtxSet();
-  void writeSceneSet();
-  bool updateFrame();
-  void resetFrame();
-  void windowTitle();
-  void screenPicking();
-  void renderAxis(VkCommandBuffer cmd);
-  void raytraceScene(VkCommandBuffer cmd);
-  void createRecordCommandBuffer();
-  void freeRecordCommandBuffer();
-  void recordRasterScene();
-  void renderNodes(VkCommandBuffer cmd, std::vector<uint32_t>& nodeIDs);
-  void renderRasterScene(VkCommandBuffer cmd);
-  void rasterScene(VkCommandBuffer cmd);
-  void createHdr(const std::string& filename);
-  void destroyResources();
+  enum PipelineType
+  {
+    eRasterSolid,
+    eRasterSolidDoubleSided,
+    eRasterBlend,
+    eRasterWireframe
+  };
+
+  void                  createScene(const std::string& filename);
+  void                  createGbuffers(const nvmath::vec2f& size);
+  void                  createVulkanBuffers();
+  void                  createRtxSet();
+  void                  createSceneSet();
+  void                  createRasterPipeline();
+  void                  createRtxPipeline();
+  void                  writeRtxSet();
+  void                  writeSceneSet();
+  bool                  updateFrame();
+  void                  resetFrame();
+  void                  windowTitle();
+  void                  screenPicking();
+  void                  raytraceScene(VkCommandBuffer cmd);
+  void                  createRecordCommandBuffer();
+  void                  freeRecordCommandBuffer();
+  void                  recordRasterScene();
+  void                  renderNodes(VkCommandBuffer cmd, const std::vector<uint32_t>& nodeIDs);
+  void                  renderRasterScene(VkCommandBuffer cmd);
+  void                  rasterScene(VkCommandBuffer cmd);
+  void                  createHdr(const std::string& filename);
+  void                  destroyResources();
+  std::vector<uint32_t> getShadedNodes(PipelineType type);
 
   //--------------------------------------------------------------------------------------------------
   //
@@ -163,7 +169,6 @@ private:
 
   std::unique_ptr<nvvkhl::HdrEnv>                m_hdrEnv;
   std::unique_ptr<nvvkhl::HdrEnvDome>            m_hdrDome;
-  std::unique_ptr<nvvk::AxisVK>                  m_vkAxis;
   std::unique_ptr<nvvk::DescriptorSetContainer>  m_rtxSet;    // Descriptor set
   std::unique_ptr<nvvk::DescriptorSetContainer>  m_sceneSet;  // Descriptor set
   std::unique_ptr<nvvk::RayPickerKHR>            m_picker;    // For ray picking info
@@ -174,9 +179,5 @@ private:
   std::unique_ptr<nvvkhl::SkyDome>               m_sky;
   std::unique_ptr<nvvkhl::TonemapperPostProcess> m_tonemapper;
 
-  // For rendering all nodes
-  std::vector<uint32_t> m_solidMatNodes;
-  std::vector<uint32_t> m_blendMatNodes;
-  std::vector<uint32_t> m_allNodes;
   bool                  m_busy{false};
 };

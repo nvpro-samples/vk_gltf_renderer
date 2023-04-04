@@ -36,10 +36,13 @@
 
 // clang-format off
 layout(location = 0) rayPayloadInEXT HitPayload payload;
-layout(buffer_reference, scalar) readonly buffer Vertices  { Vertex v[]; };
-layout(buffer_reference, scalar) readonly buffer Indices   { uvec3 i[]; };
-layout(buffer_reference, scalar) readonly buffer PrimMeshInfos { PrimMeshInfo i[]; };
-layout(buffer_reference, scalar) readonly buffer Materials { GltfShadeMaterial m[]; };
+
+layout(buffer_reference, scalar) readonly buffer GltfMaterialBuf    { GltfShadeMaterial m[]; };
+layout(buffer_reference, scalar) readonly buffer VertexBuf          { Vertex v[]; };
+layout(buffer_reference, scalar) readonly buffer IndicesBuf         { uvec3 i[]; };
+layout(buffer_reference, scalar) readonly buffer PrimMeshInfoBuf    { PrimMeshInfo i[]; };
+layout(buffer_reference, scalar) readonly buffer InstanceInfoBuf    { InstanceInfo i[]; };
+
 
 layout(set = 1, binding = eFrameInfo) uniform FrameInfo_ { FrameInfo frameInfo; };
 layout(set = 1, binding = eSceneDesc) readonly buffer SceneDesc_ { SceneDescription sceneDesc; };
@@ -61,8 +64,8 @@ vec2 GetHitState(PrimMeshInfo pinfo)
 {
 
   // Vextex and indices of the primitive
-  Vertices vertices = Vertices(pinfo.vertexAddress);
-  Indices  indices  = Indices(pinfo.indexAddress);
+  VertexBuf  vertices = VertexBuf(pinfo.vertexAddress);
+  IndicesBuf indices  = IndicesBuf(pinfo.indexAddress);
 
   // Barycentric coordinate on the triangle
   const vec3 barycentrics = vec3(1.0 - attribs.x - attribs.y, attribs.x, attribs.y);
@@ -80,7 +83,7 @@ vec2 GetHitState(PrimMeshInfo pinfo)
   const vec2 uv0 = vec2(v0.position.w, v0.normal.w);
   const vec2 uv1 = vec2(v1.position.w, v1.normal.w);
   const vec2 uv2 = vec2(v2.position.w, v2.normal.w);
-  vec2 uv         = uv0 * barycentrics.x + uv1 * barycentrics.y + uv2 * barycentrics.z;
+  vec2       uv  = uv0 * barycentrics.x + uv1 * barycentrics.y + uv2 * barycentrics.z;
 
   return uv;
 }
@@ -90,18 +93,16 @@ vec2 GetHitState(PrimMeshInfo pinfo)
 void main()
 {
   // Retrieve the Primitive mesh buffer information
-  PrimMeshInfos pInfo_ = PrimMeshInfos(sceneDesc.primInfoAddress);
-  PrimMeshInfo  pinfo  = pInfo_.i[gl_InstanceCustomIndexEXT];
+  PrimMeshInfo  primMeshInfo = PrimMeshInfoBuf(sceneDesc.primInfoAddress).i[gl_InstanceCustomIndexEXT];
 
   // Scene materials
-  uint              matIndex  = max(0, pinfo.materialIndex);  // material of primitive mesh
-  Materials         materials = Materials(sceneDesc.materialAddress);
-  GltfShadeMaterial mat       = materials.m[matIndex];
+  uint              matIndex  = max(0, primMeshInfo.materialIndex);  // material of primitive mesh
+  GltfShadeMaterial mat       = GltfMaterialBuf(sceneDesc.materialAddress).m[matIndex];
 
   float baseColorAlpha = mat.pbrBaseColorFactor.a;
   if(mat.pbrBaseColorTexture > -1)
   {
-    vec2 uv = GetHitState(pinfo);
+    vec2 uv = GetHitState(primMeshInfo);
 
     baseColorAlpha *= texture(texturesMap[nonuniformEXT(mat.pbrBaseColorTexture)], uv).a;
   }
