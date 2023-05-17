@@ -7,6 +7,7 @@
 struct HitState
 {
   vec3 pos;
+  vec3 shadowpos;
   vec3 nrm;
   vec3 geonrm;
   vec2 uv;
