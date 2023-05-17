@@ -29,6 +29,7 @@
 #include "busy_window.hpp"
 #include "imgui_axis.hpp"
 #include "imgui_helper.h"
+#include "nvh/timesampler.hpp"
 #include "nvvk/dynamicrendering_vk.hpp"
 #include "nvvk/pipeline_vk.hpp"
 #include "nvvk/raypicker_vk.hpp"
@@ -64,7 +65,7 @@ extern std::shared_ptr<nvvkhl::ElementCamera> g_elem_camera;
 //
 void GltfViewer::onAttach(nvvkhl::Application* app)
 {
-  auto scope_t = nvh::ScopedTimer("onAttach\n");
+  nvh::ScopedTimer st(std::string("\n") + __FUNCTION__);
 
   m_app    = app;
   m_device = m_app->getDevice();
@@ -73,6 +74,9 @@ void GltfViewer::onAttach(nvvkhl::Application* app)
   const uint32_t gct_queue_index = ctx->m_queueGCT.familyIndex;
   const uint32_t t_queue_index   = ctx->m_queueT.familyIndex;
   const uint32_t c_queue_index   = ctx->m_queueC.familyIndex;
+
+  // Create an extra queue for loading in parallel
+  m_qGCT1 = ctx->createQueue(VK_QUEUE_GRAPHICS_BIT | VK_QUEUE_COMPUTE_BIT | VK_QUEUE_TRANSFER_BIT, "GCT1", 1.0F);
 
   m_dutil      = std::make_unique<nvvk::DebugUtil>(m_device);                            // Debug utility
   m_alloc      = std::make_unique<nvvkhl::AllocVma>(ctx);                                // Allocator
@@ -83,15 +87,11 @@ void GltfViewer::onAttach(nvvkhl::Application* app)
   m_sbt        = std::make_unique<nvvk::SBTWrapper>();                                   // Shader Binding Table
   m_sky        = std::make_unique<nvvkhl::SkyDome>(ctx, m_alloc.get());                  // Sun&Sky
   m_picker     = std::make_unique<nvvk::RayPickerKHR>(ctx, m_alloc.get(), c_queue_index);  // RTX Picking utility
-  //m_vkAxis     = std::make_unique<nvvk::AxisVK>();                                         // Display Axis
-  m_hdrEnv   = std::make_unique<nvvkhl::HdrEnv>(ctx, m_alloc.get(), c_queue_index);      // HDR Generic
-  m_hdrDome  = std::make_unique<nvvkhl::HdrEnvDome>(ctx, m_alloc.get(), c_queue_index);  // HDR raster
-  m_rtxSet   = std::make_unique<nvvk::DescriptorSetContainer>(m_device);                 // Descriptor set for RTX
-  m_sceneSet = std::make_unique<nvvk::DescriptorSetContainer>(m_device);    // Descriptor set for the scene elements
-  m_gBuffers = std::make_unique<nvvkhl::GBuffer>(m_device, m_alloc.get());  // All the G-Buffers
-
-  // Create an extra queue for loading in parallel
-  m_qGCT1 = ctx->createQueue(VK_QUEUE_GRAPHICS_BIT | VK_QUEUE_COMPUTE_BIT | VK_QUEUE_TRANSFER_BIT, "GCT1", 1.0F);
+  m_hdrEnv     = std::make_unique<nvvkhl::HdrEnv>(ctx, m_alloc.get(), c_queue_index);      // HDR Generic
+  m_hdrDome    = std::make_unique<nvvkhl::HdrEnvDome>(ctx, m_alloc.get(), c_queue_index);  // HDR raster
+  m_rtxSet     = std::make_unique<nvvk::DescriptorSetContainer>(m_device);                 // Descriptor set for RTX
+  m_sceneSet   = std::make_unique<nvvk::DescriptorSetContainer>(m_device);    // Descriptor set for the scene elements
+  m_gBuffers   = std::make_unique<nvvkhl::GBuffer>(m_device, m_alloc.get());  // All the G-Buffers
 
   m_hdrEnv->loadEnvironment("");  // Initialize the environment with nothing (constant white: for now)
   m_hdrDome->create(m_hdrEnv->getDescriptorSet(), m_hdrEnv->getDescriptorSetLayout());  // Same as above
@@ -123,6 +123,7 @@ void GltfViewer::onAttach(nvvkhl::Application* app)
 //
 void GltfViewer::onDetach()
 {
+  vkDeviceWaitIdle(m_device);
   destroyResources();
 }
 
@@ -438,6 +439,8 @@ void GltfViewer::onRender(VkCommandBuffer cmd)
 //
 void GltfViewer::createScene(const std::string& filename)
 {
+  nvh::ScopedTimer st(std::string("\n") + __FUNCTION__);
+
   // Early freeing up memory and resources
   m_scene->destroy();
   m_sceneVk->destroy();
@@ -534,6 +537,7 @@ void GltfViewer::createGbuffers(const nvmath::vec2f& size)
   VkExtent2D                  buffer_size = {static_cast<uint32_t>(m_viewSize.x), static_cast<uint32_t>(m_viewSize.y)};
 
   // Creation of the GBuffers
+  vkDeviceWaitIdle(m_device);
   m_gBuffers->destroy();
   m_gBuffers->create(buffer_size, color_buffers, depth_format);
 
@@ -1008,6 +1012,8 @@ void GltfViewer::freeRecordCommandBuffer()
 //
 void GltfViewer::recordRasterScene()
 {
+  nvh::ScopedTimer st(__FUNCTION__);
+
   createRecordCommandBuffer();
 
   auto color_format = m_gBuffers->getColorFormat(eResult);  // Using the RGBA32F
@@ -1144,6 +1150,8 @@ void GltfViewer::rasterScene(VkCommandBuffer cmd)
 // create a convoluted version of it (Dome) used by the raster.
 void GltfViewer::createHdr(const std::string& filename)
 {
+  nvh::ScopedTimer st(std::string("\n") + __FUNCTION__);
+
   const uint32_t c_family_queue = m_app->getContext()->m_queueC.familyIndex;
   m_hdrEnv  = std::make_unique<nvvkhl::HdrEnv>(m_app->getContext().get(), m_alloc.get(), c_family_queue);
   m_hdrDome = std::make_unique<nvvkhl::HdrEnvDome>(m_app->getContext().get(), m_alloc.get(), c_family_queue);

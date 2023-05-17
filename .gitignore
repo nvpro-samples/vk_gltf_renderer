@@ -1,7 +1,6 @@
 /spv/*
 /build/*
-
 .vs/
 */_autogen/
-
 .obsidian/
+_Install/

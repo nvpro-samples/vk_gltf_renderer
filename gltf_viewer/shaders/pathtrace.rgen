@@ -75,7 +75,7 @@ struct Ray
   vec3 direction;
 };
 
-#define EPSILON 1.0F / 256.0F
+#define EPSILON 0.0// 1.19209e-07
 
 //-----------------------------------------------------------------------
 // Shoot a ray an return the information of the closest hit, in the
@@ -181,13 +181,13 @@ vec3 pathTrace(Ray r, inout uint seed)
     }
 
     // Setting next ray
-    r.origin    = offsetRay(hit.pos, hit.nrm);
     r.direction = ray_direction;
+    r.origin    = offsetRay(hit.pos, dot(ray_direction, hit.geonrm) > 0 ? hit.geonrm : -hit.geonrm);
 
     // Shoot shadow ray if the light is visible
     if(vis_contrib.visible)
     {
-      Ray  shadowRay = Ray(r.origin, vis_contrib.lightDir);
+      Ray  shadowRay = Ray(hit.shadowpos, vis_contrib.lightDir);
       bool inShadow  = traceShadow(shadowRay, INFINITE);
       // We are adding the contribution to the radiance only if the ray is not occluded by an object.
       if(!inShadow)

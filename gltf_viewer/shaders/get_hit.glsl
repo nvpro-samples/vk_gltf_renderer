@@ -53,8 +53,9 @@ HitState getHitState(in uint64_t vertexAddress,   // Buffer address of the Verte
 
   // Position
   hit.pos = mixBary(pos0, pos1, pos2, barycentrics);
-  hit.pos = pointOffset(hit.pos, pos0, pos1, pos2, nrm0, nrm1, nrm2, barycentrics);  // Shadow offset position - hacking shadow terminator
-  hit.pos = vec3(objectToWorld * vec4(hit.pos, 1.0));
+  hit.shadowpos = pointOffset(hit.pos, pos0, pos1, pos2, nrm0, nrm1, nrm2, barycentrics);  // Shadow offset position - hacking shadow terminator
+  hit.pos       = vec3(objectToWorld * vec4(hit.pos, 1.0));
+  hit.shadowpos = vec3(objectToWorld * vec4(hit.shadowpos, 1.0));
 
   // Normal
   hit.nrm    = normalize(mixBary(nrm0, nrm1, nrm2, barycentrics));
@@ -83,6 +84,11 @@ HitState getHitState(in uint64_t vertexAddress,   // Buffer address of the Verte
     hit.tangent   = -hit.tangent;
     hit.bitangent = -hit.bitangent;
   }
+
+  // handle low tessellated meshes with smooth normals
+  vec3 k2 = reflect(-V, hit.nrm);
+  if(dot(hit.geonrm, k2) < 0.0f)
+    hit.nrm = hit.geonrm;
 
   return hit;
 }
