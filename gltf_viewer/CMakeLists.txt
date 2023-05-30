@@ -37,6 +37,7 @@ target_link_libraries (${PROJECT_NAME}
 
 target_compile_definitions(${PROJECT_NAME} 
     PRIVATE PROJECT_NAME="${PROJECT_NAME}"
+    IMGUI_DEFINE_MATH_OPERATORS
     )
 
 source_group("Other"  
