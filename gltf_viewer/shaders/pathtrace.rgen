@@ -21,24 +21,23 @@
 #extension GL_EXT_nonuniform_qualifier : enable
 #extension GL_EXT_scalar_block_layout : enable
 #extension GL_GOOGLE_include_directive : enable
-#extension GL_EXT_shader_explicit_arithmetic_types_int64 : require
+#extension GL_EXT_shader_explicit_arithmetic_types : require
 #extension GL_EXT_buffer_reference2 : require
 #extension GL_EXT_shader_image_load_formatted : enable  // The folowing extension allow to pass images as function parameters
-#extension GL_EXT_shader_explicit_arithmetic_types : enable
 
 #include "device_host.h"
 #include "dh_bindings.h"
 #include "payload.glsl"
 
-#include "nvvkhl/shaders/random.glsl"
-#include "nvvkhl/shaders/constants.glsl"
 #include "nvvkhl/shaders/dh_sky.h"
-#include "nvvkhl/shaders/ggx.glsl"
-#include "nvvkhl/shaders/ray_util.glsl"
-#include "nvvkhl/shaders/pbr_mat_struct.h"
-#include "nvvkhl/shaders/pbr_eval.glsl"
 #include "nvvkhl/shaders/dh_scn_desc.h"
 #include "nvvkhl/shaders/dh_hdr.h"
+
+#include "nvvkhl/shaders/bsdf_functions.h"
+#include "nvvkhl/shaders/random.glsl"
+#include "nvvkhl/shaders/constants.glsl"
+#include "nvvkhl/shaders/ray_util.glsl"
+#include "nvvkhl/shaders/light_contrib.glsl"
 
 // clang-format off
 layout(location = 0) rayPayloadEXT HitPayload payload;
@@ -51,17 +50,15 @@ layout(buffer_reference, scalar) readonly buffer InstanceInfoBuf    { InstanceIn
 layout(set = 0, binding = eTlas)                uniform accelerationStructureEXT topLevelAS;
 layout(set = 0, binding = eOutImage, rgba32f)   uniform image2D                 image;
 layout(set = 1, binding = eFrameInfo, scalar)   uniform                         FrameInfo_ { FrameInfo frameInfo; };
-layout(set = 1, binding = eSceneDesc)           readonly buffer                 SceneDesc_ { SceneDescription sceneDesc; };
+layout(set = 1, binding = eSceneDesc, scalar)   readonly buffer                 SceneDesc_ { SceneDescription sceneDesc; };
 layout(set = 1, binding = eTextures)            uniform sampler2D               texturesMap[]; // all textures
-layout(set = 2, binding = eSkyParam)            uniform                         SkyInfo_ { ProceduralSkyShaderParameters skyInfo; };
+layout(set = 2, binding = eSkyParam, scalar)    uniform                         SkyInfo_ { ProceduralSkyShaderParameters skyInfo; };
 layout(set = 3, binding = eImpSamples, scalar)  readonly buffer                 EnvAccel_ { EnvAccel envSamplingData[]; };
 layout(set = 3, binding = eHdr)                 uniform sampler2D               hdrTexture;
 // clang-format on
 
-#include "nvvkhl/shaders/mat_eval.glsl"
-#include "nvvkhl/shaders/hdr_env_sampling.glsl"
-#include "nvvkhl/shaders/light_contrib.glsl"
-#include "nvvkhl/shaders/lighting.glsl"
+#include "nvvkhl/shaders/pbr_mat_eval.glsl"      // Need texturesMap[]
+#include "nvvkhl/shaders/hdr_env_sampling.glsl"  // nedd envSamplingData[]
 
 
 layout(push_constant) uniform RtxPushConstant_
@@ -75,7 +72,8 @@ struct Ray
   vec3 direction;
 };
 
-#define EPSILON 0.0// 1.19209e-07
+#define EPSILON 0.0  // 1.19209e-07
+const float DIRAC = -1.0;
 
 //-----------------------------------------------------------------------
 // Shoot a ray an return the information of the closest hit, in the
@@ -102,6 +100,48 @@ bool traceShadow(Ray r, float maxDist)
   return isHit;
 }
 
+// --------------------------------------------------------------------
+// Sampling the Sun or the HDR
+// - Returns
+//      The contribution divided by PDF
+//      The direction to the light source
+//      The PDF
+//
+vec3 sampleLights(in vec3 pos, vec3 normal, in vec3 worldRayDirection, inout uint seed, out vec3 dirToLight, out float lightPdf)
+{
+  vec3 radiance = vec3(0);
+  lightPdf      = 1.0;
+
+  if(frameInfo.useSky == 1)
+  {
+    Light        sunLight     = frameInfo.light[0];
+    vec2         rand_val     = vec2(rand(seed), rand(seed));
+    LightContrib lightContrib = singleLightContribution(sunLight, pos, normal, -worldRayDirection, rand_val);
+
+    radiance   = lightContrib.intensity;
+    dirToLight = normalize(-lightContrib.incidentVector);
+    lightPdf   = DIRAC;
+    // Return radiance over pdf
+    return radiance;
+  }
+  else
+  {
+    vec3 rand_val     = vec3(rand(seed), rand(seed), rand(seed));
+    vec4 radiance_pdf = environmentSample(hdrTexture, rand_val, dirToLight);
+    radiance          = radiance_pdf.xyz;
+    lightPdf          = radiance_pdf.w;
+
+    // Apply rotation and environment intensity
+    dirToLight = rotate(dirToLight, vec3(0, 1, 0), frameInfo.envRotation);
+    radiance *= frameInfo.envColor.xyz;
+    
+    // Return radiance over pdf
+    return radiance / lightPdf;
+  }
+
+  // Return radiance over pdf
+  return radiance / lightPdf;
+}
 
 //-----------------------------------------------------------------------
 //-----------------------------------------------------------------------
@@ -109,6 +149,7 @@ vec3 pathTrace(Ray r, inout uint seed)
 {
   vec3 radiance   = vec3(0.0F);
   vec3 throughput = vec3(1.0F);
+  bool isInside   = false;
 
   GltfMaterialBuf materials = GltfMaterialBuf(sceneDesc.materialAddress);
 
@@ -143,56 +184,102 @@ vec3 pathTrace(Ray r, inout uint seed)
     PrimMeshInfo pInfo = PrimMeshInfoBuf(sceneDesc.primInfoAddress).i[payload.instanceIndex];
 
     // Setting up the material
-    PbrMaterial       pbrMat;
-    int               matIndex  = max(0, pInfo.materialIndex);  // material of primitive mesh
-    GltfShadeMaterial matetrial = materials.m[matIndex];
-    pbrMat                      = evaluateMaterial(matetrial, hit.nrm, hit.tangent, hit.bitangent, hit.uv);
+    int         matIndex = max(0, pInfo.materialIndex);  // material of primitive mesh
+    PbrMaterial pbrMat   = evaluateMaterial(materials.m[matIndex], hit.nrm, hit.tangent, hit.bitangent, hit.uv);
 
     // Adding emissive
     radiance += pbrMat.emissive * throughput;
 
-    // Get contribution from IBL / Sky
-    vec3                   to_eye = -r.direction;
-    VisibilityContribution vis_contrib;
-    if(frameInfo.useSky == 1)
-    {
-      vis_contrib = lightsContribution(pbrMat, to_eye, hit.pos, hit.nrm, frameInfo.nbLights, seed);
-    }
-    else
-    {
-      vis_contrib = environmentLightingContribution(pbrMat, to_eye, hit.nrm, frameInfo.envColor.xyz, frameInfo.envRotation, seed);
-    }
-    vec3 contrib = vis_contrib.radiance;
-    contrib *= throughput;
+    bool       thin_walled = pbrMat.thinWalled;
+    const vec3 ior1        = vec3((isInside && !thin_walled) ? BSDF_USE_MATERIAL_IOR : 1.0);
+    const vec3 ior2        = vec3((isInside && !thin_walled) ? 1.0 : BSDF_USE_MATERIAL_IOR);
 
-    // Sampling and bouncing
-    float pdf = 0.0F;
-    vec3  ray_direction;
-    vec3  rand_val = vec3(rand(seed), rand(seed), rand(seed));
-    vec3  brdf     = pbrSample(pbrMat, to_eye, ray_direction, pdf, rand_val);
-
-    if(dot(hit.nrm, ray_direction) > 0.0F && pdf > 0.0F)
+    // Apply volume attenuation
+    if(isInside && !thin_walled)
     {
-      throughput *= brdf / pdf;
-    }
-    else
-    {
-      break;
+      const vec3 abs_coeff = absorptionCoefficient(pbrMat);
+      throughput.x *= abs_coeff.x > 0.0 ? exp(-abs_coeff.x * payload.hitT) : 1.0;
+      throughput.y *= abs_coeff.y > 0.0 ? exp(-abs_coeff.y * payload.hitT) : 1.0;
+      throughput.z *= abs_coeff.z > 0.0 ? exp(-abs_coeff.z * payload.hitT) : 1.0;
     }
 
-    // Setting next ray
-    r.direction = ray_direction;
-    r.origin    = offsetRay(hit.pos, dot(ray_direction, hit.geonrm) > 0 ? hit.geonrm : -hit.geonrm);
+    // Light contribution; can be environment or punctual lights
+    vec3  contribution         = vec3(0);
+    vec3  dirToLight           = vec3(0);
+    float lightPdf             = 0.F;
+    vec3  lightRadianceOverPdf = sampleLights(hit.pos, pbrMat.normal, r.direction, seed, dirToLight, lightPdf);
+
+    // do not next event estimation (but delay the adding of contribution)
+    const bool nextEventValid = ((dot(dirToLight, hit.geonrm) > 0.0f) != isInside) && lightPdf != 0.0f;
+
+    // Evaluate BSDF
+    if(nextEventValid)
+    {
+      BsdfEvaluateData evalData;
+      evalData.ior1 = ior1;
+      evalData.ior2 = ior2;
+      evalData.k1   = -r.direction;
+      evalData.k2   = dirToLight;
+
+      bsdfEvaluate(evalData, pbrMat);
+
+      if(evalData.pdf > 0.0)
+      {
+        const float mis_weight = (lightPdf == DIRAC) ? 1.0f : lightPdf / (lightPdf + evalData.pdf);
+
+        // sample weight
+        const vec3 w = throughput * lightRadianceOverPdf * mis_weight;
+        contribution += w * evalData.bsdf_diffuse;
+        contribution += w * evalData.bsdf_glossy;
+      }
+    }
+
+    // Sample BSDF
+    {
+      BsdfSampleData sampleData;
+      sampleData.ior1          = ior1;          // IOR current medium
+      sampleData.ior2          = ior2;          // IOR other side
+      sampleData.k1            = -r.direction;  // outgoing direction
+      sampleData.xi            = vec4(rand(seed), rand(seed), rand(seed), rand(seed));
+      sampleData.event_type    = 0;                    ///< output: the type of event for the generated sample
+      sampleData.pdf           = 0.0;                  // output: pdf (non-projected hemisphere)
+      sampleData.bsdf_over_pdf = vec3(0.0, 0.0, 0.0);  ///< output: bsdf * dot(normal, k2) / pdf
+
+      bsdfSample(sampleData, pbrMat);
+
+      throughput *= sampleData.bsdf_over_pdf;
+      r.direction = sampleData.k2;
+
+      if(sampleData.event_type == BSDF_EVENT_ABSORB)
+      {
+        break;  // Need to add the contribution ?
+      }
+      else
+      {
+        // Continue path
+        bool isSpecular     = (sampleData.event_type & BSDF_EVENT_SPECULAR) != 0;
+        bool isTransmission = (sampleData.event_type & BSDF_EVENT_TRANSMISSION) != 0;
+
+        vec3 offsetDir = dot(r.direction, hit.geonrm) > 0 ? hit.geonrm : -hit.geonrm;
+        r.origin       = offsetRay(hit.pos, offsetDir);
+
+        if(isTransmission)
+        {
+          isInside = !isInside;
+        }
+      }
+    }
+
 
     // Shoot shadow ray if the light is visible
-    if(vis_contrib.visible)
+    if(nextEventValid)
     {
-      Ray  shadowRay = Ray(hit.shadowpos, vis_contrib.lightDir);
+      Ray  shadowRay = Ray(hit.shadowpos, dirToLight);
       bool inShadow  = traceShadow(shadowRay, INFINITE);
       // We are adding the contribution to the radiance only if the ray is not occluded by an object.
       if(!inShadow)
       {
-        radiance += contrib;
+        radiance += contribution;
       }
     }
 

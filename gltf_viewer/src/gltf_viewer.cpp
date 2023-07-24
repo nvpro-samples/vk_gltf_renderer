@@ -256,6 +256,9 @@ void GltfViewer::onUIRender()
         reset |= PE::entry("Depth", [&] { return ImGui::SliderInt("#1", &m_settings.maxDepth, 1, 10); });
         reset |= PE::entry("Samples", [&] { return ImGui::SliderInt("#2", &m_settings.maxSamples, 1, 5); });
         reset |= PE::entry("Frames", [&] { return ImGui::DragInt("#3", &m_settings.maxFrames, 5.0F, 1, 1000000); });
+        reset |= PE::entry(
+            "Max Luminance", [&] { return ImGui::DragFloat("#4", &m_settings.maxLuminance); },
+            "Value over this might be clipped by the firefly filter.");
         PE::treePop();
       }
       if(PE::treeNode("Raster"))
@@ -282,12 +285,20 @@ void GltfViewer::onUIRender()
 
     if(ImGui::CollapsingHeader("Environment"))
     {
-      const bool sky_only = !(m_hdrEnv && m_hdrEnv->isValid());
+      const bool sky_only         = !(m_hdrEnv && m_hdrEnv->isValid());
+      auto       cache_env_system = m_settings.envSystem;
       reset |= ImGui::RadioButton("Sky", reinterpret_cast<int*>(&m_settings.envSystem), Settings::eSky);
       ImGui::SameLine();
       ImGui::BeginDisabled(sky_only);
       reset |= ImGui::RadioButton("Hdr", reinterpret_cast<int*>(&m_settings.envSystem), Settings::eHdr);
       ImGui::EndDisabled();
+
+      // When switching the environment, reset Firefly max luminance
+      if(cache_env_system != m_settings.envSystem)
+      {
+        m_settings.maxLuminance = m_settings.envSystem == Settings::eSky ? 10000.0F : m_hdrEnv->getIntegral();
+      }
+
       PE::begin();
       if(PE::treeNode("Sky"))
       {
@@ -298,12 +309,14 @@ void GltfViewer::onUIRender()
       if(PE::treeNode("Hdr"))
       {
         reset |= PE::entry(
-            "Color", [&] { return ImGui::ColorEdit3("##Color", &m_settings.envColor.x, ImGuiColorEditFlags_Float); },
+            "Intensity",
+            [&] {
+              return ImGui::SliderFloat("##Color", &m_settings.envIntensity, 0, 100, "%.3f", ImGuiSliderFlags_Logarithmic);
+            },
             "Color multiplier");
 
         reset |= PE::entry(
-            "Rotation", [&] { return ImGui::SliderAngle("Rotation", &m_settings.envRotation); },
-            "Rotating the environment");
+            "Rotation", [&] { return ImGui::SliderAngle("Rotation", &m_settings.envRotation); }, "Rotating the environment");
         PE::treePop();
       }
       ImGui::EndDisabled();
@@ -397,15 +410,15 @@ void GltfViewer::onRender(VkCommandBuffer cmd)
     m_frameInfo.useSky       = 1;
     m_frameInfo.nbLights     = static_cast<int>(m_settings.lights.size());
     m_frameInfo.light[0]     = m_sky->getSun();
-    m_frameInfo.maxLuminance = m_sky->skyParams().intensity * m_sky->skyParams().brightness;
+    m_frameInfo.maxLuminance = m_settings.maxLuminance;
   }
   else
   {
-    m_frameInfo.useSky       = 0;
-    m_frameInfo.nbLights     = 0;
-    m_frameInfo.envColor     = m_settings.envColor;
+    m_frameInfo.useSky   = 0;
+    m_frameInfo.nbLights = 0;
+    m_frameInfo.envColor = nvmath::vec4f(m_settings.envIntensity, m_settings.envIntensity, m_settings.envIntensity, 1.0F);
     m_frameInfo.envRotation  = m_settings.envRotation;
-    m_frameInfo.maxLuminance = m_hdrEnv->getIntegral();
+    m_frameInfo.maxLuminance = m_settings.maxLuminance;
   }
   vkCmdUpdateBuffer(cmd, m_bFrameInfo.buffer, 0, sizeof(FrameInfo), &m_frameInfo);
 
@@ -569,6 +582,7 @@ void GltfViewer::createVulkanBuffers()
 void GltfViewer::createRtxSet()
 {
   m_rtxSet->deinit();
+  m_rtxSet->init(m_device);
 
   // This descriptor set, holds the top level acceleration structure and the output image
   m_rtxSet->addBinding(RtxBindings::eTlas, VK_DESCRIPTOR_TYPE_ACCELERATION_STRUCTURE_KHR, 1, VK_SHADER_STAGE_ALL);
@@ -585,6 +599,7 @@ void GltfViewer::createRtxSet()
 void GltfViewer::createSceneSet()
 {
   m_sceneSet->deinit();
+  m_sceneSet->init(m_device);
 
   // This descriptor set, holds scene information and the textures
   m_sceneSet->addBinding(SceneBindings::eFrameInfo, VK_DESCRIPTOR_TYPE_UNIFORM_BUFFER, 1, VK_SHADER_STAGE_ALL);
@@ -1123,7 +1138,10 @@ void GltfViewer::rasterScene(VkCommandBuffer cmd)
     if(m_settings.envSystem == Settings::eSky)
       m_sky->draw(cmd, view, proj, img_size);
     else
-      m_hdrDome->draw(cmd, view, proj, img_size, &m_settings.envColor.x, m_settings.envRotation);
+    {
+      std::array<float, 4> color{m_settings.envIntensity, m_settings.envIntensity, m_settings.envIntensity, 1.0F};
+      m_hdrDome->draw(cmd, view, proj, img_size, color.data(), m_settings.envRotation);
+    }
   }
 
   if(m_recordedSceneCmd == VK_NULL_HANDLE)
@@ -1161,7 +1179,7 @@ void GltfViewer::createHdr(const std::string& filename)
   m_hdrDome->setOutImage(m_gBuffers->getDescriptorImageInfo(eResult));
   freeRecordCommandBuffer();
 
-  m_frameInfo.maxLuminance = m_hdrEnv->getIntegral();  // Remove firefly
+  m_settings.maxLuminance = m_hdrEnv->getIntegral();  // Remove firefly
 }
 
 //--------------------------------------------------------------------------------------------------
