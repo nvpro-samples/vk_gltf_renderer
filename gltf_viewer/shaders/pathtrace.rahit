@@ -22,9 +22,7 @@
 #extension GL_EXT_nonuniform_qualifier : enable
 #extension GL_EXT_scalar_block_layout : enable
 #extension GL_GOOGLE_include_directive : enable
-#extension GL_EXT_shader_explicit_arithmetic_types_int8 : enable
-#extension GL_EXT_shader_explicit_arithmetic_types_int16 : enable
-#extension GL_EXT_shader_explicit_arithmetic_types_int64 : require
+#extension GL_EXT_shader_explicit_arithmetic_types: enable
 #extension GL_EXT_buffer_reference2 : require
 
 #include "device_host.h"
@@ -44,15 +42,13 @@ layout(buffer_reference, scalar) readonly buffer PrimMeshInfoBuf    { PrimMeshIn
 layout(buffer_reference, scalar) readonly buffer InstanceInfoBuf    { InstanceInfo i[]; };
 
 
-layout(set = 1, binding = eFrameInfo) uniform FrameInfo_ { FrameInfo frameInfo; };
-layout(set = 1, binding = eSceneDesc) readonly buffer SceneDesc_ { SceneDescription sceneDesc; };
-layout(set = 1, binding = eTextures)  uniform sampler2D texturesMap[]; // all textures
+layout(set = 1, binding = eFrameInfo, scalar) uniform FrameInfo_ { FrameInfo frameInfo; };
+layout(set = 1, binding = eSceneDesc, scalar) readonly buffer SceneDesc_ { SceneDescription sceneDesc; };
+layout(set = 1, binding = eTextures)          uniform sampler2D texturesMap[]; // all textures
 
 layout(push_constant) uniform RtxPushConstant_ { PushConstant pc; };
 
   // clang-format on
-
-#include "nvvkhl/shaders/mat_eval.glsl"
 
 
 hitAttributeEXT vec2 attribs;

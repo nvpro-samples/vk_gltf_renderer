@@ -82,15 +82,17 @@ class GltfViewer : public nvvkhl::IAppElement
       eRaster,
     };
 
-    int           maxFrames     = 200000;
-    int           maxSamples    = 1;
-    int           maxDepth      = 5;
-    bool          showAxis      = true;
-    bool          showWireframe = false;
-    EnvSystem     envSystem     = eSky;
-    RenderSystem  renderSystem  = ePathtracer;
-    nvmath::vec4f envColor{1.F};
-    float         envRotation = 0.F;
+    int          maxFrames     = 200000;
+    int          maxSamples    = 1;
+    int          maxDepth      = 5;
+    bool         showAxis      = true;
+    bool         showWireframe = false;
+    EnvSystem    envSystem     = eSky;
+    RenderSystem renderSystem  = ePathtracer;
+    float        envIntensity  = 1.F;
+    float        envRotation   = 0.F;
+    float        maxLuminance  = 1000.0F;  // For firefly
+
 
     std::vector<Light> lights;
   } m_settings;
@@ -179,5 +181,5 @@ private:
   std::unique_ptr<nvvkhl::SkyDome>               m_sky;
   std::unique_ptr<nvvkhl::TonemapperPostProcess> m_tonemapper;
 
-  bool                  m_busy{false};
+  bool m_busy{false};
 };

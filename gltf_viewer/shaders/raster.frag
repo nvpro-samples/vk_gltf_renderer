@@ -30,7 +30,10 @@
 #include "dh_bindings.h"
 #include "nvvkhl/shaders/dh_sky.h"
 #include "nvvkhl/shaders/dh_scn_desc.h"
-#include "nvvkhl/shaders/pbr_eval.glsl"
+#include "nvvkhl/shaders/func.glsl"
+#include "nvvkhl/shaders/pbr_mat_struct.h"
+#include "nvvkhl/shaders/bsdf_structs.h"
+#include "nvvkhl/shaders/bsdf_functions.h"
 #include "nvvkhl/shaders/light_contrib.glsl"
 
 
@@ -63,7 +66,7 @@ layout(set = 2, binding = eSkyParam) uniform SkyInfo_ { ProceduralSkyShaderParam
   // clang-format on
 
 
-#include "nvvkhl/shaders/mat_eval.glsl"
+#include "nvvkhl/shaders/pbr_mat_eval.glsl"
 #include "get_hit.glsl"
 
 layout(push_constant) uniform RasterPushConstant_
@@ -84,40 +87,70 @@ vec4 getSpecularSample(vec3 reflection, float lod)
   return textureLod(u_GGXEnvSampler, dir, lod) * frameInfo.envColor;
 }
 
-// Calculation of the lighting contribution
-vec3 getIBLContribution(vec3 n, vec3 v, float roughness, vec3 diffuseColor, vec3 specularColor)
+vec3 getIBLRadianceGGX(vec3 n, vec3 v, float roughness, vec3 F0)
 {
   int   u_MipCount = textureQueryLevels(u_GGXEnvSampler);
-  float lod        = (roughness * float(u_MipCount - 1));
-  vec3  reflection = normalize(reflect(-v, n));
   float NdotV      = clampedDot(n, v);
+  float lod        = roughness * float(u_MipCount - 1);
+  vec3  reflection = normalize(reflect(-v, n));
 
-  // retrieve a scale and bias to F0. See [1], Figure 3
-  vec3 brdf          = (texture(u_GGXLUT, vec2(NdotV, 1.0 - roughness))).rgb;
-  vec3 diffuseLight  = getDiffuseLight(n);
-  vec3 specularLight = getSpecularSample(reflection, lod).xyz;
+  vec2 brdfSamplePoint = clamp(vec2(NdotV, roughness), vec2(0.0, 0.0), vec2(1.0, 1.0));
+  vec2 f_ab            = texture(u_GGXLUT, brdfSamplePoint).rg;
+  vec4 specularSample  = getSpecularSample(reflection, lod);
 
-  vec3 diffuse  = diffuseLight * diffuseColor;
-  vec3 specular = specularLight * (specularColor * brdf.x + brdf.y);
+  vec3 specularLight = specularSample.rgb;
 
-  return diffuse + specular;
+  // see https://bruop.github.io/ibl/#single_scattering_results at Single Scattering Results
+  // Roughness dependent fresnel, from Fdez-Aguera
+  vec3 Fr     = max(vec3(1.0 - roughness), F0) - F0;
+  vec3 k_S    = F0 + Fr * pow(1.0 - NdotV, 5.0);
+  vec3 FssEss = k_S * f_ab.x + f_ab.y;
+
+  return specularLight * FssEss;
 }
+
+// specularWeight is introduced with KHR_materials_specular
+vec3 getIBLRadianceLambertian(vec3 n, vec3 v, float roughness, vec3 diffuseColor, vec3 F0)
+{
+  float NdotV           = clampedDot(n, v);
+  vec2  brdfSamplePoint = clamp(vec2(NdotV, roughness), vec2(0.0, 0.0), vec2(1.0, 1.0));
+  vec2  f_ab            = texture(u_GGXLUT, brdfSamplePoint).rg;
+
+  vec3 irradiance = getDiffuseLight(n);
+
+  // see https://bruop.github.io/ibl/#single_scattering_results at Single Scattering Results
+  // Roughness dependent fresnel, from Fdez-Aguera
+
+  vec3 Fr  = max(vec3(1.0 - roughness), F0) - F0;
+  vec3 k_S = F0 + Fr * pow(1.0 - NdotV, 5.0);
+  vec3 FssEss = k_S * f_ab.x + f_ab.y;  // <--- GGX / specular light contribution (scale it down if the specularWeight is low)
+
+  // Multiple scattering, from Fdez-Aguera
+  float Ems    = (1.0 - (f_ab.x + f_ab.y));
+  vec3  F_avg  = (F0 + (1.0 - F0) / 21.0);
+  vec3  FmsEms = Ems * FssEss * F_avg / (1.0 - F_avg * Ems);
+  vec3 k_D = diffuseColor * (1.0 - FssEss + FmsEms);  // we use +FmsEms as indicated by the formula in the blog post (might be a typo in the implementation)
+
+  return (FmsEms + k_D) * irradiance;
+}
+
 
 void main()
 {
   // Material of the object
-  GltfShadeMaterial gltfMat  = GltfMaterialBuf(sceneDesc.materialAddress).m[pc.materialID];
+  GltfShadeMaterial gltfMat = GltfMaterialBuf(sceneDesc.materialAddress).m[pc.materialID];
 
   // Current Instance
-  InstanceInfo    instInfo      = InstanceInfoBuf(sceneDesc.instInfoAddress).i[pc.instanceID];
+  InstanceInfo instInfo = InstanceInfoBuf(sceneDesc.instInfoAddress).i[pc.instanceID];
 
   // Mesh used by instance
-  PrimMeshInfo    primMeshInfo  = PrimMeshInfoBuf(sceneDesc.primInfoAddress).i[pc.meshID];
+  PrimMeshInfo primMeshInfo = PrimMeshInfoBuf(sceneDesc.primInfoAddress).i[pc.meshID];
 
   // Using same hit code as for ray tracing
   const vec3 worldRayOrigin = vec3(frameInfo.viewInv[3].x, frameInfo.viewInv[3].y, frameInfo.viewInv[3].z);
   HitState   hit = getHitState(primMeshInfo.vertexAddress, primMeshInfo.indexAddress, gl_BaryCoordNV, gl_PrimitiveID,
                                worldRayOrigin, mat4x3(instInfo.objectToWorld), mat4x3(instInfo.worldToObject));
+
 
   PbrMaterial pbrMat = evaluateMaterial(gltfMat, hit.nrm, hit.tangent, hit.bitangent, hit.uv);
 
@@ -151,38 +184,48 @@ void main()
   const vec3 toEye             = -worldRayDirection;
 
   // Result
-  vec3 result = vec3(0);
+  vec3 contribution = vec3(0);
 
   float ambientFactor = 0.3;
   if(frameInfo.useSky != 0)
   {
     vec3 ambientColor = mix(skyInfo.groundColor.rgb, skyInfo.skyColor.rgb, pbrMat.normal.y * 0.5 + 0.5) * ambientFactor;
-    result += ambientColor * pbrMat.albedo.rgb;
-    result += ambientColor * pbrMat.f0;
+    contribution += ambientColor * pbrMat.albedo.rgb;
+    contribution += ambientColor * pbrMat.f0;
   }
   else
   {
     // Calculate lighting contribution from image based lighting source (IBL)
-    vec3 diffuseColor  = pbrMat.albedo.rgb * (vec3(1.0) - pbrMat.f0) * (1.0 - pbrMat.metallic);
-    vec3 specularColor = mix(pbrMat.f0, pbrMat.albedo.rgb, pbrMat.metallic);
+    float perceptualRoughness = pbrMat.roughness * pbrMat.roughness;
+    vec3  c_diff              = mix(pbrMat.albedo.rgb, vec3(0), pbrMat.metallic);
 
-    result += getIBLContribution(pbrMat.normal, toEye, pbrMat.roughness, diffuseColor, specularColor);
+    vec3 f_specular = getIBLRadianceGGX(pbrMat.normal, -worldRayDirection, perceptualRoughness, pbrMat.f0);
+    vec3 f_diffuse = getIBLRadianceLambertian(pbrMat.normal, -worldRayDirection, perceptualRoughness, c_diff, pbrMat.f0);
+
+    contribution += f_specular + f_diffuse;
   }
 
 
-  result += pbrMat.emissive;  // emissive
+  contribution += pbrMat.emissive;  // emissive
 
   // All lights
   for(int i = 0; i < frameInfo.nbLights; i++)
   {
     Light        light        = frameInfo.light[i];
-    LightContrib lightContrib = singleLightContribution(light, hit.pos, pbrMat.normal, toEye);
+    LightContrib lightContrib = singleLightContribution(light, hit.pos, pbrMat.normal, -worldRayDirection);
 
-    float pdf      = 0;
-    vec3  brdf     = pbrEval(pbrMat, toEye, -lightContrib.incidentVector, pdf);
-    vec3  radiance = brdf * lightContrib.intensity;
-    result += radiance;
+    BsdfEvaluateData evalData;
+    evalData.ior1 = vec3(1.0);
+    evalData.ior2 = vec3(1.0);
+    evalData.k1   = -worldRayDirection;
+    evalData.k2   = -lightContrib.incidentVector;
+
+    bsdfEvaluate(evalData, pbrMat);
+
+    const vec3 w = lightContrib.intensity;
+    contribution += w * evalData.bsdf_diffuse;
+    contribution += w * evalData.bsdf_glossy;
   }
 
-  outColor = vec4(result, pbrMat.albedo.a);
+  outColor = vec4(contribution, pbrMat.albedo.a);
 }
