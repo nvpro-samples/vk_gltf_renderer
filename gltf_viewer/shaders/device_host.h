@@ -2,9 +2,10 @@
 #define HOST_DEVICE_H
 
 #ifdef __cplusplus
-using mat4 = nvmath::mat4f;
-using vec4 = nvmath::vec4f;
-using vec3 = nvmath::vec3f;
+using mat4  = glm::mat4;
+using vec4  = glm::vec4;
+using vec3  = glm::vec3;
+using Light = nvvkhl_shaders::Light;
 #endif  // __cplusplus
 
 #include "nvvkhl/shaders/dh_lighting.h"

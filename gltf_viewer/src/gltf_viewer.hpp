@@ -67,7 +67,7 @@ class GltfViewer : public nvvkhl::IAppElement
     {
       // Default light
       lights.resize(1);
-      lights[0] = defaultLight();
+      lights[0] = nvvkhl_shaders::defaultLight();
     }
 
     enum EnvSystem
@@ -94,7 +94,7 @@ class GltfViewer : public nvvkhl::IAppElement
     float        maxLuminance  = 1000.0F;  // For firefly
 
 
-    std::vector<Light> lights;
+    std::vector<nvvkhl_shaders::Light> lights;
   } m_settings;
 
 public:
@@ -122,7 +122,7 @@ private:
   };
 
   void                  createScene(const std::string& filename);
-  void                  createGbuffers(const nvmath::vec2f& size);
+  void                  createGbuffers(const glm::vec2& size);
   void                  createVulkanBuffers();
   void                  createRtxSet();
   void                  createSceneSet();
@@ -153,7 +153,7 @@ private:
   std::unique_ptr<nvvkhl::AllocVma> m_alloc;
   VkCommandBuffer                   m_recordedSceneCmd{VK_NULL_HANDLE};
 
-  nvmath::vec2f                    m_viewSize{1, 1};
+  glm::vec2                        m_viewSize{1, 1};
   VkClearColorValue                m_clearColor{{0.3F, 0.3F, 0.3F, 1.0F}};  // Clear color
   VkDevice                         m_device{VK_NULL_HANDLE};                // Convenient
   std::unique_ptr<nvvkhl::GBuffer> m_gBuffers;                              // G-Buffers: color + depth
