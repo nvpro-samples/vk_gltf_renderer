@@ -27,8 +27,8 @@
 
 #include "gltf_viewer.hpp"
 #include "busy_window.hpp"
-#include "imgui_axis.hpp"
-#include "imgui_helper.h"
+#include "imgui/imgui_axis.hpp"
+#include "imgui/imgui_helper.h"
 #include "nvh/timesampler.hpp"
 #include "nvvk/dynamicrendering_vk.hpp"
 #include "nvvk/pipeline_vk.hpp"
@@ -399,11 +399,12 @@ void GltfViewer::onRender(VkCommandBuffer cmd)
   const float view_aspect_ratio = m_viewSize.x / m_viewSize.y;
 
   // Update Frame buffer uniform buffer
-  const auto& clip    = CameraManip.getClipPlanes();
-  m_frameInfo.view    = CameraManip.getMatrix();
-  m_frameInfo.proj    = nvmath::perspectiveVK(CameraManip.getFov(), view_aspect_ratio, clip.x, clip.y);
-  m_frameInfo.projInv = nvmath::inverse(m_frameInfo.proj);
-  m_frameInfo.viewInv = nvmath::inverse(m_frameInfo.view);
+  const auto& clip = CameraManip.getClipPlanes();
+  m_frameInfo.view = CameraManip.getMatrix();
+  m_frameInfo.proj = glm::perspectiveRH_ZO(glm::radians(CameraManip.getFov()), view_aspect_ratio, clip.x, clip.y);
+  m_frameInfo.proj[1][1] *= -1;
+  m_frameInfo.projInv = glm::inverse(m_frameInfo.proj);
+  m_frameInfo.viewInv = glm::inverse(m_frameInfo.view);
   m_frameInfo.camPos  = CameraManip.getEye();
   if(m_settings.envSystem == Settings::eSky)
   {
@@ -416,7 +417,7 @@ void GltfViewer::onRender(VkCommandBuffer cmd)
   {
     m_frameInfo.useSky   = 0;
     m_frameInfo.nbLights = 0;
-    m_frameInfo.envColor = nvmath::vec4f(m_settings.envIntensity, m_settings.envIntensity, m_settings.envIntensity, 1.0F);
+    m_frameInfo.envColor = glm::vec4(m_settings.envIntensity, m_settings.envIntensity, m_settings.envIntensity, 1.0F);
     m_frameInfo.envRotation  = m_settings.envRotation;
     m_frameInfo.maxLuminance = m_settings.maxLuminance;
   }
@@ -532,7 +533,7 @@ std::vector<uint32_t> GltfViewer::getShadedNodes(PipelineType type)
 //--------------------------------------------------------------------------------------------------
 // Create all G-Buffers needed when rendering the scene
 //
-void GltfViewer::createGbuffers(const nvmath::vec2f& size)
+void GltfViewer::createGbuffers(const glm::vec2& size)
 {
   static auto depth_format = nvvk::findDepthFormat(m_app->getPhysicalDevice());  // Not all depth are supported
 
@@ -643,9 +644,9 @@ void GltfViewer::createRasterPipeline()
   // Creating the Pipeline
   nvvk::GraphicsPipelineGeneratorCombined gpb(m_device, m_rasterPipe.layout, {} /*m_offscreenRenderPass*/);
   gpb.createInfo.pNext = &rf_info;
-  gpb.addBindingDescriptions({{0, sizeof(Vertex)}});
+  gpb.addBindingDescriptions({{0, sizeof(nvvkhl_shaders::Vertex)}});
   gpb.addAttributeDescriptions({
-      {0, 0, VK_FORMAT_R32G32B32_SFLOAT, offsetof(Vertex, position)},  // Position
+      {0, 0, VK_FORMAT_R32G32B32_SFLOAT, offsetof(nvvkhl_shaders::Vertex, position)},  // Position
   });
 
   {
@@ -857,13 +858,13 @@ void GltfViewer::writeSceneSet()
 //
 bool GltfViewer::updateFrame()
 {
-  static nvmath::mat4f ref_cam_matrix;
-  static float         ref_fov{CameraManip.getFov()};
+  static glm::mat4 ref_cam_matrix;
+  static float     ref_fov{CameraManip.getFov()};
 
   const auto& m   = CameraManip.getMatrix();
   const auto  fov = CameraManip.getFov();
 
-  if(memcmp(&ref_cam_matrix.a00, &m.a00, sizeof(nvmath::mat4f)) != 0 || ref_fov != fov)
+  if(ref_cam_matrix != m || ref_fov != fov)
   {
     resetFrame();
     ref_cam_matrix = m;
@@ -927,15 +928,16 @@ void GltfViewer::screenPicking()
 
   // Finding current camera matrices
   const auto& view = CameraManip.getMatrix();
-  auto        proj = nvmath::perspectiveVK(CameraManip.getFov(), aspect_ratio, 0.1F, 1000.0F);
+  auto        proj = glm::perspectiveRH_ZO(glm::radians(CameraManip.getFov()), aspect_ratio, 0.1F, 1000.0F);
+  proj[1][1] *= -1;
 
   // Setting up the data to do picking
   auto*                        cmd = m_app->createTempCmdBuffer();
   nvvk::RayPickerKHR::PickInfo pick_info;
   pick_info.pickX          = local_mouse_pos.x;
   pick_info.pickY          = local_mouse_pos.y;
-  pick_info.modelViewInv   = nvmath::invert(view);
-  pick_info.perspectiveInv = nvmath::invert(proj);
+  pick_info.modelViewInv   = glm::inverse(view);
+  pick_info.perspectiveInv = glm::inverse(proj);
 
   // Run and wait for result
   m_picker->run(cmd, pick_info);
@@ -957,10 +959,10 @@ void GltfViewer::screenPicking()
   }
 
   // Find where the hit point is and set the interest position
-  const nvmath::vec3f world_pos = nvmath::vec3f(pr.worldRayOrigin + pr.worldRayDirection * pr.hitT);
-  nvmath::vec3f       eye;
-  nvmath::vec3f       center;
-  nvmath::vec3f       up;
+  const glm::vec3 world_pos = glm::vec3(pr.worldRayOrigin + pr.worldRayDirection * pr.hitT);
+  glm::vec3       eye;
+  glm::vec3       center;
+  glm::vec3       up;
   CameraManip.getLookat(eye, center, up);
   CameraManip.setLookat(eye, world_pos, up, false);
 
@@ -1132,7 +1134,8 @@ void GltfViewer::rasterScene(VkCommandBuffer cmd)
     const auto& viewport_size = m_gBuffers->getSize();
     const float aspect_ratio  = static_cast<float>(viewport_size.width) / static_cast<float>(viewport_size.height);
     const auto& view          = CameraManip.getMatrix();
-    const auto  proj          = nvmath::perspectiveVK(CameraManip.getFov(), aspect_ratio, 0.1F, 1000.0F);
+    auto        proj          = glm::perspectiveRH_ZO(glm::radians(CameraManip.getFov()), aspect_ratio, 0.1F, 1000.0F);
+    proj[1][1] *= -1;
 
     auto img_size = m_gBuffers->getSize();
     if(m_settings.envSystem == Settings::eSky)

@@ -20,11 +20,11 @@
 
 #pragma once
 
-#include "imgui.h"
-#include "imgui_internal.h"
+#include <imgui.h>
+#include <imgui_internal.h>
 #include "nvvkhl/application.hpp"
 #include "nvml_monitor.hpp"
-#include "imgui_helper.h"
+#include "imgui/imgui_helper.h"
 #include <numeric>
 
 namespace nvvkhl {
