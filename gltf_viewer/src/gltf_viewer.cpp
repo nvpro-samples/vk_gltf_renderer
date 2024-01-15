@@ -17,7 +17,7 @@
  * SPDX-License-Identifier: Apache-2.0
  */
 
-#if defined(WIN32)
+#if defined(_WIN32)
 #define WIN32_LEAN_AND_MEAN
 #include <windows.h>
 #endif
@@ -36,6 +36,7 @@
 #include "nvvk/renderpasses_vk.hpp"
 #include "nvvk/sbtwrapper_vk.hpp"
 #include "nvvkhl/element_camera.hpp"
+#include "nvvkhl/element_profiler.hpp"
 #include "nvvkhl/gbuffer.hpp"
 #include "nvvkhl/gltf_scene_rtx.hpp"
 #include "nvvkhl/hdr_env.hpp"
@@ -47,6 +48,7 @@
 #include "shaders/dh_bindings.h"
 
 extern std::shared_ptr<nvvkhl::ElementCamera> g_elem_camera;
+extern std::shared_ptr<nvvkhl::ElementProfiler> g_profiler; // GPU profiler
 
 #include "_autogen/pathtrace.rahit.h"
 #include "_autogen/pathtrace.rchit.h"
@@ -442,7 +444,10 @@ void GltfViewer::onRender(VkCommandBuffer cmd)
   }
 
   // Apply tonemapper - take GBuffer-1 and output to GBuffer-0
-  m_tonemapper->runCompute(cmd, m_gBuffers->getSize());
+  {
+    auto sec = g_profiler->timeRecurring("Tonemapper", cmd);
+    m_tonemapper->runCompute(cmd, m_gBuffers->getSize());
+  }
 }
 
 //--------------------------------------------------------------------------------------------------
@@ -981,6 +986,7 @@ void GltfViewer::screenPicking()
 void GltfViewer::raytraceScene(VkCommandBuffer cmd)
 {
   const nvvk::DebugUtil::ScopedCmdLabel scope_dbg = m_dutil->DBG_SCOPE(cmd);
+  auto sec = g_profiler->timeRecurring("Raytrace", cmd);
 
   // Ray trace
   std::vector<VkDescriptorSet> desc_sets{m_rtxSet->getSet(), m_sceneSet->getSet(), m_sky->getDescriptorSet(),
@@ -1139,9 +1145,13 @@ void GltfViewer::rasterScene(VkCommandBuffer cmd)
 
     auto img_size = m_gBuffers->getSize();
     if(m_settings.envSystem == Settings::eSky)
+    {
+      auto sec = g_profiler->timeRecurring("Sky", cmd);
       m_sky->draw(cmd, view, proj, img_size);
+    }
     else
     {
+      auto sec = g_profiler->timeRecurring("HDR Dome", cmd);
       std::array<float, 4> color{m_settings.envIntensity, m_settings.envIntensity, m_settings.envIntensity, 1.0F};
       m_hdrDome->draw(cmd, view, proj, img_size, color.data(), m_settings.envRotation);
     }
@@ -1154,6 +1164,8 @@ void GltfViewer::rasterScene(VkCommandBuffer cmd)
 
   // Execute recorded command buffer
   {
+    auto sec = g_profiler->timeRecurring("Raster", cmd);
+
     // Drawing the primitives in the RGBA32F G-Buffer, don't clear or it will erase the
     nvvk::createRenderingInfo r_info({{0, 0}, m_gBuffers->getSize()}, {m_gBuffers->getColorImageView(eResult)},
                                      m_gBuffers->getDepthImageView(), VK_ATTACHMENT_LOAD_OP_LOAD, VK_ATTACHMENT_LOAD_OP_CLEAR,

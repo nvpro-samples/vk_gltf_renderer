@@ -33,19 +33,20 @@
 #include "nvvk/sbtwrapper_vk.hpp"
 #include "nvvkhl/element_camera.hpp"
 #include "nvvkhl/element_gui.hpp"
+#include "nvvkhl/element_logger.hpp"
+#include "nvvkhl/element_nvml.hpp"
+#include "nvvkhl/element_profiler.hpp"
 #include "nvvkhl/gbuffer.hpp"
 #include "nvvkhl/gltf_scene_rtx.hpp"
 #include "nvvkhl/hdr_env.hpp"
 #include "nvvkhl/hdr_env_dome.hpp"
 #include "nvvkhl/sky.hpp"
 #include "nvvkhl/tonemap_postprocess.hpp"
-#include "nvvkhl/element_logger.hpp"
 
 #include "gltf_viewer.hpp"
-#include "element_nvml.hpp"
 
-std::shared_ptr<nvvkhl::ElementCamera> g_elem_camera;  // Is accessed elsewhere in the App
-
+std::shared_ptr<nvvkhl::ElementCamera>   g_elem_camera;  // Is accessed elsewhere in the App
+std::shared_ptr<nvvkhl::ElementProfiler> g_profiler; // GPU profiler
 
 
 //////////////////////////////////////////////////////////////////////////
@@ -88,12 +89,14 @@ auto main(int argc, char** argv) -> int
   // Create Elements of the application
   auto gltf_viewer = std::make_shared<GltfViewer>();
   g_elem_camera    = std::make_shared<nvvkhl::ElementCamera>();
+  g_profiler       = std::make_shared<nvvkhl::ElementProfiler>(false);
 
   app->addElement(g_elem_camera);                                              // Controlling the camera movement
-  app->addElement(gltf_viewer);                                                // Our sample
   app->addElement(std::make_shared<nvvkhl::ElementDefaultMenu>());             // Menu / Quit
   app->addElement(std::make_unique<nvvkhl::ElementLogger>(&g_logger, false));  // Add logger window
   app->addElement(std::make_unique<nvvkhl::ElementNvml>(false));               // Add logger window
+  app->addElement(g_profiler);                                                 // GPU Profiler
+  app->addElement(gltf_viewer);                                                // Our sample
 
   // Search paths
   const std::vector<std::string> default_search_paths = {NVPSystem::exePath() + PROJECT_DOWNLOAD_RELDIRECTORY};
