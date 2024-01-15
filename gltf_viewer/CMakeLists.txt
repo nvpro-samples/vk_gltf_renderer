@@ -11,28 +11,20 @@ file(GLOB SOURCE_FILES
      src/*.h
      )
  
- file(GLOB OTHER_SOURCE_FILES 
-     ${COMMON_DIR}/*.cpp 
-     ${COMMON_DIR}/*.hpp 
-     ${COMMON_DIR}/*.h
-     )
-list(APPEND COMMON_SOURCE_FILES ${OTHER_SOURCE_FILES})
-
-
 add_executable(${PROJECT_NAME} 
     ${SOURCE_FILES} 
     ${COMMON_SOURCE_FILES} 
     ${PACKAGE_SOURCE_FILES} 
     )
 
-target_include_directories(${PROJECT_NAME} 
-    PRIVATE ${COMMON_DIR}  ${ADVANCE_DIR}
-    )
+target_include_directories(${PROJECT_NAME} PRIVATE ${ADVANCE_DIR} )
 
 target_link_libraries (${PROJECT_NAME} 
-    ${PLATFORM_LIBRARIES} 
-    ${LIBRARIES_OPTIMIZED} 
-    nvpro_core
+        nvpro_core
+        optimized ${LIBRARIES_OPTIMIZED}
+        debug ${LIBRARIES_DEBUG}
+        ${PLATFORM_LIBRARIES}
+        ${UNIXLINKLIBS}
     )
 
 target_compile_definitions(${PROJECT_NAME} 
