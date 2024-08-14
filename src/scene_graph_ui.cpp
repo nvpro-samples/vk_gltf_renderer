@@ -17,12 +17,24 @@
  * SPDX-License-Identifier: Apache-2.0
  */
 
+#include <glm/glm.hpp>
+namespace glm {
+// vec3 specialization
+GLM_FUNC_DECL vec3      fma(vec3 const& a, vec3 const& b, vec3 const& c);
+GLM_FUNC_QUALIFIER vec3 fma(vec3 const& a, vec3 const& b, vec3 const& c)
+{
+  return {a.x * b.x + c.x, a.y * b.y + c.y, a.z * b.z + c.z};
+}
+}  // namespace glm
+
 #include <glm/gtc/color_space.hpp>
 
 #include "scene_graph_ui.hpp"
 #include "imgui/imgui_helper.h"
+#include "nvvkhl/shaders/dh_tonemap.h"
 
 namespace PE = ImGuiH::PropertyEditor;
+
 
 //--------------------------------------------------------------------------------------------------
 // Entry point for rendering the scene graph
@@ -287,7 +299,7 @@ struct LightUI
 
   void toUI(const tinygltf::Light& light)
   {
-    color      = glm::convertLinearToSRGB(glm::make_vec3(light.color.data()));
+    color      = nvvkhl_shaders::toSrgb(glm::make_vec3(light.color.data()));
     type       = light.type == "point" ? 0 : light.type == "spot" ? 1 : 2;
     intensity  = static_cast<float>(light.intensity);
     innerAngle = static_cast<float>(light.spot.innerConeAngle);
@@ -297,7 +309,7 @@ struct LightUI
 
   void fromUI(tinygltf::Light& light) const
   {
-    glm::vec3 linearColor     = glm::convertSRGBToLinear(color);
+    glm::vec3 linearColor     = nvvkhl_shaders::toLinear(color);
     light.color               = {linearColor.x, linearColor.y, linearColor.z};
     light.type                = lightType[type];
     light.intensity           = intensity;

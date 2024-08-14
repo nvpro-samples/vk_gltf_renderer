@@ -76,7 +76,7 @@ What is currently not supported are animations and skins, multiple textures coor
 
 - [ ] KHR_animation_pointer
 - [ ] KHR_draco_mesh_compression
-- [ ] KHR_lights_punctual
+- [x] KHR_lights_punctual
 - [x] KHR_materials_anisotropy
 - [x] KHR_materials_clearcoat
 - [ ] KHR_materials_dispersion
