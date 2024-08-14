@@ -93,7 +93,4 @@ struct Ray
 #define FLT_MAX 3.402823466e+38
 #endif
 
-const float DIRAC = -1.0;
-
-
 #endif  // HOST_DEVICE_H

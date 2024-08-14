@@ -561,7 +561,7 @@ bool gltfr::Scene::onUI(Resources& resources, Settings& settings, GLFWwindow* wi
     // When switching the environment, reset Firefly max luminance
     if(cache_env_system != settings.envSystem)
     {
-      settings.maxLuminance = settings.envSystem == Settings::eSky ? 10.f : m_hdrEnv->getIntegral();
+      settings.setDefaultLuminance(m_hdrEnv->getIntegral());
     }
 
     PE::begin();
@@ -658,7 +658,7 @@ bool gltfr::Scene::onUI(Resources& resources, Settings& settings, GLFWwindow* wi
           m_selectedRenderNode = -1;  // No node selected
         }
 
-        if(m_sceneGraph->hasTransfromChanged())
+        if(m_sceneGraph->hasTransformChanged() || m_sceneGraph->hasLightChanged())
         {
           m_dirtyFlags.set(eVulkanScene);
           m_dirtyFlags.set(eRtxScene);

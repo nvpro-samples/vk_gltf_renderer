@@ -41,3 +41,10 @@ void gltfr::Settings::onUI()
     PE::end();
   }
 }
+
+// The HDR intensity is the luminance of the environment when using HDR.
+// See: HdrEnv::getIntegral()
+void gltfr::Settings::setDefaultLuminance(float hdrEnvIntensity)
+{
+  maxLuminance = (envSystem == Settings::eSky) ? 10.0f : hdrEnvIntensity;
+}

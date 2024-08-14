@@ -566,7 +566,7 @@ private:
   {
     if(m_scene.hasHdrChanged())
     {
-      m_settings.maxLuminance = m_scene.m_hdrEnv->getIntegral();
+      m_settings.setDefaultLuminance(m_scene.m_hdrEnv->getIntegral());
     }
 
     // Scene changed (new scene)
@@ -601,7 +601,7 @@ private:
   }
 
 
-  nvvkhl::Application*                           m_app  = nullptr;
+  nvvkhl::Application*                           m_app = nullptr;
   Resources                                      m_resources;
   Settings                                       m_settings;
   Scene                                          m_scene;

@@ -20,39 +20,87 @@ struct SampleResult
 //      The direction to the light source
 //      The PDF
 //
-vec3 sampleLights(in vec3 pos, vec3 normal, in vec3 worldRayDirection, inout uint seed, out vec3 dirToLight, out float lightPdf)
+vec3 sampleLights(in vec3 pos, vec3 normal, in vec3 worldRayDirection, inout uint seed, out vec3 dirToLight, out float lightPdf, out float lightDist)
 {
   vec3 radiance = vec3(0);
-  lightPdf      = 1.0;
+  lightPdf      = 0.0;
+  float envPdf  = 0.0;
+  lightDist     = INFINITE;
 
-  if(frameInfo.useSky == 1)
+  // Weight for MIS (TODO: adjust these based on scene characteristics: light intensity vs environment intensity)
+  float lightWeight = (sceneDesc.numLights > 0) ? 0.5 : 0.0;
+  float envWeight   = (frameInfo.useSky == 1 || frameInfo.envIntensity.x > 0.0) ? 0.5 : 0.0;
+
+  // Normalize weights
+  float totalWeight = lightWeight + envWeight;
+  if(totalWeight == 0.0f)
+    return vec3(0.);
+
+  lightWeight /= totalWeight;
+  envWeight /= totalWeight;
+
+  // Sample lights
+  vec3 lightRadiance = vec3(0);
+  vec3 lightDir;
+  if(sceneDesc.numLights > 0 && lightWeight > 0)
   {
-    vec2 random_sample = vec2(rand(seed), rand(seed));  // Assume rand() returns a random float in [0, 1]
-
-    SkySamplingResult skySample = samplePhysicalSky(skyInfo, random_sample);
-    dirToLight                  = skySample.direction;
-    lightPdf                    = skySample.pdf;
-    radiance                    = skySample.radiance / lightPdf;
-
-    return radiance;
+    int          lightIndex = min(int(rand(seed) * sceneDesc.numLights), sceneDesc.numLights - 1);
+    Light        light      = RenderLightBuf(sceneDesc.lightAddress)._[lightIndex];
+    LightContrib contrib = singleLightContribution(light, pos, normal, worldRayDirection, vec2(rand(seed), rand(seed)));
+    lightDir             = -contrib.incidentVector;
+    lightPdf             = (1.0 / sceneDesc.numLights) * lightWeight;
+    lightRadiance        = contrib.intensity / lightPdf;
+    lightDist            = contrib.distance;
   }
-  else
+
+  // Sample environment
+  vec3 envRadiance = vec3(0);
+  vec3 envDir;
+  if(envWeight > 0)
   {
-    vec3 rand_val     = vec3(rand(seed), rand(seed), rand(seed));
-    vec4 radiance_pdf = environmentSample(hdrTexture, rand_val, dirToLight);
-    radiance          = radiance_pdf.xyz;
-    lightPdf          = radiance_pdf.w;
-
-    // Apply rotation and environment intensity
-    dirToLight = rotate(dirToLight, vec3(0, 1, 0), frameInfo.envRotation);
-    radiance *= frameInfo.envIntensity.xyz;
-
-    // Return radiance over pdf
-    return radiance / lightPdf;
+    if(frameInfo.useSky == 1)
+    {
+      vec2              random_sample = vec2(rand(seed), rand(seed));
+      SkySamplingResult skySample     = samplePhysicalSky(skyInfo, random_sample);
+      envDir                          = skySample.direction;
+      envPdf                          = skySample.pdf * envWeight;
+      envRadiance                     = skySample.radiance / envPdf;
+    }
+    else
+    {
+      vec3 rand_val     = vec3(rand(seed), rand(seed), rand(seed));
+      vec4 radiance_pdf = environmentSample(hdrTexture, rand_val, envDir);
+      envRadiance       = radiance_pdf.xyz;
+      envPdf            = radiance_pdf.w * envWeight;
+      envDir            = rotate(envDir, vec3(0, 1, 0), frameInfo.envRotation);
+      envRadiance *= frameInfo.envIntensity.xyz;
+      envRadiance /= envPdf;
+    }
   }
 
-  // Return radiance over pdf
-  return radiance / lightPdf;
+  // Choose between light and environment using MIS
+  float rnd = rand(seed);
+  if(rnd < lightWeight && lightWeight > 0)
+  {
+    dirToLight = lightDir;
+    radiance   = lightRadiance;
+    // MIS weight calculation
+    float misWeight = lightPdf / (lightPdf + envPdf);
+    radiance *= misWeight;
+  }
+  else if(envWeight > 0)
+  {
+    dirToLight = envDir;
+    radiance   = envRadiance;
+    // MIS weight calculation
+    float misWeight = envPdf / (lightPdf + envPdf);
+    radiance *= misWeight;
+  }
+
+  // Update the total PDF
+  lightPdf = lightPdf + envPdf;
+
+  return radiance;
 }
 
 
@@ -199,7 +247,8 @@ SampleResult pathTrace(Ray r, inout uint seed)
     vec3  contribution         = vec3(0);
     vec3  dirToLight           = vec3(0);
     float lightPdf             = 0.F;
-    vec3  lightRadianceOverPdf = sampleLights(hit.pos, pbrMat.N, r.direction, seed, dirToLight, lightPdf);
+    float lightDist            = 0.F;
+    vec3  lightRadianceOverPdf = sampleLights(hit.pos, pbrMat.N, r.direction, seed, dirToLight, lightPdf, lightDist);
 
     // do not next event estimation (but delay the adding of contribution)
     const bool nextEventValid = ((dot(dirToLight, hit.geonrm) > 0.0f) != isInside) && lightPdf != 0.0f;
@@ -267,7 +316,7 @@ SampleResult pathTrace(Ray r, inout uint seed)
     {
       vec3 shadowRayOrigin = offsetRay(hit.pos, hit.geonrm);
       Ray  shadowRay       = Ray(shadowRayOrigin, dirToLight);
-      bool inShadow        = traceShadow(shadowRay, INFINITE, seed);
+      bool inShadow        = traceShadow(shadowRay, lightDist, seed);
       // We are adding the contribution to the radiance only if the ray is not occluded by an object.
       if(!inShadow)
       {

@@ -57,6 +57,7 @@ struct Settings
   glm::vec3    silhouetteColor = {0.6f, 0.4f, 0.0f};
 
   void onUI();
+  void setDefaultLuminance(float hdrEnvIntensity);
 };
 
 }  // namespace gltfr

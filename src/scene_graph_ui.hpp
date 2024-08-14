@@ -50,12 +50,13 @@ public:
   }
 
   void render();
-  bool hasTransfromChanged() { return m_changes.test(eNodeTransformDirty); }
+  bool hasTransformChanged() { return m_changes.test(eNodeTransformDirty); }
   bool hasMaterialChanged() { return m_changes.test(eMaterialDirty); }
+  bool hasLightChanged() { return m_changes.test(eLightDirty); }
   void resetChanges() { m_changes.reset(); }
   void selectNode(int nodeIndex);
-  int  selectedNode() const { return selectedNodeIndex; }
-  int  selectedMaterial() const { return selectedMaterialIndex; }
+  int  selectedNode() const { return (m_selectType == eNode) ? m_selectedIndex : -1; }
+  int  selectedMaterial() const { return (m_selectType == eMaterial) ? m_selectedIndex : -1; }
 
 private:
   void preprocessOpenNodes();
@@ -64,15 +65,22 @@ private:
   std::unordered_set<int> openNodes;  // To keep track of nodes that should be open
 
   tinygltf::Model& m_model;
-  int              selectedNodeIndex     = -1;
-  int              selectedMaterialIndex = -1;
-  std::bitset<32>  m_changes;
-  nvh::Bbox        m_bbox;
+  enum SelectType
+  {
+    eNode,
+    eMaterial,
+    eLight
+  };
+  SelectType      m_selectType    = eNode;
+  int             m_selectedIndex = -1;
+  std::bitset<32> m_changes;
+  nvh::Bbox       m_bbox;
 
   enum DirtyFlags
   {
     eNodeTransformDirty,
     eMaterialDirty,
+    eLightDirty,
     // Add more flags as needed
   };
 
@@ -80,6 +88,7 @@ private:
   void renderMesh(int meshIndex);
   void renderMaterial(int materialIndex);
   void renderNodeDetails(int nodeIndex);
+  void renderLightDetails(int lightIndex);
 
   void getNodeTransform(const tinygltf::Node& node, glm::vec3& translation, glm::quat& rotation, glm::vec3& scale);
   bool m_doScroll = false;

@@ -17,7 +17,7 @@
  * SPDX-License-Identifier: Apache-2.0
  */
 
-#include <fmt/format.h>
+#include <glm/gtc/color_space.hpp>
 
 #include "scene_graph_ui.hpp"
 #include "imgui/imgui_helper.h"
@@ -54,15 +54,21 @@ void GltfModelUI::render()
 
   ImGui::Separator();
 
-  if(ImGui::BeginChild("Details", ImVec2(0, 0), true))
+  if(ImGui::BeginChild("Details", ImVec2(0, 0), true) && (m_selectedIndex > -1))
   {
-    if(selectedNodeIndex > -1)
+    switch(m_selectType)
     {
-      renderNodeDetails(selectedNodeIndex);
-    }
-    if(selectedMaterialIndex > -1)
-    {
-      renderMaterial(selectedMaterialIndex);
+      case GltfModelUI::eNode:
+        renderNodeDetails(m_selectedIndex);
+        break;
+      case GltfModelUI::eMaterial:
+        renderMaterial(m_selectedIndex);
+        break;
+      case GltfModelUI::eLight:
+        renderLightDetails(m_selectedIndex);
+        break;
+      default:
+        break;
     }
   }
   ImGui::EndChild();
@@ -74,8 +80,8 @@ void GltfModelUI::render()
 //
 void GltfModelUI::selectNode(int nodeIndex)
 {
-  selectedNodeIndex     = nodeIndex;
-  selectedMaterialIndex = -1;
+  m_selectType    = eNode;
+  m_selectedIndex = nodeIndex;
   openNodes.clear();
   if(nodeIndex >= 0)
     preprocessOpenNodes();
@@ -100,7 +106,7 @@ void GltfModelUI::renderNode(int nodeIndex)
   }
 
   // If the node is selected, we want to highlight it
-  if(selectedNodeIndex == nodeIndex)
+  if((m_selectType == eNode) && (m_selectedIndex == nodeIndex))
   {
     flags |= ImGuiTreeNodeFlags_Selected;
     // Scroll to the selected node, done once and no need to open all the parents any more
@@ -116,8 +122,8 @@ void GltfModelUI::renderNode(int nodeIndex)
   bool nodeOpen = ImGui::TreeNodeEx((void*)(intptr_t)nodeIndex, flags, "%s (Node %d)", node.name.c_str(), nodeIndex);
   if(ImGui::IsItemClicked() && !ImGui::IsItemToggledOpen())
   {
-    selectedNodeIndex     = (selectedNodeIndex == nodeIndex) ? -1 /*toggle off*/ : nodeIndex;
-    selectedMaterialIndex = -1;
+    m_selectedIndex = ((m_selectType == eNode) && (m_selectedIndex == nodeIndex)) ? -1 /*toggle off*/ : nodeIndex;
+    m_selectType    = eNode;
   }
 
   // If the node is open, we want to render the mesh and the children
@@ -130,6 +136,15 @@ void GltfModelUI::renderNode(int nodeIndex)
       {
         renderMesh(node.mesh);
         ImGui::TreePop();
+      }
+    }
+    else if(node.light >= 0)
+    {
+      auto& light = m_model.lights[node.light];
+      if(ImGui::Selectable(light.name.c_str(), (m_selectedIndex == node.light) && (m_selectType == eLight)))
+      {
+        m_selectType    = eLight;
+        m_selectedIndex = node.light;
       }
     }
 
@@ -152,12 +167,15 @@ void GltfModelUI::renderMesh(int meshIndex)
   {
     if(ImGui::TreeNode("Primitive", "Primitive %s", std::to_string(i).c_str()))
     {
-      int         materialID   = mesh.primitives[i].material;
-      std::string materialName = m_model.materials[materialID].name;
-      if(ImGui::Selectable(materialName.c_str(), selectedMaterialIndex == materialID))
+      int materialID = mesh.primitives[i].material;
+      if(materialID >= 0 && materialID < m_model.materials.size())
       {
-        selectedMaterialIndex = materialID;
-        selectedNodeIndex     = -1;
+        std::string materialName = m_model.materials[materialID].name;
+        if(ImGui::Selectable(materialName.c_str(), (m_selectedIndex == materialID) && (m_selectType == eMaterial)))
+        {
+          m_selectType    = eMaterial;
+          m_selectedIndex = materialID;
+        }
       }
       ImGui::TreePop();
     }
@@ -255,6 +273,47 @@ struct MaterialUI
   }
 };
 
+// Utility struct to handle material UI
+struct LightUI
+{
+  glm::vec3 color;
+  int       type;
+  float     innerAngle;
+  float     outerAngle;
+  float     intensity;
+  float     radius;
+
+  static constexpr const char* lightType[] = {"point", "spot", "directional"};
+
+  void toUI(const tinygltf::Light& light)
+  {
+    color      = glm::convertLinearToSRGB(glm::make_vec3(light.color.data()));
+    type       = light.type == "point" ? 0 : light.type == "spot" ? 1 : 2;
+    intensity  = static_cast<float>(light.intensity);
+    innerAngle = static_cast<float>(light.spot.innerConeAngle);
+    outerAngle = static_cast<float>(light.spot.outerConeAngle);
+    radius     = light.extras.Has("radius") ? float(light.extras.Get("radius").GetNumberAsDouble()) : 0.0f;
+  }
+
+  void fromUI(tinygltf::Light& light) const
+  {
+    glm::vec3 linearColor     = glm::convertSRGBToLinear(color);
+    light.color               = {linearColor.x, linearColor.y, linearColor.z};
+    light.type                = lightType[type];
+    light.intensity           = intensity;
+    light.spot.innerConeAngle = innerAngle;
+    light.spot.outerConeAngle = outerAngle;
+    if(!light.extras.IsObject())
+    {
+      light.extras = tinygltf::Value(tinygltf::Value::Object());
+    }
+    tinygltf::Value::Object extras = light.extras.Get<tinygltf::Value::Object>();
+    extras["radius"]               = tinygltf::Value(radius);
+    light.extras                   = tinygltf::Value(extras);
+  }
+};
+
+
 //--------------------------------------------------------------------------------------------------
 // Rendering the material properties
 // - Base color
@@ -298,13 +357,13 @@ void GltfModelUI::renderMaterial(int materialIndex)
 void GltfModelUI::preprocessOpenNodes()
 {
   openNodes.clear();
-  if(selectedNodeIndex < 0)
+  if((m_selectedIndex < 0) || (m_selectType != eNode))
   {
     return;
   }
   for(int rootIndex : m_model.scenes[0].nodes)  // Assuming sceneNodes contains root node indices
   {
-    if(markOpenNodes(rootIndex, selectedNodeIndex, openNodes))
+    if(markOpenNodes(rootIndex, m_selectedIndex, openNodes))
     {
       break;
     }
@@ -329,4 +388,35 @@ bool GltfModelUI::markOpenNodes(int nodeIndex, int targetNodeIndex, std::unorder
     }
   }
   return false;
+}
+
+void GltfModelUI::renderLightDetails(int lightIndex)
+{
+  auto& light = m_model.lights[lightIndex];
+
+  ImGui::Text("Light: %s", light.name.c_str());
+
+  PE::begin();
+  {
+    bool    modif   = false;
+    LightUI lightUI = {};
+    lightUI.toUI(light);
+
+    modif |= PE::Combo("Type", &lightUI.type, LightUI::lightType, IM_ARRAYSIZE(LightUI::lightType));
+    modif |= PE::ColorEdit3("Color", glm::value_ptr(lightUI.color));
+    modif |= PE::SliderAngle("Intensity", &lightUI.intensity, 0.0f, 1000000.f, "%.3f", ImGuiSliderFlags_Logarithmic);
+    modif |= PE::SliderAngle("Inner Cone Angle", &lightUI.innerAngle, 0.0f, 180.f);
+    lightUI.outerAngle = std::max(lightUI.innerAngle, lightUI.outerAngle);  // Outer angle should be larger than inner angle
+    modif |= PE::SliderAngle("Outer Cone Angle", &lightUI.outerAngle, 0.0f, 180.f);
+    lightUI.innerAngle = std::min(lightUI.innerAngle, lightUI.outerAngle);  // Inner angle should be smaller than outer angle
+    modif |= PE::SliderAngle("Radius", &lightUI.radius, 0.0f, 1000000.f, "%.3f", ImGuiSliderFlags_Logarithmic);
+
+    lightUI.fromUI(light);
+
+    if(modif)
+    {
+      m_changes.set(eLightDirty);
+    }
+  }
+  PE::end();
 }

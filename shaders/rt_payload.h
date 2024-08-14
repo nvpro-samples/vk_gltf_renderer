@@ -12,6 +12,7 @@
 layout(push_constant, scalar)                   uniform                             RtxPushConstant_ { PushConstantPathtracer pc; };
 
 layout(buffer_reference, scalar)                readonly buffer                     GltfMaterialBuf  { GltfShadeMaterial m[]; };
+layout(buffer_reference, scalar)                readonly buffer                     RenderLightBuf  { Light _[]; };
 
 layout(set = 0, binding = eTlas)					uniform accelerationStructureEXT    topLevelAS;
 layout(set = 0, binding = eOutImage, rgba32f)		uniform image2D                     image;
