@@ -135,7 +135,8 @@ void gltfr::saveImageToFile(VkDevice device, VkImage dstImage, VkDeviceMemory ds
   else
   {
     LOGW("Screenshot: unknown file extension, saving as PNG\n");
-    stbi_write_png(filename.c_str(), size.width, size.height, 4, data, size.width * 4);
+    path += ".png";
+    stbi_write_png(path.string().c_str(), size.width, size.height, 4, pixels.data(), size.width * 4);
   }
 
   LOGI("Screenshot saved to %s\n", filename.c_str());

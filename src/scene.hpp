@@ -101,6 +101,9 @@ public:
   // File information
   std::string getFilename() const;
 
+  // Utility
+  void recreateTangents(bool onlyFix);
+
 
   std::unique_ptr<nvh::gltf::Scene>             m_gltfScene{};     // The glTF scene
   std::unique_ptr<nvvkhl::SceneRtx>             m_gltfSceneRtx{};  // The Vulkan scene with RTX acceleration structures
@@ -129,11 +132,12 @@ private:
 
   enum DirtyFlags
   {
-    eNewScene,        // When a new scene is loaded, same for multiple scenes
-    eVulkanScene,     // When the Vulkan geometry buffers need to be updated
-    eVulkanMaterial,  // When the Vulkan material buffers need to be updated
-    eRtxScene,        // When the RTX acceleration structures need to be updated
-    eHdrEnv,          // When the HDR environment needs to be updated
+    eNewScene,          // When a new scene is loaded, same for multiple scenes
+    eVulkanScene,       // When the Vulkan geometry buffers need to be updated
+    eVulkanMaterial,    // When the Vulkan material buffers need to be updated
+    eVulkanAttributes,  // When the Vulkan attributes need to be updated
+    eRtxScene,          // When the RTX acceleration structures need to be updated
+    eHdrEnv,            // When the HDR environment needs to be updated
 
     eNumDirtyFlags  // Keep last - Number of dirty flags
   };

@@ -52,9 +52,9 @@ namespace gltfr {
 
 struct RasterSettings
 {
-  bool showWireframe{false};
-  bool useSuperSample{true};
-  int  dbgMethod{0};
+  bool             showWireframe{false};
+  bool             useSuperSample{true};
+  DH::EDebugMethod dbgMethod{DH::eDbgMethod_none};
 } g_rasterSettings;
 
 // This shows path tracing using ray tracing
@@ -365,8 +365,8 @@ bool RendererRaster::onUI()
     PE::begin();
     changed |= PE::Checkbox("Show Wireframe", &g_rasterSettings.showWireframe);
     changed |= PE::Checkbox("Use Super Sample", &g_rasterSettings.useSuperSample);
-    changed |= PE::Combo("Debug Method", &g_rasterSettings.dbgMethod,
-                         "None\0Metallic\0Roughness\0Normal\0Tangent\0Bitangent\0BaseColor\0Emissive\0Opacity\0\0");
+    changed |= PE::Combo("Debug Method", reinterpret_cast<int32_t*>(&g_rasterSettings.dbgMethod),
+                         "None\0Metallic\0Roughness\0Normal\0Tangent\0Bitangent\0BaseColor\0Emissive\0Opacity\0TexCoord\0\0");
     PE::end();
     ImGui::PopID();
   }

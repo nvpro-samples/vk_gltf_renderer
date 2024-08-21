@@ -97,6 +97,12 @@ endif()
 # Include the rapidjson headers
 target_include_directories(${PROJNAME} PRIVATE ${RAPIDJSON_INCLUDE_DIR})
 
+# Include the MikkTSpace
+set(MIKKTSPACE_DIR ${CMAKE_CURRENT_SOURCE_DIR}/third_party/MikkTSpace)
+set(MIKKTSPACE_SRC ${MIKKTSPACE_DIR}/mikktspace.c ${MIKKTSPACE_DIR}/mikktspace.h)
+target_include_directories(${PROJNAME} PRIVATE ${MIKKTSPACE_DIR})
+target_sources(${PROJNAME} PRIVATE ${MIKKTSPACE_SRC})
+source_group("MikkTSpace" FILES ${MIKKTSPACE_SRC})
 
 #####################################################################################
 # common source code needed for this sample

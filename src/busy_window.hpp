@@ -31,30 +31,47 @@
 
 #include "imgui.h"
 
-// Display a modal window when loading assets or other long operation on separated thread
-inline void showBusyWindow(const std::string& busyReasonText)
+class BusyWindow
 {
-  if(busyReasonText.empty())
-    return;
+public:
+  void start(const std::string& reason)
+  {
+    m_busy   = true;
+    m_reason = reason;
+  }
+  void stop() { m_busy = false; }
+  bool isBusy() const { return m_busy; }
 
   // Display a modal window when loading assets or other long operation on separated thread
-  ImGui::OpenPopup("Busy Info");
-
-  // Position in the center of the main window when appearing
-  const ImVec2 win_size(300, 100);
-  ImGui::SetNextWindowSize(win_size);
-  const ImVec2 center = ImGui::GetMainViewport()->GetCenter();
-  ImGui::SetNextWindowPos(center, ImGuiCond_Appearing, ImVec2(0.5F, 0.5F));
-
-  // Window without any decoration
-  ImGui::PushStyleVar(ImGuiStyleVar_WindowRounding, 15.0);
-  if(ImGui::BeginPopupModal("Busy Info", nullptr, ImGuiWindowFlags_AlwaysAutoResize | ImGuiWindowFlags_NoDecoration))
+  inline void show()
   {
-    // Center text in window
-    ImGui::TextDisabled("Please wait ...");
-    ImGui::NewLine();
-    ImGui::ProgressBar(-.20f * float(ImGui::GetTime()), ImVec2(-1.0f, 0.0f), busyReasonText.c_str());
-    ImGui::EndPopup();
+    if(m_reason.empty())
+      return;
+
+    // Display a modal window when loading assets or other long operation on separated thread
+    ImGui::OpenPopup("Busy Info");
+
+    // Position in the center of the main window when appearing
+    const ImVec2 win_size(300, 100);
+    ImGui::SetNextWindowSize(win_size);
+    const ImVec2 center = ImGui::GetMainViewport()->GetCenter();
+    ImGui::SetNextWindowPos(center, ImGuiCond_Appearing, ImVec2(0.5F, 0.5F));
+
+    // Window without any decoration
+    ImGui::PushStyleVar(ImGuiStyleVar_WindowRounding, 15.0);
+    if(ImGui::BeginPopupModal("Busy Info", nullptr, ImGuiWindowFlags_AlwaysAutoResize | ImGuiWindowFlags_NoDecoration))
+    {
+      // Center text in window
+      ImGui::TextDisabled("Please wait ...");
+      ImGui::NewLine();
+      ImGui::ProgressBar(-.20f * float(ImGui::GetTime()), ImVec2(-1.0f, 0.0f), m_reason.c_str());
+      ImGui::EndPopup();
+    }
+    ImGui::PopStyleVar();
   }
-  ImGui::PopStyleVar();
-}
+
+
+private:
+  bool        m_busy{false};
+  std::string m_reason;
+};

@@ -177,7 +177,7 @@ void main()
     case eDbgMethod_bitangent:
       outColor = vec4(pbrMat.B * .5 + .5, 1);
       return;
-    case eDbgMethod_basecolor:
+    case eDbgMethod_baseColor:
       outColor = vec4(vec3(pbrMat.baseColor), 1);
       return;
     case eDbgMethod_emissive:
@@ -185,6 +185,9 @@ void main()
       return;
     case eDbgMethod_opacity:
       outColor = vec4(vec3(pbrMat.opacity * (1.0 - pbrMat.transmission)), 1);
+      return;
+    case eDbgMethod_texCoord:
+      outColor = vec4(hit.uv, 0, 1);
       return;
   }
 

@@ -13,7 +13,6 @@
 
 precision highp float;
 
-
 //-----------------------------------------------------------------------
 //-----------------------------------------------------------------------
 HitState getHitState(in RenderPrimitive renderPrim,      // Buffer containing all the mesh information
@@ -59,7 +58,9 @@ HitState getHitState(in RenderPrimitive renderPrim,      // Buffer containing al
 
   // Tangent - Bitangent
   vec4 tng[3];
-  if(hasVertexTangent(renderPrim))
+  bool hasTangent = hasVertexTangent(renderPrim);
+
+  if(hasTangent)
   {
     tng[0] = getVertexTangent(renderPrim, triangleIndex.x);
     tng[1] = getVertexTangent(renderPrim, triangleIndex.y);

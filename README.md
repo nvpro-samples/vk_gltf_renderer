@@ -293,3 +293,28 @@ It will show all the material variant and their name. Clicking on a variant name
 
 It is possible to visualize the scene hierarchy, to select node, to modify their transformation and their material, to some level.
 
+## Tools
+
+The application comes with a few tools to help debug and visualize the scene.
+
+### Profiler
+
+The profiler is a tool that allows to measure the time spent on the GPU. It is possible to measure the time spent on the different stages of the rendering, like the path tracing, the rasterization, the tonemapping, etc.
+
+![](doc/profiler.png)
+
+### Logger
+
+The logger is a tool that allows to see the log information. It is possible to filter the log information by selecting the level of the log.
+
+![](doc/logger.png)
+
+### Nvml
+
+The Nvml is a tool that allows to see the status of the GPU. It is possible to see the temperature, the power, the memory usage, etc.
+
+![](doc/nvml.png)
+
+### Tangent Space
+
+There is a tangent space tool that allows to fix or to recreate the tangent space of the model. This is useful when the normal map is not looking right or there are errors with the tangents in the scene.

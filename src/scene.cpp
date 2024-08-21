@@ -27,6 +27,7 @@
 #include "settings.hpp"
 #include "shaders/dh_bindings.h"
 #include "tiny_obj_loader.h"
+#include "create_tangent.hpp"
 
 extern std::shared_ptr<nvvkhl::ElementCamera> g_elemCamera;  // Is accessed elsewhere in the App
 namespace PE = ImGuiH::PropertyEditor;
@@ -120,6 +121,21 @@ std::string gltfr::Scene::getFilename() const
   if(m_gltfScene != nullptr)
     return m_gltfScene->getFilename();
   return "empty";
+}
+
+//--------------------------------------------------------------------------------------------------
+// Recreating the tangents of the scene
+void gltfr::Scene::recreateTangents(bool onlyFix)
+{
+  if(m_gltfScene && m_gltfScene->valid())
+  {
+    {
+      nvh::ScopedTimer st(std::string("\n") + __FUNCTION__);
+      recomputeTangents(m_gltfScene->getModel(), false, onlyFix);
+    }
+    m_dirtyFlags.set(eVulkanAttributes);
+    resetFrameCount();
+  }
 }
 
 //--------------------------------------------------------------------------------------------------
@@ -321,6 +337,11 @@ bool gltfr::Scene::processFrame(VkCommandBuffer cmdBuf, Settings& settings)
   {
     m_gltfSceneVk->updateMaterialBuffer(cmdBuf, *m_gltfScene);
     m_dirtyFlags.reset(eVulkanMaterial);
+  }
+  if(m_dirtyFlags.test(eVulkanAttributes))
+  {
+    m_gltfSceneVk->updateVertexBuffers(cmdBuf, *m_gltfScene);
+    m_dirtyFlags.reset(eVulkanAttributes);
   }
   if(m_dirtyFlags.test(eRtxScene))
   {

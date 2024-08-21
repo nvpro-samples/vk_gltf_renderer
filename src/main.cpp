@@ -141,7 +141,7 @@ public:
   //--------------------------------------------------------------------------------------------------
   void onRender(VkCommandBuffer cmdBuf) override
   {
-    if(m_busy)
+    if(m_busy.isBusy())
       return;
 
     // Handle changes that have happened since last frame
@@ -249,8 +249,8 @@ public:
       ImGui::PopStyleVar();
     }
 
-    if(m_busy)
-      showBusyWindow("Loading");
+    if(m_busy.isBusy())
+      m_busy.show();
   }
 
   //--------------------------------------------------------------------------------------------------
@@ -309,6 +309,25 @@ public:
       reloadShaders |= ImGui::MenuItem("Reload Shaders", "Ctrl+R");
       ImGui::Separator();
       ImGui::MenuItem("V-Sync", "Ctrl+Shift+V", &v_sync);
+      ImGui::EndMenu();
+    }
+    if(ImGui::BeginMenu("Tools"))
+    {
+      bool recreate = ImGui::MenuItem("Recreate Tangents");
+      ImGui::SetItemTooltip("This recreate all tangents using MikkTSpace");
+      bool fix = ImGui::MenuItem("Fix Tangents");
+      ImGui::SetItemTooltip("This fixes NULL tangents");
+
+      if(recreate || fix)
+      {
+        vkDeviceWaitIdle(m_resources.ctx.device);
+        m_busy.start("Recreate Tangents");
+        std::thread([&, fix]() {
+          m_scene.recreateTangents(fix);
+          m_busy.stop();
+        }).detach();
+      }
+
       ImGui::EndMenu();
     }
 
@@ -409,16 +428,16 @@ public:
   //
   void onFileDrop(const char* filename) override
   {
-    if(m_busy)
+    if(m_busy.isBusy())
       return;
-    m_busy = true;
+    m_busy.start("Loading");
     vkDeviceWaitIdle(m_resources.ctx.device);
 
     // Loading file in a separate thread
     std::string loadFile = filename;
     std::thread([&, loadFile]() {
       m_scene.load(m_resources, loadFile);
-      m_busy = false;
+      m_busy.stop();
     }).detach();
 
     // Visualize the HDR if it is a HDR file
@@ -609,8 +628,8 @@ private:
   std::unique_ptr<gltfr::Renderer>               m_renderer{};
   std::unique_ptr<nvvkhl::TonemapperPostProcess> m_tonemapper{};
   std::unique_ptr<nvvk::RayPickerKHR>            m_picker{};
-  std::unique_ptr<SettingsHandler>               m_settingsHandler;
-  bool                                           m_busy = false;
+  std::unique_ptr<SettingsHandler>               m_settingsHandler{};
+  BusyWindow                                     m_busy;
 };
 
 

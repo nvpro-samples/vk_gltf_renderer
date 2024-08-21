@@ -406,12 +406,14 @@ vec3 debugRendering(vec2 samplePos, vec2 imageSize)
       return pbrMat.T * .5 + .5;
     case eDbgMethod_bitangent:
       return pbrMat.B * .5 + .5;
-    case eDbgMethod_basecolor:
+    case eDbgMethod_baseColor:
       return vec3(pbrMat.baseColor);
     case eDbgMethod_emissive:
       return vec3(pbrMat.emissive);
     case eDbgMethod_opacity:
       return vec3(pbrMat.opacity * (1.0 - pbrMat.transmission));
+    case eDbgMethod_texCoord:
+      return vec3(hit.uv, 0);
   }
 
   return vec3(0);

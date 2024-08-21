@@ -9,20 +9,31 @@ using vec4  = glm::vec4;
 using vec3  = glm::vec3;
 using vec2  = glm::vec2;
 using Light = nvvkhl_shaders::Light;
+// clang-format off
+#define ENUM_START(name) enum name {
+#define ENUM_ENTRY(name, value) name = value,
+#define ENUM_END() };                                                                                                      
+//clang-format on
 #else
 bool useDebug = false;
+#define ENUM_START(name)
+#define ENUM_ENTRY(name, value) const int name = value;
+#define ENUM_END()
 #endif  // __cplusplus
 
+ENUM_START(EDebugMethod)
+ENUM_ENTRY(eDbgMethod_none, 0)
+ENUM_ENTRY(eDbgMethod_metallic, 1)
+ENUM_ENTRY(eDbgMethod_roughness, 2)
+ENUM_ENTRY(eDbgMethod_normal, 3)
+ENUM_ENTRY(eDbgMethod_tangent, 4)
+ENUM_ENTRY(eDbgMethod_bitangent, 5)
+ENUM_ENTRY(eDbgMethod_baseColor, 6)
+ENUM_ENTRY(eDbgMethod_emissive, 7)
+ENUM_ENTRY(eDbgMethod_opacity, 8)
+ENUM_ENTRY(eDbgMethod_texCoord, 9)
+ENUM_END()
 
-const int eDbgMethod_none      = 0;
-const int eDbgMethod_metallic  = 1;
-const int eDbgMethod_roughness = 2;
-const int eDbgMethod_normal    = 3;
-const int eDbgMethod_tangent   = 4;
-const int eDbgMethod_bitangent = 5;
-const int eDbgMethod_basecolor = 6;
-const int eDbgMethod_emissive  = 7;
-const int eDbgMethod_opacity   = 8;
 
 
 struct PushConstantPathtracer
