@@ -24,7 +24,6 @@
  */
 
 
-#include <algorithm>
 #include <vector>
 #include <mutex>
 #include <tiny_gltf.h>
@@ -33,22 +32,6 @@
 
 #include "fileformats/tinygltf_utils.hpp"
 #include "nvh/parallel_work.hpp"
-
-
-#if defined(_WIN32) || defined(_WIN64)
-#include <execution>
-#define HAS_PARALLEL_EXECUTION 1
-#elif defined(__linux__)
-#if __GNUC__ >= 9
-#include <execution>
-#include <tbb/tbb.h>
-#define HAS_PARALLEL_EXECUTION 1
-#else
-#define HAS_PARALLEL_EXECUTION 0
-#endif
-#else
-#define HAS_PARALLEL_EXECUTION 0
-#endif
 
 
 struct UserData
@@ -107,12 +90,11 @@ inline static int32_t getIndex(const SMikkTSpaceContext* pContext, const int32_t
 }
 
 template <typename T>
-inline static T* getAttributeData(const SMikkTSpaceContext* pContext, const int32_t iFace, const int32_t iVert, int32_t UserData::*accessorIndexMember)
+inline static T* getAttributeData(const SMikkTSpaceContext* pContext, const int32_t iFace, const int32_t iVert, int32_t accessorIndex)
 {
-  const UserData*  userdata      = static_cast<const UserData*>(pContext->m_pUserData);
-  tinygltf::Model* model         = userdata->model;
-  const int32_t    index         = getIndex(pContext, iFace, iVert);
-  const int32_t    accessorIndex = userdata->*accessorIndexMember;
+  auto             userdata = static_cast<const UserData*>(pContext->m_pUserData);
+  tinygltf::Model* model    = userdata->model;
+  const int32_t    index    = getIndex(pContext, iFace, iVert);
 
   const tinygltf::Accessor&   accessor   = model->accessors[accessorIndex];
   const tinygltf::BufferView& bufferView = model->bufferViews[accessor.bufferView];
@@ -125,25 +107,29 @@ inline static T* getAttributeData(const SMikkTSpaceContext* pContext, const int3
 
 inline static void getPosition(const SMikkTSpaceContext* pContext, float fvPosOut[], const int32_t iFace, const int32_t iVert)
 {
-  const glm::vec3* positions = getAttributeData<glm::vec3>(pContext, iFace, iVert, &UserData::posAccessorIndex);
+  const glm::vec3* positions =
+      getAttributeData<glm::vec3>(pContext, iFace, iVert, static_cast<const UserData*>(pContext->m_pUserData)->posAccessorIndex);
   std::memcpy(fvPosOut, positions, sizeof(glm::vec3));
 }
 
 inline static void getNormal(const SMikkTSpaceContext* pContext, float fvNormOut[], const int32_t iFace, const int32_t iVert)
 {
-  const glm::vec3* normals = getAttributeData<glm::vec3>(pContext, iFace, iVert, &UserData::nrmAccessorIndex);
+  const glm::vec3* normals =
+      getAttributeData<glm::vec3>(pContext, iFace, iVert, static_cast<const UserData*>(pContext->m_pUserData)->nrmAccessorIndex);
   std::memcpy(fvNormOut, normals, sizeof(glm::vec3));
 }
 
 inline static void getTexCoord(const SMikkTSpaceContext* pContext, float fvTexcOut[], const int32_t iFace, const int32_t iVert)
 {
-  const glm::vec2* texcoords = getAttributeData<glm::vec2>(pContext, iFace, iVert, &UserData::uvAccessorIndex);
+  const glm::vec2* texcoords =
+      getAttributeData<glm::vec2>(pContext, iFace, iVert, static_cast<const UserData*>(pContext->m_pUserData)->uvAccessorIndex);
   std::memcpy(fvTexcOut, texcoords, sizeof(glm::vec2));
 }
 
 inline static void setTSpaceBasic(const SMikkTSpaceContext* pContext, const float fvTangent[], const float fSign, const int32_t iFace, const int32_t iVert)
 {
-  glm::vec4* tangent = getAttributeData<glm::vec4>(pContext, iFace, iVert, &UserData::tanAccessorIndex);
+  glm::vec4* tangent = getAttributeData<glm::vec4>(pContext, iFace, iVert,
+                                                   static_cast<const UserData*>(pContext->m_pUserData)->tanAccessorIndex);
 
   // If we only want to fix tangents, we skip the ones that are already valid
   UserData*        userdata = static_cast<UserData*>(pContext->m_pUserData);
@@ -230,19 +216,8 @@ void recomputeTangents(tinygltf::Model& model, bool forceCreation, bool onlyFix)
     }
   }
 
-#if HAS_PARALLEL_EXECUTION
-  // Generate tangents in parallel
-  std::for_each(std::execution::par, userDatas.begin(), userDatas.end(), [&](UserData& data) {
-    SMikkTSpaceContext mikkContext = {};
-    mikkContext.m_pInterface       = &mikkInterface;
-    mikkContext.m_pUserData        = &data;
-
-    genTangSpaceDefault(&mikkContext);
-  });
-
-#else
   uint32_t num_threads = std::min((uint32_t)userDatas.size(), std::thread::hardware_concurrency());
-  nvh::parallel_batches(
+  nvh::parallel_batches<1>(
       userDatas.size(),
       [&](uint64_t i) {
         SMikkTSpaceContext mikkContext = {};
@@ -252,5 +227,4 @@ void recomputeTangents(tinygltf::Model& model, bool forceCreation, bool onlyFix)
         genTangSpaceDefault(&mikkContext);
       },
       num_threads);
-#endif
 }
