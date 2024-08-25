@@ -327,11 +327,12 @@ void RendererRaster::render(VkCommandBuffer cmd, Resources& /*res*/, Scene& scen
     // Silhouette: rendering the selected node in the second color attachment
     if(m_silhouette->isValid())
     {
-      m_silhouette->setDescriptor(SilhoutteImages::eObjectID, m_gSuperSampleBuffers->getDescriptorImageInfo(GBufferType::eSilhouette));
-      m_silhouette->setDescriptor(SilhoutteImages::eRGBAIImage,
-                                  m_gSuperSampleBuffers->getDescriptorImageInfo(GBufferType::eSuperSample));
+      m_silhouette->updateBinding(SilhoutteImages::eObjectID,
+                                  m_gSuperSampleBuffers->getColorImageView(GBufferType::eSilhouette), VK_IMAGE_LAYOUT_GENERAL);
+      m_silhouette->updateBinding(SilhoutteImages::eRGBAIImage,
+                                  m_gSuperSampleBuffers->getColorImageView(GBufferType::eSuperSample), VK_IMAGE_LAYOUT_GENERAL);
       m_silhouette->setColor(nvvkhl_shaders::toLinear(settings.silhouetteColor));
-      m_silhouette->dispatch2D(cmd, m_gSuperSampleBuffers->getSize());
+      m_silhouette->dispatch(cmd, m_gSuperSampleBuffers->getSize());
     }
   }
 

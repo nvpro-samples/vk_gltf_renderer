@@ -19,8 +19,9 @@
 
 #pragma once
 
+#include "nvvk/compute_vk.hpp"
+
 #include "resources.hpp"
-#include "push_compute.hpp"
 #include "slang_compiler.hpp"
 
 
@@ -37,11 +38,11 @@ enum SilhoutteImages
   eObjectID = 0,
   eRGBAIImage,
 };
-class Silhouette : public PushCompute<DH::PushConstantSilhouette, SilhoutteImages>
+class Silhouette : public nvvk::PushComputeDispatcher<DH::PushConstantSilhouette, SilhoutteImages>
 {
 public:
   Silhouette(Resources& res)
-      : PushCompute(res.ctx.device)
+      : PushComputeDispatcher(res.ctx.device)
   {
     // Slang version
     std::string             filename = nvh::findFile("silhouette.comp.slang", g_applicationSearchPaths, true);
@@ -66,14 +67,26 @@ public:
     // if(!res.createShaderModuleCreateInfo(compilationResult, shaderModuleCreateInfo))
     //   return;
 
-    addResource(eObjectID, VK_DESCRIPTOR_TYPE_STORAGE_IMAGE);
-    addResource(eRGBAIImage, VK_DESCRIPTOR_TYPE_STORAGE_IMAGE);
-    addShader(shaderModuleCreateInfo);
-    createShaderObjectAndLayout();
+
+    PushComputeDispatcher::setCode(shaderModuleCreateInfo.pCode, shaderModuleCreateInfo.codeSize);
+    PushComputeDispatcher::getBindings().addBinding(eObjectID, VK_DESCRIPTOR_TYPE_SAMPLED_IMAGE, 1, VK_SHADER_STAGE_COMPUTE_BIT);
+    PushComputeDispatcher::getBindings().addBinding(eRGBAIImage, VK_DESCRIPTOR_TYPE_STORAGE_IMAGE, 1, VK_SHADER_STAGE_COMPUTE_BIT);
+    PushComputeDispatcher::finalizePipeline();
 
     m_pushConstant.color = glm::vec3(1, 1, 1);
   }
+
+  void dispatch(VkCommandBuffer cmd, const VkExtent2D& imgSize)
+  {
+    glm::uvec3 blocks = {PushComputeDispatcher::getBlockCount(imgSize.width, WORKGROUP_SIZE),
+                         PushComputeDispatcher::getBlockCount(imgSize.height, WORKGROUP_SIZE), 1};
+    PushComputeDispatcher::dispatchBlocks(cmd, blocks, &m_pushConstant);
+  }
+
   void setColor(glm::vec3 color) { m_pushConstant.color = color; }
+
+private:
+  DH::PushConstantSilhouette m_pushConstant{};
 };
 
 }  // namespace gltfr

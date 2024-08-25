@@ -372,10 +372,12 @@ void RendererPathtracer::render(VkCommandBuffer cmd, Resources& /*res*/, Scene& 
   // Silhouette : adding a contour around the selected object on top of the eRgbResult
   if(m_silhouette->isValid() && scene.getSelectedRenderNode() != -1)
   {
-    m_silhouette->setDescriptor(SilhoutteImages::eObjectID, m_gBuffers->getDescriptorImageInfo(GBufferType::eSilhouette));
-    m_silhouette->setDescriptor(SilhoutteImages::eRGBAIImage, m_gBuffers->getDescriptorImageInfo(GBufferType::eRgbResult));
+    m_silhouette->updateBinding(SilhoutteImages::eObjectID, m_gBuffers->getColorImageView(GBufferType::eSilhouette),
+                                VK_IMAGE_LAYOUT_GENERAL);
+    m_silhouette->updateBinding(SilhoutteImages::eRGBAIImage, m_gBuffers->getColorImageView(GBufferType::eRgbResult),
+                                VK_IMAGE_LAYOUT_GENERAL);
     m_silhouette->setColor(nvvkhl_shaders::toLinear(settings.silhouetteColor));
-    m_silhouette->dispatch2D(cmd, size);
+    m_silhouette->dispatch(cmd, m_gBuffers->getSize());
   }
 }
 

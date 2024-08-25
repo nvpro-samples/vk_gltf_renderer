@@ -20,8 +20,7 @@
 #pragma once
 
 #include "resources.hpp"
-#include "push_compute.hpp"
-
+#include "nvvk/compute_vk.hpp"
 
 namespace gltfr {
 
@@ -35,12 +34,12 @@ enum AtrousDenoiserImages
   eDenoisedImage,
 };
 
-class AtrousDenoiser : public PushCompute<DH::PushConstantDenoiser, AtrousDenoiserImages>
+class AtrousDenoiser : public nvvk::PushComputeDispatcher<DH::PushConstantDenoiser, AtrousDenoiserImages>
 {
 public:
   // images: inColor, normal-depth, outColor
   AtrousDenoiser(Resources& res)
-      : PushCompute(res.ctx.device)
+      : PushComputeDispatcher(res.ctx.device)
   {
     shaderc::SpvCompilationResult compilationResult =
         res.compileGlslShader("denoise.comp.glsl", shaderc_shader_kind::shaderc_compute_shader);
@@ -48,11 +47,11 @@ public:
     if(!res.createShaderModuleCreateInfo(compilationResult, shaderModuleCreateInfo))
       return;
 
-    addResource(eNoisyImage, VK_DESCRIPTOR_TYPE_STORAGE_IMAGE);
-    addResource(eNormalDepthImage, VK_DESCRIPTOR_TYPE_STORAGE_IMAGE);
-    addResource(eDenoisedImage, VK_DESCRIPTOR_TYPE_STORAGE_IMAGE);
-    addShader(shaderModuleCreateInfo);
-    createShaderObjectAndLayout();
+    PushComputeDispatcher::getBindings().addBinding(eNoisyImage, VK_DESCRIPTOR_TYPE_STORAGE_IMAGE, 1, VK_SHADER_STAGE_COMPUTE_BIT);
+    PushComputeDispatcher::getBindings().addBinding(eNormalDepthImage, VK_DESCRIPTOR_TYPE_STORAGE_IMAGE, 1, VK_SHADER_STAGE_COMPUTE_BIT);
+    PushComputeDispatcher::getBindings().addBinding(eDenoisedImage, VK_DESCRIPTOR_TYPE_STORAGE_IMAGE, 1, VK_SHADER_STAGE_COMPUTE_BIT);
+    PushComputeDispatcher::setCode(shaderModuleCreateInfo.pCode, shaderModuleCreateInfo.codeSize);
+    PushComputeDispatcher::finalizePipeline();
 
     m_pushConstant.stepWidth = 1;
     m_pushConstant.colorPhi  = 0.5f;
@@ -86,12 +85,14 @@ public:
       m_pushConstant.colorPhi  = (colorPhi * colorPhi) / (1 << i);  // 2^-i
 
       // Update descriptor sets to point to current input/output
-      setDescriptor(eNoisyImage, colorBuffer);
-      setDescriptor(eNormalDepthImage, normalDepthBuffer);
-      setDescriptor(eDenoisedImage, resultBuffer);
+      PushComputeDispatcher::updateBinding(eNoisyImage, colorBuffer.imageView, VK_IMAGE_LAYOUT_GENERAL);
+      PushComputeDispatcher::updateBinding(eNormalDepthImage, normalDepthBuffer.imageView, VK_IMAGE_LAYOUT_GENERAL);
+      PushComputeDispatcher::updateBinding(eDenoisedImage, resultBuffer.imageView, VK_IMAGE_LAYOUT_GENERAL);
 
       // Bind pipeline, descriptor sets, push constants
-      dispatch2D(cmd, imgSize);
+      glm::uvec3 blocks = {PushComputeDispatcher::getBlockCount(imgSize.width, WORKGROUP_SIZE),
+                           PushComputeDispatcher::getBlockCount(imgSize.height, WORKGROUP_SIZE), 1};
+      PushComputeDispatcher::dispatchBlocks(cmd, blocks, &m_pushConstant);
 
       // Swap buffers for next iteration
       auto temp    = resultBuffer;
@@ -123,6 +124,8 @@ private:
   float depthPhi      = 0.1f;
   bool  isActive      = false;
   int   numIterations = 1;
+
+  DH::PushConstantDenoiser m_pushConstant{};
 };
 
 }  // namespace gltfr
