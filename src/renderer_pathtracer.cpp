@@ -43,7 +43,7 @@
 #include "atrous_denoiser.hpp"
 #include "silhouette.hpp"
 
-extern std::shared_ptr<nvvkhl::ElementDbgPrintf> g_dbgPrintf;
+extern std::shared_ptr<nvvkhl::ElementDbgPrintf> g_elemDebugPrintf;
 
 namespace PE = ImGuiH::PropertyEditor;
 
@@ -305,8 +305,8 @@ void RendererPathtracer::render(VkCommandBuffer cmd, Resources& /*res*/, Scene& 
 
   m_pushConst.focalDistance = glm::length(CameraManip.getEye() - CameraManip.getCenter());
   m_pushConst.aperture      = glm::radians(g_pathtraceSettings.aperture);
-  if(g_dbgPrintf)
-    m_pushConst.mouseCoord = g_dbgPrintf->getMouseCoord();
+  if(g_elemDebugPrintf)
+    m_pushConst.mouseCoord = g_elemDebugPrintf->getMouseCoord();
 
   // Ray trace
   VkDescriptorSet dsHdr   = scene.m_hdrEnv->getDescriptorSet();

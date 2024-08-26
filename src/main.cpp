@@ -59,11 +59,17 @@
 // This will print "Hello from shader" in the debug printf window ONLY for the pixels under the mouse cursor, when the mouse button is pressed.
 
 
-std::shared_ptr<nvvkhl::ElementCamera>              g_elemCamera;       // The camera element (UI and movement)
-std::shared_ptr<nvvkhl::ElementProfiler>            g_profiler;         // GPU profiler
-std::shared_ptr<nvvkhl::ElementBenchmarkParameters> g_benchmarkParams;  // Benchmark parameters
-std::shared_ptr<nvvkhl::ElementDbgPrintf>           g_dbgPrintf;
-std::shared_ptr<nvvkhl::SampleAppLog>               g_logger;                  // Log window
+// Benchmark Testing
+// To run benchmark testing, the following command line arguments can be used:
+// <path-to-gltf-scene> -test -test-frames 1000 -screenshot "screenshots.png"
+// The above command will run the benchmark test for 1000 frames and save the screenshot to "screenshots.png".
+
+
+std::shared_ptr<nvvkhl::ElementCamera>              g_elemCamera;     // The camera element (UI and movement)
+std::shared_ptr<nvvkhl::ElementProfiler>            g_elemProfiler;   // GPU profiler
+std::shared_ptr<nvvkhl::ElementBenchmarkParameters> g_elemBenchmark;  // Benchmark parameters
+std::shared_ptr<nvvkhl::ElementDbgPrintf>           g_elemDebugPrintf;
+std::shared_ptr<nvvkhl::SampleAppLog>               g_elemLogger;              // Log window
 std::vector<std::string>                            g_applicationSearchPaths;  // Search paths for resources
 
 
@@ -87,6 +93,9 @@ public:
   void onAttach(nvvkhl::Application* app) override
   {
     m_app = app;
+
+    // Override the way benchmark count frames, to only use valid ones
+    g_elemBenchmark->setCurrentFrame([&] { return m_scene.m_sceneFrameInfo.frameCount; });
 
     // Getting all required resources
     gltfr::VulkanInfo ctx;
@@ -153,18 +162,18 @@ public:
       // It could stop rendering if the scene is not ready or reached max frames
       if(m_scene.processFrame(cmdBuf, m_settings))
       {
-        m_renderer->render(cmdBuf, m_resources, m_scene, m_settings, *g_profiler.get());
+        m_renderer->render(cmdBuf, m_resources, m_scene, m_settings, *g_elemProfiler.get());
       }
     }
     else
     {
-      m_emptyRenderer->render(cmdBuf, m_resources, m_scene, m_settings, *g_profiler.get());
+      m_emptyRenderer->render(cmdBuf, m_resources, m_scene, m_settings, *g_elemProfiler.get());
     }
 
 
     // Apply tone mapper to the final image
     {
-      auto sec = g_profiler->timeRecurring("Tonemapper", cmdBuf);
+      auto sec = g_elemProfiler->timeRecurring("Tonemapper", cmdBuf);
       setTonemapperInputOutput();
       m_tonemapper->runCompute(cmdBuf, m_resources.m_finalImage->getSize());
     }
@@ -340,7 +349,7 @@ public:
 
     if(saveFile)
     {
-      m_scene.save(NVPSystem::windowSaveFileDialog(m_app->getWindowHandle(), "Save glTF", "glTF(.gltf)|*.gltf"));
+      m_scene.save(NVPSystem::windowSaveFileDialog(m_app->getWindowHandle(), "Save glTF", "glTF(.gltf, .glb)|*.gltf;*.glb"));
     }
 
     if(saveScreenFile)
@@ -642,7 +651,7 @@ private:
 auto main(int argc, char** argv) -> int
 {
 #ifdef USE_DGBPRINTF
-  g_dbgPrintf = std::make_shared<nvvkhl::ElementDbgPrintf>();
+  g_elemDebugPrintf = std::make_shared<nvvkhl::ElementDbgPrintf>();
 #endif
 
   // Search paths
@@ -657,9 +666,9 @@ auto main(int argc, char** argv) -> int
 
 
   // Create the logger, and redirect the printf to the logger
-  g_logger = std::make_shared<nvvkhl::SampleAppLog>();
-  nvprintSetCallback([](int level, const char* fmt) { g_logger->addLog(level, "%s", fmt); });
-  g_logger->setLogLevel(LOGBITS_INFO);
+  g_elemLogger = std::make_shared<nvvkhl::SampleAppLog>();
+  nvprintSetCallback([](int level, const char* fmt) { g_elemLogger->addLog(level, "%s", fmt); });
+  g_elemLogger->setLogLevel(LOGBITS_INFO);
 
 
   // Vulkan Context creation information
@@ -691,9 +700,9 @@ auto main(int argc, char** argv) -> int
                     VK_QUEUE_TRANSFER_BIT};                                                // Transfer
 
 #ifdef USE_DGBPRINTF
-  vkSetup.instanceCreateInfoExt = g_dbgPrintf->getFeatures();  // Adding the debug printf extension
-  vkSetup.ignoreDbgMessages.insert(0x76589099);                // Truncate the message when too long
-#endif                                                         // USE_DGBPRINTF
+  vkSetup.instanceCreateInfoExt = g_elemDebugPrintf->getFeatures();  // Adding the debug printf extension
+  vkSetup.ignoreDbgMessages.insert(0x76589099);                      // Truncate the message when too long
+#endif                                                               // USE_DGBPRINTF
 
   // Creating the Vulkan context
   auto vkContext = std::make_unique<VkContext>(vkSetup);
@@ -720,26 +729,26 @@ auto main(int argc, char** argv) -> int
 
   // Create Elements of the application
   g_elemCamera      = std::make_shared<nvvkhl::ElementCamera>();
-  g_profiler        = std::make_shared<nvvkhl::ElementProfiler>(false);
-  g_benchmarkParams = std::make_shared<nvvkhl::ElementBenchmarkParameters>(argc, argv);
+  g_elemProfiler    = std::make_shared<nvvkhl::ElementProfiler>(false);
+  g_elemBenchmark   = std::make_shared<nvvkhl::ElementBenchmarkParameters>(argc, argv);
   auto gltfRenderer = std::make_shared<gltfr::GltfRendererElement>();  // This is the main element of the application
 
   // Parsing arguments
-  g_benchmarkParams->parameterLists().addFilename(".gltf|load a file", &g_inFilename);
-  g_benchmarkParams->parameterLists().add("hdr|load a HDR", &g_inHdr);
-  g_benchmarkParams->setProfiler(g_profiler);  // Linking the profiler to the benchmark parameters
+  g_elemBenchmark->parameterLists().addFilename(".gltf|load a file", &g_inFilename);
+  g_elemBenchmark->parameterLists().add("hdr|load a HDR", &g_inHdr);
+  g_elemBenchmark->setProfiler(g_elemProfiler);  // Linking the profiler to the benchmark parameters
 
-  app->addElement(g_benchmarkParams);  // Benchmark/tests and parameters
-  app->addElement(gltfRenderer);       // Rendering the glTF scene
-  app->addElement(g_elemCamera);       // Controlling the camera movement
-  app->addElement(g_profiler);         // GPU Profiler
+  app->addElement(g_elemBenchmark);  // Benchmark/tests and parameters
+  app->addElement(gltfRenderer);     // Rendering the glTF scene
+  app->addElement(g_elemCamera);     // Controlling the camera movement
+  app->addElement(g_elemProfiler);   // GPU Profiler
 #ifdef USE_DGBPRINTF
-  app->addElement(g_dbgPrintf);                                                     // Debug printf
-#endif                                                                              // USE_DGBPRINTF
-  app->addElement(std::make_unique<nvvkhl::ElementLogger>(g_logger.get(), false));  // Add logger window
-  app->addElement(std::make_unique<nvvkhl::ElementNvml>(false));                    // Add GPU monitor
+  app->addElement(g_elemDebugPrintf);                                                   // Debug printf
+#endif                                                                                  // USE_DGBPRINTF
+  app->addElement(std::make_unique<nvvkhl::ElementLogger>(g_elemLogger.get(), false));  // Add logger window
+  app->addElement(std::make_unique<nvvkhl::ElementNvml>(false));                        // Add GPU monitor
 
-  g_profiler->setLabelUsage(false);  // Do not use labels for the profiler
+  g_elemProfiler->setLabelUsage(false);  // Do not use labels for the profiler
 
   // Start Application: which will loop and call on"Functions" for all Elements
   app->run();
