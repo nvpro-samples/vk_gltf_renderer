@@ -187,7 +187,7 @@ public:
   {
     VkDescriptorImageInfo inputImage  = m_resources.m_finalImage->getDescriptorImageInfo();
     VkDescriptorImageInfo outputImage = inputImage;
-    if(m_renderer != nullptr)
+    if(m_renderer != nullptr && m_scene.isValid())
     {
       inputImage = m_renderer->getOutputImage();
     }

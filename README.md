@@ -51,6 +51,9 @@ cmake --build . --config release
 cmake --install .
 ```
 
+### Draco Compression
+
+To enable Draco mesh compression, you need to enable the option CMake. In the GUI interface, you will see the option `USE_DRACO`. If you are using the command line, you can add `-DUSE_DRACO=ON` to the cmake command. This will download the Draco library and it will be included in the project.
 
 ## glTF Core features
 
@@ -75,7 +78,7 @@ What is currently not supported are animations and skins, multiple textures coor
  Here are the list of extensions that are supported by this application
 
 - [ ] KHR_animation_pointer
-- [ ] KHR_draco_mesh_compression
+- [x] KHR_draco_mesh_compression
 - [x] KHR_lights_punctual
 - [x] KHR_materials_anisotropy
 - [x] KHR_materials_clearcoat

@@ -48,6 +48,13 @@ download_package(
 
 set(RAPIDJSON_INCLUDE_DIR ${RapidJSON_SOURCE_DIR}/rapidjson-1.1.0/include/rapidjson)
 
+# ---- DRACO ----
+option(USE_DRACO "Use Draco for compression" OFF)
+include(cmake/draco.cmake)
+if(USE_DRACO)
+  download_draco()
+endif()
+
 #####################################################################################
 # additions from packages needed for this sample
 # add refs  in LIBRARIES_OPTIMIZED
@@ -122,9 +129,18 @@ else()
   set(UNIXLINKLIBS)
 endif()
 
+# ---- DRACO ----
+if(USE_DRACO)
+  add_draco()
+endif()
+
+
+
+
 #####################################################################################
 # Linkage
 #
+
 
 target_link_libraries(${PROJNAME} PRIVATE ${PLATFORM_LIBRARIES} nvpro_core)
 
