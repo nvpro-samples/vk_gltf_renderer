@@ -80,7 +80,9 @@ std::string g_inHdr;
 namespace PE = ImGuiH::PropertyEditor;
 
 namespace gltfr {
+bool g_forceExternalShaders = false;
 
+extern PathtraceSettings g_pathtraceSettings;
 
 class GltfRendererElement : public nvvkhl::IAppElement
 {
@@ -308,20 +310,24 @@ public:
       m_scene.selectRenderNode(-1);
     }
 
-    bool fitScene      = ImGui::IsKeyChordPressed(ImGuiMod_Ctrl | ImGuiMod_Shift | ImGuiKey_F);
-    bool fitObject     = ImGui::IsKeyChordPressed(ImGuiMod_Ctrl | ImGuiKey_F);
-    bool reloadShaders = ImGui::IsKeyChordPressed(ImGuiMod_Ctrl | ImGuiKey_R);
+    bool fitScene        = ImGui::IsKeyChordPressed(ImGuiMod_Ctrl | ImGuiMod_Shift | ImGuiKey_F);
+    bool fitObject       = ImGui::IsKeyChordPressed(ImGuiMod_Ctrl | ImGuiKey_F);
+    bool doReloadShaders = ImGui::IsKeyChordPressed(ImGuiMod_Ctrl | ImGuiKey_R);
     if(ImGui::BeginMenu("View"))
     {
       fitScene |= ImGui::MenuItem("Fit Scene", "Ctrl+Shift+F");
       fitObject |= ImGui::MenuItem("Fit Object", "Ctrl+F");
-      reloadShaders |= ImGui::MenuItem("Reload Shaders", "Ctrl+R");
       ImGui::Separator();
       ImGui::MenuItem("V-Sync", "Ctrl+Shift+V", &v_sync);
       ImGui::EndMenu();
     }
     if(ImGui::BeginMenu("Tools"))
     {
+      if(m_resources.hasGlslCompiler())
+      {
+        doReloadShaders |= ImGui::MenuItem("Reload Shaders", "Ctrl+R");
+        ImGui::Separator();
+      }
       bool recreate = ImGui::MenuItem("Recreate Tangents");
       ImGui::SetItemTooltip("This recreate all tangents using MikkTSpace");
       bool fix = ImGui::MenuItem("Fix Tangents");
@@ -380,9 +386,9 @@ public:
       m_scene.fitObjectToView();
     }
 
-    if(reloadShaders)
+    if(doReloadShaders)
     {
-      createRenderers();
+      reloadShaders();
     }
 
     if(m_app->isVsync() != v_sync)
@@ -585,6 +591,19 @@ private:
     m_scene.resetFrameCount();
   }
 
+  void reloadShaders()
+  {
+
+    nvh::ScopedTimer st(__FUNCTION__);
+
+    vkDeviceWaitIdle(m_resources.ctx.device);
+    m_resources.resetSlangCompiler();  // Resetting the Slang session
+    if(!m_scene.isValid() || !m_renderer)
+      return;
+    m_renderer->reloadShaders(m_resources, m_scene);
+    m_scene.resetFrameCount();
+  }
+
   //--------------------------------------------------------------------------------------------------
   // Handle changes that have happened since last frame
   // - Scene changes
@@ -735,8 +754,16 @@ auto main(int argc, char** argv) -> int
 
   // Parsing arguments
   g_elemBenchmark->parameterLists().addFilename(".gltf|load a file", &g_inFilename);
+  g_elemBenchmark->parameterLists().addFilename(".glb|load a file", &g_inFilename);
   g_elemBenchmark->parameterLists().add("hdr|load a HDR", &g_inHdr);
   g_elemBenchmark->setProfiler(g_elemProfiler);  // Linking the profiler to the benchmark parameters
+
+  g_elemBenchmark->parameterLists().add("maxDepth", &gltfr::g_pathtraceSettings.maxDepth);
+  g_elemBenchmark->parameterLists().add("maxSamples", &gltfr::g_pathtraceSettings.maxSamples);
+  g_elemBenchmark->parameterLists().add("renderMode", (int*)&gltfr::g_pathtraceSettings.renderMode);
+
+  g_elemBenchmark->parameterLists().add("forceExternalShaders", &gltfr::g_forceExternalShaders, true);
+
 
   app->addElement(g_elemBenchmark);  // Benchmark/tests and parameters
   app->addElement(gltfRenderer);     // Rendering the glTF scene

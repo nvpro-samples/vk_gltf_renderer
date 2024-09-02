@@ -96,9 +96,13 @@ target_compile_definitions(${PROJNAME}
 target_compile_definitions(${PROJNAME} 
     PRIVATE NVPRO_CORE_DIR="${NVPRO_CORE_DIR}" )
 
+
 # Adding warning levels for MSVC
 if(MSVC)
     target_compile_options(${PROJNAME}  PRIVATE /W3)
+    # We are not forcing the usage of the GLSL and Slang compiler
+    target_link_options(${PROJNAME} PRIVATE "/DELAYLOAD:shaderc_shared.dll")
+    target_link_options(${PROJNAME} PRIVATE "/DELAYLOAD:slang.dll") 
 endif()
 
 # Include the rapidjson headers
@@ -175,7 +179,7 @@ compile_glsl(
      HEADER_FILES ${SHADER_HEADER}
      DST "${CMAKE_CURRENT_SOURCE_DIR}/_autogen" 
      VULKAN_TARGET "vulkan1.3"
-     # HEADER ON
+     HEADER ON
      DEPENDENCY OFF
      FLAGS ${_GLSL_FLAGS}
      )

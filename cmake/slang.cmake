@@ -47,7 +47,7 @@ function(compile_slang_file)
     set(_SLANG_COMMANDS )
     
     # !! Compiling all entry points in a single compilation
-    set(_OUT_ARG "${_OUT_DIR}/${_FILE_STEM}_slang.spv")
+    set(_OUT_ARG "${_OUT_DIR}/${_FILE_STEM}_slang.h")
     set(_SLANG_FLAGS
         -profile sm_6_6+spirv_1_6
         -capability spvInt64Atomics+spvShaderInvocationReorderNV+spvShaderClockKHR+spvRayTracingMotionBlurNV
@@ -56,8 +56,8 @@ function(compile_slang_file)
         -force-glsl-scalar-layout
         -fvk-use-entrypoint-name
         -g3
-        # -source-embed-style text 
-        # -source-embed-name ${_FILE_STEM}Slang
+        -source-embed-style text 
+        -source-embed-name ${_FILE_STEM}Slang
         -o ${_OUT_ARG}
     )
     list(APPEND _SLANG_FLAGS ${COMPILE_FLAGS})

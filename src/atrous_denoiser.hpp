@@ -21,8 +21,13 @@
 
 #include "resources.hpp"
 #include "nvvk/compute_vk.hpp"
+#include "imgui/imgui_helper.h"
+
+#include "_autogen/denoise.comp.glsl.h"
 
 namespace gltfr {
+
+extern bool g_forceExternalShaders;
 
 // This Denoiser class is used to remove noise from an image.
 // The implementation is based on the paper "A-Trous Wavelet Transform for Fast Global Illumination Filtering"
@@ -41,11 +46,21 @@ public:
   AtrousDenoiser(Resources& res)
       : PushComputeDispatcher(res.ctx.device)
   {
-    shaderc::SpvCompilationResult compilationResult =
-        res.compileGlslShader("denoise.comp.glsl", shaderc_shader_kind::shaderc_compute_shader);
+
     VkShaderModuleCreateInfo shaderModuleCreateInfo;
-    if(!res.createShaderModuleCreateInfo(compilationResult, shaderModuleCreateInfo))
-      return;
+    if(res.hasSlangCompiler() && g_forceExternalShaders)
+    {
+
+      shaderc::SpvCompilationResult compilationResult =
+          res.compileGlslShader("denoise.comp.glsl", shaderc_shader_kind::shaderc_compute_shader);
+      if(!res.createShaderModuleCreateInfo(compilationResult, shaderModuleCreateInfo))
+        return;
+    }
+    else
+    {
+      // Pre-compiled version
+      shaderModuleCreateInfo = {.codeSize = sizeof(denoise_comp_glsl), .pCode = &denoise_comp_glsl[0]};
+    }
 
     PushComputeDispatcher::getBindings().addBinding(eNoisyImage, VK_DESCRIPTOR_TYPE_STORAGE_IMAGE, 1, VK_SHADER_STAGE_COMPUTE_BIT);
     PushComputeDispatcher::getBindings().addBinding(eNormalDepthImage, VK_DESCRIPTOR_TYPE_STORAGE_IMAGE, 1, VK_SHADER_STAGE_COMPUTE_BIT);

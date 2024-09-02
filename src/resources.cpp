@@ -17,6 +17,12 @@
  * SPDX-License-Identifier: Apache-2.0
  */
 
+#if WIN32
+#include <Windows.h>
+#else
+#include <dlfcn.h>
+#endif
+
 #include "resources.hpp"
 #include "vulkan/vulkan_core.h"
 #include "nvvk/renderpasses_vk.hpp"
@@ -26,6 +32,31 @@
 #include "nvh/timesampler.hpp"
 
 extern std::vector<std::string> g_applicationSearchPaths;  // Used by the shader manager
+
+
+static bool checkLibraryAvailability(const char* libraryName)
+{
+  std::string fullName = libraryName;
+
+#if WIN32
+  fullName += ".dll";
+  HMODULE handle = LoadLibrary(fullName.c_str());
+  if(handle)
+  {
+    FreeLibrary(handle);
+    return true;
+  }
+#else
+  fullName     = "lib" + fullName + ".so";
+  void* handle = dlopen(fullName.c_str(), RTLD_LAZY);
+  if(handle)
+  {
+    dlclose(handle);
+    return true;
+  }
+#endif
+  return false;
+}
 
 //------------------------------------------------------------------
 // The resources are the Vulkan objects that are shared among the
@@ -46,11 +77,27 @@ void gltfr::Resources::init(VulkanInfo& _ctx)
                                                           VK_COMMAND_POOL_CREATE_TRANSIENT_BIT, ctx.GCT0.queue);
 
   // Shader compilers
-  m_glslC  = std::make_unique<nvvkhl::GlslCompiler>();
-  m_slangC = std::make_unique<SlangCompiler>();
-  for(const auto& path : g_applicationSearchPaths)
+  const bool glslCompilerFound = checkLibraryAvailability("shaderc_shared");
+  if(glslCompilerFound)
   {
-    m_glslC->addInclude(path);
+    m_glslC = std::make_unique<nvvkhl::GlslCompiler>();
+    for(const auto& path : g_applicationSearchPaths)
+    {
+      m_glslC->addInclude(path);
+    }
+  }
+  else
+  {
+    LOGW("Shaderc shared library not found, GLSL compilation not available\n");
+  }
+  const bool slangCompilerFound = checkLibraryAvailability("slang");
+  if(slangCompilerFound)
+  {
+    m_slangC = std::make_unique<SlangCompiler>();
+  }
+  else
+  {
+    LOGW("Slang shared library not found, Slang compilation not available\n");
   }
 
 
@@ -114,6 +161,8 @@ void setCompilerOptions(nvvkhl::GlslCompiler* glslC)
 shaderc::SpvCompilationResult gltfr::Resources::compileGlslShader(const std::string& filename, shaderc_shader_kind shaderKind) const
 {
   // nvh::ScopedTimer st(__FUNCTION__);
+  if(!m_glslC)
+    return {};
   setCompilerOptions(m_glslC.get());
   return m_glslC->compileFile(filename, shaderKind);
 }
@@ -124,6 +173,8 @@ shaderc::SpvCompilationResult gltfr::Resources::compileGlslShader(const std::str
 VkShaderModule gltfr::Resources::createShaderModule(shaderc::SpvCompilationResult& compResult) const
 {
   // nvh::ScopedTimer st(__FUNCTION__);
+  if(!m_glslC)
+    return {};
   return m_glslC->createModule(ctx.device, compResult);
 }
 
@@ -148,5 +199,6 @@ bool gltfr::Resources::createShaderModuleCreateInfo(shaderc::SpvCompilationResul
 // This is needed when shader file have changed
 void gltfr::Resources::resetSlangCompiler()
 {
-  m_slangC->newSession();
+  if(m_slangC)
+    m_slangC->newSession();
 }

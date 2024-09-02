@@ -19,16 +19,24 @@
 
 #pragma once
 
+#include "_autogen/silhouette_slang.h"
+
 #include "nvvk/compute_vk.hpp"
 
 #include "resources.hpp"
 #include "slang_compiler.hpp"
 
+// Device/host structures for the scene
+#include "nvvkhl/shaders/dh_lighting.h"
+namespace DH {
+#include "shaders/device_host.h"  // Include the device/host structures
+}
 
 extern std::vector<std::string> g_applicationSearchPaths;  // Used by the shader manager
 
 namespace gltfr {
 
+extern bool g_forceExternalShaders;
 
 // This Silhouette class, which is used to extract the outline of a 3D object.
 // There are two images, one with the information of the silhouette and the other
@@ -44,29 +52,37 @@ public:
   Silhouette(Resources& res)
       : PushComputeDispatcher(res.ctx.device)
   {
-    // Slang version
-    std::string             filename = nvh::findFile("silhouette.comp.slang", g_applicationSearchPaths, true);
-    slang::ICompileRequest* request  = res.m_slangC->createCompileRequest(filename);
-    if(SLANG_FAILED(request->compile()))
+    VkShaderModuleCreateInfo shaderModuleCreateInfo{VK_STRUCTURE_TYPE_SHADER_MODULE_CREATE_INFO};
+    std::vector<uint32_t>    spirvCode;
+
+    if(res.hasSlangCompiler() && g_forceExternalShaders)
     {
-      LOGE("Error compiling shader %s, %s\n", filename.c_str(), request->getDiagnosticOutput());
-      return;
+      // Slang version
+      std::string             filename = nvh::findFile("silhouette.comp.slang", g_applicationSearchPaths, true);
+      slang::ICompileRequest* request  = res.m_slangC->createCompileRequest(filename);
+      if(SLANG_FAILED(request->compile()))
+      {
+        LOGE("Error compiling shader %s, %s\n", filename.c_str(), request->getDiagnosticOutput());
+        return;
+      }
+      res.m_slangC->getSpirvCode(request, spirvCode);
+      shaderModuleCreateInfo = {
+          .codeSize = spirvCode.size() * sizeof(uint32_t),
+          .pCode    = spirvCode.data(),
+      };
+
+      // GLSL version
+      // shaderc::SpvCompilationResult compilationResult =
+      //     res.compileGlslShader("silhouette.comp.glsl", shaderc_shader_kind::shaderc_compute_shader);
+      // VkShaderModuleCreateInfo shaderModuleCreateInfo;
+      // if(!res.createShaderModuleCreateInfo(compilationResult, shaderModuleCreateInfo))
+      //   return;
     }
-    std::vector<uint32_t> spirvCode;
-    res.m_slangC->getSpirvCode(request, spirvCode);
-    VkShaderModuleCreateInfo shaderModuleCreateInfo{
-        .sType    = VK_STRUCTURE_TYPE_SHADER_MODULE_CREATE_INFO,
-        .codeSize = spirvCode.size() * sizeof(uint32_t),
-        .pCode    = spirvCode.data(),
-    };
-
-    // GLSL version
-    // shaderc::SpvCompilationResult compilationResult =
-    //     res.compileGlslShader("silhouette.comp.glsl", shaderc_shader_kind::shaderc_compute_shader);
-    // VkShaderModuleCreateInfo shaderModuleCreateInfo;
-    // if(!res.createShaderModuleCreateInfo(compilationResult, shaderModuleCreateInfo))
-    //   return;
-
+    else
+    {
+      // Pre-compiled version
+      shaderModuleCreateInfo = {.codeSize = sizeof(silhouetteSlang), .pCode = &silhouetteSlang[0]};
+    }
 
     PushComputeDispatcher::setCode(shaderModuleCreateInfo.pCode, shaderModuleCreateInfo.codeSize);
     PushComputeDispatcher::getBindings().addBinding(eObjectID, VK_DESCRIPTOR_TYPE_SAMPLED_IMAGE, 1, VK_SHADER_STAGE_COMPUTE_BIT);

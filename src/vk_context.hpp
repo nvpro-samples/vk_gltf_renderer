@@ -216,9 +216,14 @@ private:
     };
 
     VkResult result = vkCreateInstance(&createInfo, m_settings.alloc, &m_instance);
-    if(result != VK_SUCCESS)
+    if(result == VK_ERROR_LAYER_NOT_PRESENT)
     {
-      assert(!"failed to create instance!");
+      // If the layers aren't present, try without
+      createInfo.enabledLayerCount = 0;
+      result                       = vkCreateInstance(&createInfo, m_settings.alloc, &m_instance);
+    }
+    if(!nvvk::checkResult(result, "vkCreateInstance"))
+    {
       return;
     }
 

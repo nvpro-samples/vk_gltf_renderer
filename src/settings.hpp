@@ -26,6 +26,11 @@ It allow to control which renderer to use, the environment system, and the inten
 
 */
 
+// Device/host structures for the scene
+#include "nvvkhl/shaders/dh_lighting.h"
+namespace DH {
+#include "shaders/device_host.h"  // Include the device/host structures
+}
 
 namespace gltfr {
 
@@ -59,5 +64,22 @@ struct Settings
   void onUI();
   void setDefaultLuminance(float hdrEnvIntensity);
 };
+
+
+enum RenderMode
+{
+  eRTX,
+  eIndirect,
+};
+
+struct PathtraceSettings
+{
+  int              maxDepth{50};
+  int              maxSamples{1};
+  DH::EDebugMethod dbgMethod = DH::eDbgMethod_none;
+  RenderMode       renderMode{eIndirect};  // RTX / Indirect
+  float            aperture{0.0f};
+};
+
 
 }  // namespace gltfr

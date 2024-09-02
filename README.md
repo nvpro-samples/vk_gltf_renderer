@@ -296,6 +296,21 @@ It will show all the material variant and their name. Clicking on a variant name
 
 It is possible to visualize the scene hierarchy, to select node, to modify their transformation and their material, to some level.
 
+Here's a shorter version of the text, tailored for developers on GitHub:
+
+### Recompiling Shaders
+For quick shader testing, use the `Recompile Shaders` button to hot-reload shaders. Requirements:
+
+- Shaders in the `shaders` folder
+- `shaderc_shared` and `slang` libraries in the path (copied to `bin` by default)
+
+To force using the external shaders:
+```bash
+vk_gltf_reenderer.exe -forceExternalShaders
+```
+
+Note: Hot-reloading won't work without the shared libraries and shaders, but the app will still run.
+
 ## Tools
 
 The application comes with a few tools to help debug and visualize the scene.

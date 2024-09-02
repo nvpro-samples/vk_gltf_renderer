@@ -17,6 +17,7 @@
  * SPDX-License-Identifier: Apache-2.0
  */
 
+
 #include <glm/glm.hpp>
 
 // Purpose: Raster renderer implementation
@@ -24,6 +25,11 @@
 namespace DH {
 #include "shaders/device_host.h"  // Include the device/host structures
 }  // namespace DH
+
+// Pre-compiled shaders
+#include "_autogen/raster.frag.glsl.h"
+#include "_autogen/raster.vert.glsl.h"
+#include "_autogen/raster_overlay.frag.glsl.h"
 
 
 #include "imgui.h"
@@ -42,6 +48,7 @@ namespace DH {
 
 #include "renderer.hpp"
 #include "silhouette.hpp"
+#include "nvvk/shaders_vk.hpp"
 
 
 constexpr auto RASTER_SS_SIZE = 2;  // Change this for the default Super-Sampling resolution multiplier for raster;
@@ -76,6 +83,8 @@ public:
 
   VkDescriptorImageInfo getOutputImage() const override { return m_gSimpleBuffers->getDescriptorImageInfo(); }
 
+  bool reloadShaders(Resources& res, Scene& scene) override;
+
 private:
   void createRasterPipeline(Resources& res, Scene& scene);
   void createRecordCommandBuffer();
@@ -83,7 +92,7 @@ private:
   void recordRasterScene(Scene& scene);
   void renderNodes(VkCommandBuffer cmd, Scene& scene, const std::vector<uint32_t>& nodeIDs);
   void renderRasterScene(VkCommandBuffer cmd, Scene& scene);
-  bool initShaders(Resources& res);
+  bool initShaders(Resources& res, bool reload);
   void deinit();
   void createGBuffer(Resources& res, Scene& scene);
 
@@ -117,7 +126,8 @@ private:
     // Last entry is the number of shaders
     eShaderGroupCount
   };
-  std::array<shaderc::SpvCompilationResult, eShaderGroupCount> m_spvShader;
+  std::vector<shaderc::SpvCompilationResult>    m_spvShader;
+  std::array<VkShaderModule, eShaderGroupCount> m_shaderModules{};
 
   VkCommandBuffer m_recordedSceneCmd{VK_NULL_HANDLE};
   VkDevice        m_device{VK_NULL_HANDLE};
@@ -127,28 +137,55 @@ private:
 //--------------------------------------------------------------------------------------------------
 // Compile all shaders used by this renderer
 //
-bool RendererRaster::initShaders(Resources& res)
+bool RendererRaster::initShaders(Resources& res, bool reload)
 {
   nvh::ScopedTimer st(__FUNCTION__);
 
-  // Loading the shaders
-  m_spvShader[eVertex]   = res.compileGlslShader("raster.vert.glsl", shaderc_shader_kind::shaderc_vertex_shader);
-  m_spvShader[eFragment] = res.compileGlslShader("raster.frag.glsl", shaderc_shader_kind::shaderc_fragment_shader);
-  m_spvShader[eFragmentOverlay] = res.compileGlslShader("raster_overlay.frag.glsl", shaderc_shader_kind::shaderc_fragment_shader);
-
-  for(auto& s : m_spvShader)
+  if(res.hasGlslCompiler() && (reload || g_forceExternalShaders))
   {
-    if(s.GetCompilationStatus() != shaderc_compilation_status_success)
+    // Loading the shaders
+    m_spvShader.resize(eShaderGroupCount);
+    m_spvShader[eVertex]   = res.compileGlslShader("raster.vert.glsl", shaderc_shader_kind::shaderc_vertex_shader);
+    m_spvShader[eFragment] = res.compileGlslShader("raster.frag.glsl", shaderc_shader_kind::shaderc_fragment_shader);
+    m_spvShader[eFragmentOverlay] = res.compileGlslShader("raster_overlay.frag.glsl", shaderc_shader_kind::shaderc_fragment_shader);
+
+    for(size_t i = 0; i < m_spvShader.size(); i++)
     {
-      LOGE("Error when loading shaders\n");
-      LOGE("Error %s\n", s.GetErrorMessage().c_str());
-      return false;
+      auto& s = m_spvShader[i];
+      if(s.GetCompilationStatus() != shaderc_compilation_status_success)
+      {
+        LOGE("Error when loading shaders\n");
+        LOGE("Error %s\n", s.GetErrorMessage().c_str());
+        return false;
+      }
+      m_shaderModules[i] = res.createShaderModule(s);
     }
+  }
+  else
+  {
+    const auto& vert_shd = std::vector<uint32_t>{std::begin(raster_vert_glsl), std::end(raster_vert_glsl)};
+    const auto& frag_shd = std::vector<uint32_t>{std::begin(raster_frag_glsl), std::end(raster_frag_glsl)};
+    const auto& overlay_shd = std::vector<uint32_t>{std::begin(raster_overlay_frag_glsl), std::end(raster_overlay_frag_glsl)};
+
+    m_shaderModules[eVertex]          = nvvk::createShaderModule(m_device, vert_shd);
+    m_shaderModules[eFragment]        = nvvk::createShaderModule(m_device, frag_shd);
+    m_shaderModules[eFragmentOverlay] = nvvk::createShaderModule(m_device, overlay_shd);
   }
 
 
   return true;
 }
+
+bool RendererRaster::reloadShaders(Resources& res, Scene& scene)
+{
+  if(!initShaders(res, true))
+    return false;
+  deinit();
+  createRasterPipeline(res, scene);
+  freeRecordCommandBuffer();
+  return true;
+}
+
 
 //--------------------------------------------------------------------------------------------------
 // Initialize the rasterizer
@@ -159,7 +196,7 @@ bool RendererRaster::init(Resources& res, Scene& scene)
   m_commandPool = res.m_tempCommandPool->getCommandPool();
   m_dbgUtil     = std::make_unique<nvvk::DebugUtil>(m_device);
 
-  if(!initShaders(res))
+  if(!initShaders(res, false))
   {
     return false;
   }
@@ -409,6 +446,7 @@ void RendererRaster::handleChange(Resources& res, Scene& scene)
   }
 }
 
+
 //--------------------------------------------------------------------------------------------------
 // Create the all pipelines for rendering the scene.
 // It uses the same layout for all pipelines
@@ -438,12 +476,6 @@ void RendererRaster::createRasterPipeline(Resources& res, Scene& scene)
       .pPushConstantRanges    = &pushConstantRanges,
   };
   vkCreatePipelineLayout(m_device, &create_info, nullptr, &m_rasterPipepline->layout);
-
-  // Shader source (Spir-V)
-  std::array<VkShaderModule, eShaderGroupCount> shaderModules{};
-  shaderModules[eVertex]          = res.createShaderModule(m_spvShader[eVertex]);
-  shaderModules[eFragment]        = res.createShaderModule(m_spvShader[eFragment]);
-  shaderModules[eFragmentOverlay] = res.createShaderModule(m_spvShader[eFragmentOverlay]);
 
   std::vector<VkFormat>         color_format = {m_gSuperSampleBuffers->getColorFormat(GBufferType::eSuperSample),
                                                 m_gSuperSampleBuffers->getColorFormat(GBufferType::eSilhouette)};
@@ -479,8 +511,8 @@ void RendererRaster::createRasterPipeline(Resources& res, Scene& scene)
       gpb.setBlendAttachmentState(1, blend_state);
     }
 
-    gpb.addShader(shaderModules[eVertex], VK_SHADER_STAGE_VERTEX_BIT);
-    gpb.addShader(shaderModules[eFragment], VK_SHADER_STAGE_FRAGMENT_BIT);
+    gpb.addShader(m_shaderModules[eVertex], VK_SHADER_STAGE_VERTEX_BIT);
+    gpb.addShader(m_shaderModules[eFragment], VK_SHADER_STAGE_FRAGMENT_BIT);
     m_rasterPipepline->plines.push_back(gpb.createPipeline());
     m_dbgUtil->DBG_NAME(m_rasterPipepline->plines[eRasterSolid]);
     // Double Sided
@@ -508,8 +540,8 @@ void RendererRaster::createRasterPipeline(Resources& res, Scene& scene)
   // Wireframe
   {
     gpb.clearShaders();
-    gpb.addShader(shaderModules[eVertex], VK_SHADER_STAGE_VERTEX_BIT);
-    gpb.addShader(shaderModules[eFragmentOverlay], VK_SHADER_STAGE_FRAGMENT_BIT);
+    gpb.addShader(m_shaderModules[eVertex], VK_SHADER_STAGE_VERTEX_BIT);
+    gpb.addShader(m_shaderModules[eFragmentOverlay], VK_SHADER_STAGE_FRAGMENT_BIT);
     gpb.rasterizationState.depthBiasEnable = VK_FALSE;
     gpb.rasterizationState.polygonMode     = VK_POLYGON_MODE_LINE;
     gpb.rasterizationState.lineWidth       = 1.0F;
@@ -519,9 +551,9 @@ void RendererRaster::createRasterPipeline(Resources& res, Scene& scene)
   }
 
   // Cleanup
-  vkDestroyShaderModule(m_device, shaderModules[eVertex], nullptr);
-  vkDestroyShaderModule(m_device, shaderModules[eFragment], nullptr);
-  vkDestroyShaderModule(m_device, shaderModules[eFragmentOverlay], nullptr);
+  vkDestroyShaderModule(m_device, m_shaderModules[eVertex], nullptr);
+  vkDestroyShaderModule(m_device, m_shaderModules[eFragment], nullptr);
+  vkDestroyShaderModule(m_device, m_shaderModules[eFragmentOverlay], nullptr);
 }
 
 

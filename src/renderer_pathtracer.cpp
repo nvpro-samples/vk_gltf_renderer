@@ -19,51 +19,42 @@
 
 
 // Purpose: Pathtracer renderer implementation
-
-#include <imgui.h>
+#include <iostream>
 
 // nvpro-core
 #include "nvh/cameramanipulator.hpp"
 #include "nvh/timesampler.hpp"
 #include "nvvk/debug_util_vk.hpp"
-#include "nvvk/descriptorsets_vk.hpp"
-#include "nvvk/dynamicrendering_vk.hpp"
-#include "nvvk/error_vk.hpp"
-#include "nvvk/sbtwrapper_vk.hpp"
 #include "nvvkhl/shaders/dh_tonemap.h"
 #include "nvvkhl/shaders/dh_comp.h"
+#include "nvvk/sbtwrapper_vk.hpp"
+#include "nvvkhl/element_dbgprintf.hpp"
 
 // Shared information between device and host
 #include "shaders/dh_bindings.h"
 
 // Local to application
-#include "renderer.hpp"
-#include "nvvkhl/element_dbgprintf.hpp"
-
-#include "atrous_denoiser.hpp"
 #include "silhouette.hpp"
+#include "atrous_denoiser.hpp"
+#include "renderer.hpp"
 
 extern std::shared_ptr<nvvkhl::ElementDbgPrintf> g_elemDebugPrintf;
 
 namespace PE = ImGuiH::PropertyEditor;
 
+#include "_autogen/pathtrace.comp.glsl.h"
+#include "_autogen/pathtrace.rchit.glsl.h"
+#include "_autogen/pathtrace.rgen.glsl.h"
+#include "_autogen/pathtrace.rmiss.glsl.h"
+#include "_autogen/pathtrace.rahit.glsl.h"
+#include "nvvk/shaders_vk.hpp"
 
 namespace gltfr {
+extern bool g_forceExternalShaders;
 
+// Settings for the pathtracer
+PathtraceSettings g_pathtraceSettings;
 
-enum RenderMode
-{
-  eRTX,
-  eIndirect,
-};
-struct PathtraceSettings
-{
-  int              maxDepth{50};
-  int              maxSamples{1};
-  DH::EDebugMethod dbgMethod = DH::eDbgMethod_none;
-  RenderMode       renderMode{eIndirect};  // RTX / Indirect
-  float            aperture{0.0f};
-} g_pathtraceSettings;
 
 // This shows path tracing using ray tracing
 class RendererPathtracer : public Renderer
@@ -83,10 +74,12 @@ public:
     return m_gBuffers->getDescriptorImageInfo(GBufferType::eRgbResult);
   }
 
+  bool reloadShaders(Resources& res, Scene& /*scene*/) override;
+
 private:
   void createRtxPipeline(Resources& res, Scene& scene);
   void createIndirectPipeline(Resources& res, Scene& scene);
-  bool initShaders(Resources& res);
+  bool initShaders(Resources& res, bool reload);
   void createRtxSet();
   void writeRtxSet(Scene& scene);
   void deinit();
@@ -123,9 +116,9 @@ private:
     eIndirect,
     eShaderGroupCount
   };
-  std::array<shaderc::SpvCompilationResult, eShaderGroupCount> m_spvShader;
+  std::vector<shaderc::SpvCompilationResult>    m_spvShader{};
+  std::array<VkShaderModule, eShaderGroupCount> m_shaderModules{};
 };
-
 
 //------------------------------------------------------------------------------
 // Initialize the renderer
@@ -135,13 +128,13 @@ private:
 //
 bool RendererPathtracer::init(Resources& res, Scene& scene)
 {
-  m_dutil = std::make_unique<nvvk::DebugUtil>(res.ctx.device);
+  m_dutil  = std::make_unique<nvvk::DebugUtil>(res.ctx.device);
+  m_device = res.ctx.device;
 
-  if(!initShaders(res))
+  if(!initShaders(res, false))
   {
     return false;
   }
-  m_device = res.ctx.device;
 
   m_silhouette = std::make_unique<Silhouette>(res);
   m_denoiser   = std::make_unique<AtrousDenoiser>(res);
@@ -169,28 +162,65 @@ bool RendererPathtracer::init(Resources& res, Scene& scene)
 //------------------------------------------------------------------------------
 // Compile all shaders
 //
-bool RendererPathtracer::initShaders(Resources& res)
+bool RendererPathtracer::initShaders(Resources& res, bool reload)
 {
   nvh::ScopedTimer st(__FUNCTION__);
 
-  m_spvShader[eRaygen] = res.compileGlslShader("pathtrace.rgen.glsl", shaderc_shader_kind::shaderc_raygen_shader);
-  m_spvShader[eMiss]   = res.compileGlslShader("pathtrace.rmiss.glsl", shaderc_shader_kind::shaderc_miss_shader);
-  m_spvShader[eClosestHit] = res.compileGlslShader("pathtrace.rchit.glsl", shaderc_shader_kind::shaderc_closesthit_shader);
-  m_spvShader[eAnyHit]   = res.compileGlslShader("pathtrace.rahit.glsl", shaderc_shader_kind::shaderc_anyhit_shader);
-  m_spvShader[eIndirect] = res.compileGlslShader("pathtrace.comp.glsl", shaderc_shader_kind::shaderc_compute_shader);
-
-  for(size_t i = 0; i < m_spvShader.size(); i++)
+  if((reload || g_forceExternalShaders) && res.hasGlslCompiler())
   {
-    auto& s = m_spvShader[i];
+    m_spvShader.resize(eShaderGroupCount);
+    m_spvShader[eRaygen] = res.compileGlslShader("pathtrace.rgen.glsl", shaderc_shader_kind::shaderc_raygen_shader);
+    m_spvShader[eMiss]   = res.compileGlslShader("pathtrace.rmiss.glsl", shaderc_shader_kind::shaderc_miss_shader);
+    m_spvShader[eClosestHit] = res.compileGlslShader("pathtrace.rchit.glsl", shaderc_shader_kind::shaderc_closesthit_shader);
+    m_spvShader[eAnyHit]   = res.compileGlslShader("pathtrace.rahit.glsl", shaderc_shader_kind::shaderc_anyhit_shader);
+    m_spvShader[eIndirect] = res.compileGlslShader("pathtrace.comp.glsl", shaderc_shader_kind::shaderc_compute_shader);
 
-    if(s.GetCompilationStatus() != shaderc_compilation_status_success)
+    for(size_t i = 0; i < m_spvShader.size(); i++)
     {
-      LOGE("Error when loading shaders: %zu\n", i);
-      LOGE("Error %s\n", s.GetErrorMessage().c_str());
-      return false;
+      auto& s = m_spvShader[i];
+
+      if(s.GetCompilationStatus() != shaderc_compilation_status_success)
+      {
+        LOGE("Error when loading shaders: %zu\n", i);
+        LOGE("Error %s\n", s.GetErrorMessage().c_str());
+        return false;
+      }
+      m_shaderModules[i] = res.createShaderModule(s);
     }
   }
+  else
+  {
+    const auto& rgen_shd  = std::vector<uint32_t>{std::begin(pathtrace_rgen_glsl), std::end(pathtrace_rgen_glsl)};
+    const auto& rchit_shd = std::vector<uint32_t>{std::begin(pathtrace_rchit_glsl), std::end(pathtrace_rchit_glsl)};
+    const auto& rmiss_shd = std::vector<uint32_t>{std::begin(pathtrace_rmiss_glsl), std::end(pathtrace_rmiss_glsl)};
+    const auto& rahit_shd = std::vector<uint32_t>{std::begin(pathtrace_rahit_glsl), std::end(pathtrace_rahit_glsl)};
+    const auto& comp_shd  = std::vector<uint32_t>{std::begin(pathtrace_comp_glsl), std::end(pathtrace_comp_glsl)};
 
+    m_shaderModules[eRaygen]     = nvvk::createShaderModule(m_device, rgen_shd);
+    m_shaderModules[eMiss]       = nvvk::createShaderModule(m_device, rmiss_shd);
+    m_shaderModules[eClosestHit] = nvvk::createShaderModule(m_device, rchit_shd);
+    m_shaderModules[eAnyHit]     = nvvk::createShaderModule(m_device, rahit_shd);
+    m_shaderModules[eIndirect]   = nvvk::createShaderModule(m_device, comp_shd);
+  }
+
+  return true;
+}
+
+bool RendererPathtracer::reloadShaders(Resources& res, Scene& /*scene*/)
+{
+  for(auto& s : m_shaderModules)
+    vkDestroyShaderModule(m_device, s, nullptr);
+  if(!initShaders(res, true))
+    return false;
+  if(m_sbt)
+    m_sbt->destroy();
+  if(m_rtxPipe)
+    m_rtxPipe->destroy(m_device);
+  if(m_indirectPipe)
+    m_indirectPipe->destroy(m_device);
+  m_rtxPipe.reset();
+  m_indirectPipe.reset();
+  //m_sbt.reset();
   return true;
 }
 
@@ -261,6 +291,9 @@ void RendererPathtracer::deinit()
   m_rtxPipe.reset();
   m_indirectPipe.reset();
   m_sbt.reset();
+  for(auto& s : m_shaderModules)
+    vkDestroyShaderModule(m_device, s, nullptr);
+  m_shaderModules.fill(VK_NULL_HANDLE);
 }
 
 //------------------------------------------------------------------------------
@@ -415,9 +448,9 @@ void RendererPathtracer::handleChange(Resources& res, Scene& scene)
   bool writeDescriptor = scene.hasHdrChanged();
   bool gbufferChanged  = res.hasGBuffersChanged();
 
-  if(g_pathtraceSettings.renderMode == 0 && !m_rtxPipe)
+  if((g_pathtraceSettings.renderMode == RenderMode::eRTX) && !m_rtxPipe)
     createRtxPipeline(res, scene);
-  if(g_pathtraceSettings.renderMode == 1 && !m_indirectPipe)
+  if((g_pathtraceSettings.renderMode == RenderMode::eIndirect) && !m_indirectPipe)
     createIndirectPipeline(res, scene);
 
 
@@ -440,6 +473,7 @@ void RendererPathtracer::handleChange(Resources& res, Scene& scene)
   }
 }
 
+
 //------------------------------------------------------------------------------
 // Creating the ray tracing pipeline
 //
@@ -457,19 +491,19 @@ void RendererPathtracer::createRtxPipeline(Resources& res, Scene& scene)
   for(auto& s : stages)
     s.sType = VK_STRUCTURE_TYPE_PIPELINE_SHADER_STAGE_CREATE_INFO;
 
-  stages[eRaygen].module = res.createShaderModule(m_spvShader[eRaygen]);
+  stages[eRaygen].module = m_shaderModules[eRaygen];
   m_dutil->setObjectName(stages[eRaygen].module, "rgen");
   stages[eRaygen].pName = "main";
   stages[eRaygen].stage = VK_SHADER_STAGE_RAYGEN_BIT_KHR;
-  stages[eMiss].module  = res.createShaderModule(m_spvShader[eMiss]);
+  stages[eMiss].module  = m_shaderModules[eMiss];
   m_dutil->setObjectName(stages[eMiss].module, "rmiss");
   stages[eMiss].pName        = "main";
   stages[eMiss].stage        = VK_SHADER_STAGE_MISS_BIT_KHR;
-  stages[eClosestHit].module = res.createShaderModule(m_spvShader[eClosestHit]);
+  stages[eClosestHit].module = m_shaderModules[eClosestHit];
   m_dutil->setObjectName(stages[eClosestHit].module, "rchit");
   stages[eClosestHit].pName = "main";
   stages[eClosestHit].stage = VK_SHADER_STAGE_CLOSEST_HIT_BIT_KHR;
-  stages[eAnyHit].module    = res.createShaderModule(m_spvShader[eAnyHit]);
+  stages[eAnyHit].module    = m_shaderModules[eAnyHit];
   m_dutil->setObjectName(stages[eAnyHit].module, "rahit");
   stages[eAnyHit].pName = "main";
   stages[eAnyHit].stage = VK_SHADER_STAGE_ANY_HIT_BIT_KHR;
@@ -531,10 +565,6 @@ void RendererPathtracer::createRtxPipeline(Resources& res, Scene& scene)
 
   // Creating the Shading Binding Table
   m_sbt->create(m_rtxPipe->plines[0], rtPipelineCreateInfo);
-
-  // Cleaning up
-  for(auto& s : stages)
-    vkDestroyShaderModule(m_device, s.module, nullptr);
 }
 
 
@@ -565,7 +595,7 @@ void RendererPathtracer::createIndirectPipeline(Resources& res, Scene& scene)
   NVVK_CHECK(vkCreatePipelineLayout(m_device, &pipeLayoutCreateInfo, nullptr, &m_indirectPipe->layout));
   m_dutil->DBG_NAME(m_indirectPipe->layout);
 
-  VkShaderModule                  module = res.createShaderModule(m_spvShader[eIndirect]);
+  VkShaderModule                  module = m_shaderModules[eIndirect];
   VkPipelineShaderStageCreateInfo comp_shd{
       .sType  = VK_STRUCTURE_TYPE_PIPELINE_SHADER_STAGE_CREATE_INFO,
       .stage  = VK_SHADER_STAGE_COMPUTE_BIT,
@@ -580,8 +610,6 @@ void RendererPathtracer::createIndirectPipeline(Resources& res, Scene& scene)
   };
 
   vkCreateComputePipelines(m_device, {}, 1, &cpCreateInfo, nullptr, &m_indirectPipe->plines[0]);
-
-  vkDestroyShaderModule(m_device, cpCreateInfo.stage.module, nullptr);
 }
 
 

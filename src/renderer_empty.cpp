@@ -42,6 +42,7 @@ public:
   }
   void deinit(Resources& /*res*/) override{};
   void handleChange(Resources& /*res*/, Scene& /*scene*/) override{};
+  bool reloadShaders(Resources& /*res*/, Scene& /*scene*/) override { return true; };
 };
 
 std::unique_ptr<Renderer> makeRendererEmpty()

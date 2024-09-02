@@ -58,6 +58,9 @@ public:
 
   // Use getOutputImage to get the final rendered image
   virtual VkDescriptorImageInfo getOutputImage() const { return {}; }
+
+  // Use hot-reload the shaders
+  virtual bool reloadShaders(Resources& res, Scene& scene) = 0;
 };
 
 // Add under here all the different renderers

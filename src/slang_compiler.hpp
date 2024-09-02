@@ -19,6 +19,11 @@
 
 #pragma once
 
+// Undefined because Slang uses None and Bool
+#ifdef __linux__
+#undef None
+#undef Bool
+#endif
 #include <slang.h>
 #include <vector>
 #include <string>

@@ -82,6 +82,9 @@ public:
   bool hasGBuffersChanged() const { return m_hasGBufferChanged; }
   void setGBuffersChanged(bool changed) { m_hasGBufferChanged = changed; }
 
+  bool hasGlslCompiler() const { return m_glslC != nullptr; }
+  bool hasSlangCompiler() const { return m_slangC != nullptr; }
+
   // Vulkan context resources
   VulkanInfo ctx{};
 
