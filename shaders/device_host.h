@@ -31,7 +31,8 @@ ENUM_ENTRY(eDbgMethod_bitangent, 5)
 ENUM_ENTRY(eDbgMethod_baseColor, 6)
 ENUM_ENTRY(eDbgMethod_emissive, 7)
 ENUM_ENTRY(eDbgMethod_opacity, 8)
-ENUM_ENTRY(eDbgMethod_texCoord, 9)
+ENUM_ENTRY(eDbgMethod_texCoord0, 9)
+ENUM_ENTRY(eDbgMethod_texCoord1, 10)
 ENUM_END()
 
 

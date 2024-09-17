@@ -118,7 +118,7 @@ float getOpacity(RenderNode renderNode, RenderPrimitive renderPrim, int triangle
     return 1.0;
 
   float baseColorAlpha = mat.pbrBaseColorFactor.a;
-  if(mat.pbrBaseColorTexture > -1)
+  if(isTexturePresent(mat.pbrBaseColorTexture))
   {
 
     // Getting the 3 indices of the triangle (local)
@@ -127,7 +127,7 @@ float getOpacity(RenderNode renderNode, RenderPrimitive renderPrim, int triangle
     // Retrieve the interpolated texture coordinate from the vertex
     vec2 uv = getInterpolatedVertexTexCoord0(renderPrim, triangleIndex, barycentrics);
 
-    baseColorAlpha *= texture(texturesMap[nonuniformEXT(mat.pbrBaseColorTexture)], uv).a;
+    baseColorAlpha *= texture(texturesMap[nonuniformEXT(mat.pbrBaseColorTexture.index)], uv).a;
   }
 
   float opacity;
@@ -412,8 +412,10 @@ vec3 debugRendering(vec2 samplePos, vec2 imageSize)
       return vec3(pbrMat.emissive);
     case eDbgMethod_opacity:
       return vec3(pbrMat.opacity * (1.0 - pbrMat.transmission));
-    case eDbgMethod_texCoord:
-      return vec3(hit.uv, 0);
+    case eDbgMethod_texCoord0:
+      return vec3(hit.uv[0], 0);
+    case eDbgMethod_texCoord1:
+      return vec3(hit.uv[1], 0);
   }
 
   return vec3(0);

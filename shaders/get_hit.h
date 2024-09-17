@@ -51,7 +51,8 @@ HitState getHitState(in RenderPrimitive renderPrim,      // Buffer containing al
   }
 
   // TexCoord
-  hit.uv = getInterpolatedVertexTexCoord0(renderPrim, triangleIndex, barycentrics);
+  hit.uv[0] = getInterpolatedVertexTexCoord0(renderPrim, triangleIndex, barycentrics);
+  hit.uv[1] = getInterpolatedVertexTexCoord1(renderPrim, triangleIndex, barycentrics);
 
   // Color
   hit.color = getInterpolatedVertexColor(renderPrim, triangleIndex, barycentrics);

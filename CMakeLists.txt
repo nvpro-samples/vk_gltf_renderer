@@ -180,7 +180,7 @@ compile_glsl(
      DST "${CMAKE_CURRENT_SOURCE_DIR}/_autogen" 
      VULKAN_TARGET "vulkan1.3"
      HEADER ON
-     DEPENDENCY OFF
+     DEPENDENCY ${Vulkan_BUILD_DEPENDENCIES}
      FLAGS ${_GLSL_FLAGS}
      )
 

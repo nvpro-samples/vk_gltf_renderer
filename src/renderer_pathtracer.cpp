@@ -429,7 +429,7 @@ bool RendererPathtracer::onUI()
     changed |= PE::SliderFloat("Aperture", &g_pathtraceSettings.aperture, 0.0f, 0.5f, "%.3f",
                                ImGuiSliderFlags_Logarithmic, "Out-of-focus effect");
     changed |= PE::Combo("Debug Method", reinterpret_cast<int32_t*>(&g_pathtraceSettings.dbgMethod),
-                         "None\0Metallic\0Roughness\0Normal\0Tangent\0Bitangent\0BaseColor\0Emissive\0Opacity\0TexCoord\0\0");
+                         "None\0Metallic\0Roughness\0Normal\0Tangent\0Bitangent\0BaseColor\0Emissive\0Opacity\0TexCoord0\0TexCoord1\0\0");
     changed |= PE::Combo("Render Mode", reinterpret_cast<int32_t*>(&g_pathtraceSettings.renderMode), "RTX\0Indirect\0\0");
 
     m_denoiser->onUi();

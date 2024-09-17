@@ -10,7 +10,7 @@ struct HitState
   //vec3 shadowpos;
   vec3 nrm;
   vec3 geonrm;
-  vec2 uv;
+  vec2 uv[2];
   vec3 tangent;
   vec3 bitangent;
   vec4 color;
