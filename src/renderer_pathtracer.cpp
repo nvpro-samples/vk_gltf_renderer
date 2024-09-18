@@ -209,7 +209,10 @@ bool RendererPathtracer::initShaders(Resources& res, bool reload)
 bool RendererPathtracer::reloadShaders(Resources& res, Scene& /*scene*/)
 {
   for(auto& s : m_shaderModules)
+  {
     vkDestroyShaderModule(m_device, s, nullptr);
+    s = VK_NULL_HANDLE;
+  }
   if(!initShaders(res, true))
     return false;
   if(m_sbt)
@@ -292,7 +295,10 @@ void RendererPathtracer::deinit()
   m_indirectPipe.reset();
   m_sbt.reset();
   for(auto& s : m_shaderModules)
+  {
     vkDestroyShaderModule(m_device, s, nullptr);
+    s = VK_NULL_HANDLE;
+  }
   m_shaderModules.fill(VK_NULL_HANDLE);
 }
 

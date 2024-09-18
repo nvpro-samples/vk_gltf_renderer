@@ -9,7 +9,6 @@ Message(STATUS "Processing Project ${PROJNAME}:")
 #####################################################################################
 # look for nvpro_core 1) as a sub-folder 2) at some other locations
 # this cannot be put anywhere else since we still didn't find setup.cmake yet
-
 if(NOT BASE_DIRECTORY)
 
   find_path(BASE_DIRECTORY
@@ -30,14 +29,14 @@ _add_project_definitions(${PROJNAME})
 
 set(NVPRO_CORE_DIR ${BASE_DIRECTORY}/nvpro_core)
 
+#####################################################################################
 # Adding Slang
 list(APPEND CMAKE_MODULE_PATH "${CMAKE_CURRENT_SOURCE_DIR}/cmake")
 set(Slang_VERSION "2024.1.30")
 find_package(Slang)
-
-# Adding SLANG compiler function
 include(${CMAKE_CURRENT_SOURCE_DIR}/cmake/slang.cmake)
 
+#####################################################################################
 # Add RapidJSON package
 download_package(
   NAME RapidJSON
@@ -45,10 +44,10 @@ download_package(
   VERSION 1.1.0
   LOCATION RapidJSON_SOURCE_DIR
 )
-
 set(RAPIDJSON_INCLUDE_DIR ${RapidJSON_SOURCE_DIR}/rapidjson-1.1.0/include/rapidjson)
 
-# ---- DRACO ----
+#####################################################################################
+# Adding DRACO if selected
 option(USE_DRACO "Use Draco for compression" OFF)
 include(cmake/draco.cmake)
 if(USE_DRACO)
@@ -56,48 +55,46 @@ if(USE_DRACO)
 endif()
 
 #####################################################################################
-# additions from packages needed for this sample
-# add refs  in LIBRARIES_OPTIMIZED
-# add refs  in LIBRARIES_DEBUG
-# add files in PACKAGE_SOURCE_FILES
+# Additions from packages needed for this sample
+_add_package_VulkanSDK()    # Vulkan dependencies
+_add_package_ShaderC()      # GLSL Compiler
+_add_package_IMGUI()        # Dear ImGui interface and utilities
+_add_package_NVML()         # GPU monitoring
+_add_package_KTX()          # KTX: BasisU images
 
-_add_package_VulkanSDK()
-_add_package_ShaderC()
-_add_package_IMGUI()
-_add_package_NVML()
-
-#####################################################################################
 # process the rest of some cmake code that needs to be done *after* the packages add
 _add_nvpro_core_lib()
 
 #####################################################################################
-# Source files for this project
-#
+# Source and shader files for this project
 file(GLOB SOURCE_FILES src/*.*)
 file(GLOB SHADER_SOURCE shaders/*.glsl)
 file(GLOB SHADER_HEADER shaders/*.h)
 file(GLOB SHADER_SLANG shaders/*.slang)
 file(GLOB SHADER_FILES shaders/*.glsl shaders/*.h shaders/*.slang)
 file(GLOB SHADER_COMMON_FILES ${NVPRO_CORE_DIR}/nvvkhl/shaders/*.*)
+set(MIKKTSPACE_DIR ${CMAKE_CURRENT_SOURCE_DIR}/third_party/MikkTSpace)
+set(MIKKTSPACE_SRC ${MIKKTSPACE_DIR}/mikktspace.c ${MIKKTSPACE_DIR}/mikktspace.h)
 
 include_directories(${CMAKE_CURRENT_SOURCE_DIR})
 
 #####################################################################################
 # Executable
 #
-
-add_executable(${PROJNAME} ${SOURCE_FILES} ${COMMON_SOURCE_FILES} ${PACKAGE_SOURCE_FILES} ${SHADER_FILES} ${SHADER_COMMON_FILES})
+add_executable(${PROJNAME})
+# Sources for the project
+target_sources(${PROJNAME} PRIVATE ${SOURCE_FILES})
+target_sources(${PROJNAME} PRIVATE ${COMMON_SOURCE_FILES})
+target_sources(${PROJNAME} PRIVATE ${PACKAGE_SOURCE_FILES})
+target_sources(${PROJNAME} PRIVATE ${SHADER_FILES} )
+target_sources(${PROJNAME} PRIVATE ${SHADER_COMMON_FILES})
+target_sources(${PROJNAME} PRIVATE ${MIKKTSPACE_SRC})
 
 set_property(DIRECTORY ${CMAKE_CURRENT_SOURCE_DIR} PROPERTY VS_STARTUP_PROJECT ${PROJNAME})
 
-target_compile_definitions(${PROJNAME} 
-    PRIVATE IMGUI_DEFINE_MATH_OPERATORS )
-
-target_compile_definitions(${PROJNAME} 
-    PRIVATE NVPRO_CORE_DIR="${NVPRO_CORE_DIR}" )
-
-
-# Adding warning levels for MSVC
+# Compiler options
+set_property(TARGET ${PROJNAME} PROPERTY CXX_STANDARD 20)
+set_property(TARGET ${PROJNAME} PROPERTY CXX_STANDARD_REQUIRED ON)
 if(MSVC)
     target_compile_options(${PROJNAME}  PRIVATE /W3)
     # We are not forcing the usage of the GLSL and Slang compiler
@@ -105,33 +102,22 @@ if(MSVC)
     target_link_options(${PROJNAME} PRIVATE "/DELAYLOAD:slang.dll") 
 endif()
 
-# Include the rapidjson headers
+# Preprocessor definitions
+target_compile_definitions(${PROJNAME} PRIVATE IMGUI_DEFINE_MATH_OPERATORS )
+target_compile_definitions(${PROJNAME} PRIVATE NVPRO_CORE_DIR="${NVPRO_CORE_DIR}" )
+
+# Extra include directories
 target_include_directories(${PROJNAME} PRIVATE ${RAPIDJSON_INCLUDE_DIR})
-
-# Include the MikkTSpace
-set(MIKKTSPACE_DIR ${CMAKE_CURRENT_SOURCE_DIR}/third_party/MikkTSpace)
-set(MIKKTSPACE_SRC ${MIKKTSPACE_DIR}/mikktspace.c ${MIKKTSPACE_DIR}/mikktspace.h)
 target_include_directories(${PROJNAME} PRIVATE ${MIKKTSPACE_DIR})
-target_sources(${PROJNAME} PRIVATE ${MIKKTSPACE_SRC})
-source_group("MikkTSpace" FILES ${MIKKTSPACE_SRC})
 
-#####################################################################################
-# common source code needed for this sample
-#
-source_group(common FILES 
-  ${COMMON_SOURCE_FILES}
-  ${PACKAGE_SOURCE_FILES}
-)
+# Folders for Visual Studio
+source_group("Common" FILES ${COMMON_SOURCE_FILES} ${PACKAGE_SOURCE_FILES} )
 source_group("Shader Files" FILES ${SHADER_FILES} ${SHADER_SLANG})
 source_group("Shader Files/common" FILES ${SHADER_COMMON_FILES})
-# source_group("Source Files" FILES ${SOURCE_FILES})
+source_group("MikkTSpace" FILES ${MIKKTSPACE_SRC})
 
 
-if(UNIX)
-  set(UNIXLINKLIBS dl pthread)
-else()
-  set(UNIXLINKLIBS)
-endif()
+
 
 # ---- DRACO ----
 if(USE_DRACO)
@@ -139,22 +125,14 @@ if(USE_DRACO)
 endif()
 
 
-
-
-#####################################################################################
-# Linkage
-#
-
-
-target_link_libraries(${PROJNAME} PRIVATE ${PLATFORM_LIBRARIES} nvpro_core)
-
-foreach(DEBUGLIB ${LIBRARIES_DEBUG})
-  target_link_libraries(${PROJNAME} PRIVATE debug ${DEBUGLIB})
-endforeach(DEBUGLIB)
-
-foreach(RELEASELIB ${LIBRARIES_OPTIMIZED})
-  target_link_libraries(${PROJNAME} PRIVATE optimized ${RELEASELIB})
-endforeach(RELEASELIB)
+# Linking with other libraries
+target_link_libraries(${PROJNAME} PRIVATE nvpro_core)
+target_link_libraries(${PROJNAME} PRIVATE optimized ${LIBRARIES_OPTIMIZED})
+target_link_libraries(${PROJNAME} PRIVATE debug ${LIBRARIES_DEBUG})
+target_link_libraries(${PROJNAME} PRIVATE ${PLATFORM_LIBRARIES})
+if(UNIX)
+    target_link_libraries(${PROJNAME} PRIVATE dl pthread)
+endif()
 
 # Resources
 download_files(FILENAMES FlightHelmet.zip EXTRACT)
@@ -163,14 +141,11 @@ download_files(FILENAMES daytime.hdr std_env.hdr)
 
 #####################################################################################
 # GLSL Shader compilation
-# - Shaders are compiled to Spir-V but not embedded in the binary
-# - This allow to check for errors before running the application
 #
-# GLSL compilation flags
-set(_GLSL_FLAGS 
+set(_GLSL_FLAGS  
    -Ishaders 
    -I${NVPRO_CORE_DIR} 
-   -g # Debugging information
+   -g
    -D_glsl)
  
 # Compiling shaders to Spir-V header
@@ -188,7 +163,7 @@ target_sources(${PROJNAME} PRIVATE ${GLSL_SOURCES} ${GLSL_HEADERS})
 
 ####################################################################################################
 # Slang Shader compilation
-# - Shaders are compiled to Spir-V but not embedded in the binary
+#
 target_sources(${PROJNAME} PRIVATE ${SHADER_SLANG})
 target_include_directories(${PROJNAME} PRIVATE "${Slang_SDK}/include")
 target_link_libraries(${PROJNAME} PRIVATE ${Slang_LIBRARY})
