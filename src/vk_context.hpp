@@ -20,6 +20,8 @@
 #include <csignal>
 
 #include <vulkan/vulkan_core.h>
+#include <vulkan/vk_enum_string_helper.h>
+
 #include <stdexcept>
 #include <vector>
 #include <cstring>
@@ -44,10 +46,16 @@ static VKAPI_ATTR VkBool32 VKAPI_CALL VkContextDebugReport(VkDebugUtilsMessageSe
     if(ignoredMsg->find(callbackData->messageIdNumber) != ignoredMsg->end())
       return VK_FALSE;
     LOGE("%s\n", callbackData->pMessage);
+    for(uint32_t count = 0; count < callbackData->objectCount; count++)
+    {
+      LOGE("Object[%d] \n\t- Type %s\n\t- Value %p\n\t- Name %s\n", count,
+           string_VkObjectType(callbackData->pObjects[count].objectType), callbackData->pObjects[count].objectHandle,
+           callbackData->pObjects[count].pObjectName);
+    }
 #if defined(_MSVC_LANG)
     __debugbreak();  // If you break here, there is a Vulkan error that needs to be fixed
                      // To ignore specific message, insert it to settings.ignoreDbgMessages
-                     // ex: "MessageID = 0x30b6e267"  ->  settings.ignoreDbgMessages.push_back(0x30b6e267);
+                     // ex: "MessageID = 0x30b6e267"  ->  settings.ignoreDbgMessages.insert(0x30b6e267);
 #elif defined(LINUX)
     raise(SIGTRAP);
 #endif
@@ -67,9 +75,11 @@ using QueueInfo = nvvkhl::ApplicationQueue;
 // Struct to hold an extension and its corresponding feature
 struct ExtensionFeaturePair
 {
-  const char* extensionName = nullptr;
-  void*       feature       = nullptr;  // [optional] Pointer to the feature structure for the extension
-  bool        required      = true;     // If the extension is required
+  const char* extensionName    = nullptr;
+  void*       feature          = nullptr;  // [optional] Pointer to the feature structure for the extension
+  bool        required         = true;     // If the extension is required
+  uint32_t    specVersion      = 0;        // [optional] Spec version of the extension, this version or higher
+  bool        exactSpecVersion = false;    // [optional] If true, the spec version must match exactly
 };
 
 
@@ -110,12 +120,12 @@ struct VkContextSettings
 
 //--------------------------------------------------------------------------------------------------
 // Simple class to handle the Vulkan context creation
-class VkContext
+class VulkanContext
 {
 public:
-  VkContext() = default;
-  VkContext(const VkContextSettings& settings) { init(settings); }
-  ~VkContext() { deinit(); }
+  VulkanContext() = default;
+  VulkanContext(const VkContextSettings& settings) { init(settings); }
+  ~VulkanContext() { deinit(); }
 
   VkInstance             getInstance() const { return m_instance; }
   VkDevice               getDevice() const { return m_device; }
@@ -216,14 +226,9 @@ private:
     };
 
     VkResult result = vkCreateInstance(&createInfo, m_settings.alloc, &m_instance);
-    if(result == VK_ERROR_LAYER_NOT_PRESENT)
+    if(result != VK_SUCCESS)
     {
-      // If the layers aren't present, try without
-      createInfo.enabledLayerCount = 0;
-      result                       = vkCreateInstance(&createInfo, m_settings.alloc, &m_instance);
-    }
-    if(!nvvk::checkResult(result, "vkCreateInstance"))
-    {
+      assert(!"failed to create instance!");
       return;
     }
 
@@ -231,16 +236,23 @@ private:
     {
       auto vkCreateDebugUtilsMessengerEXT =
           (PFN_vkCreateDebugUtilsMessengerEXT)vkGetInstanceProcAddr(m_instance, "vkCreateDebugUtilsMessengerEXT");
-      assert(vkCreateDebugUtilsMessengerEXT != nullptr);
-      VkDebugUtilsMessengerCreateInfoEXT dbg_messenger_create_info{VK_STRUCTURE_TYPE_DEBUG_UTILS_MESSENGER_CREATE_INFO_EXT};
-      dbg_messenger_create_info.messageSeverity = VK_DEBUG_UTILS_MESSAGE_SEVERITY_INFO_BIT_EXT       // For debug printf
-                                                  | VK_DEBUG_UTILS_MESSAGE_SEVERITY_WARNING_BIT_EXT  // GPU info, bug
-                                                  | VK_DEBUG_UTILS_MESSAGE_SEVERITY_ERROR_BIT_EXT;   // Invalid usage
-      dbg_messenger_create_info.messageType = VK_DEBUG_UTILS_MESSAGE_TYPE_VALIDATION_BIT_EXT      // Violation of spec
-                                              | VK_DEBUG_UTILS_MESSAGE_TYPE_PERFORMANCE_BIT_EXT;  // Non-optimal use
-      dbg_messenger_create_info.pfnUserCallback = VkContextDebugReport;
-      dbg_messenger_create_info.pUserData       = &m_settings.ignoreDbgMessages;
-      NVVK_CHECK(vkCreateDebugUtilsMessengerEXT(m_instance, &dbg_messenger_create_info, nullptr, &m_dbgMessenger));
+      if(vkCreateDebugUtilsMessengerEXT)
+      {
+        assert(vkCreateDebugUtilsMessengerEXT != nullptr);
+        VkDebugUtilsMessengerCreateInfoEXT dbg_messenger_create_info{VK_STRUCTURE_TYPE_DEBUG_UTILS_MESSENGER_CREATE_INFO_EXT};
+        dbg_messenger_create_info.messageSeverity = VK_DEBUG_UTILS_MESSAGE_SEVERITY_INFO_BIT_EXT  // For debug printf
+                                                    | VK_DEBUG_UTILS_MESSAGE_SEVERITY_WARNING_BIT_EXT  // GPU info, bug
+                                                    | VK_DEBUG_UTILS_MESSAGE_SEVERITY_ERROR_BIT_EXT;   // Invalid usage
+        dbg_messenger_create_info.messageType = VK_DEBUG_UTILS_MESSAGE_TYPE_VALIDATION_BIT_EXT      // Violation of spec
+                                                | VK_DEBUG_UTILS_MESSAGE_TYPE_PERFORMANCE_BIT_EXT;  // Non-optimal use
+        dbg_messenger_create_info.pfnUserCallback = VkContextDebugReport;
+        dbg_messenger_create_info.pUserData       = &m_settings.ignoreDbgMessages;
+        NVVK_CHECK(vkCreateDebugUtilsMessengerEXT(m_instance, &dbg_messenger_create_info, nullptr, &m_dbgMessenger));
+      }
+      else
+      {
+        LOGW("\nMissing VK_EXT_DEBUG_UTILS extension, cannot use vkCreateDebugUtilsMessengerEXT for validation layers.\n");
+      }
     }
   }
 
@@ -251,7 +263,7 @@ private:
 
     // nvh::ScopedTimer st(std::string(__FUNCTION__) + "\n");
     uint32_t deviceCount = 0;
-    vkEnumeratePhysicalDevices(m_instance, &deviceCount, nullptr);
+    NVVK_CHECK(vkEnumeratePhysicalDevices(m_instance, &deviceCount, nullptr));
     if(deviceCount == 0)
       assert(!"Failed to find GPUs with Vulkan support!");
     std::vector<VkPhysicalDevice> gpus(deviceCount);
@@ -467,31 +479,41 @@ private:
     return true;
   }
 
+  // Filters available Vulkan extensions based on desired extensions and their specifications.
   bool filterAvailableExtensions(const std::vector<VkExtensionProperties>& availableExtensions,
                                  const std::vector<ExtensionFeaturePair>&  desiredExtensions,
                                  std::vector<ExtensionFeaturePair>&        filteredExtensions)
   {
     bool allFound = true;
 
-    std::unordered_map<std::string, bool> availableExtensionsMap;
+    // Create a map for quick lookup of available extensions and their versions
+    std::unordered_map<std::string, uint32_t> availableExtensionsMap;
     for(const auto& ext : availableExtensions)
-      availableExtensionsMap[ext.extensionName] = true;
+    {
+      availableExtensionsMap[ext.extensionName] = ext.specVersion;
+    }
 
+    // Iterate through all desired extensions
     for(const auto& desiredExtension : desiredExtensions)
     {
-      if(availableExtensionsMap.find(desiredExtension.extensionName) != availableExtensionsMap.end())
+      auto     it           = availableExtensionsMap.find(desiredExtension.extensionName);
+      bool     found        = it != availableExtensionsMap.end();
+      uint32_t specVersion  = found ? it->second : 0;
+      bool     validVersion = desiredExtension.exactSpecVersion ? desiredExtension.specVersion == specVersion :
+                                                                  desiredExtension.specVersion <= specVersion;
+      if(found && validVersion)
       {
         filteredExtensions.push_back(desiredExtension);
       }
       else
       {
+        std::string versionInfo;
+        if(desiredExtension.specVersion != 0 || desiredExtension.exactSpecVersion)
+          versionInfo = fmt::format(" (v.{} {} v.{})", specVersion, specVersion ? "==" : ">=", desiredExtension.specVersion);
         if(desiredExtension.required)
-        {
-          LOGE("Extension not available: %s\n", desiredExtension.extensionName);
           allFound = false;
-        }
-        else
-          LOGW("Extension not available: %s\n", desiredExtension.extensionName);
+        nvprintfLevel(desiredExtension.required ? LOGLEVEL_ERROR : LOGLEVEL_WARNING, "Extension not available: %s %s\n",
+                      desiredExtension.extensionName, versionInfo.c_str());
       }
     }
 

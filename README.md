@@ -82,7 +82,7 @@ What is currently not supported are animations and skins, multiple textures coor
 - [x] KHR_lights_punctual
 - [x] KHR_materials_anisotropy
 - [x] KHR_materials_clearcoat
-- [ ] KHR_materials_dispersion
+- [x] KHR_materials_dispersion
 - [x] KHR_materials_emissive_strength
 - [x] KHR_materials_ior
 - [x] KHR_materials_iridescence
@@ -93,7 +93,7 @@ What is currently not supported are animations and skins, multiple textures coor
 - [x] KHR_materials_variants
 - [x] KHR_materials_volume
 - [ ] KHR_mesh_quantization
-- [ ] KHR_texture_basisu
+- [x] KHR_texture_basisu
 - [x] KHR_texture_transform
 - [ ] KHR_xmp_json_ld
 - [x] EXT_mesh_gpu_instancing

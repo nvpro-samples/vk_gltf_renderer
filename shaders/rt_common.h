@@ -180,13 +180,12 @@ SampleResult pathTrace(Ray r, inout uint seed)
 
     HitState hit = hitPayload.hit;
 
-
     // Hitting the environment, then exit
     if(hitPayload.hitT == INFINITE)
     {
       if(frameInfo.useSky == 1)
       {
-        radiance += evalPhysicalSky(skyInfo, r.direction);
+        radiance += throughput * evalPhysicalSky(skyInfo, r.direction);
       }
       else
       {
@@ -198,10 +197,9 @@ SampleResult pathTrace(Ray r, inout uint seed)
         // We may hit the environment twice: once via sampleLights() and once when hitting the sky while probing
         // for more indirect hits. This is the counter part of the MIS weighting in sampleLights()
         float misWeight = (lastSamplePdf == DIRAC) ? 1.0 : (lastSamplePdf / (lastSamplePdf + env.w));
-        radiance += misWeight * env.rgb * frameInfo.envIntensity.xyz;
+        radiance += throughput * misWeight * env.rgb * frameInfo.envIntensity.xyz;
       }
 
-      radiance *= throughput;
       sampleResult.radiance = radiance;
       return sampleResult;
     }
@@ -360,7 +358,7 @@ SampleResult samplePixel(inout uint seed, vec2 samplePos, vec2 subpixelJitter, v
 
 // Removing fireflies
 #if USE_FIREFLY_FILTER
-  float lum = dot(sampleResult.radiance, vec3(0.212671F, 0.715160F, 0.072169F));
+  float lum = dot(sampleResult.radiance, vec3(1.0F / 3.0F));
   if(lum > pc.maxLuminance)
   {
     sampleResult.radiance *= pc.maxLuminance / lum;

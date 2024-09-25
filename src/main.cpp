@@ -24,8 +24,6 @@
 #include <windows.h>
 #endif
 
-#include "slang.h"
-
 // ImGui headers
 #include "imgui/imgui_axis.hpp"
 #include "imgui/imgui_camera_widget.h"
@@ -50,6 +48,8 @@
 #include "settings_handler.hpp"
 #include "utilities.hpp"
 #include "vk_context.hpp"
+#include "stb_image.h"
+#include "doc/app_icon_png.h"
 
 // #define USE_DGBPRINTF
 // With USE_DGBPRINTF defined, the application will have the capability to use the debug printf extension.
@@ -349,7 +349,8 @@ public:
     if(loadFile)
     {
       std::string filename = NVPSystem::windowOpenFileDialog(m_app->getWindowHandle(), "Load glTF | HDR",
-                                                             "glTF(.gltf, .glb), OBJ(.obj), HDR(.hdr)|*.gltf;*.glb;*.obj;*.hdr");
+                                                             "glTF(.gltf, .glb), OBJ(.obj), "
+                                                             "HDR(.hdr)|*.gltf;*.glb;*.obj;*.hdr");
       onFileDrop(filename.c_str());
     }
 
@@ -663,6 +664,19 @@ private:
 
 }  // namespace gltfr
 
+static void setWindowIcon(GLFWwindow* window)
+{
+  GLFWimage icon{};
+  int       channels = 0;
+  icon.pixels        = stbi_load_from_memory(app_icon_png, app_icon_png_len, &icon.width, &icon.height, &channels, 4);
+  if(icon.pixels)
+  {
+    glfwSetWindowIcon(window, 1, &icon);
+    stbi_image_free(icon.pixels);
+  }
+}
+
+
 //////////////////////////////////////////////////////////////////////////
 ///
 ///
@@ -724,7 +738,7 @@ auto main(int argc, char** argv) -> int
 #endif                                                               // USE_DGBPRINTF
 
   // Creating the Vulkan context
-  auto vkContext = std::make_unique<VkContext>(vkSetup);
+  auto vkContext = std::make_unique<VulkanContext>(vkSetup);
   if(!vkContext->isValid())
   {
     LOGE("Error in Vulkan context creation\n");
@@ -745,6 +759,8 @@ auto main(int argc, char** argv) -> int
 
   // Create the application
   auto app = std::make_unique<nvvkhl::Application>(spec);
+
+  setWindowIcon(app->getWindowHandle());
 
   // Create Elements of the application
   g_elemCamera      = std::make_shared<nvvkhl::ElementCamera>();
