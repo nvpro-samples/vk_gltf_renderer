@@ -97,6 +97,7 @@ What is currently not supported are animations and skins, multiple textures coor
 - [x] KHR_texture_transform
 - [ ] KHR_xmp_json_ld
 - [x] EXT_mesh_gpu_instancing
+- [x] KHR_node_visibility
 
 ## Pathtracer
 

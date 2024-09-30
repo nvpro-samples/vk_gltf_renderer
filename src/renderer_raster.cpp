@@ -425,9 +425,10 @@ void RendererRaster::handleChange(Resources& res, Scene& scene)
   static bool lastUseSuperSample  = g_rasterSettings.useSuperSample;
   bool        resetRecorededScene = (lastSelection != scene.getSelectedRenderNode());
   bool        gbufferChanged      = res.hasGBuffersChanged() || (lastUseSuperSample != g_rasterSettings.useSuperSample);
-  bool        updateHdrDome       = scene.hasHdrChanged();
+  bool        updateHdrDome       = scene.hasDirtyFlag(Scene::eHdrEnv);
+  bool        visibilityChanged   = scene.hasDirtyFlag(Scene::eNodeVisibility);
 
-  if(gbufferChanged || resetRecorededScene || updateHdrDome)
+  if(gbufferChanged || resetRecorededScene || updateHdrDome || visibilityChanged)
   {
     vkDeviceWaitIdle(m_device);
     lastSelection = scene.getSelectedRenderNode();
@@ -629,6 +630,9 @@ void RendererRaster::renderNodes(VkCommandBuffer cmd, Scene& scene, const std::v
   {
     const nvh::gltf::RenderNode&      renderNode = renderNodes[nodeID];
     const nvh::gltf::RenderPrimitive& subMesh = subMeshes[renderNode.renderPrimID];  // Mesh referred by the draw object
+
+    if(!renderNode.visible)
+      continue;
 
     m_pushConst.materialID         = renderNode.materialID;
     m_pushConst.renderNodeID       = static_cast<int>(nodeID);

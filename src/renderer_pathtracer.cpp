@@ -451,7 +451,7 @@ bool RendererPathtracer::onUI()
 //
 void RendererPathtracer::handleChange(Resources& res, Scene& scene)
 {
-  bool writeDescriptor = scene.hasHdrChanged();
+  bool writeDescriptor = scene.hasDirtyFlag(Scene::eHdrEnv);
   bool gbufferChanged  = res.hasGBuffersChanged();
 
   if((g_pathtraceSettings.renderMode == RenderMode::eRTX) && !m_rtxPipe)

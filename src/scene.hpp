@@ -79,10 +79,8 @@ public:
 
   // Validation and state checks
   bool isValid() const { return (m_gltfScene != nullptr) && m_gltfScene->valid(); }
-  bool hasSceneChanged() const { return m_dirtyFlags.test(eNewScene); }
-  void setSceneChanged(bool changed) { changed ? m_dirtyFlags.set(eNewScene) : m_dirtyFlags.reset(eNewScene); }
-  bool hasHdrChanged() { return m_dirtyFlags.test(eHdrEnv); }
-  void setHdrChanged(bool changed) { changed ? m_dirtyFlags.set(eHdrEnv) : m_dirtyFlags.reset(eHdrEnv); }
+  bool hasDirtyFlag(int flag) const { return m_dirtyFlags.test(flag); }
+  void setDirtyFlag(int flag, bool changed) { changed ? m_dirtyFlags.set(flag) : m_dirtyFlags.reset(flag); }
 
   // Frame processing
   void resetFrameCount();
@@ -130,6 +128,14 @@ private:
   void createDescriptorSet(Resources& resources);
   void writeDescriptorSet(Resources& resources) const;
 
+
+  std::bitset<32>              m_dirtyFlags;               // Flags to indicate what has changed
+  AnimationControl             m_animControl;              // Animation control (UI)
+  std::unique_ptr<GltfModelUI> m_sceneGraph;               // Scene graph (UI)
+  std::string                  m_hdrFilename;              // Keep track of HDR filename
+  int                          m_selectedRenderNode = -1;  // Selected render node
+
+public:
   enum DirtyFlags
   {
     eNewScene,          // When a new scene is loaded, same for multiple scenes
@@ -138,16 +144,10 @@ private:
     eVulkanAttributes,  // When the Vulkan attributes need to be updated
     eRtxScene,          // When the RTX acceleration structures need to be updated
     eHdrEnv,            // When the HDR environment needs to be updated
+    eNodeVisibility,    // When the node visibility has changed
 
     eNumDirtyFlags  // Keep last - Number of dirty flags
   };
-
-
-  std::bitset<32>              m_dirtyFlags;               // Flags to indicate what has changed
-  AnimationControl             m_animControl;              // Animation control (UI)
-  std::unique_ptr<GltfModelUI> m_sceneGraph;               // Scene graph (UI)
-  std::string                  m_hdrFilename;              // Keep track of HDR filename
-  int                          m_selectedRenderNode = -1;  // Selected render node
 };
 
 }  // namespace gltfr

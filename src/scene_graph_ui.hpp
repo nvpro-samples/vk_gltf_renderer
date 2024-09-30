@@ -53,6 +53,7 @@ public:
   bool hasTransformChanged() { return m_changes.test(eNodeTransformDirty); }
   bool hasMaterialChanged() { return m_changes.test(eMaterialDirty); }
   bool hasLightChanged() { return m_changes.test(eLightDirty); }
+  bool hasVisibilityChanged() { return m_changes.test(eNodeVisibleDirty); }
   void resetChanges() { m_changes.reset(); }
   void selectNode(int nodeIndex);
   int  selectedNode() const { return (m_selectType == eNode) ? m_selectedIndex : -1; }
@@ -81,6 +82,7 @@ private:
     eNodeTransformDirty,
     eMaterialDirty,
     eLightDirty,
+    eNodeVisibleDirty,
     // Add more flags as needed
   };
 

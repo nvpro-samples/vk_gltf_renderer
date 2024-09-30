@@ -32,6 +32,7 @@ GLM_FUNC_QUALIFIER vec3 fma(vec3 const& a, vec3 const& b, vec3 const& c)
 #include "scene_graph_ui.hpp"
 #include "imgui/imgui_helper.h"
 #include "nvvkhl/shaders/dh_tonemap.h"
+#include "fileformats/tinygltf_utils.hpp"
 
 namespace PE = ImGuiH::PropertyEditor;
 
@@ -130,8 +131,14 @@ void GltfModelUI::renderNode(int nodeIndex)
     }
   }
 
+  // Append "(invisible)" to the name, if the node isn't visible
+  std::string visible;
+  if(!tinygltf::utils::getNodeVisibility(node).visible)
+    visible = "(invisible)";
+
   // Handling the selection of the node
-  bool nodeOpen = ImGui::TreeNodeEx((void*)(intptr_t)nodeIndex, flags, "%s (Node %d)", node.name.c_str(), nodeIndex);
+  bool nodeOpen =
+      ImGui::TreeNodeEx((void*)(intptr_t)nodeIndex, flags, "%s (Node %d) %s", node.name.c_str(), nodeIndex, visible.c_str());
   if(ImGui::IsItemClicked() && !ImGui::IsItemToggledOpen())
   {
     m_selectedIndex = ((m_selectType == eNode) && (m_selectedIndex == nodeIndex)) ? -1 /*toggle off*/ : nodeIndex;
@@ -203,6 +210,13 @@ void GltfModelUI::renderNodeDetails(int nodeIndex)
   auto&     node = m_model.nodes[nodeIndex];
   glm::vec3 translation, scale;
   glm::quat rotation;
+  bool      visible = true;
+
+  bool hasVisibility = tinygltf::utils::hasElementName(node.extensions, KHR_NODE_VISIBILITY_EXTENSION_NAME);
+  if(hasVisibility)
+  {
+    visible = tinygltf::utils::getNodeVisibility(node).visible;
+  }
 
   getNodeTransform(node, translation, rotation, scale);
 
@@ -224,6 +238,25 @@ void GltfModelUI::renderNodeDetails(int nodeIndex)
       node.rotation    = {rotation.x, rotation.y, rotation.z, rotation.w};
       node.scale       = {scale.x, scale.y, scale.z};
       node.matrix.clear();  // Clear the matrix, has its been converted to translation, rotation and scale
+    }
+    if(hasVisibility)
+    {
+      if(PE::Checkbox("Visible", &visible))
+      {
+        m_changes.set(eNodeVisibleDirty);
+        tinygltf::Value&         ext       = node.extensions.at(KHR_NODE_VISIBILITY_EXTENSION_NAME);
+        tinygltf::Value::Object& extObject = ext.Get<tinygltf::Value::Object>();
+        extObject["visible"]               = tinygltf::Value(visible);
+      }
+    }
+    else
+    {
+      if(ImGui::SmallButton("Add Visibility"))
+      {
+        tinygltf::Value::Object extData;
+        extData["visible"]                                  = tinygltf::Value(visible);
+        node.extensions[KHR_NODE_VISIBILITY_EXTENSION_NAME] = tinygltf::Value(extData);
+      }
     }
   }
   PE::end();

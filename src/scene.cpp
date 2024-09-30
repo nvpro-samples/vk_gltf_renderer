@@ -218,7 +218,7 @@ void gltfr::Scene::postSceneCreateProcess(Resources& resources, const std::strin
   if(filename.empty())
     return;
 
-  setSceneChanged(true);
+  setDirtyFlag(Scene::eNewScene, true);
 
   createDescriptorSet(resources);
   writeDescriptorSet(resources);
@@ -481,7 +481,7 @@ void gltfr::Scene::createHdr(Resources& res, const std::string& filename)
   m_hdrDome->create(m_hdrEnv->getDescriptorSet(), m_hdrEnv->getDescriptorSetLayout());
 
   m_hdrFilename = std::filesystem::path(filename).filename().string();
-  setHdrChanged(true);
+  setDirtyFlag(Scene::eHdrEnv, true);
 }
 
 //--------------------------------------------------------------------------------------------------
@@ -618,7 +618,7 @@ bool gltfr::Scene::onUI(Resources& resources, Settings& settings, GLFWwindow* wi
               createVulkanScene(resources);
               postSceneCreateProcess(resources, m_gltfScene->getFilename());
               reset = true;
-              setSceneChanged(true);
+              setDirtyFlag(Scene::eNewScene, true);
             }
           }
           ImGui::PopID();
@@ -679,18 +679,30 @@ bool gltfr::Scene::onUI(Resources& resources, Settings& settings, GLFWwindow* wi
           m_selectedRenderNode = -1;  // No node selected
         }
 
-        if(m_sceneGraph->hasTransformChanged() || m_sceneGraph->hasLightChanged())
+        // Check for scene graph changes
+        bool transformChanged  = m_sceneGraph->hasTransformChanged();
+        bool lightChanged      = m_sceneGraph->hasLightChanged();
+        bool visibilityChanged = m_sceneGraph->hasVisibilityChanged();
+        bool materialChanged   = m_sceneGraph->hasMaterialChanged();
+
+        if(transformChanged || lightChanged || visibilityChanged)
         {
           m_dirtyFlags.set(eVulkanScene);
           m_dirtyFlags.set(eRtxScene);
+
+          if(visibilityChanged)
+            m_dirtyFlags.set(eNodeVisibility);
+
           m_gltfScene->updateRenderNodes();
           reset = true;
         }
-        if(m_sceneGraph->hasMaterialChanged())
+
+        if(materialChanged)
         {
           m_dirtyFlags.set(eVulkanMaterial);
           reset = true;
         }
+
         m_sceneGraph->resetChanges();
       }
 

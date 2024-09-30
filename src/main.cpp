@@ -612,13 +612,13 @@ private:
   //
   void handleChanges()
   {
-    if(m_scene.hasHdrChanged())
+    if(m_scene.hasDirtyFlag(Scene::eHdrEnv))
     {
       m_settings.setDefaultLuminance(m_scene.m_hdrEnv->getIntegral());
     }
 
     // Scene changed (new scene)
-    if(m_scene.hasSceneChanged())
+    if(m_scene.hasDirtyFlag(Scene::eNewScene))
     {
       vkDeviceWaitIdle(m_resources.ctx.device);
       createRenderers();
@@ -632,8 +632,9 @@ private:
     }
 
     // Clearing flags changed
-    m_scene.setSceneChanged(false);
-    m_scene.setHdrChanged(false);
+    m_scene.setDirtyFlag(Scene::eNewScene, false);
+    m_scene.setDirtyFlag(Scene::eHdrEnv, false);
+    m_scene.setDirtyFlag(Scene::eNodeVisibility, false);
     m_resources.setGBuffersChanged(false);
   }
 
