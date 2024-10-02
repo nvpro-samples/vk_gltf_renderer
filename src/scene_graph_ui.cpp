@@ -18,6 +18,8 @@
  */
 
 #include <glm/glm.hpp>
+#include <imgui/imgui_icon.h>
+
 namespace glm {
 // vec3 specialization
 GLM_FUNC_DECL vec3      fma(vec3 const& a, vec3 const& b, vec3 const& c);
@@ -27,14 +29,17 @@ GLM_FUNC_QUALIFIER vec3 fma(vec3 const& a, vec3 const& b, vec3 const& c)
 }
 }  // namespace glm
 
-#include <glm/gtc/color_space.hpp>
 
 #include "scene_graph_ui.hpp"
+#include "fileformats/tinygltf_utils.hpp"
 #include "imgui/imgui_helper.h"
 #include "nvvkhl/shaders/dh_tonemap.h"
-#include "fileformats/tinygltf_utils.hpp"
 
 namespace PE = ImGuiH::PropertyEditor;
+
+static ImGuiTreeNodeFlags s_treeNodeFlags = ImGuiTreeNodeFlags_SpanAllColumns | ImGuiTreeNodeFlags_SpanFullWidth
+                                            | ImGuiTreeNodeFlags_SpanTextWidth | ImGuiTreeNodeFlags_OpenOnArrow
+                                            | ImGuiTreeNodeFlags_OpenOnDoubleClick;
 
 
 //--------------------------------------------------------------------------------------------------
@@ -47,27 +52,58 @@ namespace PE = ImGuiH::PropertyEditor;
 //
 void GltfModelUI::render()
 {
-  if(ImGui::BeginChild("SceneGraph", ImVec2(0, ImGui::GetContentRegionAvail().y * 0.5f), true))
+  const float TEXT_BASE_WIDTH  = ImGui::CalcTextSize("A").x;
+  int         childWindowFlags = ImGuiChildFlags_ResizeY | ImGuiChildFlags_FrameStyle;
+
+  renderSceneGraph(TEXT_BASE_WIDTH, childWindowFlags);
+  ImGui::Separator();
+  renderDetails(childWindowFlags);
+}
+
+void GltfModelUI::renderSceneGraph(float textBaseWidth, int childWindowFlags)
+{
+  static ImGuiTableFlags s_tableFlags =
+      ImGuiTableFlags_ScrollY | ImGuiTableFlags_RowBg | ImGuiTableFlags_BordersOuter | ImGuiTableFlags_BordersV;
+
+  if(ImGui::BeginChild("SceneGraph", ImVec2(-FLT_MIN, 300.f), childWindowFlags))
   {
-    for(size_t sceneID = 0; sceneID < m_model.scenes.size(); sceneID++)
+    if(ImGui::BeginTable("SceneGraphTable", 3, s_tableFlags))
     {
-      auto& scene = m_model.scenes[sceneID];
-      ImGui::SetNextItemOpen(true);  // Scene is always open
-      if(ImGui::TreeNode("Scene", "%s (Scene %ld)", scene.name.c_str(), sceneID))
+      ImGui::TableSetupScrollFreeze(1, 1);
+      ImGui::TableSetupColumn("Name", ImGuiTableColumnFlags_NoHide);
+      ImGui::TableSetupColumn("Type", ImGuiTableColumnFlags_NoHide | ImGuiTableColumnFlags_WidthFixed, textBaseWidth * 8.0f);
+      ImGui::TableSetupColumn("-", ImGuiTableColumnFlags_NoHide | ImGuiTableColumnFlags_WidthFixed, textBaseWidth * 1.0f);
+      ImGui::TableHeadersRow();
+
+      for(size_t sceneID = 0; sceneID < m_model.scenes.size(); sceneID++)
       {
-        for(int node : scene.nodes)
+        tinygltf::Scene& scene = m_model.scenes[sceneID];
+        ImGui::SetNextItemOpen(true);  // Scene is always open
+        ImGui::PushID(static_cast<int>(sceneID));
+        ImGui::TableNextRow();
+        ImGui::TableNextColumn();
+        if(ImGui::TreeNodeEx("Scene", s_treeNodeFlags, "%s", scene.name.c_str()))
         {
-          renderNode(node);
+          ImGui::TableNextColumn();
+          ImGui::Text("Scene %ld", sceneID);
+          for(int node : scene.nodes)
+          {
+            renderNode(node);
+          }
+          ImGui::TreePop();
         }
-        ImGui::TreePop();
+        ImGui::PopID();
       }
+
+      ImGui::EndTable();
     }
   }
   ImGui::EndChild();
+}
 
-  ImGui::Separator();
-
-  if(ImGui::BeginChild("Details", ImVec2(0, 0), true) && (m_selectedIndex > -1))
+void GltfModelUI::renderDetails(int childWindowFlags)
+{
+  if(ImGui::BeginChild("Details", ImVec2(-FLT_MIN, 200), childWindowFlags) && (m_selectedIndex > -1))
   {
     switch(m_selectType)
     {
@@ -95,7 +131,7 @@ void GltfModelUI::selectNode(int nodeIndex)
 {
   m_selectType    = eNode;
   m_selectedIndex = nodeIndex;
-  openNodes.clear();
+  m_openNodes.clear();
   if(nodeIndex >= 0)
     preprocessOpenNodes();
   m_doScroll = true;
@@ -108,22 +144,22 @@ void GltfModelUI::selectNode(int nodeIndex)
 //
 void GltfModelUI::renderNode(int nodeIndex)
 {
-  const auto& node = m_model.nodes[nodeIndex];
+  ImGui::TableNextRow();
+  ImGui::TableNextColumn();
+  const tinygltf::Node& node = m_model.nodes[nodeIndex];
 
-  ImGuiTreeNodeFlags flags = ImGuiTreeNodeFlags_OpenOnArrow | ImGuiTreeNodeFlags_OpenOnDoubleClick;
+  ImGuiTreeNodeFlags flags = s_treeNodeFlags;
 
-  // This is to make sure the selected node will be visible
-  if(openNodes.find(nodeIndex) != openNodes.end())
+  // Ensure the selected node is visible
+  if(m_openNodes.find(nodeIndex) != m_openNodes.end())
   {
     ImGui::SetNextItemOpen(true);
   }
 
-  // If the node is selected, we want to highlight it
+  // Highlight the selected node
   if((m_selectType == eNode) && (m_selectedIndex == nodeIndex))
   {
     flags |= ImGuiTreeNodeFlags_Selected;
-    // Scroll to the selected node, done once and no need to open all the parents any more
-    openNodes.clear();
     if(m_doScroll)
     {
       ImGui::SetScrollHereY();
@@ -131,74 +167,121 @@ void GltfModelUI::renderNode(int nodeIndex)
     }
   }
 
-  // Append "(invisible)" to the name, if the node isn't visible
-  std::string visible;
-  if(!tinygltf::utils::getNodeVisibility(node).visible)
-    visible = "(invisible)";
+  // Append "(invisible)" to the name if the node isn't visible
+  KHR_node_visibility visibility = tinygltf::utils::getNodeVisibility(node);
 
-  // Handling the selection of the node
-  bool nodeOpen =
-      ImGui::TreeNodeEx((void*)(intptr_t)nodeIndex, flags, "%s (Node %d) %s", node.name.c_str(), nodeIndex, visible.c_str());
+  // Handle node selection
+  bool nodeOpen = ImGui::TreeNodeEx((void*)(intptr_t)nodeIndex, flags, "%s", node.name.c_str());
+
   if(ImGui::IsItemClicked() && !ImGui::IsItemToggledOpen())
   {
-    m_selectedIndex = ((m_selectType == eNode) && (m_selectedIndex == nodeIndex)) ? -1 /*toggle off*/ : nodeIndex;
+    m_selectedIndex = ((m_selectType == eNode) && (m_selectedIndex == nodeIndex)) ? -1 : nodeIndex;
     m_selectType    = eNode;
   }
 
-  // If the node is open, we want to render the mesh and the children
+  ImGui::TableNextColumn();
+  ImGui::Text("Node %d", nodeIndex);
+
+  if(!visibility.visible)
+  {
+    ImGui::TableNextColumn();
+    ImGui::PushFont(ImGuiH::getIconicFont());
+    ImGui::Text("%s", ImGuiH::icon_ban);
+    ImGui::PopFont();
+  }
+  else
+  {
+    ImGui::TableNextColumn();
+  }
+
+  // Render the mesh, children, light, and camera if the node is open
   if(nodeOpen)
   {
     if(node.mesh >= 0)
     {
-      auto& mesh = m_model.meshes[node.mesh];
-      if(ImGui::TreeNode("Mesh", "%s (Mesh %d)", mesh.name.c_str(), node.mesh))
-      {
-        renderMesh(node.mesh);
-        ImGui::TreePop();
-      }
+      renderMesh(node.mesh);
     }
-    else if(node.light >= 0)
+
+    if(node.light >= 0)
     {
-      auto& light = m_model.lights[node.light];
-      if(ImGui::Selectable(light.name.c_str(), (m_selectedIndex == node.light) && (m_selectType == eLight)))
-      {
-        m_selectType    = eLight;
-        m_selectedIndex = node.light;
-      }
+      renderLight(node.light);
+    }
+
+    if(node.camera >= 0)
+    {
+      renderCamera(node.camera);
     }
 
     for(int child : node.children)
     {
       renderNode(child);
     }
+
     ImGui::TreePop();
   }
 }
 
-//--------------------------------------------------------------------------------------------------
-// Mesh rendering, shows the primitives and the material
-//
 void GltfModelUI::renderMesh(int meshIndex)
 {
-  const auto& mesh = m_model.meshes[meshIndex];
+  const tinygltf::Mesh& mesh = m_model.meshes[meshIndex];
+  ImGui::TableNextRow();
+  ImGui::TableNextColumn();
+  bool meshOpen = ImGui::TreeNodeEx("Mesh", s_treeNodeFlags, "%s", mesh.name.c_str());
+  ImGui::TableNextColumn();
+  ImGui::Text("Mesh %d", meshIndex);
+  ImGui::TableNextColumn();
 
-  for(size_t i = 0; i < mesh.primitives.size(); ++i)
+  if(meshOpen)
   {
-    if(ImGui::TreeNode("Primitive", "Primitive %s", std::to_string(i).c_str()))
+    int primID{};
+    for(const auto& primitive : mesh.primitives)
     {
-      int materialID = mesh.primitives[i].material;
-      if(materialID >= 0 && materialID < m_model.materials.size())
-      {
-        std::string materialName = m_model.materials[materialID].name;
-        if(ImGui::Selectable(materialName.c_str(), (m_selectedIndex == materialID) && (m_selectType == eMaterial)))
-        {
-          m_selectType    = eMaterial;
-          m_selectedIndex = materialID;
-        }
-      }
-      ImGui::TreePop();
+      renderPrimitive(primitive, primID++);
     }
+    ImGui::TreePop();
   }
+}
+
+void GltfModelUI::renderPrimitive(const tinygltf::Primitive& primitive, int primID)
+{
+  ImGui::TableNextRow();
+  ImGui::TableNextColumn();
+  const int         materialID = std::clamp(primitive.material, 0, static_cast<int>(m_model.materials.size() - 1));
+  const std::string primName   = "Prim " + std::to_string(primID);
+  if(ImGui::Selectable(primName.c_str(), (m_selectedIndex == materialID) && (m_selectType == eMaterial)))
+  {
+    m_selectType    = eMaterial;
+    m_selectedIndex = materialID;
+  }
+  ImGui::TableNextColumn();
+  ImGui::Text("Primitive");
+  ImGui::TableNextColumn();
+}
+
+void GltfModelUI::renderLight(int lightIndex)
+{
+  const tinygltf::Light& light = m_model.lights[lightIndex];
+  ImGui::TableNextRow();
+  ImGui::TableNextColumn();
+  if(ImGui::Selectable(light.name.c_str(), (m_selectedIndex == lightIndex) && (m_selectType == eLight)))
+  {
+    m_selectType    = eLight;
+    m_selectedIndex = lightIndex;
+  }
+  ImGui::TableNextColumn();
+  ImGui::Text("Light %d", lightIndex);
+  ImGui::TableNextColumn();
+}
+
+void GltfModelUI::renderCamera(int cameraIndex)
+{
+  const tinygltf::Camera& camera = m_model.cameras[cameraIndex];
+  ImGui::TableNextRow();
+  ImGui::TableNextColumn();
+  ImGui::Text("%s", camera.name.c_str());
+  ImGui::TableNextColumn();
+  ImGui::Text("Camera %d", cameraIndex);
+  ImGui::TableNextColumn();
 }
 
 //--------------------------------------------------------------------------------------------------
@@ -207,15 +290,15 @@ void GltfModelUI::renderMesh(int meshIndex)
 //
 void GltfModelUI::renderNodeDetails(int nodeIndex)
 {
-  auto&     node = m_model.nodes[nodeIndex];
-  glm::vec3 translation, scale;
-  glm::quat rotation;
-  bool      visible = true;
+  tinygltf::Node&     node = m_model.nodes[nodeIndex];
+  glm::vec3           translation, scale;
+  glm::quat           rotation;
+  KHR_node_visibility visibility;
 
   bool hasVisibility = tinygltf::utils::hasElementName(node.extensions, KHR_NODE_VISIBILITY_EXTENSION_NAME);
   if(hasVisibility)
   {
-    visible = tinygltf::utils::getNodeVisibility(node).visible;
+    visibility = tinygltf::utils::getNodeVisibility(node);
   }
 
   getNodeTransform(node, translation, rotation, scale);
@@ -241,22 +324,15 @@ void GltfModelUI::renderNodeDetails(int nodeIndex)
     }
     if(hasVisibility)
     {
-      if(PE::Checkbox("Visible", &visible))
+      if(PE::Checkbox("Visible", &visibility.visible))
       {
+        tinygltf::utils::setNodeVisibility(node, visibility);
         m_changes.set(eNodeVisibleDirty);
-        tinygltf::Value&         ext       = node.extensions.at(KHR_NODE_VISIBILITY_EXTENSION_NAME);
-        tinygltf::Value::Object& extObject = ext.Get<tinygltf::Value::Object>();
-        extObject["visible"]               = tinygltf::Value(visible);
       }
     }
-    else
+    else if(ImGui::SmallButton("Add Visibility"))
     {
-      if(ImGui::SmallButton("Add Visibility"))
-      {
-        tinygltf::Value::Object extData;
-        extData["visible"]                                  = tinygltf::Value(visible);
-        node.extensions[KHR_NODE_VISIBILITY_EXTENSION_NAME] = tinygltf::Value(extData);
-      }
+      tinygltf::utils::setNodeVisibility(node, {});
     }
   }
   PE::end();
@@ -358,6 +434,10 @@ struct LightUI
   }
 };
 
+static float logarithmicStep(float value)
+{
+  return std::max(0.1f * std::pow(10.0f, std::floor(std::log10(value))), 0.001f);
+}
 
 //--------------------------------------------------------------------------------------------------
 // Rendering the material properties
@@ -367,7 +447,7 @@ struct LightUI
 // - Emissive
 void GltfModelUI::renderMaterial(int materialIndex)
 {
-  auto& material = m_model.materials[materialIndex];
+  tinygltf::Material& material = m_model.materials[materialIndex];
 
   ImGui::Text("Material: %s", material.name.c_str());
 
@@ -388,10 +468,142 @@ void GltfModelUI::renderMaterial(int materialIndex)
     modif |= PE::DragScalar("Alpha Cutoff", ImGuiDataType_Double, &material.alphaCutoff, 0.01f, &f64_zero, &f64_one);
     modif |= PE::Combo("Alpha Mode", &materialUI.alphaMode, MaterialUI::alphaModes, IM_ARRAYSIZE(MaterialUI::alphaModes));
     modif |= PE::Checkbox("Double Sided", &material.doubleSided);
+
     if(modif)
     {
       materialUI.fromUI(material);
       m_changes.set(eMaterialDirty);
+      modif = false;
+    }
+
+    // Extensions
+    if(tinygltf::utils::hasElementName(material.extensions, KHR_MATERIALS_EMISSIVE_STRENGTH_EXTENSION_NAME))
+    {
+      KHR_materials_emissive_strength strenght = tinygltf::utils::getEmissiveStrength(material);
+      if(PE::DragFloat("Emissive Strength", &strenght.emissiveStrength, logarithmicStep(strenght.emissiveStrength), 0.0f, FLT_MAX))
+      {
+        tinygltf::utils::setEmissiveStrength(material, strenght);
+        m_changes.set(eMaterialDirty);
+      }
+    }
+
+    if(tinygltf::utils::hasElementName(material.extensions, KHR_MATERIALS_CLEARCOAT_EXTENSION_NAME))
+    {
+      KHR_materials_clearcoat clearcoat = tinygltf::utils::getClearcoat(material);
+      bool                    modif     = false;
+      modif |= PE::DragFloat("Clearcoat Factor", &clearcoat.factor, 0.01f, 0.0f, 1.0f);
+      modif |= PE::DragFloat("Clearcoat Roughness", &clearcoat.roughnessFactor, 0.01f, 0.0f, 1.0f);
+      if(modif)
+      {
+        tinygltf::utils::setClearcoat(material, clearcoat);
+        m_changes.set(eMaterialDirty);
+      }
+    }
+
+    // KHR_MATERIALS_SHEEN_EXTENSION_NAME
+    if(tinygltf::utils::hasElementName(material.extensions, KHR_MATERIALS_SHEEN_EXTENSION_NAME))
+    {
+      KHR_materials_sheen sheen = tinygltf::utils::getSheen(material);
+      bool                modif = false;
+      modif |= PE::ColorEdit3("Sheen Color", glm::value_ptr(sheen.sheenColorFactor));
+      modif |= PE::DragFloat("Sheen Roughness", &sheen.sheenRoughnessFactor, 0.01f, 0.0f, 1.0f);
+      if(modif)
+      {
+        tinygltf::utils::setSheen(material, sheen);
+        m_changes.set(eMaterialDirty);
+      }
+    }
+
+    // KHR_MATERIALS_TRANSMISSION_EXTENSION_NAME
+    if(tinygltf::utils::hasElementName(material.extensions, KHR_MATERIALS_TRANSMISSION_EXTENSION_NAME))
+    {
+      KHR_materials_transmission transmission = tinygltf::utils::getTransmission(material);
+      bool                       modif        = false;
+      modif |= PE::DragFloat("Transmission Factor", &transmission.factor, 0.01f, 0.0f, 1.0f);
+      if(modif)
+      {
+        tinygltf::utils::setTransmission(material, transmission);
+        m_changes.set(eMaterialDirty);
+      }
+    }
+    // KHR_MATERIALS_IOR_EXTENSION_NAME
+    if(tinygltf::utils::hasElementName(material.extensions, KHR_MATERIALS_IOR_EXTENSION_NAME))
+    {
+      KHR_materials_ior ior   = tinygltf::utils::getIor(material);
+      bool              modif = false;
+      modif |= PE::DragFloat("IOR", &ior.ior, 0.01f, 0.0f, 10.0f);
+      if(modif)
+      {
+        tinygltf::utils::setIor(material, ior);
+        m_changes.set(eMaterialDirty);
+      }
+    }
+    // KHR_MATERIALS_SPECULAR_EXTENSION_NAME
+    if(tinygltf::utils::hasElementName(material.extensions, KHR_MATERIALS_SPECULAR_EXTENSION_NAME))
+    {
+      KHR_materials_specular specular = tinygltf::utils::getSpecular(material);
+      bool                   modif    = false;
+      modif |= PE::ColorEdit3("Specular Color", glm::value_ptr(specular.specularColorFactor));
+      modif |= PE::DragFloat("Specular Factor", &specular.specularFactor, 0.01f, 0.0f, 1.0f);
+      if(modif)
+      {
+        tinygltf::utils::setSpecular(material, specular);
+        m_changes.set(eMaterialDirty);
+      }
+    }
+    // KHR_MATERIALS_VOLUME_EXTENSION_NAME
+    if(tinygltf::utils::hasElementName(material.extensions, KHR_MATERIALS_VOLUME_EXTENSION_NAME))
+    {
+      KHR_materials_volume volume = tinygltf::utils::getVolume(material);
+      bool                 modif  = false;
+      modif |= PE::DragFloat("Thickness", &volume.thicknessFactor, 0.01f, 0.0f, 1.0f);
+      modif |= PE::ColorEdit3("Attenuation Color", glm::value_ptr(volume.attenuationColor));
+
+      if(modif)
+      {
+        tinygltf::utils::setVolume(material, volume);
+        m_changes.set(eMaterialDirty);
+      }
+    }
+    // KHR_MATERIALS_ANISOTROPY_EXTENSION_NAME
+    if(tinygltf::utils::hasElementName(material.extensions, KHR_MATERIALS_ANISOTROPY_EXTENSION_NAME))
+    {
+      KHR_materials_anisotropy anisotropy = tinygltf::utils::getAnisotropy(material);
+      bool                     modif      = false;
+      modif |= PE::DragFloat("Anisotropy Strength", &anisotropy.anisotropyStrength, 0.01f, 0.0f, 1.0f);
+      modif |= PE::DragFloat("Anisotropy Rotation", &anisotropy.anisotropyRotation, 0.01f, -glm::pi<float>(), glm::pi<float>());
+      if(modif)
+      {
+        tinygltf::utils::setAnisotropy(material, anisotropy);
+        m_changes.set(eMaterialDirty);
+      }
+    }
+    // KHR_MATERIALS_IRIDESCENCE_EXTENSION_NAME
+    if(tinygltf::utils::hasElementName(material.extensions, KHR_MATERIALS_IRIDESCENCE_EXTENSION_NAME))
+    {
+      KHR_materials_iridescence iridescence = tinygltf::utils::getIridescence(material);
+      bool                      modif       = false;
+      modif |= PE::DragFloat("Iridescence Factor", &iridescence.iridescenceFactor, 0.01f, 0.0f, 10.0f);
+      modif |= PE::DragFloat("Iridescence Ior", &iridescence.iridescenceIor, 0.01f, 0.0f, 10.0f);
+      modif |= PE::DragFloat("Thickness Min", &iridescence.iridescenceThicknessMinimum, 0.01f, 0.0f, 1000.0f, "%.3f nm");
+      modif |= PE::DragFloat("Thickness Max", &iridescence.iridescenceThicknessMaximum, 0.01f, 0.0f, 1000.0f, "%.3f nm");
+      if(modif)
+      {
+        tinygltf::utils::setIridescence(material, iridescence);
+        m_changes.set(eMaterialDirty);
+      }
+    }
+    // KHR_MATERIALS_DISPERSION_EXTENSION_NAME
+    if(tinygltf::utils::hasElementName(material.extensions, KHR_MATERIALS_DISPERSION_EXTENSION_NAME))
+    {
+      KHR_materials_dispersion dispersion = tinygltf::utils::getDispersion(material);
+      bool                     modif      = false;
+      modif |= PE::DragFloat("Dispersion Factor", &dispersion.dispersion, 0.01f, 0.0f, 10.0f);
+      if(modif)
+      {
+        tinygltf::utils::setDispersion(material, dispersion);
+        m_changes.set(eMaterialDirty);
+      }
     }
   }
   PE::end();
@@ -401,14 +613,14 @@ void GltfModelUI::renderMaterial(int materialIndex)
 // It will open all the parents of the selected node
 void GltfModelUI::preprocessOpenNodes()
 {
-  openNodes.clear();
+  m_openNodes.clear();
   if((m_selectedIndex < 0) || (m_selectType != eNode))
   {
     return;
   }
   for(int rootIndex : m_model.scenes[0].nodes)  // Assuming sceneNodes contains root node indices
   {
-    if(markOpenNodes(rootIndex, m_selectedIndex, openNodes))
+    if(markOpenNodes(rootIndex, m_selectedIndex, m_openNodes))
     {
       break;
     }
@@ -423,7 +635,7 @@ bool GltfModelUI::markOpenNodes(int nodeIndex, int targetNodeIndex, std::unorder
     return true;
   }
 
-  const auto& node = m_model.nodes[nodeIndex];
+  const tinygltf::Node& node = m_model.nodes[nodeIndex];
   for(int child : node.children)
   {
     if(markOpenNodes(child, targetNodeIndex, openNodes))
@@ -437,7 +649,7 @@ bool GltfModelUI::markOpenNodes(int nodeIndex, int targetNodeIndex, std::unorder
 
 void GltfModelUI::renderLightDetails(int lightIndex)
 {
-  auto& light = m_model.lights[lightIndex];
+  tinygltf::Light& light = m_model.lights[lightIndex];
 
   ImGui::Text("Light: %s", light.name.c_str());
 

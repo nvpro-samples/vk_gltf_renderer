@@ -71,7 +71,7 @@ void gltfr::Resources::init(VulkanInfo& _ctx)
 {
   ctx = _ctx;
 
-  m_allocator       = std::make_unique<AllocDma>(ctx.device, ctx.physicalDevice);
+  m_allocator       = std::make_unique<nvvk::ResourceAllocatorDma>(ctx.device, ctx.physicalDevice);
   m_finalImage      = std::make_unique<nvvkhl::GBuffer>(ctx.device, m_allocator.get());
   m_tempCommandPool = std::make_unique<nvvk::CommandPool>(ctx.device, ctx.GCT0.familyIndex,
                                                           VK_COMMAND_POOL_CREATE_TRANSIENT_BIT, ctx.GCT0.queue);

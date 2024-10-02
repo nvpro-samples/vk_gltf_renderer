@@ -55,15 +55,27 @@ public:
   bool hasLightChanged() { return m_changes.test(eLightDirty); }
   bool hasVisibilityChanged() { return m_changes.test(eNodeVisibleDirty); }
   void resetChanges() { m_changes.reset(); }
+  void renderDetails(int childWindowFlags);
   void selectNode(int nodeIndex);
   int  selectedNode() const { return (m_selectType == eNode) ? m_selectedIndex : -1; }
   int  selectedMaterial() const { return (m_selectType == eMaterial) ? m_selectedIndex : -1; }
 
 private:
+  void renderNode(int nodeIndex);
+  void renderMesh(int meshIndex);
+  void renderPrimitive(const tinygltf::Primitive& primitive, int primID);
+  void renderLight(int lightIndex);
+  void renderCamera(int cameraIndex);
+  void renderMaterial(int materialIndex);
+  void renderNodeDetails(int nodeIndex);
+  void renderLightDetails(int lightIndex);
+
+  void getNodeTransform(const tinygltf::Node& node, glm::vec3& translation, glm::quat& rotation, glm::vec3& scale);
   void preprocessOpenNodes();
   bool markOpenNodes(int nodeIndex, int targetNodeIndex, std::unordered_set<int>& openNodes);
+  void renderSceneGraph(float textBaseWidth, int childWindowFlags);
 
-  std::unordered_set<int> openNodes;  // To keep track of nodes that should be open
+  std::unordered_set<int> m_openNodes;  // To keep track of nodes that should be open
 
   tinygltf::Model& m_model;
   enum SelectType
@@ -85,13 +97,5 @@ private:
     eNodeVisibleDirty,
     // Add more flags as needed
   };
-
-  void renderNode(int nodeIndex);
-  void renderMesh(int meshIndex);
-  void renderMaterial(int materialIndex);
-  void renderNodeDetails(int nodeIndex);
-  void renderLightDetails(int lightIndex);
-
-  void getNodeTransform(const tinygltf::Node& node, glm::vec3& translation, glm::quat& rotation, glm::vec3& scale);
   bool m_doScroll = false;
 };

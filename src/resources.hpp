@@ -36,12 +36,13 @@ It holds the Vulkan resources, such as
 */
 
 // nvpro-core
+#include "nvvk/resourceallocator_vk.hpp"
+#include "nvvk/context_vk.hpp"
 #include "nvvk/commands_vk.hpp"
 #include "nvvkhl/gbuffer.hpp"
 #include "nvvkhl/glsl_compiler.hpp"
 
 // Local to application
-#include "alloc_dma.h"
 #include "slang_compiler.hpp"
 
 namespace gltfr {
@@ -88,11 +89,11 @@ public:
   // Vulkan context resources
   VulkanInfo ctx{};
 
-  std::unique_ptr<AllocDma>             m_allocator{};
-  std::unique_ptr<nvvkhl::GBuffer>      m_finalImage{};  // G-Buffers: color
-  std::unique_ptr<nvvk::CommandPool>    m_tempCommandPool{};
-  std::unique_ptr<nvvkhl::GlslCompiler> m_glslC{};
-  std::unique_ptr<SlangCompiler>        m_slangC{};
+  std::unique_ptr<nvvk::ResourceAllocatorDma> m_allocator{};
+  std::unique_ptr<nvvkhl::GBuffer>            m_finalImage{};  // G-Buffers: color
+  std::unique_ptr<nvvk::CommandPool>          m_tempCommandPool{};
+  std::unique_ptr<nvvkhl::GlslCompiler>       m_glslC{};
+  std::unique_ptr<SlangCompiler>              m_slangC{};
 
 private:
   bool m_hasGBufferChanged{false};

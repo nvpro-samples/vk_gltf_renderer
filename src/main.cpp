@@ -225,7 +225,8 @@ public:
         m_tonemapper->onUI();
       }
 
-      m_scene.onUI(m_resources, m_settings, m_app->getWindowHandle());
+      if(!m_busy.isBusy())
+        m_scene.onUI(m_resources, m_settings, m_app->getWindowHandle());
     }
     ImGui::End();  // Settings
 
