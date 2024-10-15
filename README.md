@@ -337,3 +337,29 @@ The Nvml is a tool that allows to see the status of the GPU. It is possible to s
 ### Tangent Space
 
 There is a tangent space tool that allows to fix or to recreate the tangent space of the model. This is useful when the normal map is not looking right or there are errors with the tangents in the scene.
+
+## Utilities
+
+### gltf-material-modifier.py
+
+Modify materials in a GLTF file and optionally reorient the scene from Z-up to Y-up.
+
+```
+usage: gltf-material-modifier.py [-h] [--metallic METALLIC] [--roughness ROUGHNESS] [--override] [--reorient]
+                                 input_file output_file
+```                                 
+
+positional arguments:
+```
+   input_file            Path to the input GLTF file.
+   output_file           Path to save the modified GLTF file.
+```
+
+options:
+```
+  -h, --help             show this help message and exit
+  --metallic METALLIC    Set the metallic factor (default: 0.1).
+  --roughness ROUGHNESS  Set the roughness factor (default: 0.1).
+  --override             Override existing material values if set.
+  --reorient             Reorient the scene from Z-up to Y-up.
+```

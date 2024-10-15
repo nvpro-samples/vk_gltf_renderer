@@ -33,7 +33,7 @@
 #include "payload.h"
 
 layout(location = 0) rayPayloadInEXT HitPayload hitPayload;
-#include "rt_payload.h"
+#include "rt_layout.h"
 
 
 #include "nvvkhl/shaders/pbr_mat_eval.h"      // Need texturesMap[]

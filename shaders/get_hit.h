@@ -44,9 +44,10 @@ HitState getHitState(in RenderPrimitive renderPrim,      // Buffer containing al
 
   // Normal
   hit.nrm = hit.geonrm;
+  vec3 N  = Ng;
   if(hasVertexNormal(renderPrim))
   {
-    vec3 N  = getInterpolatedVertexNormal(renderPrim, triangleIndex, barycentrics);
+    N       = getInterpolatedVertexNormal(renderPrim, triangleIndex, barycentrics);
     hit.nrm = normalize(vec3(N * worldToObject));
   }
 
@@ -69,7 +70,7 @@ HitState getHitState(in RenderPrimitive renderPrim,      // Buffer containing al
   }
   else
   {
-    vec4 t = makeFastTangent(hit.nrm);
+    vec4 t = makeFastTangent(N);
     tng[0] = t;
     tng[1] = t;
     tng[2] = t;

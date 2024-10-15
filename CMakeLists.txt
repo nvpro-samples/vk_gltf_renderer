@@ -48,6 +48,9 @@ set(RAPIDJSON_INCLUDE_DIR ${RapidJSON_SOURCE_DIR}/rapidjson-1.1.0/include/rapidj
 
 #####################################################################################
 # Adding DRACO if selected
+if(POLICY CMP0148)
+  cmake_policy(SET CMP0148 OLD)
+endif()
 option(USE_DRACO "Use Draco for compression" OFF)
 include(cmake/draco.cmake)
 if(USE_DRACO)

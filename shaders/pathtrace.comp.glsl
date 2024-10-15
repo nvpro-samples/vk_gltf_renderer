@@ -39,7 +39,7 @@
 HitPayload hitPayload;  // Global hit payload
 
 layout(local_size_x = WORKGROUP_SIZE, local_size_y = WORKGROUP_SIZE) in;
-#include "rt_payload.h"
+#include "rt_layout.h"
 
 #include "nvvkhl/shaders/pbr_mat_eval.h"      // Need texturesMap[]
 #include "nvvkhl/shaders/hdr_env_sampling.h"  // nedd envSamplingData[]

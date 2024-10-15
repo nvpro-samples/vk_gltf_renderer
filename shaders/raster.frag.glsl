@@ -233,7 +233,7 @@ void main()
   for(int i = 0; i < frameInfo.nbLights; i++)
   {
     Light        light        = frameInfo.light[i];
-    LightContrib lightContrib = singleLightContribution(light, hit.pos, pbrMat.N, -worldRayDirection);
+    LightContrib lightContrib = singleLightContribution(light, hit.pos, pbrMat.N);
 
     BsdfEvaluateData evalData;
     evalData.k1 = -worldRayDirection;

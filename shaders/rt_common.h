@@ -46,7 +46,7 @@ vec3 sampleLights(in vec3 pos, vec3 normal, in vec3 worldRayDirection, inout uin
   {
     int          lightIndex = min(int(rand(seed) * sceneDesc.numLights), sceneDesc.numLights - 1);
     Light        light      = RenderLightBuf(sceneDesc.lightAddress)._[lightIndex];
-    LightContrib contrib = singleLightContribution(light, pos, normal, worldRayDirection, vec2(rand(seed), rand(seed)));
+    LightContrib contrib = singleLightContribution(light, pos, normal, vec2(rand(seed), rand(seed)));
     lightDir             = -contrib.incidentVector;
     lightPdf             = (1.0 / sceneDesc.numLights) * lightWeight;
     lightRadiance        = contrib.intensity / lightPdf;
@@ -296,7 +296,7 @@ SampleResult pathTrace(Ray r, inout uint seed)
       else
       {
         // Continue path
-        bool isSpecular     = (sampleData.event_type & BSDF_EVENT_SPECULAR) != 0;
+        bool isSpecular     = (sampleData.event_type & BSDF_EVENT_IMPULSE) != 0;
         bool isTransmission = (sampleData.event_type & BSDF_EVENT_TRANSMISSION) != 0;
 
         vec3 offsetDir = dot(r.direction, hit.geonrm) > 0 ? hit.geonrm : -hit.geonrm;
