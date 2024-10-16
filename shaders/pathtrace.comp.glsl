@@ -88,7 +88,7 @@ void main()
 
   SampleResult sampleResult = samplePixel(seed, samplePos, subpixelJitter, imageSize, frameInfo.projMatrixI,
                                           frameInfo.viewMatrixI, focalDistance, aperture);
-  vec3         pixel_color  = sampleResult.radiance;
+  vec4         pixel_color  = sampleResult.radiance;
   for(int s = 1; s < pc.maxSamples; s++)
   {
     subpixelJitter = vec2(rand(seed), rand(seed));
@@ -100,15 +100,15 @@ void main()
 
   if(pc.frame == 0)  // first frame
   {
-    imageStore(image, ivec2(samplePos.xy), vec4(pixel_color, 1.0F));
+    imageStore(image, ivec2(samplePos.xy), pixel_color);
     imageStore(normalDepth, ivec2(samplePos.xy), vec4(sampleResult.normal, sampleResult.depth));
   }
   else
   {
     // Do accumulation over time
     float a         = 1.0F / float(pc.frame + 1);
-    vec3  old_color = imageLoad(image, ivec2(samplePos.xy)).xyz;
-    imageStore(image, ivec2(samplePos.xy), vec4(mix(old_color, pixel_color, a), 1.0F));
+    vec4  old_color = imageLoad(image, ivec2(samplePos.xy));
+    imageStore(image, ivec2(samplePos.xy), mix(old_color, pixel_color, a));
 
     // Normal Depth buffer update
     vec4  oldNormalDepth = imageLoad(normalDepth, ivec2(samplePos.xy));

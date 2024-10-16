@@ -7,7 +7,7 @@ bool traceShadow(Ray r, float maxDist, inout uint seed);
 
 struct SampleResult
 {
-  vec3  radiance;
+  vec4  radiance;
   vec3  normal;
   float depth;
 };
@@ -46,11 +46,11 @@ vec3 sampleLights(in vec3 pos, vec3 normal, in vec3 worldRayDirection, inout uin
   {
     int          lightIndex = min(int(rand(seed) * sceneDesc.numLights), sceneDesc.numLights - 1);
     Light        light      = RenderLightBuf(sceneDesc.lightAddress)._[lightIndex];
-    LightContrib contrib = singleLightContribution(light, pos, normal, vec2(rand(seed), rand(seed)));
-    lightDir             = -contrib.incidentVector;
-    lightPdf             = (1.0 / sceneDesc.numLights) * lightWeight;
-    lightRadiance        = contrib.intensity / lightPdf;
-    lightDist            = contrib.distance;
+    LightContrib contrib    = singleLightContribution(light, pos, normal, vec2(rand(seed), rand(seed)));
+    lightDir                = -contrib.incidentVector;
+    lightPdf                = (1.0 / sceneDesc.numLights) * lightWeight;
+    lightRadiance           = contrib.intensity / lightPdf;
+    lightDist               = contrib.distance;
   }
 
   // Sample environment
@@ -168,7 +168,7 @@ SampleResult pathTrace(Ray r, inout uint seed)
   SampleResult sampleResult;
   sampleResult.depth    = 0;
   sampleResult.normal   = vec3(0, 0, 0);
-  sampleResult.radiance = vec3(0, 0, 0);
+  sampleResult.radiance = vec4(0, 0, 0, 1);
 
   GltfMaterialBuf materials = GltfMaterialBuf(sceneDesc.materialAddress);
 
@@ -183,9 +183,13 @@ SampleResult pathTrace(Ray r, inout uint seed)
     // Hitting the environment, then exit
     if(hitPayload.hitT == INFINITE)
     {
+      // For first hit, it is transparent
+      if(depth == 0)
+        sampleResult.radiance.a = 0.0;
+
       if(frameInfo.useSky == 1)
       {
-        radiance += throughput * evalPhysicalSky(skyInfo, r.direction);
+        radiance.xyz += throughput * evalPhysicalSky(skyInfo, r.direction);
       }
       else
       {
@@ -197,10 +201,10 @@ SampleResult pathTrace(Ray r, inout uint seed)
         // We may hit the environment twice: once via sampleLights() and once when hitting the sky while probing
         // for more indirect hits. This is the counter part of the MIS weighting in sampleLights()
         float misWeight = (lastSamplePdf == DIRAC) ? 1.0 : (lastSamplePdf / (lastSamplePdf + env.w));
-        radiance += throughput * misWeight * env.rgb * frameInfo.envIntensity.xyz;
+        radiance.xyz += throughput * misWeight * env.rgb * frameInfo.envIntensity.xyz;
       }
 
-      sampleResult.radiance = radiance;
+      sampleResult.radiance.xyz = radiance;
       return sampleResult;
     }
 
@@ -227,7 +231,8 @@ SampleResult pathTrace(Ray r, inout uint seed)
     if(material.unlit > 0)
     {
       radiance += pbrMat.baseColor;
-      sampleResult.radiance = radiance;
+      sampleResult.radiance.xyz = radiance;
+      sampleResult.radiance.a   = 1.0;
       return sampleResult;
     }
 
@@ -331,7 +336,7 @@ SampleResult pathTrace(Ray r, inout uint seed)
 #endif
   }
 
-  sampleResult.radiance = radiance;
+  sampleResult.radiance.xyz = radiance;
   return sampleResult;
 }
 
@@ -358,7 +363,7 @@ SampleResult samplePixel(inout uint seed, vec2 samplePos, vec2 subpixelJitter, v
 
 // Removing fireflies
 #if USE_FIREFLY_FILTER
-  float lum = dot(sampleResult.radiance, vec3(1.0F / 3.0F));
+  float lum = dot(sampleResult.radiance.xyz, vec3(1.0F / 3.0F));
   if(lum > pc.maxLuminance)
   {
     sampleResult.radiance *= pc.maxLuminance / lum;
