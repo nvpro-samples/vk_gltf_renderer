@@ -32,6 +32,7 @@
 
 #include "fileformats/tinygltf_utils.hpp"
 #include "nvh/parallel_work.hpp"
+#include "nvvkhl/shaders/func.h"
 
 
 struct UserData
@@ -128,18 +129,34 @@ inline static void getTexCoord(const SMikkTSpaceContext* pContext, float fvTexcO
 
 inline static void setTSpaceBasic(const SMikkTSpaceContext* pContext, const float fvTangent[], const float fSign, const int32_t iFace, const int32_t iVert)
 {
-  glm::vec4* tangent = getAttributeData<glm::vec4>(pContext, iFace, iVert,
+  glm::vec4*       tangent = getAttributeData<glm::vec4>(pContext, iFace, iVert,
                                                    static_cast<const UserData*>(pContext->m_pUserData)->tanAccessorIndex);
+  const glm::vec3* normal =
+      getAttributeData<glm::vec3>(pContext, iFace, iVert, static_cast<const UserData*>(pContext->m_pUserData)->nrmAccessorIndex);
 
   // If we only want to fix tangents, we skip the ones that are already valid
   UserData*        userdata = static_cast<UserData*>(pContext->m_pUserData);
   const glm::vec4& t        = *tangent;
   if(userdata->onlyFix && (glm::length2(glm::vec3(t)) > 0.01F) && (std::abs(t.w) > 0.5F))
   {
+    // Fix non-ortho normal tangents
+    if((glm::abs(glm::dot(glm::vec3(t), *normal)) > 0.1f))
+      *tangent = makeFastTangent(*normal);
     return;
   }
 
-  *tangent = {fvTangent[0], fvTangent[1], fvTangent[2], fSign};
+  // MikkTSpace uses the variation in texture coordinates to calculate the tangent and bitangent vectors.
+  // In case of incorrect input values, the resulting tangent might not be orthogonal to the normal.
+  // This additional check ensures the tangent is orthogonal to the normal and corrects it if necessary.
+  glm::vec3 tng = {fvTangent[0], fvTangent[1], fvTangent[2]};
+  if(glm::abs(glm::dot(tng, *normal)) < 0.9f)
+  {
+    *tangent = {fvTangent[0], fvTangent[1], fvTangent[2], fSign};
+  }
+  else
+  {
+    *tangent = makeFastTangent(*normal);
+  }
 }
 
 inline static void createMissingTangentSpace(tinygltf::Model& model)
