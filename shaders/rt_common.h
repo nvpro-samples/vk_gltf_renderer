@@ -1,4 +1,3 @@
-
 // --------------------------------------------------------------------
 // Forwarded declarations
 void traceRay(Ray r, inout uint seed);
@@ -29,7 +28,7 @@ vec3 sampleLights(in vec3 pos, vec3 normal, in vec3 worldRayDirection, inout uin
 
   // Weight for MIS (TODO: adjust these based on scene characteristics: light intensity vs environment intensity)
   float lightWeight = (sceneDesc.numLights > 0) ? 0.5 : 0.0;
-  float envWeight   = (frameInfo.useSky == 1 || frameInfo.envIntensity.x > 0.0) ? 0.5 : 0.0;
+  float envWeight   = (TEST_FLAG(frameInfo.flags, USE_SKY_FLAG) || frameInfo.envIntensity.x > 0.0) ? 0.5 : 0.0;
 
   // Normalize weights
   float totalWeight = lightWeight + envWeight;
@@ -58,7 +57,7 @@ vec3 sampleLights(in vec3 pos, vec3 normal, in vec3 worldRayDirection, inout uin
   vec3 envDir;
   if(envWeight > 0)
   {
-    if(frameInfo.useSky == 1)
+    if(TEST_FLAG(frameInfo.flags, USE_SKY_FLAG))
     {
       vec2              random_sample = vec2(rand(seed), rand(seed));
       SkySamplingResult skySample     = samplePhysicalSky(skyInfo, random_sample);
@@ -155,7 +154,6 @@ Ray getRay(vec2 samplePos, vec2 offset, vec2 imageSize, mat4 projMatrixI, mat4 v
   return Ray(origin.xyz, direction.xyz);
 }
 
-
 //-----------------------------------------------------------------------
 //
 //-----------------------------------------------------------------------
@@ -176,6 +174,7 @@ SampleResult pathTrace(Ray r, inout uint seed)
 
   for(int depth = 0; depth < pc.maxDepth; depth++)
   {
+    bool firstRay = (depth == 0);
     traceRay(r, seed);
 
     HitState hit = hitPayload.hit;
@@ -183,11 +182,27 @@ SampleResult pathTrace(Ray r, inout uint seed)
     // Hitting the environment, then exit
     if(hitPayload.hitT == INFINITE)
     {
-      // For first hit, it is transparent
-      if(depth == 0)
-        sampleResult.radiance.a = 0.0;
+      if(firstRay)  // If we come in here, the first ray didn't hit anything
+      {
+        sampleResult.radiance.a = 0.0;  // Set it to transparent
 
-      if(frameInfo.useSky == 1)
+        // Solid color background and blurred HDR environment, aren't part of the
+        // lighting equation (backplate), so we can return them directly.
+        if(TEST_FLAG(frameInfo.flags, USE_SOLID_BACKGROUND_FLAG))
+        {
+          sampleResult.radiance.xyz = frameInfo.backgroundColor;
+          return sampleResult;
+        }
+        else if(TEST_FLAG(frameInfo.flags, USE_HDR_FLAG) && frameInfo.envBlur > 0)
+        {
+          vec3 dir                  = rotate(r.direction, vec3(0, 1, 0), -frameInfo.envRotation);
+          vec2 uv                   = getSphericalUv(dir);  // See sampling.glsl
+          sampleResult.radiance.xyz = smoothHDRBlur(hdrTexture, uv, frameInfo.envBlur).xyz;
+          return sampleResult;
+        }
+      }
+
+      if(TEST_FLAG(frameInfo.flags, USE_SKY_FLAG))
       {
         radiance.xyz += throughput * evalPhysicalSky(skyInfo, r.direction);
       }
@@ -196,7 +211,7 @@ SampleResult pathTrace(Ray r, inout uint seed)
         // Adding HDR lookup
         vec3 dir = rotate(r.direction, vec3(0, 1, 0), -frameInfo.envRotation);
         vec2 uv  = getSphericalUv(dir);  // See sampling.glsl
-        vec4 env = texture(hdrTexture, uv);
+        vec4 env = textureLod(hdrTexture, uv, 0);
 
         // We may hit the environment twice: once via sampleLights() and once when hitting the sky while probing
         // for more indirect hits. This is the counter part of the MIS weighting in sampleLights()

@@ -647,6 +647,7 @@ private:
     m_settingsHandler->setSetting("MaxFrames", &m_settings.maxFrames);
     m_settingsHandler->setSetting("ShowAxis", &m_settings.showAxis);
     m_settingsHandler->setSetting("SilhouetteColor", &m_settings.silhouetteColor);
+    m_settingsHandler->setSetting("BackgrounfColor", &m_settings.solidBackgroundColor);
     m_settingsHandler->addImGuiHandler();
   }
 
@@ -715,16 +716,15 @@ auto main(int argc, char** argv) -> int
   VkPhysicalDeviceAccelerationStructureFeaturesKHR accel_feature{VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_ACCELERATION_STRUCTURE_FEATURES_KHR};
   VkPhysicalDeviceRayTracingPipelineFeaturesKHR rt_pipeline_feature{VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_RAY_TRACING_PIPELINE_FEATURES_KHR};
   VkPhysicalDeviceRayQueryFeaturesKHR ray_query_features{VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_RAY_QUERY_FEATURES_KHR};
-  VkPhysicalDeviceFragmentShaderBarycentricFeaturesNV baryFeatures{VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_FRAGMENT_SHADER_BARYCENTRIC_FEATURES_NV};
+  VkPhysicalDeviceFragmentShaderBarycentricFeaturesKHR baryFeatures{VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_FRAGMENT_SHADER_BARYCENTRIC_FEATURES_KHR};
   VkPhysicalDeviceShaderObjectFeaturesEXT shaderObjFeature{VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_SHADER_OBJECT_FEATURES_EXT};
   VkPhysicalDeviceNestedCommandBufferFeaturesEXT nestedCmdFeature{VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_NESTED_COMMAND_BUFFER_FEATURES_EXT};
-  vkSetup.deviceExtensions.emplace_back(VK_KHR_BUFFER_DEVICE_ADDRESS_EXTENSION_NAME);
   vkSetup.deviceExtensions.emplace_back(VK_KHR_ACCELERATION_STRUCTURE_EXTENSION_NAME, &accel_feature);
   vkSetup.deviceExtensions.emplace_back(VK_KHR_RAY_TRACING_PIPELINE_EXTENSION_NAME, &rt_pipeline_feature);
   vkSetup.deviceExtensions.emplace_back(VK_KHR_DEFERRED_HOST_OPERATIONS_EXTENSION_NAME);
   vkSetup.deviceExtensions.emplace_back(VK_KHR_RAY_QUERY_EXTENSION_NAME, &ray_query_features);
   vkSetup.deviceExtensions.emplace_back(VK_KHR_PUSH_DESCRIPTOR_EXTENSION_NAME);
-  vkSetup.deviceExtensions.emplace_back(VK_NV_FRAGMENT_SHADER_BARYCENTRIC_EXTENSION_NAME, &baryFeatures, false);
+  vkSetup.deviceExtensions.emplace_back(VK_KHR_FRAGMENT_SHADER_BARYCENTRIC_EXTENSION_NAME, &baryFeatures, false);
   vkSetup.deviceExtensions.emplace_back(VK_EXT_SHADER_OBJECT_EXTENSION_NAME, &shaderObjFeature);
   vkSetup.deviceExtensions.emplace_back(VK_EXT_NESTED_COMMAND_BUFFER_EXTENSION_NAME, &nestedCmdFeature);
 
@@ -734,10 +734,18 @@ auto main(int argc, char** argv) -> int
                     VK_QUEUE_COMPUTE_BIT,                                                  // Compute
                     VK_QUEUE_TRANSFER_BIT};                                                // Transfer
 
+  ValidationSettings vvlInfo{};
+  // vvlInfo.validate_best_practices = true;
 #ifdef USE_DGBPRINTF
-  vkSetup.instanceCreateInfoExt = g_elemDebugPrintf->getFeatures();  // Adding the debug printf extension
-  vkSetup.ignoreDbgMessages.insert(0x76589099);                      // Truncate the message when too long
-#endif                                                               // USE_DGBPRINTF
+  vvlInfo.validate_gpu_based         = {"GPU_BASED_DEBUG_PRINTF"};  // Adding the debug printf extension
+  vvlInfo.printf_verbose             = VK_FALSE;
+  vvlInfo.printf_to_stdout           = VK_FALSE;
+  vvlInfo.printf_buffer_size         = 1024;
+  vvlInfo.gpuav_reserve_binding_slot = false;
+  vvlInfo.message_id_filter          = {0x76589099};  // Truncate the message when too long
+#endif                                                // USE_DGBPRINTF
+  ValidationSettings vvl(vvlInfo);
+  vkSetup.instanceCreateInfoExt = vvl.buildPNextChain();  // Adding the validation layer settings
 
   // Creating the Vulkan context
   auto vkContext = std::make_unique<VulkanContext>(vkSetup);
@@ -752,12 +760,13 @@ auto main(int argc, char** argv) -> int
 
   // Setup the application information
   nvvkhl::ApplicationCreateInfo spec;
-  spec.name           = PROJECT_NAME " Sample";
-  spec.vSync          = false;
-  spec.instance       = vkContext->getInstance();
-  spec.device         = vkContext->getDevice();
-  spec.physicalDevice = vkContext->getPhysicalDevice();
-  spec.queues         = vkContext->getQueueInfos();
+  spec.name             = PROJECT_NAME " Sample";
+  spec.vSync            = false;
+  spec.instance         = vkContext->getInstance();
+  spec.device           = vkContext->getDevice();
+  spec.physicalDevice   = vkContext->getPhysicalDevice();
+  spec.queues           = vkContext->getQueueInfos();
+  spec.imguiConfigFlags = ImGuiConfigFlags_NavEnableKeyboard | ImGuiConfigFlags_DockingEnable;
 
   // Create the application
   auto app = std::make_unique<nvvkhl::Application>(spec);

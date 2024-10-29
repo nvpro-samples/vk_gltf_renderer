@@ -40,26 +40,27 @@ static VKAPI_ATTR VkBool32 VKAPI_CALL VkContextDebugReport(VkDebugUtilsMessageSe
                                                            const VkDebugUtilsMessengerCallbackDataEXT* callbackData,
                                                            void*                                       userData)
 {
-  if(messageSeverity >= VK_DEBUG_UTILS_MESSAGE_SEVERITY_WARNING_BIT_EXT)
+  int level = messageSeverity & VK_DEBUG_UTILS_MESSAGE_SEVERITY_ERROR_BIT_EXT   ? LOGLEVEL_ERROR :
+              messageSeverity & VK_DEBUG_UTILS_MESSAGE_SEVERITY_WARNING_BIT_EXT ? LOGLEVEL_WARNING :
+                                                                                  LOGLEVEL_INFO;
+  nvprintfLevel(level, "%s\n", callbackData->pMessage);
+  for(uint32_t count = 0; count < callbackData->objectCount; count++)
   {
-    auto ignoredMsg = reinterpret_cast<std::unordered_set<uint32_t>*>(userData);
-    if(ignoredMsg->find(callbackData->messageIdNumber) != ignoredMsg->end())
-      return VK_FALSE;
-    LOGE("%s\n", callbackData->pMessage);
-    for(uint32_t count = 0; count < callbackData->objectCount; count++)
-    {
-      LOGE("Object[%d] \n\t- Type %s\n\t- Value %p\n\t- Name %s\n", count,
-           string_VkObjectType(callbackData->pObjects[count].objectType), callbackData->pObjects[count].objectHandle,
-           callbackData->pObjects[count].pObjectName);
-    }
+    LOGI("Object[%d] \n\t- Type %s\n\t- Value %p\n\t- Name %s\n", count,
+         string_VkObjectType(callbackData->pObjects[count].objectType), callbackData->pObjects[count].objectHandle,
+         callbackData->pObjects[count].pObjectName);
+  }
+  if(messageSeverity & VK_DEBUG_UTILS_MESSAGE_SEVERITY_ERROR_BIT_EXT)
+  {
 #if defined(_MSVC_LANG)
     __debugbreak();  // If you break here, there is a Vulkan error that needs to be fixed
-                     // To ignore specific message, insert it to settings.ignoreDbgMessages
-                     // ex: "MessageID = 0x30b6e267"  ->  settings.ignoreDbgMessages.insert(0x30b6e267);
+                     // To ignore specific message, insert it to ValidationLayerInfo.message_id_filter
+                     // ex: "MessageID = 0x30b6e267"  ->  ValidationLayerInfo.message_id_filter.insert(0x30b6e267);
 #elif defined(LINUX)
     raise(SIGTRAP);
 #endif
   }
+
   return VK_FALSE;
 }
 
@@ -101,7 +102,6 @@ struct VkContextSettings
   std::vector<const char*> instanceExtensions = {};  // Instance extensions: VK_KHR_GET_PHYSICAL_DEVICE_PROPERTIES_2_EXTENSION_NAME
   std::vector<ExtensionFeaturePair> deviceExtensions = {};  // Device extensions: {{VK_KHR_SWAPCHAIN_EXTENSION_NAME}, {VK_KHR_ACCELERATION_STRUCTURE_EXTENSION_NAME, &accelFeature}, {OTHER}}
   std::vector<VkQueueFlags> queues = {VK_QUEUE_GRAPHICS_BIT | VK_QUEUE_TRANSFER_BIT | VK_QUEUE_COMPUTE_BIT};  // All desired queues, first is always GTC
-  std::unordered_set<uint32_t> ignoreDbgMessages;   // Ignore debug messages: 0x901f59ec
   void*       instanceCreateInfoExt = nullptr;      // Instance create info extension (ex: VkLayerSettingsCreateInfoEXT)
   const char* applicationName       = "No Engine";  // Application name
   uint32_t    apiVersion            = VK_API_VERSION_1_3;  // Vulkan API version
@@ -240,13 +240,11 @@ private:
       {
         assert(vkCreateDebugUtilsMessengerEXT != nullptr);
         VkDebugUtilsMessengerCreateInfoEXT dbg_messenger_create_info{VK_STRUCTURE_TYPE_DEBUG_UTILS_MESSENGER_CREATE_INFO_EXT};
-        dbg_messenger_create_info.messageSeverity = VK_DEBUG_UTILS_MESSAGE_SEVERITY_INFO_BIT_EXT  // For debug printf
-                                                    | VK_DEBUG_UTILS_MESSAGE_SEVERITY_WARNING_BIT_EXT  // GPU info, bug
-                                                    | VK_DEBUG_UTILS_MESSAGE_SEVERITY_ERROR_BIT_EXT;   // Invalid usage
+        dbg_messenger_create_info.messageSeverity = VK_DEBUG_UTILS_MESSAGE_SEVERITY_WARNING_BIT_EXT   // GPU info, bug
+                                                    | VK_DEBUG_UTILS_MESSAGE_SEVERITY_ERROR_BIT_EXT;  // Invalid usage
         dbg_messenger_create_info.messageType = VK_DEBUG_UTILS_MESSAGE_TYPE_VALIDATION_BIT_EXT      // Violation of spec
                                                 | VK_DEBUG_UTILS_MESSAGE_TYPE_PERFORMANCE_BIT_EXT;  // Non-optimal use
         dbg_messenger_create_info.pfnUserCallback = VkContextDebugReport;
-        dbg_messenger_create_info.pUserData       = &m_settings.ignoreDbgMessages;
         NVVK_CHECK(vkCreateDebugUtilsMessengerEXT(m_instance, &dbg_messenger_create_info, nullptr, &m_dbgMessenger));
       }
       else
@@ -660,3 +658,134 @@ inline void printPhysicalDeviceProperties(const VkPhysicalDeviceProperties& prop
   LOGI(" - API Version    : %s\n", getVersionString(properties.apiVersion).c_str());
   LOGI(" - Device Type    : %s\n", getDeviceType(properties.deviceType).c_str());
 }
+
+
+// https://vulkan.lunarg.com/doc/sdk/1.3.296.0/windows/khronos_validation_layer.html
+struct ValidationSettings
+{
+  VkBool32                 fine_grained_locking{true};
+  VkBool32                 validate_core{true};
+  VkBool32                 check_image_layout{true};
+  VkBool32                 check_command_buffer{true};
+  VkBool32                 check_object_in_use{true};
+  VkBool32                 check_query{true};
+  VkBool32                 check_shaders{true};
+  VkBool32                 check_shaders_caching{true};
+  VkBool32                 debug_disable_spirv_val{false};
+  VkBool32                 unique_handles{true};
+  VkBool32                 object_lifetime{true};
+  VkBool32                 stateless_param{true};
+  VkBool32                 thread_safety{true};
+  VkBool32                 validate_sync{false};
+  VkBool32                 syncval_submit_time_validation{true};
+  VkBool32                 syncval_shader_accesses_heuristic{false};
+  std::vector<const char*> validate_gpu_based{"GPU_BASED_NONE"};  // "GPU_BASED_DEBUG_PRINTF", "GPU_BASED_GPU_ASSISTED"
+  VkBool32                 printf_to_stdout{true};
+  VkBool32                 printf_verbose{false};
+  int32_t                  printf_buffer_size{1024};
+  VkBool32                 gpuav_shader_instrumentation{true};
+  VkBool32                 gpuav_descriptor_checks{true};
+  VkBool32                 gpuav_warn_on_robust_oob{true};
+  VkBool32                 gpuav_buffer_address_oob{true};
+  int32_t                  gpuav_max_buffer_device_addresses{10000};
+  VkBool32                 gpuav_validate_ray_query{true};
+  VkBool32                 gpuav_cache_instrumented_shaders{true};
+  VkBool32                 gpuav_select_instrumented_shaders{false};
+  VkBool32                 gpuav_buffers_validation{true};
+  VkBool32                 gpuav_indirect_draws_buffers{false};
+  VkBool32                 gpuav_indirect_dispatches_buffers{false};
+  VkBool32                 gpuav_indirect_trace_rays_buffers{false};
+  VkBool32                 gpuav_buffer_copies{true};
+  VkBool32                 gpuav_reserve_binding_slot{true};
+  VkBool32                 gpuav_vma_linear_output{true};
+  VkBool32                 gpuav_debug_validate_instrumented_shaders{false};
+  VkBool32                 gpuav_debug_dump_instrumented_shaders{false};
+  int32_t                  gpuav_debug_max_instrumented_count{0};
+  VkBool32                 gpuav_debug_print_instrumentation_info{false};
+  VkBool32                 validate_best_practices{false};
+  VkBool32                 validate_best_practices_arm{false};
+  VkBool32                 validate_best_practices_amd{false};
+  VkBool32                 validate_best_practices_img{false};
+  VkBool32                 validate_best_practices_nvidia{false};
+  std::vector<const char*> debug_action{"VK_DBG_LAYER_ACTION_LOG_MSG"};  // "VK_DBG_LAYER_ACTION_DEBUG_OUTPUT", "VK_DBG_LAYER_ACTION_BREAK"
+  std::vector<const char*> report_flags{"error"};                        // "info", "warn", "perf"
+  VkBool32                 enable_message_limit{true};
+  int32_t                  duplicate_message_limit{3};  // Was 10
+  std::vector<uint32_t>    message_id_filter{};         // "MessageID = 0x30b6e267"
+  VkBool32                 message_format_display_application_name{false};
+
+
+  // Vulkan interface
+  VkBaseInStructure* buildPNextChain()
+  {
+    updateSettings();
+    return reinterpret_cast<VkBaseInStructure*>(&m_layerSettingsCreateInfo);
+  }
+
+  void updateSettings()
+  {
+    // clang-format off
+    m_settings = {
+        {m_layer_name, "fine_grained_locking", VK_LAYER_SETTING_TYPE_BOOL32_EXT, 1, &fine_grained_locking},
+        {m_layer_name, "validate_core", VK_LAYER_SETTING_TYPE_BOOL32_EXT, 1, &validate_core},
+        {m_layer_name, "check_image_layout", VK_LAYER_SETTING_TYPE_BOOL32_EXT, 1, &check_image_layout},
+        {m_layer_name, "check_command_buffer", VK_LAYER_SETTING_TYPE_BOOL32_EXT, 1, &check_command_buffer},
+        {m_layer_name, "check_object_in_use", VK_LAYER_SETTING_TYPE_BOOL32_EXT, 1, &check_object_in_use},
+        {m_layer_name, "check_query", VK_LAYER_SETTING_TYPE_BOOL32_EXT, 1, &check_query},
+        {m_layer_name, "check_shaders", VK_LAYER_SETTING_TYPE_BOOL32_EXT, 1, &check_shaders},
+        {m_layer_name, "check_shaders_caching", VK_LAYER_SETTING_TYPE_BOOL32_EXT, 1, &check_shaders_caching},
+        {m_layer_name, "debug_disable_spirv_val", VK_LAYER_SETTING_TYPE_BOOL32_EXT, 1, &debug_disable_spirv_val},
+        {m_layer_name, "unique_handles", VK_LAYER_SETTING_TYPE_BOOL32_EXT, 1, &unique_handles},
+        {m_layer_name, "object_lifetime", VK_LAYER_SETTING_TYPE_BOOL32_EXT, 1, &object_lifetime},
+        {m_layer_name, "stateless_param", VK_LAYER_SETTING_TYPE_BOOL32_EXT, 1, &stateless_param},
+        {m_layer_name, "thread_safety", VK_LAYER_SETTING_TYPE_BOOL32_EXT, 1, &thread_safety},
+        {m_layer_name, "validate_sync", VK_LAYER_SETTING_TYPE_BOOL32_EXT, 1, &validate_sync},
+        {m_layer_name, "syncval_submit_time_validation", VK_LAYER_SETTING_TYPE_BOOL32_EXT, 1, &syncval_submit_time_validation},
+        {m_layer_name, "syncval_shader_accesses_heuristic", VK_LAYER_SETTING_TYPE_BOOL32_EXT, 1, &syncval_shader_accesses_heuristic},
+        {m_layer_name, "validate_gpu_based", VK_LAYER_SETTING_TYPE_STRING_EXT, uint32_t(validate_gpu_based.size()), validate_gpu_based.data()},
+        {m_layer_name, "printf_to_stdout", VK_LAYER_SETTING_TYPE_BOOL32_EXT, 1, &printf_to_stdout},
+        {m_layer_name, "printf_verbose", VK_LAYER_SETTING_TYPE_BOOL32_EXT, 1, &printf_verbose},
+        {m_layer_name, "printf_buffer_size", VK_LAYER_SETTING_TYPE_INT32_EXT, 1, &printf_buffer_size},
+        {m_layer_name, "gpuav_shader_instrumentation", VK_LAYER_SETTING_TYPE_BOOL32_EXT, 1, &gpuav_shader_instrumentation},
+        {m_layer_name, "gpuav_descriptor_checks", VK_LAYER_SETTING_TYPE_BOOL32_EXT, 1, &gpuav_descriptor_checks},
+        {m_layer_name, "gpuav_warn_on_robust_oob", VK_LAYER_SETTING_TYPE_BOOL32_EXT, 1, &gpuav_warn_on_robust_oob},
+        {m_layer_name, "gpuav_buffer_address_oob", VK_LAYER_SETTING_TYPE_BOOL32_EXT, 1, &gpuav_buffer_address_oob},
+        {m_layer_name, "gpuav_max_buffer_device_addresses", VK_LAYER_SETTING_TYPE_INT32_EXT, 1, &gpuav_max_buffer_device_addresses},
+        {m_layer_name, "gpuav_validate_ray_query", VK_LAYER_SETTING_TYPE_BOOL32_EXT, 1, &gpuav_validate_ray_query},
+        {m_layer_name, "gpuav_cache_instrumented_shaders", VK_LAYER_SETTING_TYPE_BOOL32_EXT, 1, &gpuav_cache_instrumented_shaders},
+        {m_layer_name, "gpuav_select_instrumented_shaders", VK_LAYER_SETTING_TYPE_BOOL32_EXT, 1, &gpuav_select_instrumented_shaders},
+        {m_layer_name, "gpuav_buffers_validation", VK_LAYER_SETTING_TYPE_BOOL32_EXT, 1, &gpuav_buffers_validation},
+        {m_layer_name, "gpuav_indirect_draws_buffers", VK_LAYER_SETTING_TYPE_BOOL32_EXT, 1, &gpuav_indirect_draws_buffers},
+        {m_layer_name, "gpuav_indirect_dispatches_buffers", VK_LAYER_SETTING_TYPE_BOOL32_EXT, 1, &gpuav_indirect_dispatches_buffers},
+        {m_layer_name, "gpuav_indirect_trace_rays_buffers", VK_LAYER_SETTING_TYPE_BOOL32_EXT, 1, &gpuav_indirect_trace_rays_buffers},
+        {m_layer_name, "gpuav_buffer_copies", VK_LAYER_SETTING_TYPE_BOOL32_EXT, 1, &gpuav_buffer_copies},
+        {m_layer_name, "gpuav_reserve_binding_slot", VK_LAYER_SETTING_TYPE_BOOL32_EXT, 1, &gpuav_reserve_binding_slot},
+        {m_layer_name, "gpuav_vma_linear_output", VK_LAYER_SETTING_TYPE_BOOL32_EXT, 1, &gpuav_vma_linear_output},
+        {m_layer_name, "gpuav_debug_validate_instrumented_shaders", VK_LAYER_SETTING_TYPE_BOOL32_EXT, 1, &gpuav_debug_validate_instrumented_shaders},
+        {m_layer_name, "gpuav_debug_dump_instrumented_shaders", VK_LAYER_SETTING_TYPE_BOOL32_EXT, 1, &gpuav_debug_dump_instrumented_shaders},
+        {m_layer_name, "gpuav_debug_max_instrumented_count", VK_LAYER_SETTING_TYPE_INT32_EXT, 1, &gpuav_debug_max_instrumented_count},
+        {m_layer_name, "gpuav_debug_print_instrumentation_info", VK_LAYER_SETTING_TYPE_BOOL32_EXT, 1, &gpuav_debug_print_instrumentation_info},
+        {m_layer_name, "validate_best_practices", VK_LAYER_SETTING_TYPE_BOOL32_EXT, 1, &validate_best_practices},
+        {m_layer_name, "validate_best_practices_arm", VK_LAYER_SETTING_TYPE_BOOL32_EXT, 1, &validate_best_practices_arm},
+        {m_layer_name, "validate_best_practices_amd", VK_LAYER_SETTING_TYPE_BOOL32_EXT, 1, &validate_best_practices_amd},
+        {m_layer_name, "validate_best_practices_img", VK_LAYER_SETTING_TYPE_BOOL32_EXT, 1, &validate_best_practices_img},
+        {m_layer_name, "validate_best_practices_nvidia", VK_LAYER_SETTING_TYPE_BOOL32_EXT, 1, &validate_best_practices_nvidia},
+        {m_layer_name, "debug_action", VK_LAYER_SETTING_TYPE_STRING_EXT, uint32_t(debug_action.size()), debug_action.data()},
+        {m_layer_name, "enable_message_limit", VK_LAYER_SETTING_TYPE_BOOL32_EXT, 1, &enable_message_limit},
+        {m_layer_name, "duplicate_message_limit", VK_LAYER_SETTING_TYPE_INT32_EXT, 1, &duplicate_message_limit},
+        {m_layer_name, "report_flags", VK_LAYER_SETTING_TYPE_STRING_EXT, uint32_t(report_flags.size()), report_flags.data()},
+        {m_layer_name, "message_id_filter", VK_LAYER_SETTING_TYPE_UINT32_EXT, uint32_t(message_id_filter.size()), message_id_filter.data()},
+        {m_layer_name, "message_format_display_application_name", VK_LAYER_SETTING_TYPE_BOOL32_EXT, 1, &message_format_display_application_name},
+    };
+    // clang-format on
+
+    m_layerSettingsCreateInfo.sType        = VK_STRUCTURE_TYPE_LAYER_SETTINGS_CREATE_INFO_EXT;
+    m_layerSettingsCreateInfo.settingCount = static_cast<uint32_t>(m_settings.size());
+    m_layerSettingsCreateInfo.pSettings    = m_settings.data();
+  }
+
+
+  VkLayerSettingsCreateInfoEXT   m_layerSettingsCreateInfo;
+  std::vector<VkLayerSettingEXT> m_settings;
+  static constexpr const char*   m_layer_name{"VK_LAYER_KHRONOS_validation"};
+};

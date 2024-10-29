@@ -158,6 +158,10 @@ This example loads HDR images, then creates an importance sampling acceleration 
 
 For real-time rendering, we use the created acceleration structure and create two cubemaps. One containing the diffuse irradiance and the other, storing the glossy reflection, where the different levels of glossiness are stored in separate mipmap levels.
 
+The HDR can also be blured and rotated to better fit the scene.
+
+An option to replace the background with a solid color is also available.
+
 ## Tonemapper
 
 We could not get good results without a tone mapper. This is done with a compute shader and different settings can be made.

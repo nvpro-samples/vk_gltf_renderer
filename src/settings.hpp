@@ -52,14 +52,17 @@ struct Settings
   static constexpr const char* rendererNames[] = {"Pathtracer", "Raster"};
 
 
-  int          maxFrames       = 200000;       // Maximum number of frames to render (used by pathtracer)
-  bool         showAxis        = true;         // Show the axis (bottom left)
-  EnvSystem    envSystem       = eSky;         // Environment system: Sky or HDR
-  RenderSystem renderSystem    = ePathtracer;  // Renderer to use
-  float        hdrEnvIntensity = 1.0f;         // Intensity of the environment (HDR)
-  float        hdrEnvRotation  = 0.0f;         // Rotation of the environment (HDR)
-  float        maxLuminance    = 10.0f;        // For firefly
-  glm::vec3    silhouetteColor = {0.6f, 0.4f, 0.0f};
+  int          maxFrames            = 200000;       // Maximum number of frames to render (used by pathtracer)
+  bool         showAxis             = true;         // Show the axis (bottom left)
+  EnvSystem    envSystem            = eSky;         // Environment system: Sky or HDR
+  RenderSystem renderSystem         = ePathtracer;  // Renderer to use
+  float        hdrEnvIntensity      = 1.0f;         // Intensity of the environment (HDR)
+  float        hdrEnvRotation       = 0.0f;         // Rotation of the environment (HDR)
+  float        hdrBlur              = 0.0f;         // Blur of the environment (HDR)
+  float        maxLuminance         = 10.0f;        // For firefly
+  glm::vec3    silhouetteColor      = {0.6f, 0.4f, 0.0f};
+  bool         useSolidBackground   = false;
+  glm::vec3    solidBackgroundColor = {0.0f, 0.0f, 0.0f};
 
   void onUI();
   void setDefaultLuminance(float hdrEnvIntensity);

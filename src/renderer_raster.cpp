@@ -278,22 +278,26 @@ void RendererRaster::render(VkCommandBuffer cmd, Resources& /*res*/, Scene& scen
     glm::mat4 proj = glm::perspectiveRH_ZO(glm::radians(CameraManip.getFov()), aspect_ratio, clipPlanes.x, clipPlanes.y);
     proj[1][1] *= -1;
 
-    // Update the sky
-    const VkExtent2D img_size = m_gSuperSampleBuffers->getSize();
-    if(settings.envSystem == Settings::eSky)
-    {
-      scene.m_sky->skyParams().yIsUp = CameraManip.getUp().y > CameraManip.getUp().z;
-      scene.m_sky->updateParameterBuffer(cmd);
+    const VkExtent2D imgSize = m_gSuperSampleBuffers->getSize();
 
-      auto skysec = profiler.timeRecurring("Sky", cmd);
-      scene.m_sky->draw(cmd, view, proj, img_size);
-    }
-    else
+    // When not rendering the solid background, we render the sky or HDR dome
+    if(!settings.useSolidBackground)
     {
-      auto hdrsec = profiler.timeRecurring("HDR Dome", cmd);
+      if(settings.envSystem == Settings::eSky)
+      {
+        scene.m_sky->skyParams().yIsUp = CameraManip.getUp().y > CameraManip.getUp().z;
+        scene.m_sky->updateParameterBuffer(cmd);
 
-      std::array<float, 4> color{settings.hdrEnvIntensity, settings.hdrEnvIntensity, settings.hdrEnvIntensity, 1.0F};
-      scene.m_hdrDome->draw(cmd, view, proj, img_size, color.data(), settings.hdrEnvRotation);
+        auto skysec = profiler.timeRecurring("Sky", cmd);
+        scene.m_sky->draw(cmd, view, proj, imgSize);
+      }
+      else
+      {
+        auto hdrsec = profiler.timeRecurring("HDR Dome", cmd);
+
+        std::array<float, 4> color{settings.hdrEnvIntensity, settings.hdrEnvIntensity, settings.hdrEnvIntensity, 1.0F};
+        scene.m_hdrDome->draw(cmd, view, proj, imgSize, color.data(), settings.hdrEnvRotation, settings.hdrBlur);
+      }
     }
   }
 
@@ -304,10 +308,11 @@ void RendererRaster::render(VkCommandBuffer cmd, Resources& /*res*/, Scene& scen
   }
 
   // Execute recorded command buffer - the scene graph traversal is already in the secondary command buffer,
-  // but stil need to execute it
+  // but still need to execute it
   {
     auto         rastersec = profiler.timeRecurring("Raster", cmd);
-    VkClearValue colorClear{.color = {0.0F, 0.0F, 0.0F, 1.0F}};
+    VkClearValue colorClear{.color = {settings.solidBackgroundColor.x, settings.solidBackgroundColor.y,
+                                      settings.solidBackgroundColor.z, 1.0F}};
     VkClearValue depthClear{.depthStencil = {1.0F, 0}};
 
 
@@ -319,7 +324,7 @@ void RendererRaster::render(VkCommandBuffer cmd, Resources& /*res*/, Scene& scen
             .sType       = VK_STRUCTURE_TYPE_RENDERING_ATTACHMENT_INFO,
             .imageView   = m_gSuperSampleBuffers->getColorImageView(GBufferType::eSuperSample),
             .imageLayout = VK_IMAGE_LAYOUT_ATTACHMENT_OPTIMAL,
-            .loadOp      = VK_ATTACHMENT_LOAD_OP_LOAD,
+            .loadOp      = settings.useSolidBackground ? VK_ATTACHMENT_LOAD_OP_CLEAR : VK_ATTACHMENT_LOAD_OP_LOAD,
             .storeOp     = VK_ATTACHMENT_STORE_OP_STORE,
             .clearValue  = colorClear,
         },
@@ -330,7 +335,7 @@ void RendererRaster::render(VkCommandBuffer cmd, Resources& /*res*/, Scene& scen
                 .imageLayout = VK_IMAGE_LAYOUT_ATTACHMENT_OPTIMAL,
                 .loadOp      = VK_ATTACHMENT_LOAD_OP_CLEAR,
                 .storeOp     = VK_ATTACHMENT_STORE_OP_STORE,
-                .clearValue  = colorClear,
+                .clearValue  = {.color = {0, 0, 0, 0}},
             },
         }};
 

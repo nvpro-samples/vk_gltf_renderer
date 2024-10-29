@@ -23,7 +23,7 @@
 #extension GL_EXT_scalar_block_layout : enable
 #extension GL_EXT_shader_explicit_arithmetic_types_int64 : require
 #extension GL_EXT_buffer_reference2 : require
-#extension GL_NV_fragment_shader_barycentric : enable
+#extension GL_EXT_fragment_shader_barycentric : enable
 #extension GL_EXT_shader_explicit_arithmetic_types : enable
 #extension GL_EXT_debug_printf : enable
 
@@ -143,7 +143,7 @@ void main()
 
   // Using same hit code as for ray tracing
   const vec3 worldRayOrigin = vec3(frameInfo.viewMatrixI[3].x, frameInfo.viewMatrixI[3].y, frameInfo.viewMatrixI[3].z);
-  HitState   hit            = getHitState(renderPrim, gl_BaryCoordNV, gl_PrimitiveID, worldRayOrigin,
+  HitState   hit            = getHitState(renderPrim, gl_BaryCoordEXT, gl_PrimitiveID, worldRayOrigin,
                                           mat4x3(renderNode.objectToWorld), mat4x3(renderNode.worldToObject));
 
   // Material of the object
@@ -209,7 +209,7 @@ void main()
 
   vec3  f0            = mix(vec3(0.04), pbrMat.baseColor, pbrMat.metallic);
   float ambientFactor = 0.3;
-  if(frameInfo.useSky != 0)
+  if(TEST_FLAG(frameInfo.flags, USE_SKY_FLAG))
   {
     vec3 ambientColor = mix(vec3(0.4F), vec3(0.17F, 0.37F, 0.65F), pbrMat.N.y * 0.5 + 0.5) * ambientFactor;
     contribution += ambientColor * pbrMat.baseColor * f0;

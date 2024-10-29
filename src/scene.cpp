@@ -28,6 +28,7 @@
 #include "shaders/dh_bindings.h"
 #include "tiny_obj_loader.h"
 #include "create_tangent.hpp"
+#include "nvvkhl/shaders/dh_tonemap.h"
 
 extern std::shared_ptr<nvvkhl::ElementCamera> g_elemCamera;  // Is accessed elsewhere in the App
 namespace PE = ImGuiH::PropertyEditor;
@@ -362,17 +363,25 @@ bool gltfr::Scene::processFrame(VkCommandBuffer cmdBuf, Settings& settings)
   // Update the environment
   m_sceneFrameInfo.envIntensity = glm::vec4(settings.hdrEnvIntensity, settings.hdrEnvIntensity, settings.hdrEnvIntensity, 1.0F);
   m_sceneFrameInfo.envRotation = settings.hdrEnvRotation;
+  m_sceneFrameInfo.envBlur     = settings.hdrBlur;
+  m_sceneFrameInfo.flags       = 0;
   if(settings.envSystem == Settings::eSky)
   {
-    m_sceneFrameInfo.useSky   = 1;
+    SET_FLAG(m_sceneFrameInfo.flags, USE_SKY_FLAG);
     m_sceneFrameInfo.nbLights = 1;  //static_cast<int>(settings.lights.size());
     m_sceneFrameInfo.light[0] = m_sky->getSun();
   }
   else
   {
-    m_sceneFrameInfo.useSky   = 0;
+    SET_FLAG(m_sceneFrameInfo.flags, USE_HDR_FLAG);
     m_sceneFrameInfo.nbLights = 0;
   }
+  if(settings.useSolidBackground)
+  {
+    SET_FLAG(m_sceneFrameInfo.flags, USE_SOLID_BACKGROUND_FLAG);
+    m_sceneFrameInfo.backgroundColor = nvvkhl_shaders::toLinear(settings.solidBackgroundColor);
+  }
+
 
   vkCmdUpdateBuffer(cmdBuf, m_sceneFrameInfoBuffer.buffer, 0, sizeof(DH::SceneFrameInfo), &m_sceneFrameInfo);
 
@@ -476,9 +485,16 @@ void gltfr::Scene::createHdr(Resources& res, const std::string& filename)
 
   m_hdrEnv  = std::make_unique<nvvkhl::HdrEnv>(res.ctx.device, res.ctx.physicalDevice, alloc, c_family_queue);
   m_hdrDome = std::make_unique<nvvkhl::HdrEnvDome>(res.ctx.device, res.ctx.physicalDevice, alloc, c_family_queue);
-
-  m_hdrEnv->loadEnvironment(filename);
+  m_hdrEnv->loadEnvironment(filename, true);
   m_hdrDome->create(m_hdrEnv->getDescriptorSet(), m_hdrEnv->getDescriptorSetLayout());
+
+  {
+    nvvk::ScopeCommandBuffer cmd(res.ctx.device, res.ctx.GCT1.familyIndex, res.ctx.GCT1.queue);
+    nvvk::cmdGenerateMipmaps(cmd, m_hdrEnv->getHdrTexture().image, VK_FORMAT_R32G32B32A32_SFLOAT,
+                             m_hdrEnv->getHdrImageSize(), nvvk::mipLevels(m_hdrEnv->getHdrImageSize()));
+  }
+  alloc->finalizeAndReleaseStaging();
+
 
   m_hdrFilename = std::filesystem::path(filename).filename().string();
   setDirtyFlag(Scene::eHdrEnv, true);
@@ -595,6 +611,15 @@ bool gltfr::Scene::onUI(Resources& resources, Settings& settings, GLFWwindow* wi
       PE::Text("HDR File", m_hdrFilename);
       reset |= PE::SliderFloat("Intensity", &settings.hdrEnvIntensity, 0, 100, "%.3f", ImGuiSliderFlags_Logarithmic, "HDR intensity");
       reset |= PE::SliderAngle("Rotation", &settings.hdrEnvRotation, -360, 360, "%.0f deg", 0, "Rotating the environment");
+      reset |= PE::SliderFloat("Blur", &settings.hdrBlur, 0, 1, "%.3f", 0, "Blur the environment");
+    }
+    PE::end();
+    PE::begin();
+    reset |= PE::Checkbox("Use Solid Background", &settings.useSolidBackground);
+    if(settings.useSolidBackground)
+    {
+      reset |= PE::ColorEdit3("Background Color", glm::value_ptr(settings.solidBackgroundColor),
+                              ImGuiColorEditFlags_NoInputs | ImGuiColorEditFlags_NoLabel | ImGuiColorEditFlags_Float);
     }
     PE::end();
   }

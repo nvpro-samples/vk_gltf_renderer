@@ -28,6 +28,7 @@ endif()
 _add_project_definitions(${PROJNAME})
 
 set(NVPRO_CORE_DIR ${BASE_DIRECTORY}/nvpro_core)
+set(NVPRO_SHADERS_DIR ${NVPRO_CORE_DIR}/nvvkhl/shaders)
 
 #####################################################################################
 # Adding Slang
@@ -74,8 +75,7 @@ file(GLOB SOURCE_FILES src/*.*)
 file(GLOB SHADER_SOURCE shaders/*.glsl)
 file(GLOB SHADER_HEADER shaders/*.h)
 file(GLOB SHADER_SLANG shaders/*.slang)
-file(GLOB SHADER_FILES shaders/*.glsl shaders/*.h shaders/*.slang)
-file(GLOB SHADER_COMMON_FILES ${NVPRO_CORE_DIR}/nvvkhl/shaders/*.*)
+file(GLOB SHADER_COMMON_FILES ${NVPRO_SHADERS_DIR}/*.h)
 set(MIKKTSPACE_DIR ${CMAKE_CURRENT_SOURCE_DIR}/third_party/MikkTSpace)
 set(MIKKTSPACE_SRC ${MIKKTSPACE_DIR}/mikktspace.c ${MIKKTSPACE_DIR}/mikktspace.h)
 
@@ -89,7 +89,7 @@ add_executable(${PROJNAME})
 target_sources(${PROJNAME} PRIVATE ${SOURCE_FILES})
 target_sources(${PROJNAME} PRIVATE ${COMMON_SOURCE_FILES})
 target_sources(${PROJNAME} PRIVATE ${PACKAGE_SOURCE_FILES})
-target_sources(${PROJNAME} PRIVATE ${SHADER_FILES} )
+target_sources(${PROJNAME} PRIVATE ${SHADER_SOURCE} ${SHADER_HEADER} ${SHADER_SLANG})
 target_sources(${PROJNAME} PRIVATE ${SHADER_COMMON_FILES})
 target_sources(${PROJNAME} PRIVATE ${MIKKTSPACE_SRC})
 
@@ -115,8 +115,8 @@ target_include_directories(${PROJNAME} PRIVATE ${MIKKTSPACE_DIR})
 
 # Folders for Visual Studio
 source_group("Common" FILES ${COMMON_SOURCE_FILES} ${PACKAGE_SOURCE_FILES} )
-source_group("Shader Files" FILES ${SHADER_FILES} ${SHADER_SLANG})
-source_group("Shader Files/common" FILES ${SHADER_COMMON_FILES})
+source_group("Shader Files" FILES ${SHADER_SOURCE} ${SHADER_SLANG})
+source_group("Shader Files/common" FILES ${SHADER_COMMON_FILES} ${SHADER_HEADER})
 source_group("MikkTSpace" FILES ${MIKKTSPACE_SRC})
 
 

@@ -35,6 +35,15 @@ ENUM_ENTRY(eDbgMethod_texCoord0, 9)
 ENUM_ENTRY(eDbgMethod_texCoord1, 10)
 ENUM_END()
 
+// Define bit flags for useSky and useSolidBackground
+#define USE_SKY_FLAG				(1 << 0)
+#define USE_HDR_FLAG				(1 << 1)
+#define USE_SOLID_BACKGROUND_FLAG	(1 << 2)
+
+// Macros to set and test the flags
+#define SET_FLAG(flags, flag) ((flags) |= (flag))
+#define CLEAR_FLAG(flags, flag) ((flags) &= ~(flag))
+#define TEST_FLAG(flags, flag) bool((flags) & (flag))
 
 
 struct PushConstantPathtracer
@@ -85,10 +94,13 @@ struct SceneFrameInfo
   Light light[MAX_NB_LIGHTS];
   vec4  envIntensity;
   vec3  camPos;  // camera position
-  int   useSky;  // 0: hdr, 1: sky
+  int   flags;   // Use flag bits instead of separate useSky and useSolidBackground
   int   nbLights;
   float envRotation;
   int   frameCount;
+  float envBlur;
+  int   useSolidBackground;
+  vec3  backgroundColor;
 };
 
 struct Ray
