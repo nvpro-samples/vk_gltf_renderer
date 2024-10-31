@@ -322,7 +322,10 @@ SampleResult pathTrace(Ray r, inout uint seed)
         vec3 offsetDir = dot(r.direction, hit.geonrm) > 0 ? hit.geonrm : -hit.geonrm;
         r.origin       = offsetRay(hit.pos, offsetDir);
 
-        if(isTransmission)
+        // Flip the information if we are inside the object, but only if it is a solid object
+        // The doubleSided flag is used to know if the object is solid or thin-walled.
+        // This is not a glTF specification, but works in many cases.
+        if(isTransmission && (material.doubleSided == 0))
         {
           isInside = !isInside;
         }
