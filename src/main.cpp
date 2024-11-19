@@ -50,6 +50,7 @@
 #include "vk_context.hpp"
 #include "stb_image.h"
 #include "doc/app_icon_png.h"
+#include "collapsing_header_manager.h"
 
 // #define USE_DGBPRINTF
 // With USE_DGBPRINTF defined, the application will have the capability to use the debug printf extension.
@@ -201,6 +202,8 @@ public:
   // Will display the settings, the viewport and the busy window
   void onUIRender() override
   {
+    auto& headerManager = CollapsingHeaderManager::getInstance();
+
     ImGui::Begin("Settings");
     {
       PE::begin();
@@ -215,12 +218,12 @@ public:
       {
         m_scene.resetFrameCount();
       }
-      if(ImGui::CollapsingHeader("Camera"))
+      if(headerManager.beginHeader("Camera"))
       {
         ImGuiH::CameraWidget();
       }
       m_settings.onUI();
-      if(ImGui::CollapsingHeader("Tonemapper"))
+      if(headerManager.beginHeader("Tonemapper"))
       {
         m_tonemapper->onUI();
       }

@@ -252,13 +252,10 @@ SampleResult pathTrace(Ray r, inout uint seed)
     }
 
     // Apply volume attenuation
-    bool thin_walled = (pbrMat.thickness == 0);
-    if(isInside && !thin_walled)
+    if(isInside && !pbrMat.isThinWalled)
     {
       const vec3 abs_coeff = absorptionCoefficient(pbrMat);
-      throughput.x *= abs_coeff.x > 0.0 ? exp(-abs_coeff.x * hitPayload.hitT) : 1.0;
-      throughput.y *= abs_coeff.y > 0.0 ? exp(-abs_coeff.y * hitPayload.hitT) : 1.0;
-      throughput.z *= abs_coeff.z > 0.0 ? exp(-abs_coeff.z * hitPayload.hitT) : 1.0;
+      throughput *= exp(-hitPayload.hitT * abs_coeff);
     }
 
     // Light contribution; can be environment or punctual lights
@@ -268,8 +265,8 @@ SampleResult pathTrace(Ray r, inout uint seed)
     float lightDist            = 0.F;
     vec3  lightRadianceOverPdf = sampleLights(hit.pos, pbrMat.N, r.direction, seed, dirToLight, lightPdf, lightDist);
 
-    // do not next event estimation (but delay the adding of contribution)
-    const bool nextEventValid = ((dot(dirToLight, hit.geonrm) > 0.0f) != isInside) && lightPdf != 0.0f;
+    // Do not next event estimation (but delay the adding of contribution)
+    bool nextEventValid = (dot(dirToLight, hit.geonrm) > 0.0f) && lightPdf != 0.0f;
 
     // Evaluate BSDF for Light
     if(nextEventValid)
@@ -325,7 +322,7 @@ SampleResult pathTrace(Ray r, inout uint seed)
         // Flip the information if we are inside the object, but only if it is a solid object
         // The doubleSided flag is used to know if the object is solid or thin-walled.
         // This is not a glTF specification, but works in many cases.
-        if(isTransmission && (material.doubleSided == 0))
+        if(isTransmission)
         {
           isInside = !isInside;
         }

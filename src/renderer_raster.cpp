@@ -49,6 +49,7 @@ namespace DH {
 #include "renderer.hpp"
 #include "silhouette.hpp"
 #include "nvvk/shaders_vk.hpp"
+#include "collapsing_header_manager.h"
 
 
 constexpr auto RASTER_SS_SIZE = 2;  // Change this for the default Super-Sampling resolution multiplier for raster;
@@ -400,9 +401,10 @@ void RendererRaster::render(VkCommandBuffer cmd, Resources& /*res*/, Scene& scen
 //
 bool RendererRaster::onUI()
 {
+  auto& headerManager = CollapsingHeaderManager::getInstance();
   bool changed{false};
 
-  if(ImGui::CollapsingHeader("RendererRaster"))
+  if(headerManager.beginHeader("RendererRaster"))
   {
     ImGui::PushID("RendererRaster");
     PE::begin();

@@ -29,6 +29,7 @@
 #include "tiny_obj_loader.h"
 #include "create_tangent.hpp"
 #include "nvvkhl/shaders/dh_tonemap.h"
+#include "collapsing_header_manager.h"
 
 extern std::shared_ptr<nvvkhl::ElementCamera> g_elemCamera;  // Is accessed elsewhere in the App
 namespace PE = ImGuiH::PropertyEditor;
@@ -571,9 +572,11 @@ nvh::Bbox gltfr::Scene::getRenderNodeBbox(int nodeID) const
 //
 bool gltfr::Scene::onUI(Resources& resources, Settings& settings, GLFWwindow* winHandle)
 {
+  auto& headerManager = CollapsingHeaderManager::getInstance();
+
   bool reset = false;
 
-  if(ImGui::CollapsingHeader("Environment"))
+  if(headerManager.beginHeader("Environment"))
   {
     const bool          skyOnly          = !(m_hdrEnv && m_hdrEnv->isValid());
     Settings::EnvSystem cache_env_system = settings.envSystem;
@@ -626,127 +629,131 @@ bool gltfr::Scene::onUI(Resources& resources, Settings& settings, GLFWwindow* wi
 
   if(m_gltfScene && m_gltfScene->valid())
   {
-    if(ImGui::CollapsingHeader("Scene", ImGuiTreeNodeFlags_DefaultOpen))
+    // Multiple scenes
+    if(m_gltfScene->getModel().scenes.size() > 1)
     {
-      // Multiple scenes
-      if(m_gltfScene->getModel().scenes.size() > 1)
+      if(headerManager.beginHeader("Multiple Scenes"))
       {
-        if(ImGui::CollapsingHeader("Multiple Scenes"))
+        ImGui::PushID("Scenes");
+        for(size_t i = 0; i < m_gltfScene->getModel().scenes.size(); i++)
         {
-          ImGui::PushID("Scenes");
-          for(size_t i = 0; i < m_gltfScene->getModel().scenes.size(); i++)
+          if(ImGui::RadioButton(m_gltfScene->getModel().scenes[i].name.c_str(), m_gltfScene->getCurrentScene() == i))
           {
-            if(ImGui::Selectable(m_gltfScene->getModel().scenes[i].name.c_str(), m_gltfScene->getCurrentScene() == i))
-            {
-              m_gltfScene->setCurrentScene(int(i));
-              vkDeviceWaitIdle(resources.ctx.device);
-              createVulkanScene(resources);
-              postSceneCreateProcess(resources, m_gltfScene->getFilename());
-              reset = true;
-              setDirtyFlag(Scene::eNewScene, true);
-            }
-          }
-          ImGui::PopID();
-        }
-      }
-
-      // Variant selection
-      if(m_gltfScene->getVariants().size() > 0)
-      {
-        if(ImGui::CollapsingHeader("Variants"))
-        {
-          ImGui::PushID("Variants");
-          for(size_t i = 0; i < m_gltfScene->getVariants().size(); i++)
-          {
-            if(ImGui::Selectable(m_gltfScene->getVariants()[i].c_str(), m_gltfScene->getCurrentVariant() == i))
-            {
-              m_gltfScene->setCurrentVariant(int(i));
-              m_dirtyFlags.set(eVulkanScene);
-              reset = true;
-            }
-          }
-          ImGui::PopID();
-        }
-      }
-
-      // Animation
-      if(m_gltfScene->hasAnimation())
-      {
-        if(ImGui::CollapsingHeader("Animation"))
-        {
-          m_animControl.onUI();
-        }
-      }
-
-
-      if(m_sceneGraph && ImGui::CollapsingHeader("Scene Graph"))
-      {
-        int selectedNode = m_sceneGraph->selectedNode();
-        m_sceneGraph->render();
-
-        // Find the `render node` corresponding to the selected node
-        // The `render node` is the node that is rendered, and different from the `scene node`
-        if(m_sceneGraph->selectedNode() > -1 && selectedNode != m_selectedRenderNode)
-        {
-          selectedNode      = m_sceneGraph->selectedNode();
-          auto& renderNodes = m_gltfScene->getRenderNodes();
-          for(size_t i = 0; i < renderNodes.size(); i++)
-          {
-            if(renderNodes[i].refNodeID == selectedNode)
-            {
-              m_selectedRenderNode = int(i);
-              break;
-            }
+            m_gltfScene->setCurrentScene(int(i));
+            vkDeviceWaitIdle(resources.ctx.device);
+            createVulkanScene(resources);
+            postSceneCreateProcess(resources, m_gltfScene->getFilename());
+            reset = true;
+            setDirtyFlag(Scene::eNewScene, true);
           }
         }
-        else if(selectedNode == -1)
-        {
-          m_selectedRenderNode = -1;  // No node selected
-        }
-
-        // Check for scene graph changes
-        bool transformChanged  = m_sceneGraph->hasTransformChanged();
-        bool lightChanged      = m_sceneGraph->hasLightChanged();
-        bool visibilityChanged = m_sceneGraph->hasVisibilityChanged();
-        bool materialChanged   = m_sceneGraph->hasMaterialChanged();
-
-        if(transformChanged || lightChanged || visibilityChanged)
-        {
-          m_dirtyFlags.set(eVulkanScene);
-          m_dirtyFlags.set(eRtxScene);
-
-          if(visibilityChanged)
-            m_dirtyFlags.set(eNodeVisibility);
-
-          m_gltfScene->updateRenderNodes();
-          reset = true;
-        }
-
-        if(materialChanged)
-        {
-          m_dirtyFlags.set(eVulkanMaterial);
-          reset = true;
-        }
-
-        m_sceneGraph->resetChanges();
-      }
-
-
-      if(ImGui::CollapsingHeader("Statistics"))
-      {
-        const tinygltf::Model& tiny = m_gltfScene->getModel();
-        PE::begin("Stat_Val");
-        PE::Text("Nodes", std::to_string(tiny.nodes.size()));
-        PE::Text("Render Nodes", std::to_string(m_gltfScene->getRenderNodes().size()));
-        PE::Text("Render Primitives", std::to_string(m_gltfScene->getNumRenderPrimitives()));
-        PE::Text("Materials", std::to_string(tiny.materials.size()));
-        PE::Text("Triangles", std::to_string(m_gltfScene->getNumTriangles()));
-        PE::Text("Lights", std::to_string(tiny.lights.size()));
-        PE::Text("Textures", std::to_string(tiny.textures.size()));
-        PE::Text("Images", std::to_string(tiny.images.size()));
-        PE::end();
+        ImGui::PopID();
       }
     }
+
+    // Variant selection
+    if(m_gltfScene->getVariants().size() > 0)
+    {
+      if(headerManager.beginHeader("Variants"))
+      {
+        ImGui::PushID("Variants");
+        for(size_t i = 0; i < m_gltfScene->getVariants().size(); i++)
+        {
+          if(ImGui::Selectable(m_gltfScene->getVariants()[i].c_str(), m_gltfScene->getCurrentVariant() == i))
+          {
+            m_gltfScene->setCurrentVariant(int(i));
+            m_dirtyFlags.set(eVulkanScene);
+            reset = true;
+          }
+        }
+        ImGui::PopID();
+      }
+    }
+
+    // Animation
+    if(m_gltfScene->hasAnimation())
+    {
+      if(headerManager.beginHeader("Animation"))
+      {
+        m_animControl.onUI();
+      }
+    }
+
+
+    if(m_sceneGraph && headerManager.beginHeader("Scene Graph"))
+    {
+      int selectedNode = m_sceneGraph->selectedNode();
+      m_sceneGraph->render();
+
+      // Find the `render node` corresponding to the selected node
+      // The `render node` is the node that is rendered, and different from the `scene node`
+      if(m_sceneGraph->selectedNode() > -1 && selectedNode != m_selectedRenderNode)
+      {
+        selectedNode      = m_sceneGraph->selectedNode();
+        auto& renderNodes = m_gltfScene->getRenderNodes();
+        for(size_t i = 0; i < renderNodes.size(); i++)
+        {
+          if(renderNodes[i].refNodeID == selectedNode)
+          {
+            m_selectedRenderNode = int(i);
+            break;
+          }
+        }
+      }
+      else if(selectedNode == -1)
+      {
+        m_selectedRenderNode = -1;  // No node selected
+      }
+
+      // Check for scene graph changes
+      bool transformChanged  = m_sceneGraph->hasTransformChanged();
+      bool lightChanged      = m_sceneGraph->hasLightChanged();
+      bool visibilityChanged = m_sceneGraph->hasVisibilityChanged();
+      bool materialChanged   = m_sceneGraph->hasMaterialChanged();
+
+      if(m_sceneGraph->hasMaterialFlagChanges())
+      {
+        m_dirtyFlags.set(eRtxScene);
+        reset = true;
+      }
+
+      if(transformChanged || lightChanged || visibilityChanged)
+      {
+        m_dirtyFlags.set(eVulkanScene);
+        m_dirtyFlags.set(eRtxScene);
+
+        if(visibilityChanged)
+          m_dirtyFlags.set(eNodeVisibility);
+
+        m_gltfScene->updateRenderNodes();
+        reset = true;
+      }
+
+      if(materialChanged)
+      {
+        m_dirtyFlags.set(eVulkanMaterial);
+        reset = true;
+      }
+
+      m_sceneGraph->resetChanges();
+    }
+
+
+    if(headerManager.beginHeader("Statistics"))
+    {
+      const tinygltf::Model& tiny = m_gltfScene->getModel();
+      PE::begin("Stat_Val");
+      PE::Text("Nodes", std::to_string(tiny.nodes.size()));
+      PE::Text("Render Nodes", std::to_string(m_gltfScene->getRenderNodes().size()));
+      PE::Text("Render Primitives", std::to_string(m_gltfScene->getNumRenderPrimitives()));
+      PE::Text("Materials", std::to_string(tiny.materials.size()));
+      PE::Text("Triangles", std::to_string(m_gltfScene->getNumTriangles()));
+      PE::Text("Lights", std::to_string(tiny.lights.size()));
+      PE::Text("Textures", std::to_string(tiny.textures.size()));
+      PE::Text("Images", std::to_string(tiny.images.size()));
+      PE::end();
+    }
+
 
     if(reset)
     {

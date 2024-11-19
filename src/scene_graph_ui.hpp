@@ -54,6 +54,7 @@ public:
   bool hasMaterialChanged() { return m_changes.test(eMaterialDirty); }
   bool hasLightChanged() { return m_changes.test(eLightDirty); }
   bool hasVisibilityChanged() { return m_changes.test(eNodeVisibleDirty); }
+  bool hasMaterialFlagChanges() { return m_changes.test(eMaterialFlagDirty); }
   void resetChanges() { m_changes.reset(); }
   void renderDetails(int childWindowFlags);
   void selectNode(int nodeIndex);
@@ -95,6 +96,7 @@ private:
     eMaterialDirty,
     eLightDirty,
     eNodeVisibleDirty,
+    eMaterialFlagDirty,
     // Add more flags as needed
   };
   bool m_doScroll = false;

@@ -466,8 +466,18 @@ void GltfModelUI::renderMaterial(int materialIndex)
                             &f64_zero, &f64_one);
     modif |= PE::ColorEdit3("Emissive", glm::value_ptr(materialUI.emissiveFactor));
     modif |= PE::DragScalar("Alpha Cutoff", ImGuiDataType_Double, &material.alphaCutoff, 0.01f, &f64_zero, &f64_one);
-    modif |= PE::Combo("Alpha Mode", &materialUI.alphaMode, MaterialUI::alphaModes, IM_ARRAYSIZE(MaterialUI::alphaModes));
-    modif |= PE::Checkbox("Double Sided", &material.doubleSided);
+
+    if(PE::Combo("Alpha Mode", &materialUI.alphaMode, MaterialUI::alphaModes, IM_ARRAYSIZE(MaterialUI::alphaModes)))
+    {
+      m_changes.set(eMaterialFlagDirty);
+      modif = true;
+    }
+
+    if(PE::Checkbox("Double Sided", &material.doubleSided))
+    {
+      m_changes.set(eMaterialFlagDirty);
+      modif = true;
+    }
 
     if(modif)
     {
@@ -477,132 +487,276 @@ void GltfModelUI::renderMaterial(int materialIndex)
     }
 
     // Extensions
-    if(tinygltf::utils::hasElementName(material.extensions, KHR_MATERIALS_EMISSIVE_STRENGTH_EXTENSION_NAME))
+    bool hasEmissiveStrength = tinygltf::utils::hasElementName(material.extensions, KHR_MATERIALS_EMISSIVE_STRENGTH_EXTENSION_NAME);
+    if(PE::treeNode("Emissive Strength"))
     {
-      KHR_materials_emissive_strength strenght = tinygltf::utils::getEmissiveStrength(material);
-      if(PE::DragFloat("Emissive Strength", &strenght.emissiveStrength, logarithmicStep(strenght.emissiveStrength), 0.0f, FLT_MAX))
+      if(hasEmissiveStrength)
       {
-        tinygltf::utils::setEmissiveStrength(material, strenght);
-        m_changes.set(eMaterialDirty);
+
+        KHR_materials_emissive_strength strenght = tinygltf::utils::getEmissiveStrength(material);
+        if(PE::DragFloat("Emissive Strength", &strenght.emissiveStrength, logarithmicStep(strenght.emissiveStrength), 0.0f, FLT_MAX))
+        {
+          tinygltf::utils::setEmissiveStrength(material, strenght);
+          m_changes.set(eMaterialDirty);
+        }
+      }
+      PE::treePop();
+    }
+    if(!hasEmissiveStrength)
+    {
+      ImGui::TableNextColumn();
+      if(ImGui::Button("Add##Add_1"))
+      {
+        tinygltf::utils::setEmissiveStrength(material, {});
       }
     }
 
-    if(tinygltf::utils::hasElementName(material.extensions, KHR_MATERIALS_CLEARCOAT_EXTENSION_NAME))
+    bool hasMaterialClearcoat = tinygltf::utils::hasElementName(material.extensions, KHR_MATERIALS_CLEARCOAT_EXTENSION_NAME);
+    if(PE::treeNode("Clearcoat"))
     {
-      KHR_materials_clearcoat clearcoat = tinygltf::utils::getClearcoat(material);
-      bool                    modif     = false;
-      modif |= PE::DragFloat("Clearcoat Factor", &clearcoat.factor, 0.01f, 0.0f, 1.0f);
-      modif |= PE::DragFloat("Clearcoat Roughness", &clearcoat.roughnessFactor, 0.01f, 0.0f, 1.0f);
-      if(modif)
+      if(hasMaterialClearcoat)
       {
-        tinygltf::utils::setClearcoat(material, clearcoat);
-        m_changes.set(eMaterialDirty);
+        KHR_materials_clearcoat clearcoat = tinygltf::utils::getClearcoat(material);
+        bool                    modif     = false;
+        modif |= PE::DragFloat("Clearcoat Factor", &clearcoat.factor, 0.01f, 0.0f, 1.0f);
+        modif |= PE::DragFloat("Clearcoat Roughness", &clearcoat.roughnessFactor, 0.01f, 0.0f, 1.0f);
+        if(modif)
+        {
+          tinygltf::utils::setClearcoat(material, clearcoat);
+          m_changes.set(eMaterialDirty);
+        }
+      }
+      PE::treePop();
+    }
+    if(!hasMaterialClearcoat)
+    {
+      ImGui::TableNextColumn();
+      if(ImGui::Button("Add##Add_2"))
+      {
+        tinygltf::utils::setClearcoat(material, {});
       }
     }
 
     // KHR_MATERIALS_SHEEN_EXTENSION_NAME
-    if(tinygltf::utils::hasElementName(material.extensions, KHR_MATERIALS_SHEEN_EXTENSION_NAME))
+    bool hasMaterialSheen = tinygltf::utils::hasElementName(material.extensions, KHR_MATERIALS_SHEEN_EXTENSION_NAME);
+    if(PE::treeNode("Sheen"))
     {
-      KHR_materials_sheen sheen = tinygltf::utils::getSheen(material);
-      bool                modif = false;
-      modif |= PE::ColorEdit3("Sheen Color", glm::value_ptr(sheen.sheenColorFactor));
-      modif |= PE::DragFloat("Sheen Roughness", &sheen.sheenRoughnessFactor, 0.01f, 0.0f, 1.0f);
-      if(modif)
+      if(hasMaterialSheen)
       {
-        tinygltf::utils::setSheen(material, sheen);
-        m_changes.set(eMaterialDirty);
+        KHR_materials_sheen sheen = tinygltf::utils::getSheen(material);
+        bool                modif = false;
+        modif |= PE::ColorEdit3("Sheen Color", glm::value_ptr(sheen.sheenColorFactor));
+        modif |= PE::DragFloat("Sheen Roughness", &sheen.sheenRoughnessFactor, 0.01f, 0.0f, 1.0f);
+        if(modif)
+        {
+          tinygltf::utils::setSheen(material, sheen);
+          m_changes.set(eMaterialDirty);
+        }
+      }
+      PE::treePop();
+    }
+    if(!hasMaterialSheen)
+    {
+      ImGui::TableNextColumn();
+      if(ImGui::Button("Add##Add_3"))
+      {
+        tinygltf::utils::setSheen(material, {});
       }
     }
 
     // KHR_MATERIALS_TRANSMISSION_EXTENSION_NAME
-    if(tinygltf::utils::hasElementName(material.extensions, KHR_MATERIALS_TRANSMISSION_EXTENSION_NAME))
+    bool hasMaterialTransmission = tinygltf::utils::hasElementName(material.extensions, KHR_MATERIALS_TRANSMISSION_EXTENSION_NAME);
+    if(PE::treeNode("Transmission"))
     {
-      KHR_materials_transmission transmission = tinygltf::utils::getTransmission(material);
-      bool                       modif        = false;
-      modif |= PE::DragFloat("Transmission Factor", &transmission.factor, 0.01f, 0.0f, 1.0f);
-      if(modif)
+      if(hasMaterialTransmission)
       {
-        tinygltf::utils::setTransmission(material, transmission);
-        m_changes.set(eMaterialDirty);
+        KHR_materials_transmission transmission       = tinygltf::utils::getTransmission(material);
+        bool                       modif              = false;
+        float                      transmissionFactor = transmission.factor;
+        modif |= PE::DragFloat("Transmission Factor", &transmission.factor, 0.01f, 0.0f, 1.0f);
+        if(modif)
+        {
+          tinygltf::utils::setTransmission(material, transmission);
+          m_changes.set(eMaterialDirty);
+          if(transmissionFactor == 0.0f && transmission.factor != 0.0f)
+            m_changes.set(eMaterialFlagDirty);
+        }
+      }
+      PE::treePop();
+    }
+    if(!hasMaterialTransmission)
+    {
+      ImGui::TableNextColumn();
+      if(ImGui::Button("Add##Add_4"))
+      {
+        tinygltf::utils::setTransmission(material, {});
       }
     }
-    // KHR_MATERIALS_IOR_EXTENSION_NAME
-    if(tinygltf::utils::hasElementName(material.extensions, KHR_MATERIALS_IOR_EXTENSION_NAME))
-    {
-      KHR_materials_ior ior   = tinygltf::utils::getIor(material);
-      bool              modif = false;
-      modif |= PE::DragFloat("IOR", &ior.ior, 0.01f, 0.0f, 10.0f);
-      if(modif)
-      {
-        tinygltf::utils::setIor(material, ior);
-        m_changes.set(eMaterialDirty);
-      }
-    }
-    // KHR_MATERIALS_SPECULAR_EXTENSION_NAME
-    if(tinygltf::utils::hasElementName(material.extensions, KHR_MATERIALS_SPECULAR_EXTENSION_NAME))
-    {
-      KHR_materials_specular specular = tinygltf::utils::getSpecular(material);
-      bool                   modif    = false;
-      modif |= PE::ColorEdit3("Specular Color", glm::value_ptr(specular.specularColorFactor));
-      modif |= PE::DragFloat("Specular Factor", &specular.specularFactor, 0.01f, 0.0f, 1.0f);
-      if(modif)
-      {
-        tinygltf::utils::setSpecular(material, specular);
-        m_changes.set(eMaterialDirty);
-      }
-    }
-    // KHR_MATERIALS_VOLUME_EXTENSION_NAME
-    if(tinygltf::utils::hasElementName(material.extensions, KHR_MATERIALS_VOLUME_EXTENSION_NAME))
-    {
-      KHR_materials_volume volume = tinygltf::utils::getVolume(material);
-      bool                 modif  = false;
-      modif |= PE::DragFloat("Thickness", &volume.thicknessFactor, 0.01f, 0.0f, 1.0f);
-      modif |= PE::ColorEdit3("Attenuation Color", glm::value_ptr(volume.attenuationColor));
 
-      if(modif)
+    // KHR_MATERIALS_IOR_EXTENSION_NAME
+    bool hasMaterialIor = tinygltf::utils::hasElementName(material.extensions, KHR_MATERIALS_IOR_EXTENSION_NAME);
+    if(PE::treeNode("IOR"))
+    {
+      if(hasMaterialIor)
       {
-        tinygltf::utils::setVolume(material, volume);
-        m_changes.set(eMaterialDirty);
+        KHR_materials_ior ior   = tinygltf::utils::getIor(material);
+        bool              modif = false;
+        modif |= PE::DragFloat("IOR", &ior.ior, 0.01f, 0.0f, 10.0f);
+        if(modif)
+        {
+          tinygltf::utils::setIor(material, ior);
+          m_changes.set(eMaterialDirty);
+        }
+      }
+      PE::treePop();
+    }
+    if(!hasMaterialIor)
+    {
+      ImGui::TableNextColumn();
+      if(ImGui::Button("Add##Add_5"))
+      {
+        tinygltf::utils::setIor(material, {});
       }
     }
+
+    // KHR_MATERIALS_SPECULAR_EXTENSION_NAME
+    bool hasMaterialSpecular = tinygltf::utils::hasElementName(material.extensions, KHR_MATERIALS_SPECULAR_EXTENSION_NAME);
+    if(PE::treeNode("Specular"))
+    {
+      if(hasMaterialSpecular)
+      {
+        KHR_materials_specular specular = tinygltf::utils::getSpecular(material);
+        bool                   modif    = false;
+        modif |= PE::ColorEdit3("Specular Color", glm::value_ptr(specular.specularColorFactor));
+        modif |= PE::DragFloat("Specular Factor", &specular.specularFactor, 0.01f, 0.0f, 1.0f);
+        if(modif)
+        {
+          tinygltf::utils::setSpecular(material, specular);
+          m_changes.set(eMaterialDirty);
+        }
+      }
+      PE::treePop();
+    }
+    if(!hasMaterialSpecular)
+    {
+      ImGui::TableNextColumn();
+      if(ImGui::Button("Add##Add_6"))
+      {
+        tinygltf::utils::setSpecular(material, {});
+      }
+    }
+
+    // KHR_MATERIALS_VOLUME_EXTENSION_NAME
+    bool hasMaterialVolume = tinygltf::utils::hasElementName(material.extensions, KHR_MATERIALS_VOLUME_EXTENSION_NAME);
+    if(PE::treeNode("Volume"))
+    {
+      if(hasMaterialVolume)
+      {
+        KHR_materials_volume volume          = tinygltf::utils::getVolume(material);
+        bool                 modif           = false;
+        float                thicknessFactor = volume.thicknessFactor;
+        modif |= PE::DragFloat("Thickness", &volume.thicknessFactor, 0.01f, 0.0f, 1.0f);
+        modif |= PE::ColorEdit3("Attenuation Color", glm::value_ptr(volume.attenuationColor));
+        modif |= PE::DragFloat("Attenuation", &volume.attenuationDistance);
+        volume.attenuationDistance = std::max(0.0F, volume.attenuationDistance);
+        if(modif)
+        {
+          tinygltf::utils::setVolume(material, volume);
+          m_changes.set(eMaterialDirty);
+          if(thicknessFactor == 0.0f && volume.thicknessFactor != 0.0f)
+            m_changes.set(eMaterialFlagDirty);
+        }
+      }
+      PE::treePop();
+    }
+    if(!hasMaterialVolume)
+    {
+      ImGui::TableNextColumn();
+      if(ImGui::Button("Add##Add_7"))
+      {
+        tinygltf::utils::setVolume(material, {});
+      }
+    }
+
     // KHR_MATERIALS_ANISOTROPY_EXTENSION_NAME
-    if(tinygltf::utils::hasElementName(material.extensions, KHR_MATERIALS_ANISOTROPY_EXTENSION_NAME))
+    bool hasMaterialAnisotropy = tinygltf::utils::hasElementName(material.extensions, KHR_MATERIALS_ANISOTROPY_EXTENSION_NAME);
+    if(PE::treeNode("Anisotropy"))
     {
-      KHR_materials_anisotropy anisotropy = tinygltf::utils::getAnisotropy(material);
-      bool                     modif      = false;
-      modif |= PE::DragFloat("Anisotropy Strength", &anisotropy.anisotropyStrength, 0.01f, 0.0f, 1.0f);
-      modif |= PE::DragFloat("Anisotropy Rotation", &anisotropy.anisotropyRotation, 0.01f, -glm::pi<float>(), glm::pi<float>());
-      if(modif)
+      if(hasMaterialAnisotropy)
       {
-        tinygltf::utils::setAnisotropy(material, anisotropy);
-        m_changes.set(eMaterialDirty);
+        KHR_materials_anisotropy anisotropy = tinygltf::utils::getAnisotropy(material);
+        bool                     modif      = false;
+        modif |= PE::DragFloat("Anisotropy Strength", &anisotropy.anisotropyStrength, 0.01f, 0.0f, 1.0f);
+        modif |= PE::DragFloat("Anisotropy Rotation", &anisotropy.anisotropyRotation, 0.01f, -glm::pi<float>(), glm::pi<float>());
+        if(modif)
+        {
+          tinygltf::utils::setAnisotropy(material, anisotropy);
+          m_changes.set(eMaterialDirty);
+        }
+      }
+      PE::treePop();
+    }
+    if(!hasMaterialAnisotropy)
+    {
+      ImGui::TableNextColumn();
+      if(ImGui::Button("Add##Add_8"))
+      {
+        tinygltf::utils::setAnisotropy(material, {});
       }
     }
+
     // KHR_MATERIALS_IRIDESCENCE_EXTENSION_NAME
-    if(tinygltf::utils::hasElementName(material.extensions, KHR_MATERIALS_IRIDESCENCE_EXTENSION_NAME))
+    bool hasMaterialIridescence = tinygltf::utils::hasElementName(material.extensions, KHR_MATERIALS_IRIDESCENCE_EXTENSION_NAME);
+    if(PE::treeNode("Iridescence"))
     {
-      KHR_materials_iridescence iridescence = tinygltf::utils::getIridescence(material);
-      bool                      modif       = false;
-      modif |= PE::DragFloat("Iridescence Factor", &iridescence.iridescenceFactor, 0.01f, 0.0f, 10.0f);
-      modif |= PE::DragFloat("Iridescence Ior", &iridescence.iridescenceIor, 0.01f, 0.0f, 10.0f);
-      modif |= PE::DragFloat("Thickness Min", &iridescence.iridescenceThicknessMinimum, 0.01f, 0.0f, 1000.0f, "%.3f nm");
-      modif |= PE::DragFloat("Thickness Max", &iridescence.iridescenceThicknessMaximum, 0.01f, 0.0f, 1000.0f, "%.3f nm");
-      if(modif)
+      if(hasMaterialIridescence)
       {
-        tinygltf::utils::setIridescence(material, iridescence);
-        m_changes.set(eMaterialDirty);
+        KHR_materials_iridescence iridescence = tinygltf::utils::getIridescence(material);
+        bool                      modif       = false;
+        modif |= PE::DragFloat("Iridescence Factor", &iridescence.iridescenceFactor, 0.01f, 0.0f, 10.0f);
+        modif |= PE::DragFloat("Iridescence Ior", &iridescence.iridescenceIor, 0.01f, 0.0f, 10.0f);
+        modif |= PE::DragFloat("Thickness Min", &iridescence.iridescenceThicknessMinimum, 0.01f, 0.0f, 1000.0f, "%.3f nm");
+        modif |= PE::DragFloat("Thickness Max", &iridescence.iridescenceThicknessMaximum, 0.01f, 0.0f, 1000.0f, "%.3f nm");
+        if(modif)
+        {
+          tinygltf::utils::setIridescence(material, iridescence);
+          m_changes.set(eMaterialDirty);
+        }
+      }
+      PE::treePop();
+    }
+    if(!hasMaterialIridescence)
+    {
+      ImGui::TableNextColumn();
+      if(ImGui::Button("Add##Add_9"))
+      {
+        tinygltf::utils::setIridescence(material, {});
       }
     }
+
     // KHR_MATERIALS_DISPERSION_EXTENSION_NAME
-    if(tinygltf::utils::hasElementName(material.extensions, KHR_MATERIALS_DISPERSION_EXTENSION_NAME))
+    bool hasMaterialDispersion = tinygltf::utils::hasElementName(material.extensions, KHR_MATERIALS_DISPERSION_EXTENSION_NAME);
+    if(PE::treeNode("Dispersion"))
     {
-      KHR_materials_dispersion dispersion = tinygltf::utils::getDispersion(material);
-      bool                     modif      = false;
-      modif |= PE::DragFloat("Dispersion Factor", &dispersion.dispersion, 0.01f, 0.0f, 10.0f);
-      if(modif)
+      if(hasMaterialDispersion)
       {
-        tinygltf::utils::setDispersion(material, dispersion);
-        m_changes.set(eMaterialDirty);
+        KHR_materials_dispersion dispersion = tinygltf::utils::getDispersion(material);
+        bool                     modif      = false;
+        modif |= PE::DragFloat("Dispersion Factor", &dispersion.dispersion, 0.01f, 0.0f, 10.0f);
+        if(modif)
+        {
+          tinygltf::utils::setDispersion(material, dispersion);
+          m_changes.set(eMaterialDirty);
+        }
+      }
+      PE::treePop();
+    }
+    if(!hasMaterialDispersion)
+    {
+      ImGui::TableNextColumn();
+      if(ImGui::Button("Add##Add_10"))
+      {
+        tinygltf::utils::setDispersion(material, {});
       }
     }
   }

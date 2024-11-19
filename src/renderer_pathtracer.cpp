@@ -48,6 +48,7 @@ namespace PE = ImGuiH::PropertyEditor;
 #include "_autogen/pathtrace.rmiss.glsl.h"
 #include "_autogen/pathtrace.rahit.glsl.h"
 #include "nvvk/shaders_vk.hpp"
+#include "collapsing_header_manager.h"
 
 namespace gltfr {
 extern bool g_forceExternalShaders;
@@ -425,9 +426,10 @@ void RendererPathtracer::render(VkCommandBuffer cmd, Resources& /*res*/, Scene& 
 //
 bool RendererPathtracer::onUI()
 {
-  bool changed{false};
+  auto& headerManager = CollapsingHeaderManager::getInstance();
+  bool  changed{false};
 
-  if(ImGui::CollapsingHeader("RendererPathtracer"))
+  if(headerManager.beginHeader("RendererPathtracer"))
   {
     PE::begin();
     changed |= PE::SliderInt("Max Depth", &g_pathtraceSettings.maxDepth, 1, 100);

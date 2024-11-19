@@ -22,14 +22,16 @@
 
 #include "settings.hpp"
 #include <glm/gtc/type_ptr.hpp>
+#include "collapsing_header_manager.h"
 
 //-----------------------------------------------------------------------------
 // Rendering the UI for the settings
 //
 void gltfr::Settings::onUI()
 {
+  auto& headerManager = CollapsingHeaderManager::getInstance();
   namespace PE = ImGuiH::PropertyEditor;
-  if(ImGui::CollapsingHeader("Settings"))
+  if(headerManager.beginHeader("Settings"))
   {
     PE::begin("gltfr::Settings::onUI");
     PE::SliderInt("Max Frames", &maxFrames, 1, 1000000);
