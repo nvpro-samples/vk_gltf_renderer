@@ -12,8 +12,8 @@ using Light = nvvkhl_shaders::Light;
 // clang-format off
 #define ENUM_START(name) enum name {
 #define ENUM_ENTRY(name, value) name = value,
-#define ENUM_END() };                                                                                                      
-//clang-format on
+#define ENUM_END() };
+// clang-format on
 #else
 bool useDebug = false;
 #define ENUM_START(name)
@@ -36,9 +36,9 @@ ENUM_ENTRY(eDbgMethod_texCoord1, 10)
 ENUM_END()
 
 // Define bit flags for useSky and useSolidBackground
-#define USE_SKY_FLAG				(1 << 0)
-#define USE_HDR_FLAG				(1 << 1)
-#define USE_SOLID_BACKGROUND_FLAG	(1 << 2)
+#define USE_SKY_FLAG (1 << 0)
+#define USE_HDR_FLAG (1 << 1)
+#define USE_SOLID_BACKGROUND_FLAG (1 << 2)
 
 // Macros to set and test the flags
 #define SET_FLAG(flags, flag) ((flags) |= (flag))
@@ -48,24 +48,24 @@ ENUM_END()
 
 struct PushConstantPathtracer
 {
-  int   frame;
-  int   maxDepth;
-  int   maxSamples;
-  float maxLuminance;
-  int   dbgMethod;
-  int   selectedRenderNode;
-  float focalDistance;
-  float aperture;
-  vec2  mouseCoord;  // Debugging (printf) mouse coordinates
+  int   maxDepth;            // Maximum ray depth
+  int   maxSamples;          // Number of samples per frame
+  float maxLuminance;        // Maximum luminance value used by the firefly clamping
+  int   dbgMethod;           // Various debug informations
+  int   selectedRenderNode;  // The node that is selected, used to create silhouette
+  float focalDistance;       // Focal distance for depth of field
+  float aperture;            // Aperture for depth of field
+  vec2  mouseCoord;          // Debugging (printf) mouse coordinates
+  int   useRTDenoiser;       // Use the RTX denoiser?
 };
 
 struct PushConstantRaster
 {
-  int materialID;
-  int renderNodeID;
-  int renderPrimID;
-  int dbgMethod;
-  int selectedRenderNode;
+  int materialID;          // Material used by the rendering instance
+  int renderNodeID;        // Node used by the rendering instance
+  int renderPrimID;        // Primitive used by the rendering instance
+  int dbgMethod;           // Debugging method
+  int selectedRenderNode;  // The node that is selected, used to create silhouette
 };
 
 struct PushConstantSilhouette
@@ -87,20 +87,20 @@ struct PushConstantDenoiser
 
 struct SceneFrameInfo
 {
-  mat4  projMatrix;
-  mat4  projMatrixI;
-  mat4  viewMatrix;
-  mat4  viewMatrixI;
-  Light light[MAX_NB_LIGHTS];
-  vec4  envIntensity;
-  vec3  camPos;  // camera position
-  int   flags;   // Use flag bits instead of separate useSky and useSolidBackground
-  int   nbLights;
-  float envRotation;
-  int   frameCount;
-  float envBlur;
-  int   useSolidBackground;
-  vec3  backgroundColor;
+  mat4  projMatrix;            // projection matrix
+  mat4  projMatrixI;           // inverse projection matrix
+  mat4  viewMatrix;            // view matrix (world to camera)
+  mat4  viewMatrixI;           // inverse view matrix (camera to world)
+  Light light[MAX_NB_LIGHTS];  // Light information
+  vec4  envIntensity;          // Environment intensity
+  vec3  camPos;                // Camera position
+  int   flags;                 // Use flag bits instead of separate useSky and useSolidBackground
+  int   nbLights;              // Number of lights
+  float envRotation;           // Environment rotation (used for the HDR)
+  int   frameCount;            // Current render frame [0, ... [
+  float envBlur;               // Level of blur for the environment map (0.0: no blur, 1.0: full blur)
+  int   useSolidBackground;    // Use solid background color (0==false, 1==true)
+  vec3  backgroundColor;       // Background color when using solid background
 };
 
 struct Ray

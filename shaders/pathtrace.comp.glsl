@@ -66,7 +66,7 @@ void main()
   // Debugging, single frame
   if(pc.dbgMethod != eDbgMethod_none)
   {
-    if(pc.frame == 0)
+    if(frameInfo.frameCount == 0)
     {
       vec3 result = debugRendering(samplePos, imageSize);
       imageStore(image, ivec2(samplePos.xy), vec4(result, 1.0F));
@@ -76,10 +76,13 @@ void main()
   }
 
   // Initialize the random number
-  uint seed = xxhash32(uvec3(samplePos.xy, pc.frame));
+  uint seed = xxhash32(uvec3(samplePos.xy, frameInfo.frameCount));
 
-  // Subpixel jitter: send the ray through a different position inside the pixel each time, to provide antialiasing.
-  vec2 subpixelJitter = pc.frame == 0 ? vec2(0.5f, 0.5f) : vec2(rand(seed), rand(seed));
+  // Subpixel jitter: send the ray through a different position inside the
+  // pixel each time, to provide antialiasing.
+  vec2 subpixelJitter = vec2(0.5f, 0.5f);
+  if(frameInfo.frameCount > 0)
+    subpixelJitter += ANTIALIASING_STANDARD_DEVIATION * sampleGaussian(vec2(rand(seed), rand(seed)));
 
   float focalDistance = pc.focalDistance;
   float aperture      = pc.aperture;
@@ -98,25 +101,32 @@ void main()
   }
   pixel_color /= pc.maxSamples;
 
-  if(pc.frame == 0)  // first frame
+  if(frameInfo.frameCount == 0)  // first frame
   {
     imageStore(image, ivec2(samplePos.xy), pixel_color);
-    imageStore(normalDepth, ivec2(samplePos.xy), vec4(sampleResult.normal, sampleResult.depth));
+
+    // Store the normal and depth for the denoiser
+    if(pc.useRTDenoiser == 1)
+      imageStore(normalDepth, ivec2(samplePos.xy), vec4(sampleResult.normal, sampleResult.depth));
   }
   else
   {
     // Do accumulation over time
-    float a         = 1.0F / float(pc.frame + 1);
+    float a         = 1.0F / float(frameInfo.frameCount + 1);
     vec4  old_color = imageLoad(image, ivec2(samplePos.xy));
     imageStore(image, ivec2(samplePos.xy), mix(old_color, pixel_color, a));
 
-    // Normal Depth buffer update
-    vec4  oldNormalDepth = imageLoad(normalDepth, ivec2(samplePos.xy));
-    float new_depth      = min(oldNormalDepth.w, sampleResult.depth);
-    vec3  new_normal     = normalize(mix(oldNormalDepth.xyz, sampleResult.normal, a));
+    // Store the normal and depth for the denoiser
+    if(pc.useRTDenoiser == 1)
+    {
+      // Normal Depth buffer update
+      vec4  oldNormalDepth = imageLoad(normalDepth, ivec2(samplePos.xy));
+      float new_depth      = min(oldNormalDepth.w, sampleResult.depth);
+      vec3  new_normal     = normalize(mix(oldNormalDepth.xyz, sampleResult.normal, a));
 
-    // Write to the normalDepth buffer
-    imageStore(normalDepth, ivec2(samplePos.xy), vec4(new_normal, new_depth));
+      // Write to the normalDepth buffer
+      imageStore(normalDepth, ivec2(samplePos.xy), vec4(new_normal, new_depth));
+    }
   }
 
   // Adding to the selection buffer the selected object id

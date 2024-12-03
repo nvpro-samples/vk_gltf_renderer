@@ -667,6 +667,7 @@ void GltfModelUI::renderMaterial(int materialIndex)
             m_changes.set(eMaterialFlagDirty);
         }
       }
+
       PE::treePop();
     }
     if(!hasMaterialVolume)

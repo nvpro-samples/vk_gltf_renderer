@@ -1,6 +1,14 @@
 
 // Forward declarations
 float getOpacity(RenderNode renderNode, RenderPrimitive renderPrim, int triangleID, vec3 barycentrics);
+vec3  getShadowTransmission(RenderNode      renderNode,
+                            RenderPrimitive renderPrim,
+                            int             triangleID,
+                            vec3            barycentrics,
+                            float           hitT,
+                            mat4x3          worldToObject,
+                            vec3            rayDirection,
+                            inout bool      isInside);
 Ray   getRay(vec2 samplePos, vec2 offset, vec2 imageSize, mat4 projMatrixI, mat4 viewMatrixI);
 
 
@@ -72,34 +80,57 @@ void traceRay(Ray ray, inout uint seed)
 //-----------------------------------------------------------------------
 // Shadow ray - return true if a ray hits anything
 //
-bool traceShadow(Ray ray, float maxDist, inout uint seed)
+vec3 traceShadow(Ray ray, float maxDist, inout uint seed)
 {
-  rayQueryEXT rayQuery;
+  const float MIN_TRANSMISSION  = 0.01;  // Minimum transmission factor to continue tracing
+  vec3        totalTransmission = vec3(1.0);
+  bool        isInside          = false;
+  float       approxHitT        = 0;
 
-  uint rayFlags = gl_RayFlagsNoneEXT | gl_RayFlagsCullBackFacingTrianglesEXT;
+  rayQueryEXT rayQuery;
+  uint        rayFlags = gl_RayFlagsNoneEXT;  // Start with no flags
+
   rayQueryInitializeEXT(rayQuery, topLevelAS, rayFlags, 0xFF, ray.origin, 0.0, ray.direction, maxDist);
 
+  // Collect all potential hits first
   while(rayQueryProceedEXT(rayQuery))
-  {  // Force opaque, therefore, no intersection confirmation needed
-    int  instanceID   = rayQueryGetIntersectionInstanceIdEXT(rayQuery, false);
-    int  renderPrimID = rayQueryGetIntersectionInstanceCustomIndexEXT(rayQuery, false);
-    int  triangleID   = rayQueryGetIntersectionPrimitiveIndexEXT(rayQuery, false);
-    vec2 bary         = rayQueryGetIntersectionBarycentricsEXT(rayQuery, false);
+  {
+    float  hitT          = rayQueryGetIntersectionTEXT(rayQuery, false);
+    int    instanceID    = rayQueryGetIntersectionInstanceIdEXT(rayQuery, false);
+    int    renderPrimID  = rayQueryGetIntersectionInstanceCustomIndexEXT(rayQuery, false);
+    int    triangleID    = rayQueryGetIntersectionPrimitiveIndexEXT(rayQuery, false);
+    vec2   bary          = rayQueryGetIntersectionBarycentricsEXT(rayQuery, false);
+    mat4x3 worldToObject = rayQueryGetIntersectionWorldToObjectEXT(rayQuery, false);
 
-    // Barycentric coordinate on the triangle
-    const vec3 barycentrics = vec3(1.0 - bary.x - bary.y, bary.x, bary.y);
+    RenderNode      renderNode   = RenderNodeBuf(sceneDesc.renderNodeAddress)._[instanceID];
+    RenderPrimitive renderPrim   = RenderPrimitiveBuf(sceneDesc.renderPrimitiveAddress)._[renderPrimID];
+    vec3            barycentrics = vec3(1.0 - bary.x - bary.y, bary.x, bary.y);
+    float           opacity      = getOpacity(renderNode, renderPrim, triangleID, barycentrics);
 
-    RenderNode      renderNode = RenderNodeBuf(sceneDesc.renderNodeAddress)._[instanceID];
-    RenderPrimitive renderPrim = RenderPrimitiveBuf(sceneDesc.renderPrimitiveAddress)._[renderPrimID];
-
-    float opacity = getOpacity(renderNode, renderPrim, triangleID, barycentrics);
-    if(rand(seed) <= opacity)
+    float r = rand(seed);
+    if(r < opacity)
     {
-      rayQueryConfirmIntersectionEXT(rayQuery);
+      approxHitT               = abs(hitT - approxHitT);
+      vec3 currentTransmission = getShadowTransmission(renderNode, renderPrim, triangleID, barycentrics, approxHitT,
+                                                       worldToObject, ray.direction, isInside);
+
+      totalTransmission *= currentTransmission;
+
+      if(max(max(totalTransmission.r, totalTransmission.g), totalTransmission.b) <= MIN_TRANSMISSION)
+      {
+        return vec3(0.0);
+      }
     }
   }
 
-  return (rayQueryGetIntersectionTypeEXT(rayQuery, true) != gl_RayQueryCommittedIntersectionNoneEXT);  // Is Hit ?
+  // It is possible that we didn't get any candidate, because the object had the OPAQUE flag, which than
+  // means it would not have entered any hit information.
+  if(rayQueryGetIntersectionTypeEXT(rayQuery, true) != gl_RayQueryCommittedIntersectionNoneEXT)
+  {
+    return vec3(0.0);
+  }
+
+  return totalTransmission;
 }
 
 

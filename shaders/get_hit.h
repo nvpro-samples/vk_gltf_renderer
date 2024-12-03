@@ -64,23 +64,26 @@ HitState getHitState(in RenderPrimitive renderPrim,      // Buffer containing al
 
   if(hasTangent)
   {
+    // Retrieve the tangent for each vertex of the triangle if available.
     tng[0] = getVertexTangent(renderPrim, triangleIndex.x);
     tng[1] = getVertexTangent(renderPrim, triangleIndex.y);
     tng[2] = getVertexTangent(renderPrim, triangleIndex.z);
   }
   else
   {
+    // If tangents are not available, create a default tangent from the normal.
     vec4 t = makeFastTangent(N);
     tng[0] = t;
     tng[1] = t;
     tng[2] = t;
   }
 
+  // Compute the interpolated tangent and bitangent at the hit point.
   {
-    hit.tangent   = normalize(mixBary(tng[0].xyz, tng[1].xyz, tng[2].xyz, barycentrics));
-    hit.tangent   = vec3(objectToWorld * vec4(hit.tangent, 0.0));
-    hit.tangent   = normalize(hit.tangent - hit.nrm * dot(hit.nrm, hit.tangent));
-    hit.bitangent = cross(hit.nrm, hit.tangent) * tng[0].w;
+    hit.tangent = normalize(mixBary(tng[0].xyz, tng[1].xyz, tng[2].xyz, barycentrics));  // Interpolate the tangents using barycentric coordinates.
+    hit.tangent = vec3(objectToWorld * vec4(hit.tangent, 0.0));  // Transform the tangent from object space to world space.
+    hit.tangent = normalize(hit.tangent - hit.nrm * dot(hit.nrm, hit.tangent));  // Re-orthogonalize the tangent with respect to the normal.
+    hit.bitangent = cross(hit.nrm, hit.tangent) * tng[0].w;  // Compute the bitangent, The sign (tng[0].w) is used to handle handedness.
   }
 
   // Adjusting normal

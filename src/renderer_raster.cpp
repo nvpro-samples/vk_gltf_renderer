@@ -467,7 +467,7 @@ void RendererRaster::createRasterPipeline(Resources& res, Scene& scene)
   std::unique_ptr<nvvk::DebugUtil> dutil = std::make_unique<nvvk::DebugUtil>(m_device);
   m_rasterPipepline                      = std::make_unique<nvvkhl::PipelineContainer>();
 
-  VkDescriptorSetLayout sceneSet   = scene.m_sceneSet->getLayout();
+  VkDescriptorSetLayout sceneSet   = scene.m_sceneDescriptorSetLayout;
   VkDescriptorSetLayout hdrDomeSet = scene.m_hdrDome->getDescLayout();
   VkDescriptorSetLayout skySet     = scene.m_sky->getDescriptorSetLayout();
 
@@ -672,7 +672,7 @@ void RendererRaster::renderRasterScene(VkCommandBuffer cmd, Scene& scene)
   vkCmdSetScissor(cmd, 0, 1, &scissor);
 
 
-  std::vector dset = {scene.m_sceneSet->getSet(), scene.m_hdrDome->getDescSet(), scene.m_sky->getDescriptorSet()};
+  std::vector dset = {scene.m_sceneDescriptorSet, scene.m_hdrDome->getDescSet(), scene.m_sky->getDescriptorSet()};
   vkCmdBindDescriptorSets(cmd, VK_PIPELINE_BIND_POINT_GRAPHICS, m_rasterPipepline->layout, 0,
                           static_cast<uint32_t>(dset.size()), dset.data(), 0, nullptr);
   // Draw solid

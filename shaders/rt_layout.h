@@ -14,14 +14,22 @@ layout(push_constant, scalar)                   uniform                         
 layout(buffer_reference, scalar)                readonly buffer                     GltfMaterialBuf  { GltfShadeMaterial m[]; };
 layout(buffer_reference, scalar)                readonly buffer                     RenderLightBuf  { Light _[]; };
 
+// Path tracer
 layout(set = 0, binding = eTlas)					uniform accelerationStructureEXT    topLevelAS;
 layout(set = 0, binding = eOutImage, rgba32f)		uniform image2D                     image;
 layout(set = 0, binding = eNormalDepth, rgba32f)	uniform image2D						normalDepth;
 layout(set = 0, binding = eSelect)					uniform image2D                     selectImage;
+
+// Scene (shared with raster)
 layout(set = 1, binding = eFrameInfo, scalar)		uniform                             FrameInfo_      { SceneFrameInfo frameInfo; };
 layout(set = 1, binding = eSceneDesc, scalar)		readonly buffer                     SceneDesc_      { SceneDescription sceneDesc; };
 layout(set = 1, binding = eTextures)				uniform sampler2D                   texturesMap[]; // all textures
+
+// Sun & Sky information
 layout(set = 2, binding = eSkyParam, scalar)		uniform                             SkyInfo_        { PhysicalSkyParameters  skyInfo; };
+
+// HDR information
 layout(set = 3, binding = eImpSamples, scalar)		readonly buffer                     EnvAccel_       { EnvAccel envSamplingData[]; };
 layout(set = 3, binding = eHdr)						uniform sampler2D                   hdrTexture;
+
 // clang-format on

@@ -34,6 +34,9 @@
 extern std::shared_ptr<nvvkhl::ElementCamera> g_elemCamera;  // Is accessed elsewhere in the App
 namespace PE = ImGuiH::PropertyEditor;
 
+constexpr uint32_t MAXTEXTURES = 1000;  // Maximum textures allowed in the application
+
+
 //--------------------------------------------------------------------------------------------------
 // Initialization of the scene object
 // - Create the buffers for the scene frame information
@@ -54,6 +57,10 @@ void gltfr::Scene::init(Resources& res)
                                       VK_MEMORY_PROPERTY_HOST_VISIBLE_BIT | VK_MEMORY_PROPERTY_HOST_COHERENT_BIT);
     nvvk::DebugUtil(res.ctx.device).DBG_NAME(m_sceneFrameInfoBuffer.buffer);
   }
+
+  VkDevice device = res.ctx.device;
+  createDescriptorPool(device);
+  createDescriptorSet(device);
 }
 
 //--------------------------------------------------------------------------------------------------
@@ -65,7 +72,9 @@ void gltfr::Scene::init(Resources& res)
 void gltfr::Scene::deinit(Resources& res)
 {
   res.m_allocator->destroy(m_sceneFrameInfoBuffer);
-  m_sceneSet.reset();
+
+  destroyDescriptorSet(res.ctx.device);
+
   m_gltfSceneVk.reset();
   m_gltfSceneRtx.reset();
   m_gltfScene.reset();
@@ -222,7 +231,6 @@ void gltfr::Scene::postSceneCreateProcess(Resources& resources, const std::strin
 
   setDirtyFlag(Scene::eNewScene, true);
 
-  createDescriptorSet(resources);
   writeDescriptorSet(resources);
 
   // Scene camera fitting
@@ -252,24 +260,78 @@ bool gltfr::Scene::save(const std::string& filename) const
   return false;
 }
 
+void gltfr::Scene::createDescriptorPool(VkDevice device)
+{
+  const std::vector<VkDescriptorPoolSize> poolSizes{
+      {VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER, MAXTEXTURES},
+      {VK_DESCRIPTOR_TYPE_UNIFORM_BUFFER, 1},
+      {VK_DESCRIPTOR_TYPE_STORAGE_BUFFER, 1},
+  };
+
+  const VkDescriptorPoolCreateInfo poolInfo = {
+      .sType = VK_STRUCTURE_TYPE_DESCRIPTOR_POOL_CREATE_INFO,
+      .flags = VK_DESCRIPTOR_POOL_CREATE_UPDATE_AFTER_BIND_BIT |  //  allows descriptor sets to be updated after they have been bound to a command buffer
+               VK_DESCRIPTOR_POOL_CREATE_FREE_DESCRIPTOR_SET_BIT,  // individual descriptor sets can be freed from the descriptor pool
+      .maxSets       = MAXTEXTURES,  // Allowing to create many sets (ImGui uses this for textures)
+      .poolSizeCount = uint32_t(poolSizes.size()),
+      .pPoolSizes    = poolSizes.data(),
+  };
+  NVVK_CHECK(vkCreateDescriptorPool(device, &poolInfo, nullptr, &m_descriptorPool));
+  // nvvk::DebugUtil(device).DBG_NAME(m_descriptorPool));
+}
+
 //--------------------------------------------------------------------------------------------------
 // Create the descriptor set for the scene
 //
-void gltfr::Scene::createDescriptorSet(Resources& resources)
+void gltfr::Scene::createDescriptorSet(VkDevice device)
 {
-  VkDevice device = resources.ctx.device;
-  m_sceneSet      = std::make_unique<nvvk::DescriptorSetContainer>(device);
+  std::vector<VkDescriptorSetLayoutBinding> layoutBindings;
+  layoutBindings.push_back({.binding         = SceneBindings::eFrameInfo,
+                            .descriptorType  = VK_DESCRIPTOR_TYPE_UNIFORM_BUFFER,
+                            .descriptorCount = 1,
+                            .stageFlags      = VK_SHADER_STAGE_ALL});
+  layoutBindings.push_back({.binding         = SceneBindings::eSceneDesc,
+                            .descriptorType  = VK_DESCRIPTOR_TYPE_STORAGE_BUFFER,
+                            .descriptorCount = 1,
+                            .stageFlags      = VK_SHADER_STAGE_ALL});
+  layoutBindings.push_back({.binding         = SceneBindings::eTextures,
+                            .descriptorType  = VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER,
+                            .descriptorCount = MAXTEXTURES,  // Not all will be filled - but pipeline will be cached
+                            .stageFlags      = VK_SHADER_STAGE_ALL});
 
-  // This descriptor set, holds scene information and the textures
-  m_sceneSet->addBinding(SceneBindings::eFrameInfo, VK_DESCRIPTOR_TYPE_UNIFORM_BUFFER, 1, VK_SHADER_STAGE_ALL);
-  m_sceneSet->addBinding(SceneBindings::eSceneDesc, VK_DESCRIPTOR_TYPE_STORAGE_BUFFER, 1, VK_SHADER_STAGE_ALL);
-  m_sceneSet->addBinding(SceneBindings::eTextures, VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER,
-                         m_gltfSceneVk->nbTextures(), VK_SHADER_STAGE_ALL);
-  m_sceneSet->initLayout();
-  m_sceneSet->initPool(1);
+  const VkDescriptorBindingFlags flags[] = {
+      VK_DESCRIPTOR_BINDING_UPDATE_AFTER_BIND_BIT,  // Flags for binding 0 (uniform buffer)
+      VK_DESCRIPTOR_BINDING_UPDATE_AFTER_BIND_BIT,  // Flags for binding 1 (storage buffer)
+      // Flags for binding 2 (texture array):
+      VK_DESCRIPTOR_BINDING_UPDATE_AFTER_BIND_BIT |                // Can update while in use
+          VK_DESCRIPTOR_BINDING_UPDATE_UNUSED_WHILE_PENDING_BIT |  // Can update unused entries
+          VK_DESCRIPTOR_BINDING_PARTIALLY_BOUND_BIT,  // Not all array elements need to be valid (0,2,3 vs 0,1,2,3)
+  };
+  const VkDescriptorSetLayoutBindingFlagsCreateInfo bindingFlags{
+      .sType         = VK_STRUCTURE_TYPE_DESCRIPTOR_SET_LAYOUT_BINDING_FLAGS_CREATE_INFO,
+      .bindingCount  = uint32_t(layoutBindings.size()),  // matches our number of bindings
+      .pBindingFlags = flags,                            // the flags for each binding
+  };
 
-  nvvk::DebugUtil(device).DBG_NAME(m_sceneSet->getLayout());
-  nvvk::DebugUtil(device).DBG_NAME(m_sceneSet->getSet());
+  const VkDescriptorSetLayoutCreateInfo descriptorSetLayoutInfo{
+      .sType = VK_STRUCTURE_TYPE_DESCRIPTOR_SET_LAYOUT_CREATE_INFO,
+      .pNext = &bindingFlags,
+      .flags = VK_DESCRIPTOR_SET_LAYOUT_CREATE_UPDATE_AFTER_BIND_POOL_BIT,  // Allows to update the descriptor set after it has been bound
+      .bindingCount = uint32_t(layoutBindings.size()),
+      .pBindings    = layoutBindings.data(),
+  };
+  NVVK_CHECK(vkCreateDescriptorSetLayout(device, &descriptorSetLayoutInfo, nullptr, &m_sceneDescriptorSetLayout));
+  nvvk::DebugUtil(device).DBG_NAME(m_sceneDescriptorSetLayout);
+
+  // Allocate the descriptor set, needed only for larger descriptor sets
+  const VkDescriptorSetAllocateInfo allocInfo = {
+      .sType              = VK_STRUCTURE_TYPE_DESCRIPTOR_SET_ALLOCATE_INFO,
+      .descriptorPool     = m_descriptorPool,
+      .descriptorSetCount = 1,
+      .pSetLayouts        = &m_sceneDescriptorSetLayout,
+  };
+  NVVK_CHECK(vkAllocateDescriptorSets(device, &allocInfo, &m_sceneDescriptorSet));
+  nvvk::DebugUtil(device).DBG_NAME(m_sceneDescriptorSet);
 }
 
 //--------------------------------------------------------------------------------------------------
@@ -283,20 +345,51 @@ void gltfr::Scene::writeDescriptorSet(Resources& resources) const
   }
 
   // Write to descriptors
-  const VkDescriptorBufferInfo dbi_unif{m_sceneFrameInfoBuffer.buffer, 0, VK_WHOLE_SIZE};
-  const VkDescriptorBufferInfo scene_desc{m_gltfSceneVk->sceneDesc().buffer, 0, VK_WHOLE_SIZE};
+  const VkDescriptorBufferInfo frameBufferInfo{m_sceneFrameInfoBuffer.buffer, 0, VK_WHOLE_SIZE};
+  const VkDescriptorBufferInfo sceneBufferInfo{m_gltfSceneVk->sceneDesc().buffer, 0, VK_WHOLE_SIZE};
 
-  std::vector<VkWriteDescriptorSet> writes;
-  writes.emplace_back(m_sceneSet->makeWrite(0, SceneBindings::eFrameInfo, &dbi_unif));
-  writes.emplace_back(m_sceneSet->makeWrite(0, SceneBindings::eSceneDesc, &scene_desc));
-  std::vector<VkDescriptorImageInfo> diit;
+  std::vector<VkWriteDescriptorSet> writeDescriptorSets;
+  writeDescriptorSets.push_back({.sType           = VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET,
+                                 .dstSet          = m_sceneDescriptorSet,
+                                 .dstBinding      = SceneBindings::eFrameInfo,
+                                 .dstArrayElement = 0,
+                                 .descriptorCount = 1,
+                                 .descriptorType  = VK_DESCRIPTOR_TYPE_UNIFORM_BUFFER,
+                                 .pBufferInfo     = &frameBufferInfo});
+  writeDescriptorSets.push_back({.sType           = VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET,
+                                 .dstSet          = m_sceneDescriptorSet,
+                                 .dstBinding      = SceneBindings::eSceneDesc,
+                                 .dstArrayElement = 0,
+                                 .descriptorCount = 1,
+                                 .descriptorType  = VK_DESCRIPTOR_TYPE_STORAGE_BUFFER,
+                                 .pBufferInfo     = &sceneBufferInfo});
+
+  std::vector<VkDescriptorImageInfo> descImageInfos;
+  descImageInfos.reserve(m_gltfSceneVk->nbTextures());
   for(const nvvk::Texture& texture : m_gltfSceneVk->textures())  // All texture samplers
   {
-    diit.emplace_back(texture.descriptor);
+    descImageInfos.emplace_back(texture.descriptor);
   }
-  writes.emplace_back(m_sceneSet->makeWriteArray(0, SceneBindings::eTextures, diit.data()));
+  writeDescriptorSets.push_back({.sType           = VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET,
+                                 .dstSet          = m_sceneDescriptorSet,
+                                 .dstBinding      = SceneBindings::eTextures,
+                                 .dstArrayElement = 0,
+                                 .descriptorCount = m_gltfSceneVk->nbTextures(),
+                                 .descriptorType  = VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER,
+                                 .pImageInfo      = descImageInfos.data()});
 
-  vkUpdateDescriptorSets(resources.ctx.device, static_cast<uint32_t>(writes.size()), writes.data(), 0, nullptr);
+  vkUpdateDescriptorSets(resources.ctx.device, static_cast<uint32_t>(writeDescriptorSets.size()),
+                         writeDescriptorSets.data(), 0, nullptr);
+}
+
+void gltfr::Scene::destroyDescriptorSet(VkDevice device)
+{
+  if(m_descriptorPool)
+  {
+    vkFreeDescriptorSets(device, m_descriptorPool, 1, &m_sceneDescriptorSet);
+    vkDestroyDescriptorSetLayout(device, m_sceneDescriptorSetLayout, nullptr);
+    vkDestroyDescriptorPool(device, m_descriptorPool, nullptr);
+  }
 }
 
 //--------------------------------------------------------------------------------------------------
@@ -313,11 +406,22 @@ bool gltfr::Scene::processFrame(VkCommandBuffer cmdBuf, Settings& settings)
   // Dealing with animation
   if(m_gltfScene->hasAnimation() && m_animControl.doAnimation())
   {
-    float deltaTime = m_animControl.deltaTime();
-    bool needUpdate = m_animControl.isReset() ? m_gltfScene->resetAnimations() : m_gltfScene->updateAnimations(deltaTime);
+    float                     deltaTime = m_animControl.deltaTime();
+    nvh::gltf::AnimationInfo& animInfo  = m_gltfScene->getAnimationInfo(m_animControl.currentAnimation);
+    if(m_animControl.isReset())
+    {
+      animInfo.reset();
+    }
+    else
+    {
+      animInfo.incrementTime(deltaTime);
+    }
+
+    m_gltfScene->updateAnimation(m_animControl.currentAnimation);
+    m_gltfScene->updateRenderNodes();
+
     m_animControl.clearStates();
 
-    if(needUpdate)
     {
       m_dirtyFlags.set(eVulkanScene);
       m_dirtyFlags.set(eRtxScene);
@@ -332,7 +436,9 @@ bool gltfr::Scene::processFrame(VkCommandBuffer cmdBuf, Settings& settings)
   // Check for scene changes
   if(m_dirtyFlags.test(eVulkanScene))
   {
-    m_gltfSceneVk->updateRenderNodeBuffer(cmdBuf, *m_gltfScene);
+    m_gltfSceneVk->updateRenderNodesBuffer(cmdBuf, *m_gltfScene);       // Animation, changing nodes transform
+    m_gltfSceneVk->updateRenderPrimitivesBuffer(cmdBuf, *m_gltfScene);  // Animation
+    m_gltfSceneVk->updateRenderLightsBuffer(cmdBuf, *m_gltfScene);      // changing lights data
     m_dirtyFlags.reset(eVulkanScene);
   }
   if(m_dirtyFlags.test(eVulkanMaterial))
@@ -348,6 +454,8 @@ bool gltfr::Scene::processFrame(VkCommandBuffer cmdBuf, Settings& settings)
   if(m_dirtyFlags.test(eRtxScene))
   {
     m_gltfSceneRtx->updateTopLevelAS(cmdBuf, *m_gltfScene);
+    m_gltfSceneRtx->updateBottomLevelAS(cmdBuf, *m_gltfScene);
+
     m_dirtyFlags.reset(eRtxScene);
   }
 
@@ -425,13 +533,13 @@ void gltfr::Scene::createVulkanScene(Resources& res)
   {
     // Create the Vulkan side of the scene
     // Since we load and display simultaneously, we need to use a second GTC queue
-    nvvk::CommandPool cmd_pool(res.ctx.device, res.ctx.GCT1.familyIndex, VK_COMMAND_POOL_CREATE_TRANSIENT_BIT,
-                               res.ctx.GCT1.queue);
+    nvvk::CommandPool cmd_pool(res.ctx.device, res.ctx.compute.familyIndex, VK_COMMAND_POOL_CREATE_TRANSIENT_BIT,
+                               res.ctx.compute.queue);
     VkCommandBuffer   cmd;
     {  // Creating the scene in Vulkan buffers
       cmd = cmd_pool.createCommandBuffer();
-      m_gltfSceneVk->create(cmd, *m_gltfScene);
-      // This method is simpler, but it is not as efficient as the one below
+      m_gltfSceneVk->create(cmd, *m_gltfScene, false);
+      // This method is simpler, but it is not as efficient as the while-loop below
       // m_sceneRtx->create(cmd, *m_scene, *m_sceneVk, VK_BUILD_ACCELERATION_STRUCTURE_PREFER_FAST_TRACE_BIT_KHR);
       cmd_pool.submitAndWait(cmd);
       res.m_allocator->finalizeAndReleaseStaging();  // Make sure there are no pending staging buffers and clear them up
@@ -439,7 +547,8 @@ void gltfr::Scene::createVulkanScene(Resources& res)
 
     // Create the acceleration structure, and compact the BLAS
     VkBuildAccelerationStructureFlagsKHR blasBuildFlags = VK_BUILD_ACCELERATION_STRUCTURE_PREFER_FAST_TRACE_BIT_KHR
-                                                          | VK_BUILD_ACCELERATION_STRUCTURE_ALLOW_COMPACTION_BIT_KHR;
+                                                          | VK_BUILD_ACCELERATION_STRUCTURE_ALLOW_COMPACTION_BIT_KHR
+                                                          | VK_BUILD_ACCELERATION_STRUCTURE_ALLOW_UPDATE_BIT_KHR;
     m_gltfSceneRtx->createBottomLevelAccelerationStructure(*m_gltfScene, *m_gltfSceneVk, blasBuildFlags);
     bool finished = false;
     do
@@ -488,17 +597,17 @@ void gltfr::Scene::createHdr(Resources& res, const std::string& filename)
   m_hdrDome = std::make_unique<nvvkhl::HdrEnvDome>(res.ctx.device, res.ctx.physicalDevice, alloc, c_family_queue);
   m_hdrEnv->loadEnvironment(filename, true);
   m_hdrDome->create(m_hdrEnv->getDescriptorSet(), m_hdrEnv->getDescriptorSetLayout());
-
-  {
-    nvvk::ScopeCommandBuffer cmd(res.ctx.device, res.ctx.GCT1.familyIndex, res.ctx.GCT1.queue);
-    nvvk::cmdGenerateMipmaps(cmd, m_hdrEnv->getHdrTexture().image, VK_FORMAT_R32G32B32A32_SFLOAT,
-                             m_hdrEnv->getHdrImageSize(), nvvk::mipLevels(m_hdrEnv->getHdrImageSize()));
-  }
   alloc->finalizeAndReleaseStaging();
-
 
   m_hdrFilename = std::filesystem::path(filename).filename().string();
   setDirtyFlag(Scene::eHdrEnv, true);
+}
+
+void gltfr::Scene::generateHdrMipmap(VkCommandBuffer cmd, Resources& res)
+{
+  vkQueueWaitIdle(res.ctx.GCT0.queue);
+  nvvk::cmdGenerateMipmaps(cmd, m_hdrEnv->getHdrTexture().image, VK_FORMAT_R32G32B32A32_SFLOAT,
+                           m_hdrEnv->getHdrImageSize(), nvvk::mipLevels(m_hdrEnv->getHdrImageSize()));
 }
 
 //--------------------------------------------------------------------------------------------------
@@ -675,7 +784,7 @@ bool gltfr::Scene::onUI(Resources& resources, Settings& settings, GLFWwindow* wi
     {
       if(headerManager.beginHeader("Animation"))
       {
-        m_animControl.onUI();
+        m_animControl.onUI(m_gltfScene.get());
       }
     }
 

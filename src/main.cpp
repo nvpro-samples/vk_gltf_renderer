@@ -105,9 +105,8 @@ public:
     ctx.device         = app->getDevice();
     ctx.physicalDevice = app->getPhysicalDevice();
     ctx.GCT0           = {app->getQueue(0).queue, app->getQueue(0).familyIndex};  // See creation of queues in main()
-    ctx.GCT1           = {app->getQueue(1).queue, app->getQueue(1).familyIndex};
-    ctx.compute        = {app->getQueue(2).queue, app->getQueue(2).familyIndex};
-    ctx.transfer       = {app->getQueue(3).queue, app->getQueue(3).familyIndex};
+    ctx.compute        = {app->getQueue(1).queue, app->getQueue(1).familyIndex};
+    ctx.transfer       = {app->getQueue(2).queue, app->getQueue(2).familyIndex};
 
     m_resources.init(ctx);
     m_scene.init(m_resources);
@@ -115,11 +114,12 @@ public:
     nvvk::ResourceAllocator* alloc         = m_resources.m_allocator.get();
     uint32_t                 c_queue_index = ctx.compute.familyIndex;
 
-    m_tonemapper = std::make_unique<nvvkhl::TonemapperPostProcess>(ctx.device, alloc);  // Tonemapper utility
+    m_tonemapper.init(ctx.device, alloc);
+
     m_picker = std::make_unique<nvvk::RayPickerKHR>(ctx.device, ctx.physicalDevice, alloc, c_queue_index);  // RTX Picking utility
 
     m_emptyRenderer = makeRendererEmpty();
-    m_tonemapper->createComputePipeline();
+    m_tonemapper.createComputePipeline();
 
     if(!g_inHdr.empty())
     {
@@ -151,34 +151,39 @@ public:
   void onResize(uint32_t width, uint32_t height) override { m_resources.resizeGbuffers({width, height}); }
 
   //--------------------------------------------------------------------------------------------------
-  void onRender(VkCommandBuffer cmdBuf) override
+  void onRender(VkCommandBuffer cmd) override
   {
     if(m_busy.isBusy())
       return;
+    if(m_busy.isDone())
+    {
+      // Post busy work
+      m_busy.consumeDone();
+    }
 
     // Handle changes that have happened since last frame
-    handleChanges();
+    handleChanges(cmd);
 
     if(m_renderer && m_scene.isValid())
     {
       // Animate, update Vulkan buffers: scene, frame, acceleration structures
       // It could stop rendering if the scene is not ready or reached max frames
-      if(m_scene.processFrame(cmdBuf, m_settings))
+      if(m_scene.processFrame(cmd, m_settings))
       {
-        m_renderer->render(cmdBuf, m_resources, m_scene, m_settings, *g_elemProfiler.get());
+        m_renderer->render(cmd, m_resources, m_scene, m_settings, *g_elemProfiler.get());
       }
     }
     else
     {
-      m_emptyRenderer->render(cmdBuf, m_resources, m_scene, m_settings, *g_elemProfiler.get());
+      m_emptyRenderer->render(cmd, m_resources, m_scene, m_settings, *g_elemProfiler.get());
     }
 
 
     // Apply tone mapper to the final image
     {
-      auto sec = g_elemProfiler->timeRecurring("Tonemapper", cmdBuf);
+      auto sec = g_elemProfiler->timeRecurring("Tonemapper", cmd);
       setTonemapperInputOutput();
-      m_tonemapper->runCompute(cmdBuf, m_resources.m_finalImage->getSize());
+      m_tonemapper.runCompute(cmd, m_resources.m_finalImage->getSize());
     }
   }
 
@@ -194,7 +199,7 @@ public:
     {
       inputImage = m_renderer->getOutputImage();
     }
-    m_tonemapper->updateComputeDescriptorSets(inputImage, outputImage);  // To
+    m_tonemapper.updateComputeDescriptorSets(inputImage, outputImage);  // To
   }
 
   //--------------------------------------------------------------------------------------------------
@@ -204,7 +209,7 @@ public:
   {
     auto& headerManager = CollapsingHeaderManager::getInstance();
 
-    ImGui::Begin("Settings");
+    if(ImGui::Begin("Settings"))
     {
       PE::begin();
       {
@@ -225,7 +230,7 @@ public:
       m_settings.onUI();
       if(headerManager.beginHeader("Tonemapper"))
       {
-        m_tonemapper->onUI();
+        m_tonemapper.onUI();
       }
 
       if(!m_busy.isBusy())
@@ -614,10 +619,11 @@ private:
   // - Scene changes
   // - Resolution changes
   //
-  void handleChanges()
+  void handleChanges(VkCommandBuffer cmd)
   {
     if(m_scene.hasDirtyFlag(Scene::eHdrEnv))
     {
+      m_scene.generateHdrMipmap(cmd, m_resources);
       m_settings.setDefaultLuminance(m_scene.m_hdrEnv->getIntegral());
     }
 
@@ -645,26 +651,27 @@ private:
   // This goes in the .ini file and remember the settings of the application
   void addSettingsHandler()
   {
-    m_settingsHandler = std::make_unique<SettingsHandler>("GLTFRenderer");
-    m_settingsHandler->setSetting("Renderer", reinterpret_cast<int*>(&m_settings.renderSystem));
-    m_settingsHandler->setSetting("MaxFrames", &m_settings.maxFrames);
-    m_settingsHandler->setSetting("ShowAxis", &m_settings.showAxis);
-    m_settingsHandler->setSetting("SilhouetteColor", &m_settings.silhouetteColor);
-    m_settingsHandler->setSetting("BackgrounfColor", &m_settings.solidBackgroundColor);
-    m_settingsHandler->addImGuiHandler();
+    m_settingsHandler.setHandlerName("GLTFRenderer");
+    m_settingsHandler.setSetting("Renderer", reinterpret_cast<int*>(&m_settings.renderSystem));
+    m_settingsHandler.setSetting("MaxFrames", &m_settings.maxFrames);
+    m_settingsHandler.setSetting("ShowAxis", &m_settings.showAxis);
+    m_settingsHandler.setSetting("SilhouetteColor", &m_settings.silhouetteColor);
+    m_settingsHandler.setSetting("BackgrounfColor", &m_settings.solidBackgroundColor);
+    m_settingsHandler.setSetting("Tonemapper", &m_tonemapper.settings().method);
+    m_settingsHandler.addImGuiHandler();
   }
 
 
-  nvvkhl::Application*                           m_app = nullptr;
-  Resources                                      m_resources;
-  Settings                                       m_settings;
-  Scene                                          m_scene;
-  std::unique_ptr<gltfr::Renderer>               m_emptyRenderer{};
-  std::unique_ptr<gltfr::Renderer>               m_renderer{};
-  std::unique_ptr<nvvkhl::TonemapperPostProcess> m_tonemapper{};
-  std::unique_ptr<nvvk::RayPickerKHR>            m_picker{};
-  std::unique_ptr<SettingsHandler>               m_settingsHandler{};
-  BusyWindow                                     m_busy;
+  nvvkhl::Application*                m_app = nullptr;
+  Resources                           m_resources;
+  Settings                            m_settings;
+  Scene                               m_scene;
+  std::unique_ptr<gltfr::Renderer>    m_emptyRenderer{};
+  std::unique_ptr<gltfr::Renderer>    m_renderer{};
+  nvvkhl::TonemapperPostProcess       m_tonemapper;
+  std::unique_ptr<nvvk::RayPickerKHR> m_picker{};
+  SettingsHandler                     m_settingsHandler;
+  BusyWindow                          m_busy;
 };
 
 
@@ -715,6 +722,7 @@ auto main(int argc, char** argv) -> int
   nvvkhl::addSurfaceExtensions(vkSetup.instanceExtensions);
   vkSetup.instanceExtensions.emplace_back(VK_EXT_DEBUG_UTILS_EXTENSION_NAME);
   vkSetup.deviceExtensions.emplace_back(VK_KHR_SWAPCHAIN_EXTENSION_NAME);
+
   // All Vulkan extensions required by the sample
   VkPhysicalDeviceAccelerationStructureFeaturesKHR accel_feature{VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_ACCELERATION_STRUCTURE_FEATURES_KHR};
   VkPhysicalDeviceRayTracingPipelineFeaturesKHR rt_pipeline_feature{VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_RAY_TRACING_PIPELINE_FEATURES_KHR};
@@ -722,6 +730,8 @@ auto main(int argc, char** argv) -> int
   VkPhysicalDeviceFragmentShaderBarycentricFeaturesKHR baryFeatures{VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_FRAGMENT_SHADER_BARYCENTRIC_FEATURES_KHR};
   VkPhysicalDeviceShaderObjectFeaturesEXT shaderObjFeature{VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_SHADER_OBJECT_FEATURES_EXT};
   VkPhysicalDeviceNestedCommandBufferFeaturesEXT nestedCmdFeature{VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_NESTED_COMMAND_BUFFER_FEATURES_EXT};
+  VkPhysicalDeviceRayTracingInvocationReorderFeaturesNV reorderFeature{
+      VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_RAY_TRACING_INVOCATION_REORDER_FEATURES_NV};
   vkSetup.deviceExtensions.emplace_back(VK_KHR_ACCELERATION_STRUCTURE_EXTENSION_NAME, &accel_feature);
   vkSetup.deviceExtensions.emplace_back(VK_KHR_RAY_TRACING_PIPELINE_EXTENSION_NAME, &rt_pipeline_feature);
   vkSetup.deviceExtensions.emplace_back(VK_KHR_DEFERRED_HOST_OPERATIONS_EXTENSION_NAME);
@@ -730,10 +740,10 @@ auto main(int argc, char** argv) -> int
   vkSetup.deviceExtensions.emplace_back(VK_KHR_FRAGMENT_SHADER_BARYCENTRIC_EXTENSION_NAME, &baryFeatures, false);
   vkSetup.deviceExtensions.emplace_back(VK_EXT_SHADER_OBJECT_EXTENSION_NAME, &shaderObjFeature);
   vkSetup.deviceExtensions.emplace_back(VK_EXT_NESTED_COMMAND_BUFFER_EXTENSION_NAME, &nestedCmdFeature);
+  vkSetup.deviceExtensions.emplace_back(VK_NV_RAY_TRACING_INVOCATION_REORDER_EXTENSION_NAME, &reorderFeature, false);
 
   // Request the creation of all needed queues
   vkSetup.queues = {VK_QUEUE_GRAPHICS_BIT | VK_QUEUE_TRANSFER_BIT | VK_QUEUE_COMPUTE_BIT,  // GTC for rendering
-                    VK_QUEUE_GRAPHICS_BIT | VK_QUEUE_TRANSFER_BIT | VK_QUEUE_COMPUTE_BIT,  // GTC for loading in parallel
                     VK_QUEUE_COMPUTE_BIT,                                                  // Compute
                     VK_QUEUE_TRANSFER_BIT};                                                // Transfer
 

@@ -30,11 +30,10 @@ public:
     ImGui::SetNextItemOpen(wasOpen);
     const bool isOpen = ImGui::CollapsingHeader(name.data());
 
-    if(isOpen && !wasOpen)
-    {
+    if(isOpen)
       m_openedHeader = name;
-    }
-
+    else if(wasOpen)
+      m_openedHeader = {};
 
     return isOpen;
   }
@@ -43,6 +42,5 @@ private:
   CollapsingHeaderManager()  = default;
   ~CollapsingHeaderManager() = default;
 
-  std::unordered_set<std::string> m_openedHeaders{};
-  std::string                     m_openedHeader{};
+  std::string_view m_openedHeader{};
 };

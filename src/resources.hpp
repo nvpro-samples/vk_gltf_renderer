@@ -57,7 +57,6 @@ struct VulkanInfo
   VkDevice         device{};
   VkPhysicalDevice physicalDevice{};
   Queue            GCT0;
-  Queue            GCT1;
   Queue            compute;
   Queue            transfer;
 };

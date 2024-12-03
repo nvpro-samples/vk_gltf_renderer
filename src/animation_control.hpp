@@ -38,8 +38,18 @@
 // Simple structure to hold the animation controls
 struct AnimationControl
 {
-  void onUI()
+  void onUI(nvh::gltf::Scene* gltfScene)
   {
+    namespace PE = ImGuiH::PropertyEditor;
+    std::vector<const char*> animationNames;
+    for(int i = 0; i < gltfScene->getNumAnimations(); i++)
+    {
+      animationNames.push_back(gltfScene->getAnimationInfo(i).name.c_str());
+    }
+    PE::begin("");
+    PE::Combo("Animations", &currentAnimation, animationNames.data(), static_cast<int>(animationNames.size()));
+    PE::end();
+
     ImGui::SeparatorText("Animation Controls");
     ImGui::PushFont(ImGuiH::getIconicFont());
     if(ImGui::Button(play ? ImGuiH::icon_media_pause : ImGuiH::icon_media_play))
@@ -57,9 +67,26 @@ struct AnimationControl
     }
 
     ImGui::PopFont();
-    ImGui::SameLine();
-    ImGui::SliderFloat("##speed", &speed, 0.0F, 2.0F, "Speed: %.2f");
-    ImGui::Separator();
+
+    ImGui::SameLine(0, 10.0f);
+    ImGui::PushItemWidth(60.0f);  // Adjust width to make it compact
+    ImGui::DragFloat("##speed", &speed, 0.01f, 0.0f, 100.0f);
+    // Tooltip or additional indicator for the speed control
+    if(ImGui::IsItemHovered())
+      ImGui::SetTooltip("Playback speed multiplier");
+    ImGui::PopItemWidth();  // Reset width
+
+    // Add a small label next to the speed input for clarity
+    ImGui::SameLine(0.0, 1.0);
+    ImGui::TextUnformatted("x");
+
+    // Show the timeline slider
+    nvh::gltf::AnimationInfo& animInfo = gltfScene->getAnimationInfo(currentAnimation);
+    ImGui::TextDisabled("Timeline");
+    ImGui::PushItemWidth(ImGui::GetContentRegionAvail().x);
+    if(ImGui::SliderFloat("##no-label", &animInfo.currentTime, animInfo.start, animInfo.end, "Time: %.2f"))
+      runOnce = true;
+    ImGui::PopItemWidth();
   }
 
   bool  doAnimation() const { return play || runOnce || reset; }
@@ -67,8 +94,9 @@ struct AnimationControl
   bool  isReset() const { return reset; }
   void  clearStates() { runOnce = reset = false; }
 
-  bool  play    = true;   // Simulation running?
-  bool  runOnce = false;  // Simulation step-once
-  bool  reset   = false;  // Reset the animation
-  float speed   = 1.0F;   // Simulation speed
+  bool  play             = true;   // Simulation running?
+  bool  runOnce          = false;  // Simulation step-once
+  bool  reset            = false;  // Reset the animation
+  float speed            = 1.0F;   // Simulation speed
+  int   currentAnimation = 0;
 };

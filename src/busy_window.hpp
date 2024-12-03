@@ -28,6 +28,7 @@
 
 
 #include <string>
+#include <atomic>
 
 #include "imgui.h"
 
@@ -39,8 +40,14 @@ public:
     m_busy   = true;
     m_reason = reason;
   }
-  void stop() { m_busy = false; }
+  void stop()
+  {
+    m_busy = false;
+    m_done = true;
+  }
+  void consumeDone() { m_done = false; }
   bool isBusy() const { return m_busy; }
+  bool isDone() const { return m_done; }
 
   // Display a modal window when loading assets or other long operation on separated thread
   inline void show()
@@ -70,8 +77,8 @@ public:
     ImGui::PopStyleVar();
   }
 
-
 private:
-  bool        m_busy{false};
-  std::string m_reason;
+  std::atomic<bool> m_busy{false};
+  bool              m_done{false};
+  std::string       m_reason;
 };

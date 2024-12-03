@@ -1,7 +1,8 @@
 // --------------------------------------------------------------------
 // Forwarded declarations
-void traceRay(Ray r, inout uint seed);
-bool traceShadow(Ray r, float maxDist, inout uint seed);
+void        traceRay(Ray r, inout uint seed);
+vec3        traceShadow(Ray r, float maxDist, inout uint seed);
+const float MIN_TRANSMISSION = 0.01;  // Minimum transmission factor to continue tracing
 
 
 struct SampleResult
@@ -26,7 +27,12 @@ vec3 sampleLights(in vec3 pos, vec3 normal, in vec3 worldRayDirection, inout uin
   float envPdf  = 0.0;
   lightDist     = INFINITE;
 
-  // Weight for MIS (TODO: adjust these based on scene characteristics: light intensity vs environment intensity)
+  // We use the one-sample model to perform multiple importance sampling
+  // between point lights and environment lights.
+  // See section 9.2.4 of https://graphics.stanford.edu/papers/veach_thesis/thesis.pdf .
+
+  // Probability we'll select each sampling scheme (TODO: adjust these based on
+  // scene characteristics: light intensity vs environment intensity)
   float lightWeight = (sceneDesc.numLights > 0) ? 0.5 : 0.0;
   float envWeight   = (TEST_FLAG(frameInfo.flags, USE_SKY_FLAG) || frameInfo.envIntensity.x > 0.0) ? 0.5 : 0.0;
 
@@ -38,66 +44,72 @@ vec3 sampleLights(in vec3 pos, vec3 normal, in vec3 worldRayDirection, inout uin
   lightWeight /= totalWeight;
   envWeight /= totalWeight;
 
-  // Sample lights
-  vec3 lightRadiance = vec3(0);
-  vec3 lightDir;
-  if(sceneDesc.numLights > 0 && lightWeight > 0)
+  // Decide whether to sample the light or the environment.
+  bool sampleLights = (rand(seed) <= lightWeight);
+
+  // We'll choose a direction from one technique, but for MIS we need the
+  // PDFs of each technique in the direction we chose. That's why we always get
+  // the light PDF (which is constant), but only sample a light if
+  // `sampleLights` is true.
+
+  // Lights
+  if(lightWeight > 0)
   {
-    int          lightIndex = min(int(rand(seed) * sceneDesc.numLights), sceneDesc.numLights - 1);
-    Light        light      = RenderLightBuf(sceneDesc.lightAddress)._[lightIndex];
-    LightContrib contrib    = singleLightContribution(light, pos, normal, vec2(rand(seed), rand(seed)));
-    lightDir                = -contrib.incidentVector;
-    lightPdf                = (1.0 / sceneDesc.numLights) * lightWeight;
-    lightRadiance           = contrib.intensity / lightPdf;
-    lightDist               = contrib.distance;
+    lightPdf = 1.0 / sceneDesc.numLights;
+    if(sampleLights)  // Use this technique for MIS?
+    {
+      int          lightIndex = min(int(rand(seed) * sceneDesc.numLights), sceneDesc.numLights - 1);
+      Light        light      = RenderLightBuf(sceneDesc.lightAddress)._[lightIndex];
+      LightContrib contrib    = singleLightContribution(light, pos, normal, vec2(rand(seed), rand(seed)));
+      dirToLight              = -contrib.incidentVector;
+      radiance                = contrib.intensity / (lightPdf * lightWeight);
+      lightDist               = contrib.distance;
+    }
   }
 
-  // Sample environment
-  vec3 envRadiance = vec3(0);
-  vec3 envDir;
+  // Environment
   if(envWeight > 0)
   {
     if(TEST_FLAG(frameInfo.flags, USE_SKY_FLAG))
     {
-      vec2              random_sample = vec2(rand(seed), rand(seed));
-      SkySamplingResult skySample     = samplePhysicalSky(skyInfo, random_sample);
-      envDir                          = skySample.direction;
-      envPdf                          = skySample.pdf * envWeight;
-      envRadiance                     = skySample.radiance / envPdf;
+      if(!sampleLights)  // Use this technique for MIS?
+      {
+        vec2              random_sample = vec2(rand(seed), rand(seed));
+        SkySamplingResult skySample     = samplePhysicalSky(skyInfo, random_sample);
+        dirToLight                      = skySample.direction;
+        envPdf                          = skySample.pdf;
+        radiance                        = skySample.radiance / (envPdf * envWeight);
+      }
+      else
+      {
+        envPdf = samplePhysicalSkyPDF(skyInfo, dirToLight);
+      }
     }
     else
     {
-      vec3 rand_val     = vec3(rand(seed), rand(seed), rand(seed));
-      vec4 radiance_pdf = environmentSample(hdrTexture, rand_val, envDir);
-      envRadiance       = radiance_pdf.xyz;
-      envPdf            = radiance_pdf.w * envWeight;
-      envDir            = rotate(envDir, vec3(0, 1, 0), frameInfo.envRotation);
-      envRadiance *= frameInfo.envIntensity.xyz;
-      envRadiance /= envPdf;
+      if(!sampleLights)  // Use this technique for MIS?
+      {
+        vec3 rand_val     = vec3(rand(seed), rand(seed), rand(seed));
+        vec4 radiance_pdf = environmentSample(hdrTexture, rand_val, dirToLight);
+        envPdf            = radiance_pdf.w;
+        radiance          = radiance_pdf.xyz * frameInfo.envIntensity.xyz / (envPdf * envWeight);
+        dirToLight        = rotate(dirToLight, vec3(0, 1, 0), frameInfo.envRotation);
+      }
+      else
+      {
+        vec3 dir          = rotate(dirToLight, vec3(0, 1, 0), -frameInfo.envRotation);
+        vec2 uv           = getSphericalUv(dir);
+        vec4 radiance_pdf = textureLod(hdrTexture, uv, 0);
+        envPdf            = radiance_pdf.w;
+      }
     }
   }
 
-  // Choose between light and environment using MIS
-  float rnd = rand(seed);
-  if(rnd < lightWeight && lightWeight > 0)
-  {
-    dirToLight = lightDir;
-    radiance   = lightRadiance;
-    // MIS weight calculation
-    float misWeight = lightPdf / (lightPdf + envPdf);
-    radiance *= misWeight;
-  }
-  else if(envWeight > 0)
-  {
-    dirToLight = envDir;
-    radiance   = envRadiance;
-    // MIS weight calculation
-    float misWeight = envPdf / (lightPdf + envPdf);
-    radiance *= misWeight;
-  }
-
+  // MIS weight calculation
+  float misWeight = (sampleLights ? lightPdf : envPdf) / (lightPdf + envPdf);
+  radiance *= misWeight;
   // Update the total PDF
-  lightPdf = lightPdf + envPdf;
+  lightPdf = lightWeight * lightPdf + envWeight * envPdf;
 
   return radiance;
 }
@@ -116,17 +128,32 @@ float getOpacity(RenderNode renderNode, RenderPrimitive renderPrim, int triangle
   if(mat.alphaMode == ALPHA_OPAQUE)
     return 1.0;
 
-  float baseColorAlpha = mat.pbrBaseColorFactor.a;
-  if(isTexturePresent(mat.pbrBaseColorTexture))
+  float baseColorAlpha = 0;
+  if(mat.usePbrSpecularGlossiness == 0)
   {
+    baseColorAlpha = mat.pbrBaseColorFactor.a;
+    if(isTexturePresent(mat.pbrBaseColorTexture))
+    {
+      // Getting the 3 indices of the triangle (local)
+      uvec3 triangleIndex = getTriangleIndices(renderPrim, triangleID);
 
-    // Getting the 3 indices of the triangle (local)
-    uvec3 triangleIndex = getTriangleIndices(renderPrim, triangleID);
+      // Retrieve the interpolated texture coordinate from the vertex
+      vec2 uv = getInterpolatedVertexTexCoord0(renderPrim, triangleIndex, barycentrics);
 
-    // Retrieve the interpolated texture coordinate from the vertex
-    vec2 uv = getInterpolatedVertexTexCoord0(renderPrim, triangleIndex, barycentrics);
+      baseColorAlpha *= texture(texturesMap[nonuniformEXT(mat.pbrBaseColorTexture.index)], uv).a;
+    }
+  }
+  else
+  {
+    vec4 diffuse = mat.pbrDiffuseFactor;
+    if(isTexturePresent(mat.pbrDiffuseTexture))
+    {
+      uvec3 triangleIndex = getTriangleIndices(renderPrim, triangleID);
+      vec2 uv = getInterpolatedVertexTexCoord0(renderPrim, triangleIndex, barycentrics);
 
-    baseColorAlpha *= texture(texturesMap[nonuniformEXT(mat.pbrBaseColorTexture.index)], uv).a;
+      diffuse *= texture(texturesMap[nonuniformEXT(mat.pbrDiffuseTexture.index)], uv).a;
+    }
+    baseColorAlpha = diffuse.a;
   }
 
   float opacity;
@@ -141,6 +168,119 @@ float getOpacity(RenderNode renderNode, RenderPrimitive renderPrim, int triangle
 
   return opacity;
 }
+
+vec3 getShadowTransmission(RenderNode      renderNode,
+                           RenderPrimitive renderPrim,
+                           int             triangleID,
+                           vec3            barycentrics,
+                           float           hitT,
+                           mat4x3          worldToObject,
+                           vec3            rayDirection,
+                           inout bool      isInside)
+{
+  uint              matIndex = max(0, renderNode.materialID);
+  GltfShadeMaterial mat      = GltfMaterialBuf(sceneDesc.materialAddress).m[matIndex];
+
+  // If hit a non-transmissive surface, terminate with full shadow
+  if(mat.transmissionFactor <= MIN_TRANSMISSION)
+  {
+    return vec3(0.0);
+  }
+
+
+  // Get triangle indices and compute normal
+  uvec3 indices = getTriangleIndices(renderPrim, triangleID);
+
+
+  vec3 normal;
+  {
+    // Compute geometric normal
+    vec3 v0 = getVertexPosition(renderPrim, indices.x);
+    vec3 v1 = getVertexPosition(renderPrim, indices.y);
+    vec3 v2 = getVertexPosition(renderPrim, indices.z);
+    vec3 e1 = v1 - v0;
+    vec3 e2 = v2 - v0;
+    normal  = normalize(cross(e1, e2));
+    normal  = normalize(vec3(normal * worldToObject));
+  }
+
+  // Transmission calculation
+  vec3 currentTransmission = vec3(mat.transmissionFactor);
+
+  // Regular transmission with Fresnel using normal
+  float cosTheta = abs(dot(rayDirection, normal));
+  float fresnel  = schlickFresnel(mat.ior, cosTheta);
+  currentTransmission *= vec3((1.0 - fresnel));
+
+  // Apply material color tint to transmission
+  currentTransmission *= mat.pbrBaseColorFactor.rgb;
+
+  // Volume attenuation (Beer's law)
+  if(mat.thicknessFactor > 0.0)
+  {
+    if(isInside)
+    {
+      // Calculate per-channel attenuation with improved color preservation
+      vec3 absorbance = -log(max(mat.attenuationColor, vec3(0.001))) / max(mat.attenuationDistance, 0.001);
+      vec3 attenuation;
+      attenuation.r = exp(-hitT * absorbance.r);
+      attenuation.g = exp(-hitT * absorbance.g);
+      attenuation.b = exp(-hitT * absorbance.b);
+
+      currentTransmission *= attenuation;
+    }
+    isInside = !isInside;
+  }
+
+  // Attenuation due to roughness and metallic
+  float transmissionAttenuation = 1.0;
+  {
+    float roughness = mat.pbrRoughnessFactor;
+    float metallic  = mat.pbrMetallicFactor;
+    if(isTexturePresent(mat.pbrMetallicRoughnessTexture))
+    {
+      vec2 tc[2];
+      tc[0]          = getInterpolatedVertexTexCoord0(renderPrim, indices, barycentrics);
+      tc[1]          = getInterpolatedVertexTexCoord1(renderPrim, indices, barycentrics);
+      vec4 mr_sample = getTexture(mat.pbrMetallicRoughnessTexture, tc);
+      roughness *= mr_sample.g;
+      metallic *= mr_sample.b;
+    }
+
+    // Metallic completely blocks transmission
+    transmissionAttenuation *= (1.0 - metallic);
+
+    // Roughness reduces transmission non-linearly
+    float roughnessEffect = 1.0 - (roughness * roughness);
+    transmissionAttenuation *= mix(0.65, 1.0, roughnessEffect);
+  }
+  currentTransmission *= transmissionAttenuation;
+
+  return currentTransmission;
+}
+
+//-----------------------------------------------------------------------
+// Samples a 2D Gaussian distribution with a standard distribution of 1,
+// using the Box-Muller algorithm.
+// The input must be two random numbers in the range [0,1].
+//-----------------------------------------------------------------------
+vec2 sampleGaussian(vec2 u)
+{
+  const float r     = sqrt(-2.0f * log(max(1e-38f, u.x)));  // Radius
+  const float theta = 2.0f * M_PI * u.y;                    // Angle
+  return r * vec2(cos(theta), sin(theta));
+}
+
+//-----------------------------------------------------------------------
+// Standard deviation of the Gaussian filter used for antialiasing,
+// in units of pixels.
+// This value of 1 / sqrt(8 ln(2)) makes it so that a Gaussian centered
+// on a pixel is at exactly 1/2 its maximum at the midpoints between
+// orthogonally adjacent pixels, and 1/4 its maximum at the "corners"
+// of pixels. It also empirically looks nice: larger values are
+// too blurry, and smaller values make thin lines look jagged.
+//-----------------------------------------------------------------------
+#define ANTIALIASING_STANDARD_DEVIATION 0.4246609F
 
 Ray getRay(vec2 samplePos, vec2 offset, vec2 imageSize, mat4 projMatrixI, mat4 viewMatrixI)
 {
@@ -159,9 +299,10 @@ Ray getRay(vec2 samplePos, vec2 offset, vec2 imageSize, mat4 projMatrixI, mat4 v
 //-----------------------------------------------------------------------
 SampleResult pathTrace(Ray r, inout uint seed)
 {
-  vec3 radiance   = vec3(0.0F);
-  vec3 throughput = vec3(1.0F);
-  bool isInside   = false;
+  vec3 radiance     = vec3(0.0F);
+  vec3 throughput   = vec3(1.0F);
+  bool isInside     = false;
+  vec2 maxRoughness = vec2(0.0);
 
   SampleResult sampleResult;
   sampleResult.depth    = 0;
@@ -202,9 +343,13 @@ SampleResult pathTrace(Ray r, inout uint seed)
         }
       }
 
+      // Add sky or HDR texture
+      vec3  envColor;
+      float envPdf;
       if(TEST_FLAG(frameInfo.flags, USE_SKY_FLAG))
       {
-        radiance.xyz += throughput * evalPhysicalSky(skyInfo, r.direction);
+        envColor = evalPhysicalSky(skyInfo, r.direction);
+        envPdf   = samplePhysicalSkyPDF(skyInfo, r.direction);
       }
       else
       {
@@ -212,12 +357,14 @@ SampleResult pathTrace(Ray r, inout uint seed)
         vec3 dir = rotate(r.direction, vec3(0, 1, 0), -frameInfo.envRotation);
         vec2 uv  = getSphericalUv(dir);  // See sampling.glsl
         vec4 env = textureLod(hdrTexture, uv, 0);
-
-        // We may hit the environment twice: once via sampleLights() and once when hitting the sky while probing
-        // for more indirect hits. This is the counter part of the MIS weighting in sampleLights()
-        float misWeight = (lastSamplePdf == DIRAC) ? 1.0 : (lastSamplePdf / (lastSamplePdf + env.w));
-        radiance.xyz += throughput * misWeight * env.rgb * frameInfo.envIntensity.xyz;
+        envColor = env.rgb * frameInfo.envIntensity.xyz;
+        envPdf   = env.w;
       }
+
+      // We may hit the environment twice: once via sampleLights() and once when hitting the sky while probing
+      // for more indirect hits. This is the counter part of the MIS weighting in sampleLights()
+      float misWeight = (lastSamplePdf == DIRAC) ? 1.0 : (lastSamplePdf / (lastSamplePdf + envPdf));
+      radiance += throughput * misWeight * envColor;
 
       sampleResult.radiance.xyz = radiance;
       return sampleResult;
@@ -238,6 +385,11 @@ SampleResult pathTrace(Ray r, inout uint seed)
     material.pbrBaseColorFactor *= hit.color;                         // Color at vertices
     MeshState   mesh   = MeshState(hit.nrm, hit.tangent, hit.bitangent, hit.geonrm, hit.uv, isInside);
     PbrMaterial pbrMat = evaluateMaterial(material, mesh);
+
+    // Keep track of the maximum roughness to prevent firefly artifacts
+    // by forcing subsequent bounces to be at least as rough
+    maxRoughness     = max(pbrMat.roughness, maxRoughness);
+    pbrMat.roughness = maxRoughness;
 
     // Adding emissive
     radiance += pbrMat.emissive * throughput;
@@ -334,12 +486,9 @@ SampleResult pathTrace(Ray r, inout uint seed)
     {
       vec3 shadowRayOrigin = offsetRay(hit.pos, hit.geonrm);
       Ray  shadowRay       = Ray(shadowRayOrigin, dirToLight);
-      bool inShadow        = traceShadow(shadowRay, lightDist, seed);
+      vec3 shadowFactor    = traceShadow(shadowRay, lightDist, seed);
       // We are adding the contribution to the radiance only if the ray is not occluded by an object.
-      if(!inShadow)
-      {
-        radiance += contribution;
-      }
+      radiance += contribution * shadowFactor;
     }
 
 #if USE_RUSIAN_ROULETTE

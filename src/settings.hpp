@@ -82,6 +82,8 @@ struct PathtraceSettings
   DH::EDebugMethod dbgMethod = DH::eDbgMethod_none;
   RenderMode       renderMode{eIndirect};  // RTX / Indirect
   float            aperture{0.0f};
+  float            focalDistance{10.0f};
+  bool             autoFocus{true};
 };
 
 

@@ -25,10 +25,11 @@
 #include "nvh/cameramanipulator.hpp"
 #include "nvh/timesampler.hpp"
 #include "nvvk/debug_util_vk.hpp"
-#include "nvvkhl/shaders/dh_tonemap.h"
-#include "nvvkhl/shaders/dh_comp.h"
 #include "nvvk/sbtwrapper_vk.hpp"
+#include "nvvk/specialization.hpp"
 #include "nvvkhl/element_dbgprintf.hpp"
+#include "nvvkhl/shaders/dh_comp.h"
+#include "nvvkhl/shaders/dh_tonemap.h"
 
 // Shared information between device and host
 #include "shaders/dh_bindings.h"
@@ -47,6 +48,9 @@ namespace PE = ImGuiH::PropertyEditor;
 #include "_autogen/pathtrace.rgen.glsl.h"
 #include "_autogen/pathtrace.rmiss.glsl.h"
 #include "_autogen/pathtrace.rahit.glsl.h"
+#include "_autogen/shadow.rmiss.glsl.h"
+#include "_autogen/shadow.rahit.glsl.h"
+#include "_autogen/shadow.rchit.glsl.h"
 #include "nvvk/shaders_vk.hpp"
 #include "collapsing_header_manager.h"
 
@@ -98,13 +102,23 @@ private:
   std::unique_ptr<Silhouette>                   m_silhouette{};
   std::unique_ptr<AtrousDenoiser>               m_denoiser{};
 
+  nvh::Bbox m_sceneBBox{};
+
   enum GBufferType
   {
     eRgbLinear,    // Result from path-tracing
-    eNormalDepth,  // Normal
-    eSilhouette,   // Buffer to store object ID for silhouette
     eRgbResult,    // Final result
-    eTempResult,   // Temporary result
+    eSilhouette,   // Buffer to store object ID for silhouette
+    eNormalDepth,  // Denoise - Normal
+    eTempResult,   // Denoise - Temporary result
+  };
+
+  std::vector<VkFormat> m_gbufferFormats = {
+      VK_FORMAT_R32G32B32A32_SFLOAT,  // Accumulated result of path tracing
+      VK_FORMAT_R16G16B16A16_SFLOAT,  // Final result - After tonemap
+      VK_FORMAT_R8_UNORM,             // For selection, silhouette
+      VK_FORMAT_R16G16B16A16_SFLOAT,  // Normal / Depth (Normal in RGB, Depth in A) used by denoiser
+      VK_FORMAT_R16G16B16A16_SFLOAT,  // Temp result (Denoiser / Ping-pong for multiple passes)
   };
 
   // Creating all shaders
@@ -112,13 +126,20 @@ private:
   {
     eRaygen,
     eMiss,
+    eShadowMiss,
     eClosestHit,
     eAnyHit,
+    eShadowCH,
+    eShadowAH,
     eIndirect,
     eShaderGroupCount
   };
   std::vector<shaderc::SpvCompilationResult>    m_spvShader{};
   std::array<VkShaderModule, eShaderGroupCount> m_shaderModules{};
+
+  VkPhysicalDeviceRayTracingPipelinePropertiesKHR m_rtPipelineProperties{VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_RAY_TRACING_PIPELINE_PROPERTIES_KHR};
+  VkPhysicalDeviceRayTracingInvocationReorderPropertiesNV m_reorderProperties{
+      VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_RAY_TRACING_INVOCATION_REORDER_PROPERTIES_NV};
 };
 
 //------------------------------------------------------------------------------
@@ -141,21 +162,24 @@ bool RendererPathtracer::init(Resources& res, Scene& scene)
   m_denoiser   = std::make_unique<AtrousDenoiser>(res);
 
   // Requesting ray tracing properties
-  VkPhysicalDeviceRayTracingPipelinePropertiesKHR rt_prop{VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_RAY_TRACING_PIPELINE_PROPERTIES_KHR};
   VkPhysicalDeviceProperties2 prop2{VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_PROPERTIES_2};
-  prop2.pNext = &rt_prop;
+  prop2.pNext                  = &m_rtPipelineProperties;
+  m_rtPipelineProperties.pNext = &m_reorderProperties;
   vkGetPhysicalDeviceProperties2(res.ctx.physicalDevice, &prop2);
 
   const uint32_t t_queue_index = res.ctx.transfer.familyIndex;
 
   m_rtxSet = std::make_unique<nvvk::DescriptorSetContainer>(m_device);  // Descriptor set for RTX
   m_sbt    = std::make_unique<nvvk::SBTWrapper>();
-  m_sbt->setup(m_device, t_queue_index, res.m_allocator.get(), rt_prop);
+  m_sbt->setup(m_device, t_queue_index, res.m_allocator.get(), m_rtPipelineProperties);
   m_gBuffers = std::make_unique<nvvkhl::GBuffer>(m_device, res.m_allocator.get());
 
   createGBuffer(res);
   createRtxSet();
   writeRtxSet(scene);
+
+
+  m_sceneBBox = scene.m_gltfScene->getSceneBounds();
 
   return true;
 }
@@ -170,10 +194,13 @@ bool RendererPathtracer::initShaders(Resources& res, bool reload)
   if((reload || g_forceExternalShaders) && res.hasGlslCompiler())
   {
     m_spvShader.resize(eShaderGroupCount);
-    m_spvShader[eRaygen] = res.compileGlslShader("pathtrace.rgen.glsl", shaderc_shader_kind::shaderc_raygen_shader);
-    m_spvShader[eMiss]   = res.compileGlslShader("pathtrace.rmiss.glsl", shaderc_shader_kind::shaderc_miss_shader);
+    m_spvShader[eRaygen]     = res.compileGlslShader("pathtrace.rgen.glsl", shaderc_shader_kind::shaderc_raygen_shader);
+    m_spvShader[eMiss]       = res.compileGlslShader("pathtrace.rmiss.glsl", shaderc_shader_kind::shaderc_miss_shader);
+    m_spvShader[eShadowMiss] = res.compileGlslShader("shadow.rmiss.glsl", shaderc_shader_kind::shaderc_miss_shader);
     m_spvShader[eClosestHit] = res.compileGlslShader("pathtrace.rchit.glsl", shaderc_shader_kind::shaderc_closesthit_shader);
     m_spvShader[eAnyHit]   = res.compileGlslShader("pathtrace.rahit.glsl", shaderc_shader_kind::shaderc_anyhit_shader);
+    m_spvShader[eShadowCH] = res.compileGlslShader("shadow.rchit.glsl", shaderc_shader_kind::shaderc_closesthit_shader);
+    m_spvShader[eShadowAH] = res.compileGlslShader("shadow.rahit.glsl", shaderc_shader_kind::shaderc_anyhit_shader);
     m_spvShader[eIndirect] = res.compileGlslShader("pathtrace.comp.glsl", shaderc_shader_kind::shaderc_compute_shader);
 
     for(size_t i = 0; i < m_spvShader.size(); i++)
@@ -195,12 +222,18 @@ bool RendererPathtracer::initShaders(Resources& res, bool reload)
     const auto& rchit_shd = std::vector<uint32_t>{std::begin(pathtrace_rchit_glsl), std::end(pathtrace_rchit_glsl)};
     const auto& rmiss_shd = std::vector<uint32_t>{std::begin(pathtrace_rmiss_glsl), std::end(pathtrace_rmiss_glsl)};
     const auto& rahit_shd = std::vector<uint32_t>{std::begin(pathtrace_rahit_glsl), std::end(pathtrace_rahit_glsl)};
-    const auto& comp_shd  = std::vector<uint32_t>{std::begin(pathtrace_comp_glsl), std::end(pathtrace_comp_glsl)};
+    const auto& rshadowmiss_shd = std::vector<uint32_t>{std::begin(shadow_rmiss_glsl), std::end(shadow_rmiss_glsl)};
+    const auto& rahshadow_shd   = std::vector<uint32_t>{std::begin(shadow_rahit_glsl), std::end(shadow_rahit_glsl)};
+    const auto& rchshadow_shd   = std::vector<uint32_t>{std::begin(shadow_rchit_glsl), std::end(shadow_rchit_glsl)};
+    const auto& comp_shd        = std::vector<uint32_t>{std::begin(pathtrace_comp_glsl), std::end(pathtrace_comp_glsl)};
 
     m_shaderModules[eRaygen]     = nvvk::createShaderModule(m_device, rgen_shd);
     m_shaderModules[eMiss]       = nvvk::createShaderModule(m_device, rmiss_shd);
+    m_shaderModules[eShadowMiss] = nvvk::createShaderModule(m_device, rshadowmiss_shd);
     m_shaderModules[eClosestHit] = nvvk::createShaderModule(m_device, rchit_shd);
     m_shaderModules[eAnyHit]     = nvvk::createShaderModule(m_device, rahit_shd);
+    m_shaderModules[eShadowCH]   = nvvk::createShaderModule(m_device, rchshadow_shd);
+    m_shaderModules[eShadowAH]   = nvvk::createShaderModule(m_device, rahshadow_shd);
     m_shaderModules[eIndirect]   = nvvk::createShaderModule(m_device, comp_shd);
   }
 
@@ -308,15 +341,8 @@ void RendererPathtracer::deinit()
 //
 void RendererPathtracer::createGBuffer(Resources& res)
 {
-  static const auto imageFormats = {
-      VK_FORMAT_R32G32B32A32_SFLOAT,  // Result of path tracing
-      VK_FORMAT_R16G16B16A16_SFLOAT,  // Normal / Depth
-      VK_FORMAT_R8_UNORM,             // For selection, silhouette
-      VK_FORMAT_R16G16B16A16_SFLOAT,  // Final result
-      VK_FORMAT_R16G16B16A16_SFLOAT,  // Temp result
-  };
   m_gBuffers->destroy();
-  m_gBuffers->create(res.m_finalImage->getSize(), imageFormats, VK_FORMAT_UNDEFINED);
+  m_gBuffers->create(res.m_finalImage->getSize(), m_gbufferFormats, VK_FORMAT_UNDEFINED);
 }
 
 //------------------------------------------------------------------------------
@@ -330,28 +356,30 @@ void RendererPathtracer::render(VkCommandBuffer cmd, Resources& /*res*/, Scene& 
   static int lastSelected = -1;
 
   // Push constant
-  m_pushConst.maxDepth     = g_pathtraceSettings.maxDepth;
-  m_pushConst.maxSamples   = g_pathtraceSettings.maxSamples;
-  m_pushConst.frame        = scene.m_sceneFrameInfo.frameCount;
-  m_pushConst.dbgMethod    = g_pathtraceSettings.dbgMethod;
-  m_pushConst.maxLuminance = settings.maxLuminance;
-  if(lastSelected != scene.getSelectedRenderNode() || m_pushConst.frame <= 0)
+  m_pushConst.maxDepth      = g_pathtraceSettings.maxDepth;
+  m_pushConst.maxSamples    = g_pathtraceSettings.maxSamples;
+  m_pushConst.dbgMethod     = g_pathtraceSettings.dbgMethod;
+  m_pushConst.maxLuminance  = settings.maxLuminance;
+  m_pushConst.useRTDenoiser = m_denoiser->isActivated();
+  if(lastSelected != scene.getSelectedRenderNode() || scene.m_sceneFrameInfo.frameCount <= 0)
   {
     lastSelected                   = scene.getSelectedRenderNode();
     m_pushConst.selectedRenderNode = lastSelected;
+    if(g_pathtraceSettings.autoFocus)
+      g_pathtraceSettings.focalDistance = glm::length(CameraManip.getEye() - CameraManip.getCenter());
   }
   else
     m_pushConst.selectedRenderNode = -1;  // Resetting the selected object, to avoid shooting rays on the same object
 
-  m_pushConst.focalDistance = glm::length(CameraManip.getEye() - CameraManip.getCenter());
-  m_pushConst.aperture      = glm::radians(g_pathtraceSettings.aperture);
+  m_pushConst.focalDistance = g_pathtraceSettings.focalDistance;
+  m_pushConst.aperture      = g_pathtraceSettings.aperture;
   if(g_elemDebugPrintf)
     m_pushConst.mouseCoord = g_elemDebugPrintf->getMouseCoord();
 
   // Ray trace
   VkDescriptorSet dsHdr   = scene.m_hdrEnv->getDescriptorSet();
   VkDescriptorSet dsSky   = scene.m_sky->getDescriptorSet();
-  VkDescriptorSet dsScene = scene.m_sceneSet->getSet();
+  VkDescriptorSet dsScene = scene.m_sceneDescriptorSet;
 
   const VkExtent2D size = m_gBuffers->getSize();
 
@@ -431,14 +459,34 @@ bool RendererPathtracer::onUI()
 
   if(headerManager.beginHeader("RendererPathtracer"))
   {
+    // Setting the aperture max slidder value, based on the scene size
+    float scaleFactor = std::log(m_sceneBBox.radius());
+    scaleFactor       = std::max(scaleFactor, 0.0f);   // Prevent negative values when the scene is small
+    float apertureMax = 0.0001f + scaleFactor * 5.0f;  // Minimum max aperture is 0.0001
+
+
     PE::begin();
     changed |= PE::SliderInt("Max Depth", &g_pathtraceSettings.maxDepth, 1, 100);
     changed |= PE::SliderInt("Max Samples", &g_pathtraceSettings.maxSamples, 1, 100);
-    changed |= PE::SliderFloat("Aperture", &g_pathtraceSettings.aperture, 0.0f, 0.5f, "%.3f",
-                               ImGuiSliderFlags_Logarithmic, "Out-of-focus effect");
-    changed |= PE::Combo("Debug Method", reinterpret_cast<int32_t*>(&g_pathtraceSettings.dbgMethod),
-                         "None\0Metallic\0Roughness\0Normal\0Tangent\0Bitangent\0BaseColor\0Emissive\0Opacity\0TexCoord0\0TexCoord1\0\0");
-    changed |= PE::Combo("Render Mode", reinterpret_cast<int32_t*>(&g_pathtraceSettings.renderMode), "RTX\0Indirect\0\0");
+    if(PE::treeNode("Depth-of-field"))
+    {
+      changed |= PE::SliderFloat("Aperture", &g_pathtraceSettings.aperture, 0.0f, apertureMax, "%5.9f",
+                                 ImGuiSliderFlags_Logarithmic | ImGuiSliderFlags_NoRoundToFormat, "Out-of-focus effect");
+      changed |= PE::Checkbox("Auto Focus", &g_pathtraceSettings.autoFocus, "Use interest position");
+      ImGui::BeginDisabled(g_pathtraceSettings.autoFocus);
+      changed |= PE::DragFloat("Focal Distance", &g_pathtraceSettings.focalDistance, 100.0f, 0.0f, 1000000.0f, "%5.9f",
+                               ImGuiSliderFlags_Logarithmic | ImGuiSliderFlags_NoRoundToFormat, "Distance to focal point");
+      g_pathtraceSettings.focalDistance = std::max(0.000000001f, g_pathtraceSettings.focalDistance);
+      ImGui::EndDisabled();
+      PE::treePop();
+    }
+    if(PE::treeNode("Extra"))
+    {
+      changed |= PE::Combo("Debug Method", reinterpret_cast<int32_t*>(&g_pathtraceSettings.dbgMethod),
+                           "None\0Metallic\0Roughness\0Normal\0Tangent\0Bitangent\0BaseColor\0Emissive\0Opacity\0TexCoord0\0TexCoord1\0\0");
+      changed |= PE::Combo("Render Mode", reinterpret_cast<int32_t*>(&g_pathtraceSettings.renderMode), "RTX\0Indirect\0\0");
+      PE::treePop();
+    }
 
     m_denoiser->onUi();
 
@@ -495,26 +543,46 @@ void RendererPathtracer::createRtxPipeline(Resources& res, Scene& scene)
   m_rtxPipe->plines.resize(1);
 
 
-  std::array<VkPipelineShaderStageCreateInfo, 4> stages{};
+  std::array<VkPipelineShaderStageCreateInfo, 7> stages{};
   for(auto& s : stages)
     s.sType = VK_STRUCTURE_TYPE_PIPELINE_SHADER_STAGE_CREATE_INFO;
 
   stages[eRaygen].module = m_shaderModules[eRaygen];
+  stages[eRaygen].pName  = "main";
+  stages[eRaygen].stage  = VK_SHADER_STAGE_RAYGEN_BIT_KHR;
   m_dutil->setObjectName(stages[eRaygen].module, "rgen");
-  stages[eRaygen].pName = "main";
-  stages[eRaygen].stage = VK_SHADER_STAGE_RAYGEN_BIT_KHR;
-  stages[eMiss].module  = m_shaderModules[eMiss];
+
+  stages[eMiss].module = m_shaderModules[eMiss];
+  stages[eMiss].pName  = "main";
+  stages[eMiss].stage  = VK_SHADER_STAGE_MISS_BIT_KHR;
   m_dutil->setObjectName(stages[eMiss].module, "rmiss");
-  stages[eMiss].pName        = "main";
-  stages[eMiss].stage        = VK_SHADER_STAGE_MISS_BIT_KHR;
+
   stages[eClosestHit].module = m_shaderModules[eClosestHit];
+  stages[eClosestHit].pName  = "main";
+  stages[eClosestHit].stage  = VK_SHADER_STAGE_CLOSEST_HIT_BIT_KHR;
   m_dutil->setObjectName(stages[eClosestHit].module, "rchit");
-  stages[eClosestHit].pName = "main";
-  stages[eClosestHit].stage = VK_SHADER_STAGE_CLOSEST_HIT_BIT_KHR;
-  stages[eAnyHit].module    = m_shaderModules[eAnyHit];
+
+  stages[eAnyHit].module = m_shaderModules[eAnyHit];
+  stages[eAnyHit].pName  = "main";
+  stages[eAnyHit].stage  = VK_SHADER_STAGE_ANY_HIT_BIT_KHR;
   m_dutil->setObjectName(stages[eAnyHit].module, "rahit");
-  stages[eAnyHit].pName = "main";
-  stages[eAnyHit].stage = VK_SHADER_STAGE_ANY_HIT_BIT_KHR;
+
+  //Shadow
+  stages[eShadowMiss].module = m_shaderModules[eShadowMiss];
+  stages[eShadowMiss].pName  = "main";
+  stages[eShadowMiss].stage  = VK_SHADER_STAGE_MISS_BIT_KHR;
+  m_dutil->setObjectName(stages[eMiss].module, "shaodw_rmiss");
+
+  stages[eShadowCH].module = m_shaderModules[eShadowCH];
+  stages[eShadowCH].pName  = "main";
+  stages[eShadowCH].stage  = VK_SHADER_STAGE_CLOSEST_HIT_BIT_KHR;
+  m_dutil->setObjectName(stages[eShadowCH].module, "rchit_shadow");
+
+  stages[eShadowAH].module = m_shaderModules[eShadowAH];
+  stages[eShadowAH].pName  = "main";
+  stages[eShadowAH].stage  = VK_SHADER_STAGE_ANY_HIT_BIT_KHR;
+  m_dutil->setObjectName(stages[eShadowAH].module, "rahit_shadow");
+
 
   // Shader groups
   VkRayTracingShaderGroupCreateInfoKHR group{
@@ -536,6 +604,11 @@ void RendererPathtracer::createRtxPipeline(Resources& res, Scene& scene)
   group.generalShader = eMiss;
   shader_groups.push_back(group);
 
+  // Shadow Miss
+  group.type          = VK_RAY_TRACING_SHADER_GROUP_TYPE_GENERAL_KHR;
+  group.generalShader = eShadowMiss;
+  shader_groups.push_back(group);
+
   // Hit Group-0
   group.type             = VK_RAY_TRACING_SHADER_GROUP_TYPE_TRIANGLES_HIT_GROUP_KHR;
   group.generalShader    = VK_SHADER_UNUSED_KHR;
@@ -543,9 +616,24 @@ void RendererPathtracer::createRtxPipeline(Resources& res, Scene& scene)
   group.anyHitShader     = eAnyHit;
   shader_groups.push_back(group);
 
+  // Hit Group-1
+  group.type             = VK_RAY_TRACING_SHADER_GROUP_TYPE_TRIANGLES_HIT_GROUP_KHR;
+  group.generalShader    = VK_SHADER_UNUSED_KHR;
+  group.closestHitShader = eShadowCH;
+  group.anyHitShader     = eShadowAH;
+  shader_groups.push_back(group);
+
+
+  // Shader Execution Reorder (SER)
+  int supportSER =
+      (m_reorderProperties.rayTracingInvocationReorderReorderingHint & VK_RAY_TRACING_INVOCATION_REORDER_MODE_REORDER_NV) ? 1 : 0;
+  nvvk::Specialization specialization;
+  specialization.add(0, supportSER);
+  stages[eRaygen].pSpecializationInfo = specialization.getSpecialization();
+
   // Creating of the pipeline layout
   const VkPushConstantRange pushConstantRange{.stageFlags = VK_SHADER_STAGE_ALL, .offset = 0, .size = sizeof(DH::PushConstantPathtracer)};
-  std::vector<VkDescriptorSetLayout> descSetLayouts = {m_rtxSet->getLayout(), scene.m_sceneSet->getLayout(),
+  std::vector<VkDescriptorSetLayout> descSetLayouts = {m_rtxSet->getLayout(), scene.m_sceneDescriptorSetLayout,
                                                        scene.m_sky->getDescriptorSetLayout(),
                                                        scene.m_hdrEnv->getDescriptorSetLayout()};
   VkPipelineLayoutCreateInfo         pipeLayoutCreateInfo{
@@ -590,7 +678,7 @@ void RendererPathtracer::createIndirectPipeline(Resources& res, Scene& scene)
 
   // Creating of the pipeline layout
   const VkPushConstantRange pushConstantRange{.stageFlags = VK_SHADER_STAGE_ALL, .offset = 0, .size = sizeof(DH::PushConstantPathtracer)};
-  std::vector<VkDescriptorSetLayout> descSetLayouts = {m_rtxSet->getLayout(), scene.m_sceneSet->getLayout(),
+  std::vector<VkDescriptorSetLayout> descSetLayouts = {m_rtxSet->getLayout(), scene.m_sceneDescriptorSetLayout,
                                                        scene.m_sky->getDescriptorSetLayout(),
                                                        scene.m_hdrEnv->getDescriptorSetLayout()};
   VkPipelineLayoutCreateInfo         pipeLayoutCreateInfo{
@@ -617,7 +705,8 @@ void RendererPathtracer::createIndirectPipeline(Resources& res, Scene& scene)
       .layout = m_indirectPipe->layout,
   };
 
-  vkCreateComputePipelines(m_device, {}, 1, &cpCreateInfo, nullptr, &m_indirectPipe->plines[0]);
+  NVVK_CHECK(vkCreateComputePipelines(m_device, {}, 1, &cpCreateInfo, nullptr, &m_indirectPipe->plines[0]));
+  m_dutil->DBG_NAME(m_indirectPipe->plines[0]);
 }
 
 

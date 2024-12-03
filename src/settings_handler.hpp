@@ -87,10 +87,10 @@ private:
   static void boolFromString(const std::string& str, bool& value) { value = (str == "true"); }
 
 public:
-  explicit SettingsHandler(const std::string& name)
-      : handlerName(name)
-  {
-  }
+  SettingsHandler() {}
+  explicit SettingsHandler(const std::string& name) { setHandlerName(name); }
+
+  void setHandlerName(const std::string& name) { handlerName = name; }
 
   template <typename T>
   void setSetting(const std::string& key, T* value)
@@ -132,6 +132,7 @@ public:
 
   void addImGuiHandler()
   {
+    assert(!handlerName.empty());
     ImGuiSettingsHandler ini_handler{};
     ini_handler.TypeName   = handlerName.c_str();
     ini_handler.TypeHash   = ImHashStr(handlerName.c_str());

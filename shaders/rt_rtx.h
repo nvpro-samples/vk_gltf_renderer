@@ -1,3 +1,5 @@
+#extension GL_NV_shader_invocation_reorder : enable
+
 
 // Forward declarations
 float getOpacity(RenderNode renderNode, RenderPrimitive renderPrim, int triangleID, vec3 barycentrics);
@@ -16,22 +18,36 @@ void traceRay(Ray r, inout uint seed)
   // If we want to cull back facing triangles, we need to set the flag. But if we want double sided,
   // the cull flag is set on the TLAS instance flag
   uint rayFlags = gl_RayFlagsNoneEXT | gl_RayFlagsCullBackFacingTrianglesEXT;
-  traceRayEXT(topLevelAS, rayFlags, 0xFF, 0, 0, 0, r.origin, EPSILON, r.direction, INFINITE, 0);
+
+  if(USE_SER == 1)
+  {
+    hitObjectNV hObj;
+    hitObjectRecordEmptyNV(hObj);  //Initialize to an empty hit object
+    hitObjectTraceRayNV(hObj, topLevelAS, rayFlags, 0xFF, 0, 0, 0, r.origin, EPSILON, r.direction, INFINITE, 0);
+    reorderThreadNV(hObj);
+    hitObjectExecuteShaderNV(hObj, 0);
+  }
+  else
+  {
+    traceRayEXT(topLevelAS, rayFlags, 0xFF, 0, 0, 0, r.origin, EPSILON, r.direction, INFINITE, 0);
+  }
   seed = hitPayload.seed;
 }
 
 //-----------------------------------------------------------------------
 // Shadow ray - return true if a ray hits anything
 //
-bool traceShadow(Ray r, float maxDist, inout uint seed)
+vec3 traceShadow(Ray r, float maxDist, inout uint seed)
 {
-  hitPayload.hitT = 0.0F;
-  hitPayload.seed = seed;
-  uint rayFlags = gl_RayFlagsNoneEXT | gl_RayFlagsCullBackFacingTrianglesEXT;  //TerminateOnFirstHitEXT | gl_RayFlagsSkipClosestHitShaderEXT;
-  traceRayEXT(topLevelAS, rayFlags, 0xFF, 0, 0, 0, r.origin, EPSILON, r.direction, maxDist, 0);
+  shadowPayload.hitT              = 0.0F;
+  shadowPayload.seed              = seed;
+  shadowPayload.totalTransmission = vec3(1, 1, 1);
+  shadowPayload.isInside          = false;
+  uint rayFlags                   = gl_RayFlagsNoneEXT;
+  traceRayEXT(topLevelAS, rayFlags, 0xFF, 1, 0, 1, r.origin, EPSILON, r.direction, maxDist, 1);
   bool isHit = (hitPayload.hitT != INFINITE);  // payload will change if miss shader is invoked
   seed       = hitPayload.seed;
-  return isHit;
+  return shadowPayload.totalTransmission;
 }
 
 //-----------------------------------------------------------------------

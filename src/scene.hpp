@@ -101,19 +101,22 @@ public:
 
   // Utility
   void recreateTangents(bool onlyFix);
+  void generateHdrMipmap(VkCommandBuffer cmd, Resources& res);
 
 
-  std::unique_ptr<nvh::gltf::Scene>             m_gltfScene{};     // The glTF scene
-  std::unique_ptr<nvvkhl::SceneRtx>             m_gltfSceneRtx{};  // The Vulkan scene with RTX acceleration structures
-  std::unique_ptr<nvvkhl::SceneVk>              m_gltfSceneVk{};   // The Vulkan scene
-  std::unique_ptr<nvvkhl::HdrEnv>               m_hdrEnv{};        // The HDR environment
-  std::unique_ptr<nvvkhl::HdrEnvDome>           m_hdrDome{};       // The HDR environment dome (raster)
-  std::unique_ptr<nvvkhl::PhysicalSkyDome>      m_sky{};           // The sky dome
-  std::unique_ptr<nvvk::DescriptorSetContainer> m_sceneSet{};      // The descriptor set for the scene
+  std::unique_ptr<nvh::gltf::Scene>        m_gltfScene{};     // The glTF scene
+  std::unique_ptr<nvvkhl::SceneRtx>        m_gltfSceneRtx{};  // The Vulkan scene with RTX acceleration structures
+  std::unique_ptr<nvvkhl::SceneVk>         m_gltfSceneVk{};   // The Vulkan scene
+  std::unique_ptr<nvvkhl::HdrEnv>          m_hdrEnv{};        // The HDR environment
+  std::unique_ptr<nvvkhl::HdrEnvDome>      m_hdrDome{};       // The HDR environment dome (raster)
+  std::unique_ptr<nvvkhl::PhysicalSkyDome> m_sky{};           // The sky dome
+
+  VkDescriptorPool      m_descriptorPool{};  // Scene descriptor pool, frame info + scene buffer address + textures
+  VkDescriptorSetLayout m_sceneDescriptorSetLayout{};  // Descriptor set layout for the scene
+  VkDescriptorSet m_sceneDescriptorSet{};  // Application descriptor set (storing all textures + scene and frame info)
 
   DH::SceneFrameInfo m_sceneFrameInfo{};      // Used to pass the scene information to the shaders
   nvvk::Buffer       m_sceneFrameInfoBuffer;  // Buffer for the scene information
-
 
 private:
   // Scene creation
@@ -125,7 +128,9 @@ private:
   bool updateFrameCount(Settings& settings);
 
   // Descriptor set management
-  void createDescriptorSet(Resources& resources);
+  void createDescriptorPool(VkDevice device);
+  void createDescriptorSet(VkDevice device);
+  void destroyDescriptorSet(VkDevice device);
   void writeDescriptorSet(Resources& resources) const;
 
 
@@ -134,6 +139,7 @@ private:
   std::unique_ptr<GltfModelUI> m_sceneGraph;               // Scene graph (UI)
   std::string                  m_hdrFilename;              // Keep track of HDR filename
   int                          m_selectedRenderNode = -1;  // Selected render node
+
 
 public:
   enum DirtyFlags
