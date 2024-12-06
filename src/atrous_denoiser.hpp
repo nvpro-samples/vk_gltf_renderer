@@ -47,7 +47,7 @@ public:
       : PushComputeDispatcher(res.ctx.device)
   {
 
-    VkShaderModuleCreateInfo shaderModuleCreateInfo;
+    VkShaderModuleCreateInfo shaderModuleCreateInfo{.sType = VK_STRUCTURE_TYPE_SHADER_MODULE_CREATE_INFO};
     if(res.hasSlangCompiler() && g_forceExternalShaders)
     {
 
@@ -59,7 +59,9 @@ public:
     else
     {
       // Pre-compiled version
-      shaderModuleCreateInfo = {.codeSize = sizeof(denoise_comp_glsl), .pCode = &denoise_comp_glsl[0]};
+      shaderModuleCreateInfo = {.sType    = VK_STRUCTURE_TYPE_SHADER_MODULE_CREATE_INFO,
+                                .codeSize = sizeof(denoise_comp_glsl),
+                                .pCode    = &denoise_comp_glsl[0]};
     }
 
     PushComputeDispatcher::getBindings().addBinding(eNoisyImage, VK_DESCRIPTOR_TYPE_STORAGE_IMAGE, 1, VK_SHADER_STAGE_COMPUTE_BIT);

@@ -136,13 +136,13 @@ std::string gltfr::Scene::getFilename() const
 
 //--------------------------------------------------------------------------------------------------
 // Recreating the tangents of the scene
-void gltfr::Scene::recreateTangents(bool onlyFix)
+void gltfr::Scene::recreateTangents(bool mikktspace)
 {
   if(m_gltfScene && m_gltfScene->valid())
   {
     {
       nvh::ScopedTimer st(std::string("\n") + __FUNCTION__);
-      recomputeTangents(m_gltfScene->getModel(), false, onlyFix);
+      recomputeTangents(m_gltfScene->getModel(), true, mikktspace);
     }
     m_dirtyFlags.set(eVulkanAttributes);
     resetFrameCount();
@@ -653,7 +653,7 @@ nvh::Bbox gltfr::Scene::getRenderNodeBbox(int nodeID) const
   const nvh::gltf::RenderNode&      renderNode      = m_gltfScene->getRenderNodes()[nodeID];
   const nvh::gltf::RenderPrimitive& renderPrimitive = m_gltfScene->getRenderPrimitive(renderNode.renderPrimID);
   const tinygltf::Model&            model           = m_gltfScene->getModel();
-  const tinygltf::Accessor&         accessor = model.accessors[renderPrimitive.primitive.attributes.at("POSITION")];
+  const tinygltf::Accessor&         accessor = model.accessors[renderPrimitive.pPrimitive->attributes.at("POSITION")];
 
   glm::vec3 minValues = {-1.f, -1.f, -1.f};
   glm::vec3 maxValues = {1.f, 1.f, 1.f};

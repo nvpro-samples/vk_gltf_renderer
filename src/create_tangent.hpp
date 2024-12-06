@@ -19,4 +19,4 @@
 #pragma once
 
 #include <tiny_gltf.h>
-void recomputeTangents(tinygltf::Model& model, bool forceCreation, bool onlyFix);
+void recomputeTangents(tinygltf::Model& model, bool forceCreation, bool mikktspace);

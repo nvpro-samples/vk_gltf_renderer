@@ -51,6 +51,12 @@
 #include "stb_image.h"
 #include "doc/app_icon_png.h"
 #include "collapsing_header_manager.h"
+#include "perproject_globals.hpp"
+#include "nvvk/nsight_aftermath_vk.hpp"
+
+// #define USE_AFTERMATH
+// For debugging GPU crashes
+//  In CMake, set -DNSIGHT_AFTERMATH_SKD=<path_to_sdk> to have "Aftermath available"
 
 // #define USE_DGBPRINTF
 // With USE_DGBPRINTF defined, the application will have the capability to use the debug printf extension.
@@ -337,17 +343,17 @@ public:
         doReloadShaders |= ImGui::MenuItem("Reload Shaders", "Ctrl+R");
         ImGui::Separator();
       }
-      bool recreate = ImGui::MenuItem("Recreate Tangents");
+      bool recreate = ImGui::MenuItem("Recreate Tangents - Simple");
       ImGui::SetItemTooltip("This recreate all tangents using MikkTSpace");
-      bool fix = ImGui::MenuItem("Fix Tangents");
+      bool mikktspace = ImGui::MenuItem("Recreate Tangents - MikkTSpace");
       ImGui::SetItemTooltip("This fixes NULL tangents");
 
-      if(recreate || fix)
+      if(recreate || mikktspace)
       {
         vkDeviceWaitIdle(m_resources.ctx.device);
         m_busy.start("Recreate Tangents");
-        std::thread([&, fix]() {
-          m_scene.recreateTangents(fix);
+        std::thread([&, mikktspace]() {
+          m_scene.recreateTangents(mikktspace);
           m_busy.stop();
         }).detach();
       }
@@ -741,6 +747,27 @@ auto main(int argc, char** argv) -> int
   vkSetup.deviceExtensions.emplace_back(VK_EXT_SHADER_OBJECT_EXTENSION_NAME, &shaderObjFeature);
   vkSetup.deviceExtensions.emplace_back(VK_EXT_NESTED_COMMAND_BUFFER_EXTENSION_NAME, &nestedCmdFeature);
   vkSetup.deviceExtensions.emplace_back(VK_NV_RAY_TRACING_INVOCATION_REORDER_EXTENSION_NAME, &reorderFeature, false);
+
+#ifdef USE_AFTERMATH
+  // #Aftermath - Initialization
+  nvvk::GpuCrashTracker gpuCrashTracker;
+  static VkDeviceDiagnosticsConfigCreateInfoNV aftermathInfo{VK_STRUCTURE_TYPE_DEVICE_DIAGNOSTICS_CONFIG_CREATE_INFO_NV};
+  if(::isAftermathAvailable())  // Check if the Aftermath SDK is available (See CMake path)
+  {
+    gpuCrashTracker.initialize();
+    aftermathInfo.flags =
+        (VK_DEVICE_DIAGNOSTICS_CONFIG_ENABLE_RESOURCE_TRACKING_BIT_NV  // Additional information about the resource related to a GPU virtual address
+         | VK_DEVICE_DIAGNOSTICS_CONFIG_ENABLE_AUTOMATIC_CHECKPOINTS_BIT_NV  // Automatic checkpoints for all draw calls (ADD OVERHEAD)
+         | VK_DEVICE_DIAGNOSTICS_CONFIG_ENABLE_SHADER_DEBUG_INFO_BIT_NV);  // instructs the shader compiler to generate debug information (ADD OVERHEAD)
+    vkSetup.deviceExtensions.emplace_back(VK_NV_DEVICE_DIAGNOSTIC_CHECKPOINTS_EXTENSION_NAME);
+    vkSetup.deviceExtensions.emplace_back(VK_NV_DEVICE_DIAGNOSTICS_CONFIG_EXTENSION_NAME, &aftermathInfo);
+    LOGW(
+        "\n-------------------------------------------------------------------"
+        "\nWARNING: Aftermath extensions enabled. This may affect performance."
+        "\n-------------------------------------------------------------------\n\n");
+  }
+#endif  // USE_AFTERMATH
+
 
   // Request the creation of all needed queues
   vkSetup.queues = {VK_QUEUE_GRAPHICS_BIT | VK_QUEUE_TRANSFER_BIT | VK_QUEUE_COMPUTE_BIT,  // GTC for rendering

@@ -100,7 +100,7 @@ public:
   std::string getFilename() const;
 
   // Utility
-  void recreateTangents(bool onlyFix);
+  void recreateTangents(bool mikktspace);
   void generateHdrMipmap(VkCommandBuffer cmd, Resources& res);
 
 
