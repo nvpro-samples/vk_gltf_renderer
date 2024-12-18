@@ -50,7 +50,7 @@ HitState getHitState(in RenderPrimitive renderPrim,      // Buffer containing al
     N       = getInterpolatedVertexNormal(renderPrim, triangleIndex, barycentrics);
     hit.nrm = normalize(vec3(N * worldToObject));
   }
-
+  
   // TexCoord
   hit.uv[0] = getInterpolatedVertexTexCoord0(renderPrim, triangleIndex, barycentrics);
   hit.uv[1] = getInterpolatedVertexTexCoord1(renderPrim, triangleIndex, barycentrics);

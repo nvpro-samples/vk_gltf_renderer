@@ -237,6 +237,15 @@ bool RendererPathtracer::initShaders(Resources& res, bool reload)
     m_shaderModules[eIndirect]   = nvvk::createShaderModule(m_device, comp_shd);
   }
 
+  m_dutil->DBG_NAME(m_shaderModules[eRaygen]);
+  m_dutil->DBG_NAME(m_shaderModules[eMiss]);
+  m_dutil->DBG_NAME(m_shaderModules[eShadowMiss]);
+  m_dutil->DBG_NAME(m_shaderModules[eClosestHit]);
+  m_dutil->DBG_NAME(m_shaderModules[eAnyHit]);
+  m_dutil->DBG_NAME(m_shaderModules[eShadowCH]);
+  m_dutil->DBG_NAME(m_shaderModules[eShadowAH]);
+  m_dutil->DBG_NAME(m_shaderModules[eIndirect]);
+
   return true;
 }
 

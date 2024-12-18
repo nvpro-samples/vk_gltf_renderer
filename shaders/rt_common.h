@@ -128,15 +128,15 @@ float getOpacity(RenderNode renderNode, RenderPrimitive renderPrim, int triangle
   if(mat.alphaMode == ALPHA_OPAQUE)
     return 1.0;
 
-  float baseColorAlpha = 0;
+  // Getting the 3 indices of the triangle (local)
+  uvec3 triangleIndex = getTriangleIndices(renderPrim, triangleID);
+
+  float baseColorAlpha = 1;
   if(mat.usePbrSpecularGlossiness == 0)
   {
     baseColorAlpha = mat.pbrBaseColorFactor.a;
     if(isTexturePresent(mat.pbrBaseColorTexture))
     {
-      // Getting the 3 indices of the triangle (local)
-      uvec3 triangleIndex = getTriangleIndices(renderPrim, triangleID);
-
       // Retrieve the interpolated texture coordinate from the vertex
       vec2 uv = getInterpolatedVertexTexCoord0(renderPrim, triangleIndex, barycentrics);
 
@@ -145,28 +145,23 @@ float getOpacity(RenderNode renderNode, RenderPrimitive renderPrim, int triangle
   }
   else
   {
-    vec4 diffuse = mat.pbrDiffuseFactor;
+    baseColorAlpha = mat.pbrDiffuseFactor.a;
     if(isTexturePresent(mat.pbrDiffuseTexture))
     {
-      uvec3 triangleIndex = getTriangleIndices(renderPrim, triangleID);
       vec2 uv = getInterpolatedVertexTexCoord0(renderPrim, triangleIndex, barycentrics);
 
-      diffuse *= texture(texturesMap[nonuniformEXT(mat.pbrDiffuseTexture.index)], uv).a;
+      baseColorAlpha *= texture(texturesMap[nonuniformEXT(mat.pbrDiffuseTexture.index)], uv).a;
     }
-    baseColorAlpha = diffuse.a;
   }
 
-  float opacity;
+  baseColorAlpha *= getInterpolatedVertexColor(renderPrim, triangleIndex, barycentrics).a;
+
   if(mat.alphaMode == ALPHA_MASK)
   {
-    opacity = baseColorAlpha > mat.alphaCutoff ? 1.0 : 0.0;
+    return  baseColorAlpha >= mat.alphaCutoff ? 1.0 : 0.0;
   }
-  else
-  {
-    opacity = baseColorAlpha;
-  }
-
-  return opacity;
+ 
+  return baseColorAlpha;
 }
 
 vec3 getShadowTransmission(RenderNode      renderNode,

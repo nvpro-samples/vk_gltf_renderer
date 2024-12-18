@@ -173,6 +173,9 @@ bool RendererRaster::initShaders(Resources& res, bool reload)
     m_shaderModules[eFragmentOverlay] = nvvk::createShaderModule(m_device, overlay_shd);
   }
 
+  m_dbgUtil->DBG_NAME(m_shaderModules[eVertex]);
+  m_dbgUtil->DBG_NAME(m_shaderModules[eFragment]);
+  m_dbgUtil->DBG_NAME(m_shaderModules[eFragmentOverlay]);
 
   return true;
 }
