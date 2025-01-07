@@ -12,6 +12,32 @@ struct SampleResult
   float depth;
 };
 
+vec3 debugValue(PbrMaterial pbrMat, HitState hit, int dbgMethod)
+{
+  switch(dbgMethod)
+  {
+    case eDbgMethod_metallic:
+      return vec3(pbrMat.metallic);
+    case eDbgMethod_roughness:
+      return vec3(pbrMat.roughness.xyx);
+    case eDbgMethod_normal:
+      return vec3(pbrMat.N * .5 + .5);
+    case eDbgMethod_tangent:
+      return pbrMat.T * .5 + .5;
+    case eDbgMethod_bitangent:
+      return pbrMat.B * .5 + .5;
+    case eDbgMethod_baseColor:
+      return vec3(pbrMat.baseColor);
+    case eDbgMethod_emissive:
+      return vec3(pbrMat.emissive);
+    case eDbgMethod_opacity:
+      return vec3(pbrMat.opacity * (1.0 - pbrMat.transmission));
+    case eDbgMethod_texCoord0:
+      return vec3(hit.uv[0], 0);
+    case eDbgMethod_texCoord1:
+      return vec3(hit.uv[1], 0);
+  }
+}
 
 // --------------------------------------------------------------------
 // Sampling the Sun or the HDR
@@ -158,9 +184,9 @@ float getOpacity(RenderNode renderNode, RenderPrimitive renderPrim, int triangle
 
   if(mat.alphaMode == ALPHA_MASK)
   {
-    return  baseColorAlpha >= mat.alphaCutoff ? 1.0 : 0.0;
+    return baseColorAlpha >= mat.alphaCutoff ? 1.0 : 0.0;
   }
- 
+
   return baseColorAlpha;
 }
 
@@ -333,7 +359,7 @@ SampleResult pathTrace(Ray r, inout uint seed)
         {
           vec3 dir                  = rotate(r.direction, vec3(0, 1, 0), -frameInfo.envRotation);
           vec2 uv                   = getSphericalUv(dir);  // See sampling.glsl
-          sampleResult.radiance.xyz = smoothHDRBlur(hdrTexture, uv, frameInfo.envBlur).xyz;
+          sampleResult.radiance.xyz = smoothHDRBlur(hdrTexture, uv, frameInfo.envBlur).xyz * frameInfo.envIntensity.xyz;
           return sampleResult;
         }
       }
@@ -385,6 +411,14 @@ SampleResult pathTrace(Ray r, inout uint seed)
     // by forcing subsequent bounces to be at least as rough
     maxRoughness     = max(pbrMat.roughness, maxRoughness);
     pbrMat.roughness = maxRoughness;
+
+    // Debugging, single frame
+    if(pc.dbgMethod != eDbgMethod_none && firstRay)
+    {
+      sampleResult.radiance.xyz = debugValue(pbrMat, hit, pc.dbgMethod);
+      sampleResult.radiance.a   = 1.0;
+      return sampleResult;
+    }
 
     // Adding emissive
     radiance += pbrMat.emissive * throughput;
@@ -561,7 +595,7 @@ vec3 debugRendering(vec2 samplePos, vec2 imageSize)
     case eDbgMethod_metallic:
       return vec3(pbrMat.metallic);
     case eDbgMethod_roughness:
-      return vec3(pbrMat.roughness.xy, 0);
+      return vec3(pbrMat.roughness.xyx);
     case eDbgMethod_normal:
       return vec3(pbrMat.N * .5 + .5);
     case eDbgMethod_tangent:

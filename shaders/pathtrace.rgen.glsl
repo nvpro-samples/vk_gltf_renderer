@@ -1,5 +1,5 @@
 /*
- * Copyright (c) 2019-2024, NVIDIA CORPORATION.  All rights reserved.
+ * Copyright (c) 2019-2025, NVIDIA CORPORATION.  All rights reserved.
  *
  * Licensed under the Apache License, Version 2.0 (the "License");
  * you may not use this file except in compliance with the License.
@@ -13,7 +13,7 @@
  * See the License for the specific language governing permissions and
  * limitations under the License.
  *
- * SPDX-FileCopyrightText: Copyright (c) 2019-2024, NVIDIA CORPORATION.
+ * SPDX-FileCopyrightText: Copyright (c) 2019-2025, NVIDIA CORPORATION.
  * SPDX-License-Identifier: Apache-2.0
  */
 #version 460
@@ -56,18 +56,6 @@ void main()
 {
   vec2 imageSize = gl_LaunchSizeEXT.xy;
   vec2 samplePos = vec2(gl_LaunchIDEXT.xy);
-
-  // Debugging, single frame
-  if(pc.dbgMethod != eDbgMethod_none)
-  {
-    if(frameInfo.frameCount == 0)
-    {
-      vec3 result = debugRendering(samplePos, imageSize);
-      imageStore(image, ivec2(samplePos.xy), vec4(result, 1.0F));
-      selectObject(samplePos, imageSize);
-    }
-    return;
-  }
 
   // Initialize the random number
   uint seed = xxhash32(uvec3(gl_LaunchIDEXT.xy, frameInfo.frameCount));

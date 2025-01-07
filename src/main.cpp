@@ -1,5 +1,5 @@
 /*
- * Copyright (c) 2024, NVIDIA CORPORATION.  All rights reserved.
+ * Copyright (c) 2024-2025, NVIDIA CORPORATION.  All rights reserved.
  *
  * Licensed under the Apache License, Version 2.0 (the "License");
  * you may not use this file except in compliance with the License.
@@ -13,7 +13,7 @@
  * See the License for the specific language governing permissions and
  * limitations under the License.
  *
- * SPDX-FileCopyrightText: Copyright (c) 2014-2024 NVIDIA CORPORATION
+ * SPDX-FileCopyrightText: Copyright (c) 2024-2025, NVIDIA CORPORATION.
  * SPDX-License-Identifier: Apache-2.0
  */
 
@@ -385,10 +385,13 @@ public:
 
     if(saveImageFile)
     {
-      std::string filename = getSaveImage();
+
+      std::filesystem::path filename = getSaveImage();
+      // filename = std::filesystem::path(m_scene.getFilename()).stem().replace_extension(".jpg");
+      // filename = std::filesystem::path("C:/temp") / filename;
       if(!filename.empty())
       {
-        saveRenderedImage(filename);
+        saveRenderedImage(filename.string());
       }
     }
 
@@ -799,17 +802,17 @@ auto main(int argc, char** argv) -> int
   load_VK_EXTENSIONS(vkContext->getInstance(), vkGetInstanceProcAddr, vkContext->getDevice(), vkGetDeviceProcAddr);
 
   // Setup the application information
-  nvvkhl::ApplicationCreateInfo spec;
-  spec.name             = PROJECT_NAME " Sample";
-  spec.vSync            = false;
-  spec.instance         = vkContext->getInstance();
-  spec.device           = vkContext->getDevice();
-  spec.physicalDevice   = vkContext->getPhysicalDevice();
-  spec.queues           = vkContext->getQueueInfos();
-  spec.imguiConfigFlags = ImGuiConfigFlags_NavEnableKeyboard | ImGuiConfigFlags_DockingEnable;
+  nvvkhl::ApplicationCreateInfo appInfo;
+  appInfo.name             = PROJECT_NAME " Sample";
+  appInfo.vSync            = false;
+  appInfo.instance         = vkContext->getInstance();
+  appInfo.device           = vkContext->getDevice();
+  appInfo.physicalDevice   = vkContext->getPhysicalDevice();
+  appInfo.queues           = vkContext->getQueueInfos();
+  appInfo.imguiConfigFlags = ImGuiConfigFlags_NavEnableKeyboard | ImGuiConfigFlags_DockingEnable;
 
   // Create the application
-  auto app = std::make_unique<nvvkhl::Application>(spec);
+  auto app = std::make_unique<nvvkhl::Application>(appInfo);
 
   setWindowIcon(app->getWindowHandle());
 
