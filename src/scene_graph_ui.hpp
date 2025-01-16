@@ -1,5 +1,5 @@
 /*
- * Copyright (c) 2024, NVIDIA CORPORATION.  All rights reserved.
+ * Copyright (c) 2024-2025, NVIDIA CORPORATION.  All rights reserved.
  *
  * Licensed under the Apache License, Version 2.0 (the "License");
  * you may not use this file except in compliance with the License.
@@ -13,7 +13,7 @@
  * See the License for the specific language governing permissions and
  * limitations under the License.
  *
- * SPDX-FileCopyrightText: Copyright (c) 2014-2024 NVIDIA CORPORATION
+ * SPDX-FileCopyrightText: Copyright (c) 2024-2025, NVIDIA CORPORATION.
  * SPDX-License-Identifier: Apache-2.0
  */
 
@@ -68,6 +68,19 @@ private:
   void renderLight(int lightIndex);
   void renderCamera(int cameraIndex);
   void renderMaterial(int materialIndex);
+
+  void materialAnisotropy(tinygltf::Material& material);
+  void materialClearcoat(tinygltf::Material& material);
+  void materialDiffuseTransmission(tinygltf::Material& material);
+  void materialDispersion(tinygltf::Material& material);
+  void materialEmissiveStrength(tinygltf::Material& material);
+  void materialIor(tinygltf::Material& material);
+  void materialIridescence(tinygltf::Material& material);
+  void materialSheen(tinygltf::Material& material);
+  void materialSpecular(tinygltf::Material& material);
+  void materialTransmission(tinygltf::Material& material);
+  void materialVolume(tinygltf::Material& material);
+
   void renderNodeDetails(int nodeIndex);
   void renderLightDetails(int lightIndex);
 

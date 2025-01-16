@@ -447,7 +447,7 @@ SampleResult pathTrace(Ray r, inout uint seed)
     vec3  lightRadianceOverPdf = sampleLights(hit.pos, pbrMat.N, r.direction, seed, dirToLight, lightPdf, lightDist);
 
     // Do not next event estimation (but delay the adding of contribution)
-    bool nextEventValid = (dot(dirToLight, hit.geonrm) > 0.0f) && lightPdf != 0.0f;
+    bool nextEventValid = (dot(dirToLight, hit.geonrm) > 0.0f || pbrMat.diffuseTransmissionFactor > 0.0f) && lightPdf != 0.0f;
 
     // Evaluate BSDF for Light
     if(nextEventValid)
@@ -513,7 +513,8 @@ SampleResult pathTrace(Ray r, inout uint seed)
     // We are adding the contribution to the radiance only if the ray is not occluded by an object.
     if(nextEventValid)
     {
-      vec3 shadowRayOrigin = offsetRay(hit.pos, hit.geonrm);
+      // shadow origin is the hit position offset by a small amount in the direction of the light
+      vec3 shadowRayOrigin = offsetRay(hit.pos, (dot(dirToLight, hit.geonrm) > 0.0f) ? hit.geonrm : -hit.geonrm);
       Ray  shadowRay       = Ray(shadowRayOrigin, dirToLight);
       vec3 shadowFactor    = traceShadow(shadowRay, lightDist, seed);
       // We are adding the contribution to the radiance only if the ray is not occluded by an object.
