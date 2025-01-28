@@ -33,7 +33,7 @@ set(NVPRO_SHADERS_DIR ${NVPRO_CORE_DIR}/nvvkhl/shaders)
 #####################################################################################
 # Adding Slang
 list(APPEND CMAKE_MODULE_PATH "${CMAKE_CURRENT_SOURCE_DIR}/cmake")
-set(Slang_VERSION "2024.1.30")
+set(Slang_VERSION "2025.3.1")
 find_package(Slang)
 include(${CMAKE_CURRENT_SOURCE_DIR}/cmake/slang.cmake)
 

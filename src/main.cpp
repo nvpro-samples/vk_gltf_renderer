@@ -32,7 +32,6 @@
 // NV Vulkan headers
 #include "nvvk/extensions_vk.hpp"
 #include "nvvk/raypicker_vk.hpp"
-#include "nvvkhl/element_benchmark_parameters.hpp"
 #include "nvvkhl/element_camera.hpp"
 #include "nvvkhl/element_dbgprintf.hpp"
 #include "nvvkhl/element_logger.hpp"
@@ -45,7 +44,6 @@
 #include "renderer.hpp"
 #include "scene.hpp"
 #include "settings.hpp"
-#include "settings_handler.hpp"
 #include "utilities.hpp"
 #include "vk_context.hpp"
 #include "stb_image.h"
@@ -72,16 +70,16 @@
 // The above command will run the benchmark test for 1000 frames and save the screenshot to "screenshots.png".
 
 
-std::shared_ptr<nvvkhl::ElementCamera>              g_elemCamera;     // The camera element (UI and movement)
-std::shared_ptr<nvvkhl::ElementProfiler>            g_elemProfiler;   // GPU profiler
-std::shared_ptr<nvvkhl::ElementBenchmarkParameters> g_elemBenchmark;  // Benchmark parameters
-std::shared_ptr<nvvkhl::ElementDbgPrintf>           g_elemDebugPrintf;
-std::shared_ptr<nvvkhl::SampleAppLog>               g_elemLogger;              // Log window
-std::vector<std::string>                            g_applicationSearchPaths;  // Search paths for resources
+std::shared_ptr<nvvkhl::ElementCamera>    g_elemCamera;    // The camera element (UI and movement)
+std::shared_ptr<nvvkhl::ElementProfiler>  g_elemProfiler;  // GPU profiler
+std::shared_ptr<nvvkhl::ElementDbgPrintf> g_elemDebugPrintf;
+std::shared_ptr<nvvkhl::SampleAppLog>     g_elemLogger;              // Log window
+std::vector<std::string>                  g_applicationSearchPaths;  // Search paths for resources
 
 
 // Default scene elements
 std::string g_inFilename;
+std::string g_outImageFilename;
 std::string g_inHdr;
 
 namespace PE = ImGuiH::PropertyEditor;
@@ -102,9 +100,6 @@ public:
   void onAttach(nvvkhl::Application* app) override
   {
     m_app = app;
-
-    // Override the way benchmark count frames, to only use valid ones
-    g_elemBenchmark->setCurrentFrame([&] { return m_scene.m_sceneFrameInfo.frameCount; });
 
     // Getting all required resources
     gltfr::VulkanInfo ctx;
@@ -136,8 +131,15 @@ public:
     }
     if(!g_inFilename.empty())
     {
-      // Load the glTF file in a separate thread
-      onFileDrop(g_inFilename.c_str());
+      if(m_app->isHeadless())
+      {
+        m_scene.load(m_resources, g_inFilename);
+      }
+      else
+      {
+        // Load the glTF file in a separate thread
+        onFileDrop(g_inFilename.c_str());
+      }
     }
   }
 
@@ -266,7 +268,7 @@ public:
         float  size        = 25.F;
         ImVec2 window_pos  = ImGui::GetWindowPos();
         ImVec2 window_size = ImGui::GetWindowSize();
-        ImVec2 offset      = ImVec2(size * 1.1F, -size * 1.1F) * ImGui::GetWindowDpiScale();
+        ImVec2 offset      = ImVec2(size * 1.1F, -size * 1.1F) * ImGui::GetIO().FontGlobalScale;
         ImVec2 pos         = ImVec2(window_pos.x, window_pos.y + window_size.y) + offset;
         ImGuiH::Axis(pos, CameraManip.getMatrix(), size);
       }
@@ -438,23 +440,13 @@ public:
 
   void saveRenderedImage(const std::string& filename)
   {
-    VkDevice         device         = m_app->getDevice();
-    VkPhysicalDevice physicalDevice = m_app->getPhysicalDevice();
-    VkImage          srcImage       = m_resources.m_finalImage->getColorImage();
-    VkExtent2D       size           = m_resources.m_finalImage->getSize();
-    VkImage          dstImage       = {};
-    VkDeviceMemory   dstImageMemory = {};
+    m_app->saveImageToFile(m_resources.m_finalImage->getColorImage(), m_resources.m_finalImage->getSize(), filename);
+  }
 
-    VkCommandBuffer cmd = m_app->createTempCmdBuffer();
-    imageToRgba8Linear(cmd, device, physicalDevice, srcImage, size, dstImage, dstImageMemory);
-    m_app->submitAndWaitTempCmdBuffer(cmd);
-
-    saveImageToFile(device, dstImage, dstImageMemory, size, filename);
-
-    // Clean up resources
-    vkUnmapMemory(device, dstImageMemory);
-    vkFreeMemory(device, dstImageMemory, nullptr);
-    vkDestroyImage(device, dstImage, nullptr);
+  void onLastHeadlessFrame() override
+  {
+    std::filesystem::path filename(m_scene.getFilename());
+    saveRenderedImage(g_outImageFilename.empty() ? filename.replace_extension(".jpg").string() : g_outImageFilename);
   }
 
   //--------------------------------------------------------------------------------------------------
@@ -679,7 +671,7 @@ private:
   std::unique_ptr<gltfr::Renderer>    m_renderer{};
   nvvkhl::TonemapperPostProcess       m_tonemapper;
   std::unique_ptr<nvvk::RayPickerKHR> m_picker{};
-  SettingsHandler                     m_settingsHandler;
+  ImGuiH::SettingsHandler             m_settingsHandler;
   BusyWindow                          m_busy;
 };
 
@@ -705,6 +697,28 @@ static void setWindowIcon(GLFWwindow* window)
 ///
 auto main(int argc, char** argv) -> int
 {
+  nvvkhl::ApplicationCreateInfo appInfo;
+  appInfo.name  = nvh::getExecutablePath().stem().string();
+  appInfo.vSync = false;
+
+  nvh::CommandLineParser cli(appInfo.name);
+  cli.addFilename(".gltf", &g_inFilename, "Load GLTF|GLB files");
+  cli.addFilename(".glb", &g_inFilename, "");
+  cli.addFilename(".hdr", &g_inHdr, "Load HDR environment file");
+
+  cli.addArgument({"-o", "--out"}, &g_outImageFilename, "In Headless, the output name");
+
+  cli.addArgument({"--headless"}, &appInfo.headless, "Run in headless mode");
+  cli.addArgument({"--frames"}, &appInfo.headlessFrameCount, "Number of frames to render in headless mode");
+  cli.addArgument({"--size"}, &appInfo.windowSize, "Window size in [W H] format");
+  cli.addArgument({"--vsync"}, &appInfo.vSync, "Turn on vsync");
+  cli.addArgument({"--maxDepth"}, &gltfr::g_pathtraceSettings.maxDepth);
+  cli.addArgument({"--maxSamples"}, &gltfr::g_pathtraceSettings.maxSamples);
+  cli.addArgument({"--renderMode"}, (int*)&gltfr::g_pathtraceSettings.renderMode);
+  cli.addArgument({"--forceExternalShaders"}, &gltfr::g_forceExternalShaders);
+  cli.parse(argc, argv);
+
+
 #ifdef USE_DGBPRINTF
   g_elemDebugPrintf = std::make_shared<nvvkhl::ElementDbgPrintf>();
 #endif
@@ -714,7 +728,7 @@ auto main(int argc, char** argv) -> int
   g_applicationSearchPaths.push_back(std::string("GLSL_" PROJECT_NAME));
   // Search path for shaders within the project
   g_applicationSearchPaths.push_back(NVPSystem::exePath() + std::string(PROJECT_RELDIRECTORY) + "shaders");
-  g_applicationSearchPaths.push_back(NVPRO_CORE_DIR);
+  g_applicationSearchPaths.push_back(PROJECT_NVPRO_CORE_RELDIRECTORY);
   // INSTALL_RELDIRECTORY is defined in CMakeLists.txt
   g_applicationSearchPaths.push_back(NVPSystem::exePath() + std::string("GLSL_" PROJECT_NAME));
   g_applicationSearchPaths.push_back(NVPSystem::exePath() + "media");
@@ -728,9 +742,12 @@ auto main(int argc, char** argv) -> int
 
   // Vulkan Context creation information
   VkContextSettings vkSetup;
-  nvvkhl::addSurfaceExtensions(vkSetup.instanceExtensions);
+  if(!appInfo.headless)
+  {
+    nvvkhl::addSurfaceExtensions(vkSetup.instanceExtensions);
+    vkSetup.deviceExtensions.emplace_back(VK_KHR_SWAPCHAIN_EXTENSION_NAME);
+  }
   vkSetup.instanceExtensions.emplace_back(VK_EXT_DEBUG_UTILS_EXTENSION_NAME);
-  vkSetup.deviceExtensions.emplace_back(VK_KHR_SWAPCHAIN_EXTENSION_NAME);
 
   // All Vulkan extensions required by the sample
   VkPhysicalDeviceAccelerationStructureFeaturesKHR accel_feature{VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_ACCELERATION_STRUCTURE_FEATURES_KHR};
@@ -802,9 +819,6 @@ auto main(int argc, char** argv) -> int
   load_VK_EXTENSIONS(vkContext->getInstance(), vkGetInstanceProcAddr, vkContext->getDevice(), vkGetDeviceProcAddr);
 
   // Setup the application information
-  nvvkhl::ApplicationCreateInfo appInfo;
-  appInfo.name             = PROJECT_NAME " Sample";
-  appInfo.vSync            = false;
   appInfo.instance         = vkContext->getInstance();
   appInfo.device           = vkContext->getDevice();
   appInfo.physicalDevice   = vkContext->getPhysicalDevice();
@@ -814,31 +828,20 @@ auto main(int argc, char** argv) -> int
   // Create the application
   auto app = std::make_unique<nvvkhl::Application>(appInfo);
 
-  setWindowIcon(app->getWindowHandle());
+  if(!appInfo.headless)
+  {
+    setWindowIcon(app->getWindowHandle());
+  }
 
   // Create Elements of the application
   g_elemCamera      = std::make_shared<nvvkhl::ElementCamera>();
   g_elemProfiler    = std::make_shared<nvvkhl::ElementProfiler>(false);
-  g_elemBenchmark   = std::make_shared<nvvkhl::ElementBenchmarkParameters>(argc, argv);
   auto gltfRenderer = std::make_shared<gltfr::GltfRendererElement>();  // This is the main element of the application
 
-  // Parsing arguments
-  g_elemBenchmark->parameterLists().addFilename(".gltf|load a file", &g_inFilename);
-  g_elemBenchmark->parameterLists().addFilename(".glb|load a file", &g_inFilename);
-  g_elemBenchmark->parameterLists().add("hdr|load a HDR", &g_inHdr);
-  g_elemBenchmark->setProfiler(g_elemProfiler);  // Linking the profiler to the benchmark parameters
-
-  g_elemBenchmark->parameterLists().add("maxDepth", &gltfr::g_pathtraceSettings.maxDepth);
-  g_elemBenchmark->parameterLists().add("maxSamples", &gltfr::g_pathtraceSettings.maxSamples);
-  g_elemBenchmark->parameterLists().add("renderMode", (int*)&gltfr::g_pathtraceSettings.renderMode);
-
-  g_elemBenchmark->parameterLists().add("forceExternalShaders", &gltfr::g_forceExternalShaders, true);
-
-
-  app->addElement(g_elemBenchmark);  // Benchmark/tests and parameters
-  app->addElement(gltfRenderer);     // Rendering the glTF scene
-  app->addElement(g_elemCamera);     // Controlling the camera movement
-  app->addElement(g_elemProfiler);   // GPU Profiler
+  // All the elements are added to the application
+  app->addElement(gltfRenderer);    // Rendering the glTF scene
+  app->addElement(g_elemCamera);    // Controlling the camera movement
+  app->addElement(g_elemProfiler);  // GPU Profiler
 #ifdef USE_DGBPRINTF
   app->addElement(g_elemDebugPrintf);                                                   // Debug printf
 #endif                                                                                  // USE_DGBPRINTF

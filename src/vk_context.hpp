@@ -71,7 +71,7 @@ static VKAPI_ATTR VkBool32 VKAPI_CALL VkContextDebugReport(VkDebugUtilsMessageSe
 //  uint32_t queueIndex  = ~0U;
 //  VkQueue  queue       = VK_NULL_HANDLE;
 //};
-using QueueInfo = nvvkhl::ApplicationQueue;
+using QueueInfo = nvvkhl::QueueInfo;
 
 // Struct to hold an extension and its corresponding feature
 struct ExtensionFeaturePair

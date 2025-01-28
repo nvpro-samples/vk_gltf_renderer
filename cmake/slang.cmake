@@ -56,6 +56,7 @@ function(compile_slang_file)
         -force-glsl-scalar-layout
         -fvk-use-entrypoint-name
         -g3
+        -O0
         -source-embed-style text 
         -source-embed-name ${_FILE_STEM}Slang
         -o ${_OUT_ARG}

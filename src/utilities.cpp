@@ -1,5 +1,5 @@
 /*
- * Copyright (c) 2024, NVIDIA CORPORATION.  All rights reserved.
+ * Copyright (c) 2024-2025, NVIDIA CORPORATION.  All rights reserved.
  *
  * Licensed under the Apache License, Version 2.0 (the "License");
  * you may not use this file except in compliance with the License.
@@ -13,7 +13,7 @@
  * See the License for the specific language governing permissions and
  * limitations under the License.
  *
- * SPDX-FileCopyrightText: Copyright (c) 2014-2024 NVIDIA CORPORATION
+ * SPDX-FileCopyrightText: Copyright (c) 2024-2025, NVIDIA CORPORATION.
  * SPDX-License-Identifier: Apache-2.0
  */
 
@@ -139,5 +139,5 @@ void gltfr::saveImageToFile(VkDevice device, VkImage dstImage, VkDeviceMemory ds
     stbi_write_png(path.string().c_str(), size.width, size.height, 4, pixels.data(), size.width * 4);
   }
 
-  LOGI("Screenshot saved to %s\n", filename.c_str());
+  LOGI("Image saved to %s\n", filename.c_str());
 }

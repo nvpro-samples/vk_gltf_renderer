@@ -1,5 +1,5 @@
 /*
- * Copyright (c) 2024, NVIDIA CORPORATION.  All rights reserved.
+ * Copyright (c) 2024-2025, NVIDIA CORPORATION.  All rights reserved.
  *
  * Licensed under the Apache License, Version 2.0 (the "License");
  * you may not use this file except in compliance with the License.
@@ -13,7 +13,7 @@
  * See the License for the specific language governing permissions and
  * limitations under the License.
  *
- * SPDX-FileCopyrightText: Copyright (c) 2014-2024 NVIDIA CORPORATION
+ * SPDX-FileCopyrightText: Copyright (c) 2024-2025, NVIDIA CORPORATION.
  * SPDX-License-Identifier: Apache-2.0
  */
 
@@ -401,7 +401,7 @@ void gltfr::Scene::destroyDescriptorSet(VkDevice device)
 // - Update the Vulkan scene
 // - Update the RTX scene
 //
-bool gltfr::Scene::processFrame(VkCommandBuffer cmdBuf, Settings& settings)
+bool gltfr::Scene::processFrame(VkCommandBuffer cmd, Settings& settings)
 {
   // Dealing with animation
   if(m_gltfScene->hasAnimation() && m_animControl.doAnimation())
@@ -436,25 +436,25 @@ bool gltfr::Scene::processFrame(VkCommandBuffer cmdBuf, Settings& settings)
   // Check for scene changes
   if(m_dirtyFlags.test(eVulkanScene))
   {
-    m_gltfSceneVk->updateRenderNodesBuffer(cmdBuf, *m_gltfScene);       // Animation, changing nodes transform
-    m_gltfSceneVk->updateRenderPrimitivesBuffer(cmdBuf, *m_gltfScene);  // Animation
-    m_gltfSceneVk->updateRenderLightsBuffer(cmdBuf, *m_gltfScene);      // changing lights data
+    m_gltfSceneVk->updateRenderNodesBuffer(cmd, *m_gltfScene);       // Animation, changing nodes transform
+    m_gltfSceneVk->updateRenderPrimitivesBuffer(cmd, *m_gltfScene);  // Animation
+    m_gltfSceneVk->updateRenderLightsBuffer(cmd, *m_gltfScene);      // changing lights data
     m_dirtyFlags.reset(eVulkanScene);
   }
   if(m_dirtyFlags.test(eVulkanMaterial))
   {
-    m_gltfSceneVk->updateMaterialBuffer(cmdBuf, *m_gltfScene);
+    m_gltfSceneVk->updateMaterialBuffer(cmd, *m_gltfScene);
     m_dirtyFlags.reset(eVulkanMaterial);
   }
   if(m_dirtyFlags.test(eVulkanAttributes))
   {
-    m_gltfSceneVk->updateVertexBuffers(cmdBuf, *m_gltfScene);
+    m_gltfSceneVk->updateVertexBuffers(cmd, *m_gltfScene);
     m_dirtyFlags.reset(eVulkanAttributes);
   }
   if(m_dirtyFlags.test(eRtxScene))
   {
-    m_gltfSceneRtx->updateTopLevelAS(cmdBuf, *m_gltfScene);
-    m_gltfSceneRtx->updateBottomLevelAS(cmdBuf, *m_gltfScene);
+    m_gltfSceneRtx->updateTopLevelAS(cmd, *m_gltfScene);
+    m_gltfSceneRtx->updateBottomLevelAS(cmd, *m_gltfScene);
 
     m_dirtyFlags.reset(eRtxScene);
   }
@@ -492,20 +492,29 @@ bool gltfr::Scene::processFrame(VkCommandBuffer cmdBuf, Settings& settings)
   }
 
 
-  vkCmdUpdateBuffer(cmdBuf, m_sceneFrameInfoBuffer.buffer, 0, sizeof(DH::SceneFrameInfo), &m_sceneFrameInfo);
+  vkCmdUpdateBuffer(cmd, m_sceneFrameInfoBuffer.buffer, 0, sizeof(DH::SceneFrameInfo), &m_sceneFrameInfo);
 
   // Barrier to ensure the buffer is updated before rendering
-  VkBufferMemoryBarrier bufferBarrier{VK_STRUCTURE_TYPE_BUFFER_MEMORY_BARRIER};
-  bufferBarrier.srcAccessMask = VK_ACCESS_TRANSFER_WRITE_BIT;
-  bufferBarrier.dstAccessMask = VK_ACCESS_SHADER_READ_BIT;
-  bufferBarrier.buffer        = m_sceneFrameInfoBuffer.buffer;
-  bufferBarrier.size          = VK_WHOLE_SIZE;
-  vkCmdPipelineBarrier(cmdBuf, VK_PIPELINE_STAGE_TRANSFER_BIT, VK_PIPELINE_STAGE_RAY_TRACING_SHADER_BIT_KHR, 0, 0,
-                       nullptr, 1, &bufferBarrier, 0, nullptr);
+  std::array<VkBufferMemoryBarrier2, 1> bufferBarriers = {
+      {{.sType         = VK_STRUCTURE_TYPE_BUFFER_MEMORY_BARRIER_2,
+        .srcStageMask  = VK_PIPELINE_STAGE_2_TRANSFER_BIT,  // vkCmdUpdateBuffer uses transfer
+        .srcAccessMask = VK_ACCESS_2_TRANSFER_WRITE_BIT,
+        .dstStageMask = VK_PIPELINE_STAGE_2_VERTEX_SHADER_BIT | VK_PIPELINE_STAGE_2_FRAGMENT_SHADER_BIT | VK_PIPELINE_STAGE_2_COMPUTE_SHADER_BIT,
+        .dstAccessMask = VK_ACCESS_2_SHADER_READ_BIT,
+        .buffer        = m_sceneFrameInfoBuffer.buffer,
+        .offset        = 0,
+        .size          = sizeof(DH::SceneFrameInfo)}},
+  };
+
+  VkDependencyInfo dependencyInfo = {.sType                    = VK_STRUCTURE_TYPE_DEPENDENCY_INFO,
+                                     .bufferMemoryBarrierCount = uint32_t(bufferBarriers.size()),
+                                     .pBufferMemoryBarriers    = bufferBarriers.data()};
+  vkCmdPipelineBarrier2(cmd, &dependencyInfo);
+
 
   // Update the sky
   m_sky->skyParams().yIsUp = CameraManip.getUp().y > CameraManip.getUp().z;
-  m_sky->updateParameterBuffer(cmdBuf);
+  m_sky->updateParameterBuffer(cmd);
 
   return true;
 }
