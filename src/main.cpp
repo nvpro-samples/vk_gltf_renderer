@@ -51,6 +51,7 @@
 #include "collapsing_header_manager.h"
 #include "perproject_globals.hpp"
 #include "nvvk/nsight_aftermath_vk.hpp"
+#include "imgui_mouse_state.hpp"
 
 // #define USE_AFTERMATH
 // For debugging GPU crashes
@@ -251,8 +252,10 @@ public:
       ImGui::PushStyleVar(ImGuiStyleVar_WindowPadding, ImVec2(0.0F, 0.0F));
       ImGui::Begin("Viewport");
 
+      m_mouseClickState.update();
+
       // Pick under mouse cursor
-      if((ImGui::IsWindowHovered(ImGuiFocusedFlags_RootWindow) && ImGui::IsMouseDoubleClicked(ImGuiMouseButton_Left))
+      if((ImGui::IsWindowHovered(ImGuiFocusedFlags_RootWindow) && (m_mouseClickState.isMouseClicked(ImGuiMouseButton_Left)))
          || ImGui::IsKeyPressed(ImGuiKey_Space))
       {
         screenPicking();
@@ -422,7 +425,7 @@ public:
       m_app->close();
     }
 
-#ifndef NDEBUG
+#ifdef SHOW_IMGUI_DEMO
     static bool s_showDemo{false};
     static bool s_showDemoPlot{false};
     if(ImGui::BeginMenu("Debug"))
@@ -555,12 +558,14 @@ private:
     glm::vec3       center;
     glm::vec3       up;
     CameraManip.getLookat(eye, center, up);
-    CameraManip.setLookat(eye, world_pos, up, false);
+    if(m_mouseClickState.isMouseDoubleClicked(ImGuiMouseButton_Left))
+      CameraManip.setLookat(eye, world_pos, up, false);
 
     // Logging picking info.
     const nvh::gltf::RenderNode& renderNode = m_scene.m_gltfScene->getRenderNodes()[pr.instanceID];
     const tinygltf::Node&        node       = m_scene.m_gltfScene->getModel().nodes[renderNode.refNodeID];
-    m_scene.selectRenderNode(pr.instanceID);
+    if(m_mouseClickState.isMouseSingleClicked(ImGuiMouseButton_Left))
+      m_scene.selectRenderNode(pr.instanceID);
 
     LOGI("Node Name: %s\n", node.name.c_str());
     LOGI(" - GLTF: NodeID: %d, MeshID: %d, TriangleId: %d\n", renderNode.refNodeID, node.mesh, pr.primitiveID);
@@ -673,6 +678,7 @@ private:
   std::unique_ptr<nvvk::RayPickerKHR> m_picker{};
   ImGuiH::SettingsHandler             m_settingsHandler;
   BusyWindow                          m_busy;
+  ClickStateMachine                   m_mouseClickState;
 };
 
 
@@ -824,6 +830,7 @@ auto main(int argc, char** argv) -> int
   appInfo.physicalDevice   = vkContext->getPhysicalDevice();
   appInfo.queues           = vkContext->getQueueInfos();
   appInfo.imguiConfigFlags = ImGuiConfigFlags_NavEnableKeyboard | ImGuiConfigFlags_DockingEnable;
+  appInfo.vSync            = true;
 
   // Create the application
   auto app = std::make_unique<nvvkhl::Application>(appInfo);
