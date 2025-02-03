@@ -172,7 +172,7 @@ bool gltfr::Scene::load(Resources& resources, const std::string& filename)
     }
     else
     {
-      m_gltfScene.release();
+      m_gltfScene.reset();
       return false;
     }
   }
@@ -199,7 +199,7 @@ bool gltfr::Scene::load(Resources& resources, const std::string& filename)
     }
     else
     {
-      m_gltfScene.release();
+      m_gltfScene.reset();
       LOGE("Error loading OBJ: %s\n", error.c_str());
       LOGW("Warning: %s\n", warn.c_str());
       return false;
@@ -587,8 +587,8 @@ void gltfr::Scene::createVulkanScene(Resources& res)
   }
   else
   {
-    m_gltfSceneRtx.release();
-    m_gltfSceneVk.release();
+    m_gltfSceneRtx.reset();
+    m_gltfSceneVk.reset();
   }
 }
 
@@ -717,7 +717,7 @@ bool gltfr::Scene::onUI(Resources& resources, Settings& settings, GLFWwindow* wi
     }
 
     // When switching the environment, reset Firefly max luminance
-    if(cache_env_system != settings.envSystem)
+    if(cache_env_system != settings.envSystem && m_hdrEnv)
     {
       settings.setDefaultLuminance(m_hdrEnv->getIntegral());
     }

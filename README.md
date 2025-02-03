@@ -73,8 +73,6 @@ To enable Draco mesh compression, you need to enable the option CMake. In the GU
 - [x] textures
 - [x] extensions
 
-What is currently not supported are animations and skins, multiple textures coordinates, morph targets, color at vertices, and some extensions.
-
 ## GLTF Extensions
  Here are the list of extensions that are supported by this application
 

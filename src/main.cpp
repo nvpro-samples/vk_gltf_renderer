@@ -810,7 +810,7 @@ auto main(int argc, char** argv) -> int
   vvlInfo.gpuav_reserve_binding_slot = false;
   vvlInfo.message_id_filter          = {0x76589099};  // Truncate the message when too long
 #endif                                                // USE_DGBPRINTF
-  ValidationSettings vvl(vvlInfo);
+  ValidationSettings vvl(std::move(vvlInfo));
   vkSetup.instanceCreateInfoExt = vvl.buildPNextChain();  // Adding the validation layer settings
 
   // Creating the Vulkan context

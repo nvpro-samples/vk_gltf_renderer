@@ -46,7 +46,7 @@ static VKAPI_ATTR VkBool32 VKAPI_CALL VkContextDebugReport(VkDebugUtilsMessageSe
   nvprintfLevel(level, "%s\n", callbackData->pMessage);
   for(uint32_t count = 0; count < callbackData->objectCount; count++)
   {
-    LOGI("Object[%d] \n\t- Type %s\n\t- Value %lu\n\t- Name %s\n", count,
+    LOGI("Object[%d] \n\t- Type %s\n\t- Value %llu\n\t- Name %s\n", count,
          string_VkObjectType(callbackData->pObjects[count].objectType), callbackData->pObjects[count].objectHandle,
          callbackData->pObjects[count].pObjectName);
   }
@@ -325,7 +325,7 @@ private:
       m_physicalDevice = {};
       return;
     }
-    m_settings.deviceExtensions = filteredExtensions;
+    m_settings.deviceExtensions = std::move(filteredExtensions);
   }
 
   void createDevice()
