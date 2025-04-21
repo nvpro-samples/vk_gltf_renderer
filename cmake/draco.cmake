@@ -5,7 +5,7 @@ set_property(GLOBAL PROPERTY USE_FOLDERS ON)
 function(download_draco)
     download_package(
         NAME draco
-        URL https://github.com/google/draco/archive/refs/tags/1.5.7.zip
+        URLS https://github.com/google/draco/archive/refs/tags/1.5.7.zip
         VERSION 1.5.7
         LOCATION draco_SOURCE_DIR
     )

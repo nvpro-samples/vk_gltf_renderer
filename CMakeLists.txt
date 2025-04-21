@@ -33,7 +33,7 @@ set(NVPRO_SHADERS_DIR ${NVPRO_CORE_DIR}/nvvkhl/shaders)
 #####################################################################################
 # Adding Slang
 list(APPEND CMAKE_MODULE_PATH "${CMAKE_CURRENT_SOURCE_DIR}/cmake")
-set(Slang_VERSION "2025.3.1")
+set(Slang_VERSION "2025.6.1")
 find_package(Slang)
 include(${CMAKE_CURRENT_SOURCE_DIR}/cmake/slang.cmake)
 
@@ -41,7 +41,7 @@ include(${CMAKE_CURRENT_SOURCE_DIR}/cmake/slang.cmake)
 # Add RapidJSON package
 download_package(
   NAME RapidJSON
-  URL https://github.com/Tencent/rapidjson/archive/refs/tags/v1.1.0.zip
+  URLS https://github.com/Tencent/rapidjson/archive/refs/tags/v1.1.0.zip
   VERSION 1.1.0
   LOCATION RapidJSON_SOURCE_DIR
 )
@@ -168,7 +168,7 @@ target_sources(${PROJNAME} PRIVATE ${GLSL_SOURCES} ${GLSL_HEADERS})
 # Slang Shader compilation
 #
 target_sources(${PROJNAME} PRIVATE ${SHADER_SLANG})
-target_include_directories(${PROJNAME} PRIVATE "${Slang_SDK}/include")
+target_include_directories(${PROJNAME} PRIVATE "${Slang_INCLUDE_DIR}")
 target_link_libraries(${PROJNAME} PRIVATE ${Slang_LIBRARY})
 foreach(SLANG_FILE ${SHADER_SLANG})
     compile_slang_file(
