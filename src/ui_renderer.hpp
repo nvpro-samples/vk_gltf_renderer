@@ -1,5 +1,5 @@
 /*
- * Copyright (c) 2024-2025, NVIDIA CORPORATION.  All rights reserved.
+ * Copyright (c) 2023-2025, NVIDIA CORPORATION.  All rights reserved.
  *
  * Licensed under the Apache License, Version 2.0 (the "License");
  * you may not use this file except in compliance with the License.
@@ -13,10 +13,21 @@
  * See the License for the specific language governing permissions and
  * limitations under the License.
  *
- * SPDX-FileCopyrightText: Copyright (c) 2024-2025, NVIDIA CORPORATION.
+ * SPDX-FileCopyrightText: Copyright (c) 2023-2025, NVIDIA CORPORATION.
  * SPDX-License-Identifier: Apache-2.0
  */
+
 #pragma once
 
-#include <tinygltf/tiny_gltf.h>
-void recomputeTangents(tinygltf::Model& model, bool forceCreation, bool mikktspace);
+#include "nvutils/bounding_box.hpp"
+
+class GltfRenderer;  // Forward declaration
+
+struct GltfRendererUI
+{
+  static void          renderUI(GltfRenderer& renderer);
+  static void          renderMenu(GltfRenderer& renderer);
+  static void          mouseClickedInViewport(GltfRenderer& renderer);
+  static nvutils::Bbox getRenderNodeBbox(GltfRenderer& renderer, int nodeID);
+  static void          windowTitle(GltfRenderer& renderer);
+};

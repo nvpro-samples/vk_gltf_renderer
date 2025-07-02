@@ -1,4 +1,3 @@
-
 # DRACO 
 set_property(GLOBAL PROPERTY USE_FOLDERS ON)
 
@@ -9,9 +8,12 @@ function(download_draco)
         VERSION 1.5.7
         LOCATION draco_SOURCE_DIR
     )
-
+    
+    set(_ORIGINAL_CMAKE_MESSAGE_LOG_LEVEL ${CMAKE_MESSAGE_LOG_LEVEL})
+    set(CMAKE_MESSAGE_LOG_LEVEL "WARNING")
+    message(STATUS "Setting CMAKE_MESSAGE_LOG_LEVEL to WARNING")
     add_subdirectory(${draco_SOURCE_DIR}/draco-1.5.7 ${draco_BINARY_DIR} EXCLUDE_FROM_ALL)
-
+    set(CMAKE_MESSAGE_LOG_LEVEL ${_ORIGINAL_CMAKE_MESSAGE_LOG_LEVEL})
     set(draco_targets 
         draco 
         draco_animation 

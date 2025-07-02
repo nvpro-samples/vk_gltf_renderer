@@ -1,5 +1,5 @@
 /*
- * Copyright (c) 2024, NVIDIA CORPORATION.  All rights reserved.
+ * Copyright (c) 2023-2025, NVIDIA CORPORATION.  All rights reserved.
  *
  * Licensed under the Apache License, Version 2.0 (the "License");
  * you may not use this file except in compliance with the License.
@@ -13,114 +13,350 @@
  * See the License for the specific language governing permissions and
  * limitations under the License.
  *
- * SPDX-FileCopyrightText: Copyright (c) 2014-2024 NVIDIA CORPORATION
+ * SPDX-FileCopyrightText: Copyright (c) 2023-2025, NVIDIA CORPORATION.
  * SPDX-License-Identifier: Apache-2.0
  */
 
 
-// Purpose: Pathtracer renderer implementation
-#include <iostream>
+#include <nvapp/elem_dbgprintf.hpp>
+#include <nvutils/camera_manipulator.hpp>
+#include <nvvk/check_error.hpp>
+#include <nvvk/compute_pipeline.hpp>
+#include <nvvk/debug_util.hpp>
+#include <nvvk/sbt_generator.hpp>
+#include <nvvk/specialization.hpp>
+#include <nvutils/parameter_registry.hpp>
 
-// nvpro-core
-#include "nvh/cameramanipulator.hpp"
-#include "nvh/timesampler.hpp"
-#include "nvvk/debug_util_vk.hpp"
-#include "nvvk/sbtwrapper_vk.hpp"
-#include "nvvk/specialization.hpp"
-#include "nvvkhl/element_dbgprintf.hpp"
-#include "nvvkhl/shaders/dh_comp.h"
-#include "nvvkhl/shaders/dh_tonemap.h"
+#include "renderer_pathtracer.hpp"
 
-// Shared information between device and host
-#include "shaders/dh_bindings.h"
-
-// Local to application
-#include "silhouette.hpp"
-#include "atrous_denoiser.hpp"
-#include "renderer.hpp"
-
-extern std::shared_ptr<nvvkhl::ElementDbgPrintf> g_elemDebugPrintf;
-
-namespace PE = ImGuiH::PropertyEditor;
-
-#include "_autogen/pathtrace.comp.glsl.h"
-#include "_autogen/pathtrace.rchit.glsl.h"
-#include "_autogen/pathtrace.rgen.glsl.h"
-#include "_autogen/pathtrace.rmiss.glsl.h"
-#include "_autogen/pathtrace.rahit.glsl.h"
-#include "_autogen/shadow.rmiss.glsl.h"
-#include "_autogen/shadow.rahit.glsl.h"
-#include "_autogen/shadow.rchit.glsl.h"
-#include "nvvk/shaders_vk.hpp"
-#include "collapsing_header_manager.h"
-
-namespace gltfr {
-extern bool g_forceExternalShaders;
-
-// Settings for the pathtracer
-PathtraceSettings g_pathtraceSettings;
+// Pre-compiled shaders
+#include "_autogen/gltf_pathtrace.slang.h"
 
 
-// This shows path tracing using ray tracing
-class RendererPathtracer : public Renderer
+PathTracer::PathTracer()
 {
-public:
-  RendererPathtracer() = default;
-  ~RendererPathtracer() { deinit(); };
+#if defined(USE_DLSS)
+  m_dlss = std::make_unique<DlssDenoiser>();
+#endif
+}
 
-  // Implementing the renderer interface
-  bool init(Resources& res, Scene& scene) override;
-  void deinit(Resources& /*res*/) override { deinit(); }
-  void render(VkCommandBuffer cmd, Resources& res, Scene& scene, Settings& settings, nvvk::ProfilerVK& profiler) override;
-  bool                  onUI() override;
-  void                  handleChange(Resources& res, Scene& scene) override;
-  VkDescriptorImageInfo getOutputImage() const override
+//--------------------------------------------------------------------------------------------------
+// Constructor
+// Initialize the device, the frame counter and the firefly clamp threshold
+void PathTracer::onAttach(Resources& resources, nvvk::ProfilerGpuTimer* profiler)
+{
+  ::BaseRenderer::onAttach(resources, profiler);
+  m_device = resources.allocator.getDevice();
+  // Default parameters for overall material
+  m_pushConst.maxDepth              = 5;
+  m_pushConst.frameCount            = 0;
+  m_pushConst.fireflyClampThreshold = 10.;
+  m_pushConst.numSamples            = 1;  // Number of samples per pixel
+
+  compileShader(resources, false);
+
+  // Requesting ray tracing properties
+  VkPhysicalDeviceProperties2 prop2{VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_PROPERTIES_2};
+  prop2.pNext                  = &m_rtPipelineProperties;
+  m_rtPipelineProperties.pNext = &m_reorderProperties;
+  vkGetPhysicalDeviceProperties2(resources.allocator.getPhysicalDevice(), &prop2);
+
+  // #DLSS - Create the DLSS denoiser
+#if defined(USE_DLSS)
+  m_dlss->init(resources);
+#endif
+}
+
+//--------------------------------------------------------------------------------------------------
+// Register command line parameters for the PathTracer
+void PathTracer::registerParameters(nvutils::ParameterRegistry* paramReg)
+{
+  // PathTracer-specific command line parameters
+  paramReg->add({"ptMaxDepth", "PathTracer: Maximum ray depth"}, &m_pushConst.maxDepth);
+  paramReg->add({"ptSamples", "PathTracer: Samples per pixel"}, &m_pushConst.numSamples);
+  paramReg->add({"ptFireflyClamp", "PathTracer: Firefly clamp threshold"}, &m_pushConst.fireflyClampThreshold);
+  paramReg->add({"ptAperture", "PathTracer: Camera aperture"}, &m_pushConst.aperture);
+  paramReg->add({"ptFocalDistance", "PathTracer: Focal distance"}, &m_pushConst.focalDistance);
+  paramReg->add({"ptAutoFocus", "PathTracer: Enable auto focus"}, &m_autoFocus);
+  paramReg->add({"ptTechnique", "PathTracer: Rendering technique [Compute:0, RayTracing:1]"}, (int*)&m_renderTechnique);
+#if defined(USE_DLSS)
+  m_dlss->registerParameters(paramReg);
+#endif
+}
+
+//--------------------------------------------------------------------------------------------------
+// Destroy the resources
+void PathTracer::onDetach(Resources& resources)
+{
+  resources.allocator.destroyBuffer(m_sbtBuffer);
+
+#if USE_DLSS
+  m_dlss->deinit();
+#endif  //  USE_DLSS
+  vkDestroyPipelineLayout(m_device, m_pipelineLayout, nullptr);
+  vkDestroyShaderEXT(m_device, m_shader, nullptr);
+  vkDestroyShaderModule(m_device, m_shaderModule, nullptr);
+  vkDestroyPipeline(m_device, m_pipeline, nullptr);
+}
+
+//--------------------------------------------------------------------------------------------------
+// Resize the G-Buffer and the renderers
+void PathTracer::onResize(VkCommandBuffer cmd, const VkExtent2D& size, Resources& resources)
+{
+  updateDlssResources(cmd, resources);
+}
+
+void PathTracer::updateDlssResources(VkCommandBuffer cmd, Resources& resources)
+{
+#if defined(USE_DLSS)
+  NVVK_DBG_SCOPE(cmd);  // <-- Helps to debug in NSight
+  VkExtent2D size = resources.gBuffers.getSize();
+  m_dlss->updateSize(cmd, size);
+  m_dlss->setResources();
+  m_dlss->setResource(DlssRayReconstruction::ResourceType::eColorOut, resources.gBuffers.getColorImage(Resources::eImgRendered),
+                      resources.gBuffers.getColorImageView(Resources::eImgRendered),
+                      resources.gBuffers.getColorFormat(Resources::eImgRendered));
+#endif
+}
+
+bool PathTracer::onUIRender(Resources& resources)
+{
+  // Setting the aperture max slider value, based on the scene size
+  float scaleFactor = std::log(m_sceneRadius);
+  scaleFactor       = std::max(scaleFactor, 0.0f);   // Prevent negative values when the scene is small
+  float apertureMax = 0.0001f + scaleFactor * 5.0f;  // Minimum max aperture is 0.0001
+
+  namespace PE = nvgui::PropertyEditor;
+  bool changed = false;
+  if(PE::begin())
   {
-    return m_gBuffers->getDescriptorImageInfo(GBufferType::eRgbResult);
+    // Add rendering technique selector
+    const char* techniques[] = {"Compute", "Ray Tracing"};
+    int         current      = static_cast<int>(m_renderTechnique);
+    if(PE::Combo("Rendering Technique", &current, techniques, IM_ARRAYSIZE(techniques)))
+    {
+      m_renderTechnique = static_cast<RenderTechnique>(current);
+      changed           = true;
+    }
+
+    changed |= PE::SliderInt("Depth", &m_pushConst.maxDepth, 0, 20, "%d", 0, "Maximum number of bounces");
+    changed |= PE::SliderInt("Samples", &m_pushConst.numSamples, 1, 10, "%d", 0, "Number of samples per pixel");
+    changed |= PE::SliderFloat("FireFly Clamp", &m_pushConst.fireflyClampThreshold, 0.0f, 10.0f, "%.2f", 0,
+                               "Clamp threshold for fireflies");
+
+
+    changed |= PE::SliderFloat("Aperture", &m_pushConst.aperture, 0.0f, apertureMax, "%5.9f",
+                               ImGuiSliderFlags_Logarithmic | ImGuiSliderFlags_NoRoundToFormat, "Out-of-focus effect");
+    changed |= PE::Checkbox("Auto Focus", &m_autoFocus, "Use interest position");
+    ImGui::BeginDisabled(m_autoFocus);
+    changed |= PE::DragFloat("Focal Distance", &m_pushConst.focalDistance, 100.0f, 0.0f, 1000000.0f, "%5.9f",
+                             ImGuiSliderFlags_Logarithmic | ImGuiSliderFlags_NoRoundToFormat, "Distance to focal point");
+    m_pushConst.focalDistance = std::max(0.000000001f, m_pushConst.focalDistance);
+    ImGui::EndDisabled();
+    PE::end();
+
+    // Infinite plane
+    changed |= ImGui::Checkbox("Infinite Plane", (bool*)&resources.settings.useInfinitePlane);
+    if(resources.settings.useInfinitePlane)
+    {
+      const float extentY = resources.scene.valid() ? resources.scene.getSceneBounds().extents().y : 10.0f;
+      PE::begin();
+      if(PE::treeNode("Infinite Plane Settings"))
+      {
+        changed |= PE::SliderFloat("Height", &resources.settings.infinitePlaneDistance, -extentY, extentY, "%5.9f",
+                                   ImGuiSliderFlags_NoRoundToFormat, "Distance to infinite plane");
+        changed |= PE::ColorEdit3("Color", glm::value_ptr(resources.settings.infinitePlaneBaseColor));
+        changed |= PE::SliderFloat("Metallic", &resources.settings.infinitePlaneMetallic, 0.0f, 1.0f);
+        changed |= PE::SliderFloat("Roughness", &resources.settings.infinitePlaneRoughness, 0.0f, 1.0f);
+        PE::treePop();
+      }
+      PE::end();
+    }
+  }
+#if defined(USE_DLSS)
+  m_dlss->onUi(resources);
+#endif
+  return changed;
+}
+
+//--------------------------------------------------------------------------------------------------
+// Render the scene
+void PathTracer::onRender(VkCommandBuffer cmd, Resources& resources)
+{
+  NVVK_DBG_SCOPE(cmd);  // <-- Helps to debug in NSight
+  auto timerSection = m_profiler->cmdFrameSection(cmd, "Pathtrace");
+
+  m_sceneRadius = resources.scene.getSceneBounds().radius();
+
+  // Update the push constant: the camera information, sky parameters and the scene to render
+  if(m_autoFocus)
+  {
+    m_pushConst.focalDistance = glm::length(resources.cameraManip->getEye() - resources.cameraManip->getCenter());
   }
 
-  bool reloadShaders(Resources& res, Scene& /*scene*/) override;
+  // Current frame count, can be overridden by DLSS
+  int frameCount = resources.frameCount;
 
-private:
-  void createRtxPipeline(Resources& res, Scene& scene);
-  void createIndirectPipeline(Resources& res, Scene& scene);
-  bool initShaders(Resources& res, bool reload);
-  void createRtxSet();
-  void writeRtxSet(Scene& scene);
-  void deinit();
-  void createGBuffer(Resources& res);
-
-  VkDevice                   m_device{VK_NULL_HANDLE};
-  DH::PushConstantPathtracer m_pushConst{};
-
-  std::unique_ptr<nvvk::DescriptorSetContainer> m_rtxSet{};        // Descriptor set
-  std::unique_ptr<nvvk::SBTWrapper>             m_sbt{};           // Shading binding table wrapper
-  std::unique_ptr<nvvkhl::PipelineContainer>    m_rtxPipe{};       // Raytracing pipeline
-  std::unique_ptr<nvvkhl::PipelineContainer>    m_indirectPipe{};  // Raytracing pipeline
-  std::unique_ptr<nvvkhl::GBuffer>              m_gBuffers{};      // G-Buffers: RGBA32F
-  std::unique_ptr<nvvk::DebugUtil>              m_dutil{};
-  std::unique_ptr<Silhouette>                   m_silhouette{};
-  std::unique_ptr<AtrousDenoiser>               m_denoiser{};
-
-  nvh::Bbox m_sceneBBox{};
-
-  enum GBufferType
+#if defined(USE_DLSS)
+  // Lazy initialize DLSS if enabled and not yet initialized
+  static uint32_t haltonIndex = 0;
+  m_pushConst.useDlss         = m_dlss->isEnabled();
+  if(m_dlss && m_dlss->isEnabled())
   {
-    eRgbLinear,    // Result from path-tracing
-    eRgbResult,    // Final result
-    eSilhouette,   // Buffer to store object ID for silhouette
-    eNormalDepth,  // Denoise - Normal
-    eTempResult,   // Denoise - Temporary result
-  };
+    frameCount = ++haltonIndex;  // Override frame count with Halton index
+    // If the initialization is successful, update the DLSS resources
+    if(m_dlss->ensureInitialized(resources))
+      updateDlssResources(cmd, resources);
+  }
+  m_pushConst.jitter = shaderio::dlssJitter(frameCount);
+#endif
+  static int lastRenderedObject = -1;
+  m_pushConst.renderSelection   = resources.selectedObject != lastRenderedObject || resources.frameCount == 0;
+  lastRenderedObject            = resources.selectedObject;
+  m_pushConst.frameCount        = frameCount;
+  m_pushConst.frameInfo         = (shaderio::SceneFrameInfo*)resources.bFrameInfo.address;
+  m_pushConst.skyParams         = (shaderio::SkyPhysicalParameters*)resources.bSkyParams.address;
+  m_pushConst.gltfScene         = (shaderio::GltfScene*)resources.sceneVk.sceneDesc().address;
+  m_pushConst.mouseCoord        = nvapp::ElementDbgPrintf::getMouseCoord();  // Use for debugging: printf in shader
+  vkCmdPushConstants(cmd, m_pipelineLayout, VK_SHADER_STAGE_ALL, 0, sizeof(shaderio::PathtracePushConstant), &m_pushConst);
 
-  std::vector<VkFormat> m_gbufferFormats = {
-      VK_FORMAT_R32G32B32A32_SFLOAT,  // Accumulated result of path tracing
-      VK_FORMAT_R16G16B16A16_SFLOAT,  // Final result - After tonemap
-      VK_FORMAT_R8_UNORM,             // For selection, silhouette
-      VK_FORMAT_R16G16B16A16_SFLOAT,  // Normal / Depth (Normal in RGB, Depth in A) used by denoiser
-      VK_FORMAT_R16G16B16A16_SFLOAT,  // Temp result (Denoiser / Ping-pong for multiple passes)
-  };
+  // Make sure buffer is ready to be used
+  nvvk::cmdMemoryBarrier(cmd, VK_PIPELINE_STAGE_2_TRANSFER_BIT, VK_PIPELINE_STAGE_2_COMPUTE_SHADER_BIT);
 
+  if(m_renderTechnique == RenderTechnique::Compute)
+  {
+    // Bind the shader to use
+    VkShaderStageFlagBits stage = VK_SHADER_STAGE_COMPUTE_BIT;
+    vkCmdBindShadersEXT(cmd, 1, &stage, &m_shader);
+
+    // Bind the descriptor set: TLAS, output image, textures, etc. (Set: 0)
+    vkCmdBindDescriptorSets(cmd, VK_PIPELINE_BIND_POINT_COMPUTE, m_pipelineLayout, 0, 1, &resources.descriptorSet, 0, nullptr);
+
+    // Set the Descriptor for HDR (Set: 2)
+    VkDescriptorSet hdrDescSet = resources.hdrIbl.getDescriptorSet();
+    vkCmdBindDescriptorSets(cmd, VK_PIPELINE_BIND_POINT_COMPUTE, m_pipelineLayout, 2, 1, &hdrDescSet, 0, nullptr);
+
+    pushDescriptorSet(cmd, resources, VK_PIPELINE_BIND_POINT_COMPUTE);
+
+    // Dispatch the compute shader
+    const VkExtent2D& size      = resources.gBuffers.getSize();
+    VkExtent2D        numGroups = nvvk::getGroupCounts(size, WORKGROUP_SIZE);
+    vkCmdDispatch(cmd, numGroups.width, numGroups.height, 1);
+  }
+  else  // RayTracing
+  {
+    // Create pipeline if it doesn't exist
+    if(m_pipeline == VK_NULL_HANDLE)
+    {
+      createRtxPipeline(resources);
+    }
+
+    // Bind the ray tracing pipeline
+    vkCmdBindPipeline(cmd, VK_PIPELINE_BIND_POINT_RAY_TRACING_KHR, m_pipeline);
+
+    // Bind the descriptor set: TLAS, output image, textures, etc. (Set: 0)
+    vkCmdBindDescriptorSets(cmd, VK_PIPELINE_BIND_POINT_RAY_TRACING_KHR, m_pipelineLayout, 0, 1, &resources.descriptorSet, 0, nullptr);
+
+    // Set the Descriptor for HDR (Set: 2)
+    VkDescriptorSet hdrDescSet = resources.hdrIbl.getDescriptorSet();
+    vkCmdBindDescriptorSets(cmd, VK_PIPELINE_BIND_POINT_RAY_TRACING_KHR, m_pipelineLayout, 2, 1, &hdrDescSet, 0, nullptr);
+
+    pushDescriptorSet(cmd, resources, VK_PIPELINE_BIND_POINT_RAY_TRACING_KHR);
+
+    // Trace rays
+    const VkExtent2D& size = resources.gBuffers.getSize();
+    vkCmdTraceRaysKHR(cmd, &m_sbtRegions.raygen, &m_sbtRegions.miss, &m_sbtRegions.hit, &m_sbtRegions.callable,
+                      size.width, size.height, 1);
+  }
+
+  // Making sure the rendered image is ready to be used by tonemapper
+  nvvk::cmdMemoryBarrier(cmd, VK_PIPELINE_STAGE_2_COMPUTE_SHADER_BIT, VK_PIPELINE_STAGE_2_COMPUTE_SHADER_BIT);
+
+#if defined(USE_DLSS)
+  if(m_dlss->isEnabled())
+  {
+    // #DLSS - Denoising
+    const glm::mat4& view   = resources.cameraManip->getViewMatrix();
+    const glm::mat4& proj   = resources.cameraManip->getPerspectiveMatrix();
+    glm::vec2        jitter = m_pushConst.jitter;
+
+    m_dlss->denoise(cmd, jitter, view, proj, false);
+
+    {
+      // Blit the selection image from the DLSS GBuffer (different resolution) to the Renderer GBuffer Selection
+      VkOffset3D  minCorner = {0, 0, 0};
+      VkImageBlit blitRegions{
+          .srcSubresource = {.aspectMask = VK_IMAGE_ASPECT_COLOR_BIT, .layerCount = 1},
+          .srcOffsets = {minCorner, {int(m_dlss->getGBuffers().getSize().width), int(m_dlss->getGBuffers().getSize().height), 1}},
+          .dstSubresource = {.aspectMask = VK_IMAGE_ASPECT_COLOR_BIT, .layerCount = 1},
+          .dstOffsets = {minCorner, {int(resources.gBuffers.getSize().width), int(resources.gBuffers.getSize().height), 1}},
+      };
+      vkCmdBlitImage(cmd, m_dlss->getGBuffers().getColorImage(shaderio::OutputImage::eSelectImage),
+                     VK_IMAGE_LAYOUT_GENERAL, resources.gBuffers.getColorImage(Resources::eImgSelection),
+                     VK_IMAGE_LAYOUT_GENERAL, 1, &blitRegions, VK_FILTER_LINEAR);
+    }
+  }
+#endif
+}
+
+//--------------------------------------------------------------------------------------------------
+// Push the descriptor set
+// This is making sure our shader has the latest TLAS, and the latest output images
+void PathTracer::pushDescriptorSet(VkCommandBuffer cmd, Resources& resources, VkPipelineBindPoint bindPoint) const
+{
+  nvvk::WriteSetContainer write{};
+  write.append(resources.descriptorBinding[1].getWriteSet(shaderio::BindingPoints::eTlas), resources.sceneRtx.tlas());
+
+  // Normal rendering, two output images
+  std::vector<VkDescriptorImageInfo> outputImages = {resources.gBuffers.getDescriptorImageInfo(Resources::eImgRendered),
+                                                     resources.gBuffers.getDescriptorImageInfo(Resources::eImgSelection)};
+#if USE_DLSS
+  if(m_dlss->isEnabled())
+  {
+    // With DLSS, we have 7 output images
+    using namespace shaderio;
+    outputImages.resize(7);
+    outputImages[eResultImage]         = m_dlss->getGBuffers().getDescriptorImageInfo(eResultImage);
+    outputImages[eSelectImage]         = m_dlss->getGBuffers().getDescriptorImageInfo(eSelectImage);
+    outputImages[eDlssAlbedo]          = m_dlss->getGBuffers().getDescriptorImageInfo(eDlssAlbedo);
+    outputImages[eDlssSpecAlbedo]      = m_dlss->getGBuffers().getDescriptorImageInfo(eDlssSpecAlbedo);
+    outputImages[eDlssNormalRoughness] = m_dlss->getGBuffers().getDescriptorImageInfo(eDlssNormalRoughness);
+    outputImages[eDlssMotion]          = m_dlss->getGBuffers().getDescriptorImageInfo(eDlssMotion);
+    outputImages[eDlssDepth]           = m_dlss->getGBuffers().getDescriptorImageInfo(eDlssDepth);
+  }
+#endif
+
+  VkWriteDescriptorSet allTextures = resources.descriptorBinding[1].getWriteSet(shaderio::BindingPoints::eOutImages);
+  allTextures.descriptorCount      = uint32_t(outputImages.size());
+  write.append(allTextures, outputImages.data());
+  vkCmdPushDescriptorSetKHR(cmd, bindPoint, m_pipelineLayout, 1, write.size(), write.data());
+}
+
+//--------------------------------------------------------------------------------------------------
+// Create the pipeline
+void PathTracer::createPipeline(Resources& resources)
+{
+  SCOPED_TIMER(__FUNCTION__);
+  std::vector<VkDescriptorSetLayout> descriptorSetLayouts{resources.descriptorSetLayout[0], resources.descriptorSetLayout[1],
+                                                          resources.hdrIbl.getDescriptorSetLayout()};
+
+  // Creating the pipeline layout
+  VkPushConstantRange        pushConstant{VK_SHADER_STAGE_ALL, 0, sizeof(shaderio::PathtracePushConstant)};
+  VkPipelineLayoutCreateInfo plCreateInfo{
+      .sType                  = VK_STRUCTURE_TYPE_PIPELINE_LAYOUT_CREATE_INFO,
+      .setLayoutCount         = uint32_t(descriptorSetLayouts.size()),
+      .pSetLayouts            = descriptorSetLayouts.data(),
+      .pushConstantRangeCount = 1,
+      .pPushConstantRanges    = &pushConstant,
+  };
+  vkDestroyPipelineLayout(m_device, m_pipelineLayout, nullptr);
+  NVVK_CHECK(vkCreatePipelineLayout(m_device, &plCreateInfo, nullptr, &m_pipelineLayout));
+  NVVK_DBG_NAME(m_pipelineLayout);
+}
+
+void PathTracer::createRtxPipeline(Resources& resources)
+{
+  SCOPED_TIMER(__FUNCTION__);
   // Creating all shaders
   enum ShaderStages
   {
@@ -128,470 +364,40 @@ private:
     eMiss,
     eShadowMiss,
     eClosestHit,
+    eShadowClosestHit,
     eAnyHit,
-    eShadowCH,
-    eShadowAH,
-    eIndirect,
+    eShadowAnyHit,
     eShaderGroupCount
   };
-  std::vector<shaderc::SpvCompilationResult>    m_spvShader{};
-  std::array<VkShaderModule, eShaderGroupCount> m_shaderModules{};
 
-  VkPhysicalDeviceRayTracingPipelinePropertiesKHR m_rtPipelineProperties{VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_RAY_TRACING_PIPELINE_PROPERTIES_KHR};
-  VkPhysicalDeviceRayTracingInvocationReorderPropertiesNV m_reorderProperties{
-      VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_RAY_TRACING_INVOCATION_REORDER_PROPERTIES_NV};
-};
-
-//------------------------------------------------------------------------------
-// Initialize the renderer
-// - Creating the G-Buffers
-// - Creating the ray tracing pipeline
-// - Creating the descriptor set for ray tracing
-//
-bool RendererPathtracer::init(Resources& res, Scene& scene)
-{
-  m_dutil  = std::make_unique<nvvk::DebugUtil>(res.ctx.device);
-  m_device = res.ctx.device;
-
-  if(!initShaders(res, false))
-  {
-    return false;
-  }
-
-  m_silhouette = std::make_unique<Silhouette>(res);
-  m_denoiser   = std::make_unique<AtrousDenoiser>(res);
-
-  // Requesting ray tracing properties
-  VkPhysicalDeviceProperties2 prop2{VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_PROPERTIES_2};
-  prop2.pNext                  = &m_rtPipelineProperties;
-  m_rtPipelineProperties.pNext = &m_reorderProperties;
-  vkGetPhysicalDeviceProperties2(res.ctx.physicalDevice, &prop2);
-
-  const uint32_t t_queue_index = res.ctx.transfer.familyIndex;
-
-  m_rtxSet = std::make_unique<nvvk::DescriptorSetContainer>(m_device);  // Descriptor set for RTX
-  m_sbt    = std::make_unique<nvvk::SBTWrapper>();
-  m_sbt->setup(m_device, t_queue_index, res.m_allocator.get(), m_rtPipelineProperties);
-  m_gBuffers = std::make_unique<nvvkhl::GBuffer>(m_device, res.m_allocator.get());
-
-  createGBuffer(res);
-  createRtxSet();
-  writeRtxSet(scene);
-
-
-  m_sceneBBox = scene.m_gltfScene->getSceneBounds();
-
-  return true;
-}
-
-//------------------------------------------------------------------------------
-// Compile all shaders
-//
-bool RendererPathtracer::initShaders(Resources& res, bool reload)
-{
-  nvh::ScopedTimer st(__FUNCTION__);
-
-  if((reload || g_forceExternalShaders) && res.hasGlslCompiler())
-  {
-    m_spvShader.resize(eShaderGroupCount);
-    m_spvShader[eRaygen]     = res.compileGlslShader("pathtrace.rgen.glsl", shaderc_shader_kind::shaderc_raygen_shader);
-    m_spvShader[eMiss]       = res.compileGlslShader("pathtrace.rmiss.glsl", shaderc_shader_kind::shaderc_miss_shader);
-    m_spvShader[eShadowMiss] = res.compileGlslShader("shadow.rmiss.glsl", shaderc_shader_kind::shaderc_miss_shader);
-    m_spvShader[eClosestHit] = res.compileGlslShader("pathtrace.rchit.glsl", shaderc_shader_kind::shaderc_closesthit_shader);
-    m_spvShader[eAnyHit]   = res.compileGlslShader("pathtrace.rahit.glsl", shaderc_shader_kind::shaderc_anyhit_shader);
-    m_spvShader[eShadowCH] = res.compileGlslShader("shadow.rchit.glsl", shaderc_shader_kind::shaderc_closesthit_shader);
-    m_spvShader[eShadowAH] = res.compileGlslShader("shadow.rahit.glsl", shaderc_shader_kind::shaderc_anyhit_shader);
-    m_spvShader[eIndirect] = res.compileGlslShader("pathtrace.comp.glsl", shaderc_shader_kind::shaderc_compute_shader);
-
-    for(size_t i = 0; i < m_spvShader.size(); i++)
-    {
-      auto& s = m_spvShader[i];
-
-      if(s.GetCompilationStatus() != shaderc_compilation_status_success)
-      {
-        LOGE("Error when loading shaders: %zu\n", i);
-        LOGE("Error %s\n", s.GetErrorMessage().c_str());
-        return false;
-      }
-      m_shaderModules[i] = res.createShaderModule(s);
-    }
-  }
-  else
-  {
-    const auto& rgen_shd  = std::vector<uint32_t>{std::begin(pathtrace_rgen_glsl), std::end(pathtrace_rgen_glsl)};
-    const auto& rchit_shd = std::vector<uint32_t>{std::begin(pathtrace_rchit_glsl), std::end(pathtrace_rchit_glsl)};
-    const auto& rmiss_shd = std::vector<uint32_t>{std::begin(pathtrace_rmiss_glsl), std::end(pathtrace_rmiss_glsl)};
-    const auto& rahit_shd = std::vector<uint32_t>{std::begin(pathtrace_rahit_glsl), std::end(pathtrace_rahit_glsl)};
-    const auto& rshadowmiss_shd = std::vector<uint32_t>{std::begin(shadow_rmiss_glsl), std::end(shadow_rmiss_glsl)};
-    const auto& rahshadow_shd   = std::vector<uint32_t>{std::begin(shadow_rahit_glsl), std::end(shadow_rahit_glsl)};
-    const auto& rchshadow_shd   = std::vector<uint32_t>{std::begin(shadow_rchit_glsl), std::end(shadow_rchit_glsl)};
-    const auto& comp_shd        = std::vector<uint32_t>{std::begin(pathtrace_comp_glsl), std::end(pathtrace_comp_glsl)};
-
-    m_shaderModules[eRaygen]     = nvvk::createShaderModule(m_device, rgen_shd);
-    m_shaderModules[eMiss]       = nvvk::createShaderModule(m_device, rmiss_shd);
-    m_shaderModules[eShadowMiss] = nvvk::createShaderModule(m_device, rshadowmiss_shd);
-    m_shaderModules[eClosestHit] = nvvk::createShaderModule(m_device, rchit_shd);
-    m_shaderModules[eAnyHit]     = nvvk::createShaderModule(m_device, rahit_shd);
-    m_shaderModules[eShadowCH]   = nvvk::createShaderModule(m_device, rchshadow_shd);
-    m_shaderModules[eShadowAH]   = nvvk::createShaderModule(m_device, rahshadow_shd);
-    m_shaderModules[eIndirect]   = nvvk::createShaderModule(m_device, comp_shd);
-  }
-
-  m_dutil->DBG_NAME(m_shaderModules[eRaygen]);
-  m_dutil->DBG_NAME(m_shaderModules[eMiss]);
-  m_dutil->DBG_NAME(m_shaderModules[eShadowMiss]);
-  m_dutil->DBG_NAME(m_shaderModules[eClosestHit]);
-  m_dutil->DBG_NAME(m_shaderModules[eAnyHit]);
-  m_dutil->DBG_NAME(m_shaderModules[eShadowCH]);
-  m_dutil->DBG_NAME(m_shaderModules[eShadowAH]);
-  m_dutil->DBG_NAME(m_shaderModules[eIndirect]);
-
-  return true;
-}
-
-bool RendererPathtracer::reloadShaders(Resources& res, Scene& /*scene*/)
-{
-  for(auto& s : m_shaderModules)
-  {
-    vkDestroyShaderModule(m_device, s, nullptr);
-    s = VK_NULL_HANDLE;
-  }
-  if(!initShaders(res, true))
-    return false;
-  if(m_sbt)
-    m_sbt->destroy();
-  if(m_rtxPipe)
-    m_rtxPipe->destroy(m_device);
-  if(m_indirectPipe)
-    m_indirectPipe->destroy(m_device);
-  m_rtxPipe.reset();
-  m_indirectPipe.reset();
-  //m_sbt.reset();
-  return true;
-}
-
-//------------------------------------------------------------------------------
-// Creating the descriptor set for the ray tracing
-// - Top level acceleration structure
-// - Output image
-//
-void RendererPathtracer::createRtxSet()
-{
-  m_rtxSet = std::make_unique<nvvk::DescriptorSetContainer>(m_device);
-
-  // This descriptor set, holds the top level acceleration structure, the output image and the selection image
-  m_rtxSet->addBinding(RtxBindings::eTlas, VK_DESCRIPTOR_TYPE_ACCELERATION_STRUCTURE_KHR, 1, VK_SHADER_STAGE_ALL);
-  m_rtxSet->addBinding(RtxBindings::eOutImage, VK_DESCRIPTOR_TYPE_STORAGE_IMAGE, 1, VK_SHADER_STAGE_ALL);
-  m_rtxSet->addBinding(RtxBindings::eNormalDepth, VK_DESCRIPTOR_TYPE_STORAGE_IMAGE, 1, VK_SHADER_STAGE_ALL);
-  m_rtxSet->addBinding(RtxBindings::eSelect, VK_DESCRIPTOR_TYPE_STORAGE_IMAGE, 1, VK_SHADER_STAGE_ALL);
-  m_rtxSet->initLayout();
-  m_rtxSet->initPool(1);
-  m_dutil->DBG_NAME(m_rtxSet->getLayout());
-  m_dutil->DBG_NAME(m_rtxSet->getSet());
-}
-
-//------------------------------------------------------------------------------
-// Writing the descriptor set for the ray tracing
-// - Top level acceleration structure
-// - Output image
-//
-void RendererPathtracer::writeRtxSet(Scene& scene)
-{
-  if(!scene.isValid())
-  {
-    return;
-  }
-
-  // Write to descriptors
-  VkAccelerationStructureKHR                   tlas = scene.m_gltfSceneRtx->tlas();
-  VkWriteDescriptorSetAccelerationStructureKHR desc_as_info{
-      .sType                      = VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET_ACCELERATION_STRUCTURE_KHR,
-      .accelerationStructureCount = 1,
-      .pAccelerationStructures    = &tlas,
-  };
-
-  const VkDescriptorImageInfo outImage    = m_gBuffers->getDescriptorImageInfo(GBufferType::eRgbLinear);
-  const VkDescriptorImageInfo normalDepth = m_gBuffers->getDescriptorImageInfo(GBufferType::eNormalDepth);
-  const VkDescriptorImageInfo selectImage = m_gBuffers->getDescriptorImageInfo(GBufferType::eSilhouette);  // for selection
-
-  std::vector<VkWriteDescriptorSet> writes;
-  writes.emplace_back(m_rtxSet->makeWrite(0, RtxBindings::eTlas, &desc_as_info));
-  writes.emplace_back(m_rtxSet->makeWrite(0, RtxBindings::eOutImage, &outImage));
-  writes.emplace_back(m_rtxSet->makeWrite(0, RtxBindings::eNormalDepth, &normalDepth));
-  writes.emplace_back(m_rtxSet->makeWrite(0, RtxBindings::eSelect, &selectImage));
-  vkUpdateDescriptorSets(m_device, static_cast<uint32_t>(writes.size()), writes.data(), 0, nullptr);
-}
-
-//------------------------------------------------------------------------------
-// De-initialize the renderer
-//
-void RendererPathtracer::deinit()
-{
-  if(m_sbt)
-    m_sbt->destroy();
-  if(m_rtxPipe)
-    m_rtxPipe->destroy(m_device);
-  if(m_indirectPipe)
-    m_indirectPipe->destroy(m_device);
-  m_rtxSet.reset();
-  m_rtxPipe.reset();
-  m_indirectPipe.reset();
-  m_sbt.reset();
-  for(auto& s : m_shaderModules)
-  {
-    vkDestroyShaderModule(m_device, s, nullptr);
-    s = VK_NULL_HANDLE;
-  }
-  m_shaderModules.fill(VK_NULL_HANDLE);
-}
-
-//------------------------------------------------------------------------------
-// Creating the G-Buffers, only RGBA32F, no depth
-//
-void RendererPathtracer::createGBuffer(Resources& res)
-{
-  m_gBuffers->destroy();
-  m_gBuffers->create(res.m_finalImage->getSize(), m_gbufferFormats, VK_FORMAT_UNDEFINED);
-}
-
-//------------------------------------------------------------------------------
-// Rendering the scene using ray tracing
-//
-void RendererPathtracer::render(VkCommandBuffer cmd, Resources& /*res*/, Scene& scene, Settings& settings, nvvk::ProfilerVK& profiler)
-{
-  auto scopeDbg = m_dutil->DBG_SCOPE(cmd);
-  auto sec      = profiler.timeRecurring("Raytrace", cmd);
-
-  static int lastSelected = -1;
-
-  // Push constant
-  m_pushConst.maxDepth      = g_pathtraceSettings.maxDepth;
-  m_pushConst.maxSamples    = g_pathtraceSettings.maxSamples;
-  m_pushConst.dbgMethod     = g_pathtraceSettings.dbgMethod;
-  m_pushConst.maxLuminance  = settings.maxLuminance;
-  m_pushConst.useRTDenoiser = m_denoiser->isActivated();
-  if(lastSelected != scene.getSelectedRenderNode() || scene.m_sceneFrameInfo.frameCount <= 0)
-  {
-    lastSelected                   = scene.getSelectedRenderNode();
-    m_pushConst.selectedRenderNode = lastSelected;
-    if(g_pathtraceSettings.autoFocus)
-      g_pathtraceSettings.focalDistance = glm::length(CameraManip.getEye() - CameraManip.getCenter());
-  }
-  else
-    m_pushConst.selectedRenderNode = -1;  // Resetting the selected object, to avoid shooting rays on the same object
-
-  m_pushConst.focalDistance = g_pathtraceSettings.focalDistance;
-  m_pushConst.aperture      = g_pathtraceSettings.aperture;
-  if(g_elemDebugPrintf)
-    m_pushConst.mouseCoord = g_elemDebugPrintf->getMouseCoord();
-
-  // Ray trace
-  VkDescriptorSet dsHdr   = scene.m_hdrEnv->getDescriptorSet();
-  VkDescriptorSet dsSky   = scene.m_sky->getDescriptorSet();
-  VkDescriptorSet dsScene = scene.m_sceneDescriptorSet;
-
-  const VkExtent2D size = m_gBuffers->getSize();
-
-  std::vector<VkDescriptorSet> desc_sets{m_rtxSet->getSet(), dsScene, dsSky, dsHdr};
-  if(g_pathtraceSettings.renderMode == 0)
-  {
-    vkCmdBindPipeline(cmd, VK_PIPELINE_BIND_POINT_RAY_TRACING_KHR, m_rtxPipe->plines[0]);
-    vkCmdBindDescriptorSets(cmd, VK_PIPELINE_BIND_POINT_RAY_TRACING_KHR, m_rtxPipe->layout, 0,
-                            static_cast<uint32_t>(desc_sets.size()), desc_sets.data(), 0, nullptr);
-    vkCmdPushConstants(cmd, m_rtxPipe->layout, VK_SHADER_STAGE_ALL, 0, sizeof(DH::PushConstantPathtracer), &m_pushConst);
-
-    const std::array<VkStridedDeviceAddressRegionKHR, 4>& regions = m_sbt->getRegions();
-    vkCmdTraceRaysKHR(cmd, regions.data(), &regions[1], &regions[2], &regions[3], size.width, size.height, 1);
-  }
-  else
-  {
-    vkCmdBindPipeline(cmd, VK_PIPELINE_BIND_POINT_COMPUTE, m_indirectPipe->plines[0]);
-    vkCmdBindDescriptorSets(cmd, VK_PIPELINE_BIND_POINT_COMPUTE, m_indirectPipe->layout, 0,
-                            static_cast<uint32_t>(desc_sets.size()), desc_sets.data(), 0, nullptr);
-    vkCmdPushConstants(cmd, m_indirectPipe->layout, VK_SHADER_STAGE_ALL, 0, sizeof(DH::PushConstantPathtracer), &m_pushConst);
-
-    VkExtent2D groups = getGroupCounts(size);
-    vkCmdDispatch(cmd, groups.width, groups.height, 1);
-  }
-
-  // Making sure the rendered image is ready to be used
-  VkImage outImage = m_gBuffers->getColorImage(GBufferType::eRgbLinear);
-  VkImageMemoryBarrier barrier = nvvk::makeImageMemoryBarrier(outImage, VK_ACCESS_SHADER_READ_BIT, VK_ACCESS_SHADER_WRITE_BIT,
-                                                              VK_IMAGE_LAYOUT_GENERAL, VK_IMAGE_LAYOUT_GENERAL);
-  vkCmdPipelineBarrier(cmd, VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT, VK_PIPELINE_STAGE_FRAGMENT_SHADER_BIT, 0, 0, nullptr,
-                       0, nullptr, 1, &barrier);
-
-  if(m_denoiser->isActivated())
-  {
-    // Initial buffers
-    VkDescriptorImageInfo colorBuffer       = m_gBuffers->getDescriptorImageInfo(GBufferType::eRgbLinear);
-    VkDescriptorImageInfo resultBuffer      = m_gBuffers->getDescriptorImageInfo(GBufferType::eRgbResult);
-    VkDescriptorImageInfo tmpBuffer         = m_gBuffers->getDescriptorImageInfo(GBufferType::eTempResult);
-    VkDescriptorImageInfo normalDepthBuffer = m_gBuffers->getDescriptorImageInfo(GBufferType::eNormalDepth);
-
-    m_denoiser->render(cmd, size, colorBuffer, resultBuffer, normalDepthBuffer, tmpBuffer);
-  }
-  else
-  {
-    // Blit the 32-bit color buffer to the 16-bit color buffer
-    VkOffset3D  minCorner = {0, 0, 0};
-    VkOffset3D  maxCorner = {int(m_gBuffers->getSize().width), int(m_gBuffers->getSize().height), 1};
-    VkImageBlit blitRegions{
-        .srcSubresource = {.aspectMask = VK_IMAGE_ASPECT_COLOR_BIT, .layerCount = 1},
-        .srcOffsets     = {minCorner, maxCorner},
-        .dstSubresource = {.aspectMask = VK_IMAGE_ASPECT_COLOR_BIT, .layerCount = 1},
-        .dstOffsets     = {minCorner, maxCorner},
-    };
-    vkCmdBlitImage(cmd, m_gBuffers->getColorImage(GBufferType::eRgbLinear), VK_IMAGE_LAYOUT_GENERAL,
-                   m_gBuffers->getColorImage(GBufferType::eRgbResult), VK_IMAGE_LAYOUT_GENERAL, 1, &blitRegions, VK_FILTER_LINEAR);
-  }
-
-  // Silhouette : adding a contour around the selected object on top of the eRgbResult
-  if(m_silhouette->isValid() && scene.getSelectedRenderNode() != -1)
-  {
-    m_silhouette->updateBinding(SilhoutteImages::eObjectID, m_gBuffers->getColorImageView(GBufferType::eSilhouette),
-                                VK_IMAGE_LAYOUT_GENERAL);
-    m_silhouette->updateBinding(SilhoutteImages::eRGBAIImage, m_gBuffers->getColorImageView(GBufferType::eRgbResult),
-                                VK_IMAGE_LAYOUT_GENERAL);
-    m_silhouette->setColor(nvvkhl_shaders::toLinear(settings.silhouetteColor));
-    m_silhouette->dispatch(cmd, m_gBuffers->getSize());
-  }
-}
-
-//------------------------------------------------------------------------------
-// User interface for the renderer
-//
-bool RendererPathtracer::onUI()
-{
-  auto& headerManager = CollapsingHeaderManager::getInstance();
-  bool  changed{false};
-
-  if(headerManager.beginHeader("RendererPathtracer"))
-  {
-    // Setting the aperture max slidder value, based on the scene size
-    float scaleFactor = std::log(m_sceneBBox.radius());
-    scaleFactor       = std::max(scaleFactor, 0.0f);   // Prevent negative values when the scene is small
-    float apertureMax = 0.0001f + scaleFactor * 5.0f;  // Minimum max aperture is 0.0001
-
-
-    PE::begin();
-    changed |= PE::SliderInt("Max Depth", &g_pathtraceSettings.maxDepth, 1, 100);
-    changed |= PE::SliderInt("Max Samples", &g_pathtraceSettings.maxSamples, 1, 100);
-    if(PE::treeNode("Depth-of-field"))
-    {
-      changed |= PE::SliderFloat("Aperture", &g_pathtraceSettings.aperture, 0.0f, apertureMax, "%5.9f",
-                                 ImGuiSliderFlags_Logarithmic | ImGuiSliderFlags_NoRoundToFormat, "Out-of-focus effect");
-      changed |= PE::Checkbox("Auto Focus", &g_pathtraceSettings.autoFocus, "Use interest position");
-      ImGui::BeginDisabled(g_pathtraceSettings.autoFocus);
-      changed |= PE::DragFloat("Focal Distance", &g_pathtraceSettings.focalDistance, 100.0f, 0.0f, 1000000.0f, "%5.9f",
-                               ImGuiSliderFlags_Logarithmic | ImGuiSliderFlags_NoRoundToFormat, "Distance to focal point");
-      g_pathtraceSettings.focalDistance = std::max(0.000000001f, g_pathtraceSettings.focalDistance);
-      ImGui::EndDisabled();
-      PE::treePop();
-    }
-    if(PE::treeNode("Extra"))
-    {
-      changed |= PE::Combo("Debug Method", reinterpret_cast<int32_t*>(&g_pathtraceSettings.dbgMethod),
-                           "None\0Metallic\0Roughness\0Normal\0Tangent\0Bitangent\0BaseColor\0Emissive\0Opacity\0TexCoord0\0TexCoord1\0\0");
-      changed |= PE::Combo("Render Mode", reinterpret_cast<int32_t*>(&g_pathtraceSettings.renderMode), "RTX\0Indirect\0\0");
-      PE::treePop();
-    }
-
-    m_denoiser->onUi();
-
-    PE::end();
-  }
-
-  return changed;
-}
-
-//------------------------------------------------------------------------------
-// When the scene changes, we need to update the descriptor set
-//
-void RendererPathtracer::handleChange(Resources& res, Scene& scene)
-{
-  bool writeDescriptor = scene.hasDirtyFlag(Scene::eHdrEnv);
-  bool gbufferChanged  = res.hasGBuffersChanged();
-
-  if((g_pathtraceSettings.renderMode == RenderMode::eRTX) && !m_rtxPipe)
-    createRtxPipeline(res, scene);
-  if((g_pathtraceSettings.renderMode == RenderMode::eIndirect) && !m_indirectPipe)
-    createIndirectPipeline(res, scene);
-
-
-  if(gbufferChanged || writeDescriptor)
-  {
-    vkDeviceWaitIdle(m_device);
-    scene.resetFrameCount();  // Any change in the scene requires a reset of the frame count
-  }
-  if(gbufferChanged)
-  {
-    // Need to recreate the output G-Buffers with the new size
-    createGBuffer(res);
-    writeDescriptor = true;
-  }
-  if(writeDescriptor)
-  {
-    // Writing the descriptor set for the ray tracing
-    // Which includes the top level acceleration structure and the output images
-    writeRtxSet(scene);
-  }
-}
-
-
-//------------------------------------------------------------------------------
-// Creating the ray tracing pipeline
-//
-void RendererPathtracer::createRtxPipeline(Resources& res, Scene& scene)
-{
-  nvh::ScopedTimer st(__FUNCTION__);
-
-  if(m_rtxPipe)
-    m_rtxPipe->destroy(m_device);
-  m_rtxPipe = std::make_unique<nvvkhl::PipelineContainer>();
-  m_rtxPipe->plines.resize(1);
-
-
+  // RTX Pipeline
   std::array<VkPipelineShaderStageCreateInfo, 7> stages{};
-  for(auto& s : stages)
-    s.sType = VK_STRUCTURE_TYPE_PIPELINE_SHADER_STAGE_CREATE_INFO;
+  for(auto& stage : stages)
+  {
+    stage.sType  = VK_STRUCTURE_TYPE_PIPELINE_SHADER_STAGE_CREATE_INFO;
+    stage.module = m_shaderModule;
+  }
+  stages[eRaygen].pName = "rgenMain";
+  stages[eRaygen].stage = VK_SHADER_STAGE_RAYGEN_BIT_KHR;
 
-  stages[eRaygen].module = m_shaderModules[eRaygen];
-  stages[eRaygen].pName  = "main";
-  stages[eRaygen].stage  = VK_SHADER_STAGE_RAYGEN_BIT_KHR;
-  m_dutil->setObjectName(stages[eRaygen].module, "rgen");
+  stages[eMiss].pName = "rmissMain";
+  stages[eMiss].stage = VK_SHADER_STAGE_MISS_BIT_KHR;
 
-  stages[eMiss].module = m_shaderModules[eMiss];
-  stages[eMiss].pName  = "main";
-  stages[eMiss].stage  = VK_SHADER_STAGE_MISS_BIT_KHR;
-  m_dutil->setObjectName(stages[eMiss].module, "rmiss");
+  stages[eClosestHit].pName = "rchitMain";
+  stages[eClosestHit].stage = VK_SHADER_STAGE_CLOSEST_HIT_BIT_KHR;
 
-  stages[eClosestHit].module = m_shaderModules[eClosestHit];
-  stages[eClosestHit].pName  = "main";
-  stages[eClosestHit].stage  = VK_SHADER_STAGE_CLOSEST_HIT_BIT_KHR;
-  m_dutil->setObjectName(stages[eClosestHit].module, "rchit");
-
-  stages[eAnyHit].module = m_shaderModules[eAnyHit];
-  stages[eAnyHit].pName  = "main";
-  stages[eAnyHit].stage  = VK_SHADER_STAGE_ANY_HIT_BIT_KHR;
-  m_dutil->setObjectName(stages[eAnyHit].module, "rahit");
+  stages[eAnyHit].pName = "rahitMain";
+  stages[eAnyHit].stage = VK_SHADER_STAGE_ANY_HIT_BIT_KHR;
 
   //Shadow
-  stages[eShadowMiss].module = m_shaderModules[eShadowMiss];
-  stages[eShadowMiss].pName  = "main";
-  stages[eShadowMiss].stage  = VK_SHADER_STAGE_MISS_BIT_KHR;
-  m_dutil->setObjectName(stages[eMiss].module, "shaodw_rmiss");
+  stages[eShadowMiss].pName = "rmissShadow";
+  stages[eShadowMiss].stage = VK_SHADER_STAGE_MISS_BIT_KHR;
 
-  stages[eShadowCH].module = m_shaderModules[eShadowCH];
-  stages[eShadowCH].pName  = "main";
-  stages[eShadowCH].stage  = VK_SHADER_STAGE_CLOSEST_HIT_BIT_KHR;
-  m_dutil->setObjectName(stages[eShadowCH].module, "rchit_shadow");
+  stages[eShadowClosestHit].pName = "rchitShadow";
+  stages[eShadowClosestHit].stage = VK_SHADER_STAGE_CLOSEST_HIT_BIT_KHR;
 
-  stages[eShadowAH].module = m_shaderModules[eShadowAH];
-  stages[eShadowAH].pName  = "main";
-  stages[eShadowAH].stage  = VK_SHADER_STAGE_ANY_HIT_BIT_KHR;
-  m_dutil->setObjectName(stages[eShadowAH].module, "rahit_shadow");
-
+  stages[eShadowAnyHit].pName = "rahitShadow";
+  stages[eShadowAnyHit].stage = VK_SHADER_STAGE_ANY_HIT_BIT_KHR;
 
   // Shader groups
   VkRayTracingShaderGroupCreateInfoKHR group{
@@ -628,32 +434,18 @@ void RendererPathtracer::createRtxPipeline(Resources& res, Scene& scene)
   // Hit Group-1
   group.type             = VK_RAY_TRACING_SHADER_GROUP_TYPE_TRIANGLES_HIT_GROUP_KHR;
   group.generalShader    = VK_SHADER_UNUSED_KHR;
-  group.closestHitShader = eShadowCH;
-  group.anyHitShader     = eShadowAH;
+  group.closestHitShader = eShadowClosestHit;
+  group.anyHitShader     = eShadowAnyHit;
   shader_groups.push_back(group);
-
 
   // Shader Execution Reorder (SER)
   int supportSER =
       (m_reorderProperties.rayTracingInvocationReorderReorderingHint & VK_RAY_TRACING_INVOCATION_REORDER_MODE_REORDER_NV) ? 1 : 0;
   nvvk::Specialization specialization;
   specialization.add(0, supportSER);
-  stages[eRaygen].pSpecializationInfo = specialization.getSpecialization();
+  //specialization.add(0, 0);
+  stages[eRaygen].pSpecializationInfo = specialization.getSpecializationInfo();
 
-  // Creating of the pipeline layout
-  const VkPushConstantRange pushConstantRange{.stageFlags = VK_SHADER_STAGE_ALL, .offset = 0, .size = sizeof(DH::PushConstantPathtracer)};
-  std::vector<VkDescriptorSetLayout> descSetLayouts = {m_rtxSet->getLayout(), scene.m_sceneDescriptorSetLayout,
-                                                       scene.m_sky->getDescriptorSetLayout(),
-                                                       scene.m_hdrEnv->getDescriptorSetLayout()};
-  VkPipelineLayoutCreateInfo         pipeLayoutCreateInfo{
-              .sType                  = VK_STRUCTURE_TYPE_PIPELINE_LAYOUT_CREATE_INFO,
-              .setLayoutCount         = static_cast<uint32_t>(descSetLayouts.size()),
-              .pSetLayouts            = descSetLayouts.data(),
-              .pushConstantRangeCount = 1,
-              .pPushConstantRanges    = &pushConstantRange,
-  };
-  NVVK_CHECK(vkCreatePipelineLayout(m_device, &pipeLayoutCreateInfo, nullptr, &m_rtxPipe->layout));
-  m_dutil->DBG_NAME(m_rtxPipe->layout);
 
   // Assemble the shader stages and recursion depth info into the ray tracing pipeline
   VkRayTracingPipelineCreateInfoKHR rtPipelineCreateInfo{
@@ -663,68 +455,95 @@ void RendererPathtracer::createRtxPipeline(Resources& res, Scene& scene)
       .groupCount                   = static_cast<uint32_t>(shader_groups.size()),
       .pGroups                      = shader_groups.data(),
       .maxPipelineRayRecursionDepth = 2,  // Ray depth
-      .layout                       = m_rtxPipe->layout,
+      .layout                       = m_pipelineLayout,
   };
-  NVVK_CHECK(vkCreateRayTracingPipelinesKHR(m_device, {}, {}, 1, &rtPipelineCreateInfo, nullptr, (m_rtxPipe->plines).data()));
-  m_dutil->DBG_NAME(m_rtxPipe->plines[0]);
+  vkDestroyPipeline(m_device, m_pipeline, nullptr);
+  NVVK_CHECK(vkCreateRayTracingPipelinesKHR(m_device, {}, {}, 1, &rtPipelineCreateInfo, nullptr, &m_pipeline));
+  NVVK_DBG_NAME(m_pipeline);
 
-  // Creating the Shading Binding Table
-  m_sbt->create(m_rtxPipe->plines[0], rtPipelineCreateInfo);
+  // Create the Shading Binding Table
+  {
+    resources.allocator.destroyBuffer(m_sbtBuffer);
+
+    // Shader Binding Table (SBT) setup
+    nvvk::SBTGenerator sbtGenerator;
+    sbtGenerator.init(m_device, m_rtPipelineProperties);
+
+    // Prepare SBT data from ray pipeline
+    size_t bufferSize = sbtGenerator.calculateSBTBufferSize(m_pipeline, rtPipelineCreateInfo);
+
+    // Create SBT buffer using the size from above
+    NVVK_CHECK(resources.allocator.createBuffer(
+        m_sbtBuffer, bufferSize, VK_BUFFER_USAGE_2_SHADER_BINDING_TABLE_BIT_KHR, VMA_MEMORY_USAGE_AUTO_PREFER_DEVICE,
+        VMA_ALLOCATION_CREATE_MAPPED_BIT | VMA_ALLOCATION_CREATE_HOST_ACCESS_RANDOM_BIT, sbtGenerator.getBufferAlignment()));
+    NVVK_DBG_NAME(m_sbtBuffer.buffer);
+
+    // Pass the manual mapped pointer to fill the SBT data
+    NVVK_CHECK(sbtGenerator.populateSBTBuffer(m_sbtBuffer.address, bufferSize, m_sbtBuffer.mapping));
+
+    // Retrieve the regions, which are using addresses based on the m_sbtBuffer.address
+    m_sbtRegions = sbtGenerator.getSBTRegions();
+
+    sbtGenerator.deinit();
+  }
 }
 
 
-//------------------------------------------------------------------------------
-// Creating the ray tracing pipeline
-//
-void RendererPathtracer::createIndirectPipeline(Resources& res, Scene& scene)
+//--------------------------------------------------------------------------------------------------
+// Compile the shader
+void PathTracer::compileShader(Resources& resources, bool fromFile)
 {
-  nvh::ScopedTimer st(__FUNCTION__);
+  SCOPED_TIMER(__FUNCTION__);
 
-  if(m_indirectPipe)
-    m_indirectPipe->destroy(m_device);
-  m_indirectPipe = std::make_unique<nvvkhl::PipelineContainer>();
-  m_indirectPipe->plines.resize(1);
+  VkPushConstantRange pushConstant{VK_SHADER_STAGE_ALL, 0, sizeof(shaderio::PathtracePushConstant)};
 
-  // Creating of the pipeline layout
-  const VkPushConstantRange pushConstantRange{.stageFlags = VK_SHADER_STAGE_ALL, .offset = 0, .size = sizeof(DH::PushConstantPathtracer)};
-  std::vector<VkDescriptorSetLayout> descSetLayouts = {m_rtxSet->getLayout(), scene.m_sceneDescriptorSetLayout,
-                                                       scene.m_sky->getDescriptorSetLayout(),
-                                                       scene.m_hdrEnv->getDescriptorSetLayout()};
-  VkPipelineLayoutCreateInfo         pipeLayoutCreateInfo{
-              .sType                  = VK_STRUCTURE_TYPE_PIPELINE_LAYOUT_CREATE_INFO,
-              .setLayoutCount         = static_cast<uint32_t>(descSetLayouts.size()),
-              .pSetLayouts            = descSetLayouts.data(),
-              .pushConstantRangeCount = 1,
-              .pPushConstantRanges    = &pushConstantRange,
+  std::vector<VkDescriptorSetLayout> descriptorSetLayouts{resources.descriptorSetLayout[0], resources.descriptorSetLayout[1],
+                                                          resources.hdrIbl.getDescriptorSetLayout()};
+
+  VkShaderCreateInfoEXT shaderInfo{
+      .sType                  = VK_STRUCTURE_TYPE_SHADER_CREATE_INFO_EXT,
+      .stage                  = VK_SHADER_STAGE_COMPUTE_BIT,
+      .codeType               = VK_SHADER_CODE_TYPE_SPIRV_EXT,
+      .codeSize               = gltf_pathtrace_slang_sizeInBytes,
+      .pCode                  = gltf_pathtrace_slang,
+      .pName                  = "computeMain",
+      .setLayoutCount         = uint32_t(descriptorSetLayouts.size()),
+      .pSetLayouts            = descriptorSetLayouts.data(),
+      .pushConstantRangeCount = 1,
+      .pPushConstantRanges    = &pushConstant,
   };
-  NVVK_CHECK(vkCreatePipelineLayout(m_device, &pipeLayoutCreateInfo, nullptr, &m_indirectPipe->layout));
-  m_dutil->DBG_NAME(m_indirectPipe->layout);
+  if(fromFile)
+  {
+    if(resources.slangCompiler.compileFile("gltf_pathtrace.slang"))
+    {
+      shaderInfo.codeSize = resources.slangCompiler.getSpirvSize();
+      shaderInfo.pCode    = resources.slangCompiler.getSpirv();
+    }
+    else
+    {
+      LOGE("Error compiling gltf_pathtrace.slang\n");
+    }
+  }
+  vkDestroyShaderEXT(m_device, m_shader, nullptr);
+  NVVK_CHECK(vkCreateShadersEXT(m_device, 1U, &shaderInfo, nullptr, &m_shader));
+  NVVK_DBG_NAME(m_shader);
 
-  VkShaderModule                  module = m_shaderModules[eIndirect];
-  VkPipelineShaderStageCreateInfo comp_shd{
-      .sType  = VK_STRUCTURE_TYPE_PIPELINE_SHADER_STAGE_CREATE_INFO,
-      .stage  = VK_SHADER_STAGE_COMPUTE_BIT,
-      .module = module,
-      .pName  = "main",
+  // Create a shader module
+  VkShaderModuleCreateInfo moduleInfo{
+      .sType    = VK_STRUCTURE_TYPE_SHADER_MODULE_CREATE_INFO,
+      .codeSize = gltf_pathtrace_slang_sizeInBytes,
+      .pCode    = gltf_pathtrace_slang,
   };
+  vkDestroyShaderModule(m_device, m_shaderModule, nullptr);
+  NVVK_CHECK(vkCreateShaderModule(m_device, &moduleInfo, nullptr, &m_shaderModule));
+  NVVK_DBG_NAME(m_shaderModule);
 
-  VkComputePipelineCreateInfo cpCreateInfo{
-      .sType  = VK_STRUCTURE_TYPE_COMPUTE_PIPELINE_CREATE_INFO,
-      .stage  = comp_shd,
-      .layout = m_indirectPipe->layout,
-  };
-
-  NVVK_CHECK(vkCreateComputePipelines(m_device, {}, 1, &cpCreateInfo, nullptr, &m_indirectPipe->plines[0]));
-  m_dutil->DBG_NAME(m_indirectPipe->plines[0]);
+  // Destroy pipeline since shader was recompiled
+  vkDestroyPipeline(m_device, m_pipeline, nullptr);
+  m_pipeline = VK_NULL_HANDLE;
 }
 
-
-//------------------------------------------------------------------------------
-// Factory function to create the renderer
-//
-std::unique_ptr<Renderer> makeRendererPathtracer()
+void PathTracer::onUIMenu()
 {
-  return std::make_unique<RendererPathtracer>();
+  BaseRenderer::onUIMenu();
 }
-
-}  // namespace gltfr

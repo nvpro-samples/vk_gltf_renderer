@@ -1,197 +1,174 @@
-cmake_minimum_required(VERSION 3.17)
+cmake_minimum_required(VERSION 3.22...3.31)
+project(GLTF_renderer VERSION 2.0 LANGUAGES C CXX)
 
-# get_filename_component(PROJNAME ${CMAKE_CURRENT_SOURCE_DIR} NAME)
-set(PROJNAME vk_gltf_renderer)
-Project(${PROJNAME})
-Message(STATUS "-------------------------------")
-Message(STATUS "Processing Project ${PROJNAME}:")
 
-#####################################################################################
-# look for nvpro_core 1) as a sub-folder 2) at some other locations
-# this cannot be put anywhere else since we still didn't find setup.cmake yet
-if(NOT BASE_DIRECTORY)
+option(NVPRO2_ENABLE_nvgl off)
 
-  find_path(BASE_DIRECTORY
-    NAMES nvpro_core/cmake/setup.cmake
-    PATHS ${CMAKE_CURRENT_SOURCE_DIR} ${CMAKE_CURRENT_SOURCE_DIR}/.. ${CMAKE_CURRENT_SOURCE_DIR}/../.. ${CMAKE_CURRENT_SOURCE_DIR}/external
-    REQUIRED
-    DOC "Directory containing nvpro_core"
-    )
-endif()
-if(EXISTS ${BASE_DIRECTORY}/nvpro_core/cmake/setup.cmake)
-  set(OUTPUT_PATH ${CMAKE_CURRENT_BINARY_DIR}/bin_x64)
-  include(${BASE_DIRECTORY}/nvpro_core/cmake/setup.cmake)
-else()
-  message(FATAL_ERROR "could not find base directory, please set BASE_DIRECTORY to folder containing nvpro_core")
-endif()
-
-_add_project_definitions(${PROJNAME})
-
-set(NVPRO_CORE_DIR ${BASE_DIRECTORY}/nvpro_core)
-set(NVPRO_SHADERS_DIR ${NVPRO_CORE_DIR}/nvvkhl/shaders)
-
-#####################################################################################
-# Adding Slang
+# Add the cmake folder to the module path
 list(APPEND CMAKE_MODULE_PATH "${CMAKE_CURRENT_SOURCE_DIR}/cmake")
-set(Slang_VERSION "2025.6.1")
-find_package(Slang)
-include(${CMAKE_CURRENT_SOURCE_DIR}/cmake/slang.cmake)
+find_package(NvproCore2 REQUIRED)
 
+
+# Get the name of the current directory
+get_filename_component(PROJECT_NAME ${CMAKE_CURRENT_SOURCE_DIR} NAME)
+project(${PROJECT_NAME})
+message(STATUS "Processing: ${PROJECT_NAME}")
+
+# Adding all sources
+file(GLOB EXE_SOURCES "src/*.cpp" "src/*.hpp" "src/*.h")
+list(FILTER EXE_SOURCES EXCLUDE REGEX "dlss*")
+
+source_group("Source Files" FILES ${EXE_SOURCES})
+
+# Add the executable
+add_executable(${PROJECT_NAME} ${EXE_SOURCES})
+
+# Link libraries and include directories
+target_link_libraries(${PROJECT_NAME} PRIVATE
+  nvpro2::nvapp
+  nvpro2::nvgui
+  nvpro2::nvslang
+  nvpro2::nvutils
+  nvpro2::nvvk
+  nvpro2::nvshaders_host
+  nvpro2::nvaftermath
+  nvpro2::nvvkgltf
+  nvpro2::nvgpu_monitor
+)
+
+add_project_definitions(${PROJECT_NAME})
+
+# Include directory for generated files
+target_include_directories(${PROJECT_NAME} PRIVATE ${CMAKE_BINARY_DIR} ${CMAKE_SOURCE_DIR})
+
+#------------------------------------------------------------------------------------------------------------------------------
+# Compile shaders
+file(GLOB_RECURSE _ALL_SLANG_FILES "shaders/*.slang")
+list(FILTER _ALL_SLANG_FILES EXCLUDE REGEX ".*\\.h\\.slang$")
+set(SHADER_SRC_SLANG_FILES ${_ALL_SLANG_FILES})
+file(GLOB SHADER_H_FILES "shaders/*.h" "shaders/*.h.slang")
+
+# Adding local pre-compiled version of the tonemapper
+set(SHADER_SHARED_SLANG_FILES
+  ${NVSHADERS_DIR}/nvshaders/tonemapper.slang
+  ${NVSHADERS_DIR}/nvshaders/sky_physical.slang
+  ${NVSHADERS_DIR}/nvshaders/hdr_prefilter_diffuse.slang
+  ${NVSHADERS_DIR}/nvshaders/hdr_prefilter_glossy.slang
+  ${NVSHADERS_DIR}/nvshaders/hdr_dome.slang
+  ${NVSHADERS_DIR}/nvshaders/hdr_integrate_brdf.slang
+)
+set(SHADER_SLANG_FILES ${SHADER_SRC_SLANG_FILES} ${SHADER_SHARED_SLANG_FILES})
+message(STATUS "Compiling shaders: ${SHADER_SLANG_FILES}")
+
+compile_slang(
+  "${SHADER_SLANG_FILES}"
+  "${CMAKE_BINARY_DIR}/_autogen"
+  GENERATED_SHADER_HEADERS
+  EXTRA_FLAGS "-I${NVSHADERS_DIR}"
+)
+
+# Add shader files to the project
+source_group("Shaders" FILES ${SHADER_SRC_SLANG_FILES} ${SHADER_H_FILES})
+source_group("Shaders/Compiled" FILES ${GENERATED_SHADER_HEADERS})
+source_group("Shaders/Shared" FILES ${SHADER_SHARED_SLANG_FILES})
+
+# Add the output shader headers (target) directly to the executable
+# This allow to compile the shaders when the executable is built
+target_sources(${PROJECT_NAME} PRIVATE ${GENERATED_SHADER_HEADERS} ${SHADER_H_FILES})
+
+
+
+#####################################################################################
+# Adding DRACO if selected
+option(USE_DRACO "Use Draco for compression" OFF)
+if(USE_DRACO)
+  include(cmake/draco.cmake)
+  download_draco()
+  target_include_directories(${PROJECT_NAME} PRIVATE ${draco_SOURCE_DIR}/src ${draco_BINARY_DIR})
+  target_link_libraries(${PROJECT_NAME} PRIVATE draco::draco)
+  target_compile_definitions(tinygltf INTERFACE TINYGLTF_ENABLE_DRACO) # Tinygltf needs to know about Draco
+  target_compile_definitions(nvvkgltf PRIVATE USE_DRACO) # Our glTF needs to know about Draco to support the extension
+endif()
 #####################################################################################
 # Add RapidJSON package
 download_package(
   NAME RapidJSON
-  URLS https://github.com/Tencent/rapidjson/archive/refs/tags/v1.1.0.zip
-  VERSION 1.1.0
+  URLS https://github.com/Tencent/rapidjson/archive/refs/heads/master.zip
+  VERSION master
   LOCATION RapidJSON_SOURCE_DIR
 )
-set(RAPIDJSON_INCLUDE_DIR ${RapidJSON_SOURCE_DIR}/rapidjson-1.1.0/include/rapidjson)
-
+set(RAPIDJSON_INCLUDE_DIR ${RapidJSON_SOURCE_DIR}/rapidjson-master/include/rapidjson)
+target_include_directories(${PROJECT_NAME} PRIVATE ${RAPIDJSON_INCLUDE_DIR})
 #####################################################################################
-# Adding DRACO if selected
-if(POLICY CMP0148)
-  cmake_policy(SET CMP0148 OLD)
-endif()
-option(USE_DRACO "Use Draco for compression" OFF)
-include(cmake/draco.cmake)
-if(USE_DRACO)
-  download_draco()
-endif()
-
-#####################################################################################
-# Additions from packages needed for this sample
-_add_package_VulkanSDK()    # Vulkan dependencies
-_add_package_ShaderC()      # GLSL Compiler
-_add_package_IMGUI()        # Dear ImGui interface and utilities
-_add_package_NVML()         # GPU monitoring
-_add_package_KTX()          # KTX: BasisU images
-
-# process the rest of some cmake code that needs to be done *after* the packages add
-_add_nvpro_core_lib()
-
-#####################################################################################
-# Source and shader files for this project
-file(GLOB SOURCE_FILES src/*.*)
-file(GLOB SHADER_SOURCE shaders/*.glsl)
-file(GLOB SHADER_HEADER shaders/*.h)
-file(GLOB SHADER_SLANG shaders/*.slang)
-file(GLOB SHADER_COMMON_FILES ${NVPRO_SHADERS_DIR}/*.h)
+# Add MikkTSpace
 set(MIKKTSPACE_DIR ${CMAKE_CURRENT_SOURCE_DIR}/third_party/MikkTSpace)
 set(MIKKTSPACE_SRC ${MIKKTSPACE_DIR}/mikktspace.c ${MIKKTSPACE_DIR}/mikktspace.h)
+target_include_directories(${PROJECT_NAME} PRIVATE ${MIKKTSPACE_DIR})
+target_sources(${PROJECT_NAME} PRIVATE ${MIKKTSPACE_SRC})
+source_group("MikkTSpace" FILES ${MIKKTSPACE_SRC})
+#####################################################################################
+# Adding DLSS if selected
+option(USE_DLSS "Use DLSS-RR for denoising" OFF)
+if(USE_DLSS)
+  message(STATUS "Using DLSS-RR for denoising")
+    download_package(
+      NAME DLSSRR
+      URLS https://github.com/NVIDIA/DLSS/archive/refs/tags/v310.3.0.zip
+      VERSION 310.3.0
+      LOCATION DLSSRR_SOURCE_DIR
+    )
 
-include_directories(${CMAKE_CURRENT_SOURCE_DIR})
+    # Set NGX SDK root path
+    set(NGX_SDK_ROOT "${DLSSRR_SOURCE_DIR}/DLSS-310.3.0/")
+    message(STATUS " - DLSS path: " ${NGX_SDK_ROOT})
+    include(cmake/ngx.cmake)
+    
+    target_link_libraries(${PROJECT_NAME} PRIVATE ngx)
+    target_compile_definitions(${PROJECT_NAME} PRIVATE USE_DLSS)
+    list(APPEND SOURCE_FILES 
+        ${CMAKE_CURRENT_SOURCE_DIR}/src/dlss_wrapper.cpp 
+        ${CMAKE_CURRENT_SOURCE_DIR}/src/dlss_wrapper.hpp
+        ${CMAKE_CURRENT_SOURCE_DIR}/src/dlss_denoiser.cpp 
+        ${CMAKE_CURRENT_SOURCE_DIR}/src/dlss_denoiser.hpp
+        )
+    target_sources(${PROJECT_NAME} PRIVATE ${SOURCE_FILES})
+
+    if (WIN32)
+        if(CMAKE_BUILD_TYPE STREQUAL "Debug")
+            file(GLOB DLSS_DLLS "${NGX_SDK_ROOT}/lib/Windows_x86_64/dev/nvngx_*.dll")
+        else()
+            file(GLOB DLSS_DLLS "${NGX_SDK_ROOT}/lib/Windows_x86_64/rel/nvngx_*.dll")
+        endif()
+    else()
+        if(CMAKE_BUILD_TYPE STREQUAL "Debug")
+            file(GLOB DLSS_DLLS "${NGX_SDK_ROOT}/lib/Linux_x86_64/dev/libnvidia-ngx*.so")
+        else()
+            file(GLOB DLSS_DLLS "${NGX_SDK_ROOT}/lib/Linux_x86_64/rel/libnvidia-ngx*.so")
+        endif()    
+    endif()
+
+    add_custom_command(TARGET ${PROJECT_NAME} POST_BUILD
+        COMMAND ${CMAKE_COMMAND} -E copy_if_different ${DLSS_DLLS} $<TARGET_FILE_DIR:${PROJECT_NAME}> VERBATIM
+        )
+
+    install(FILES ${DLSS_DLLS} DESTINATION ${CMAKE_INSTALL_PREFIX})
+
+endif()
 
 #####################################################################################
-# Executable
-#
-add_executable(${PROJNAME})
-# Sources for the project
-target_sources(${PROJNAME} PRIVATE ${SOURCE_FILES})
-target_sources(${PROJNAME} PRIVATE ${COMMON_SOURCE_FILES})
-target_sources(${PROJNAME} PRIVATE ${PACKAGE_SOURCE_FILES})
-target_sources(${PROJNAME} PRIVATE ${SHADER_SOURCE} ${SHADER_HEADER} ${SHADER_SLANG})
-target_sources(${PROJNAME} PRIVATE ${SHADER_COMMON_FILES})
-target_sources(${PROJNAME} PRIVATE ${MIKKTSPACE_SRC})
-
-set_property(DIRECTORY ${CMAKE_CURRENT_SOURCE_DIR} PROPERTY VS_STARTUP_PROJECT ${PROJNAME})
-
-# Compiler options
-set_property(TARGET ${PROJNAME} PROPERTY CXX_STANDARD 20)
-set_property(TARGET ${PROJNAME} PROPERTY CXX_STANDARD_REQUIRED ON)
-if(MSVC)
-    target_compile_options(${PROJNAME}  PRIVATE /W3)
-    # We are not forcing the usage of the GLSL and Slang compiler
-    target_link_options(${PROJNAME} PRIVATE "/DELAYLOAD:shaderc_shared.dll")
-    target_link_options(${PROJNAME} PRIVATE "/DELAYLOAD:slang.dll") 
-endif()
-
-# Preprocessor definitions
-target_compile_definitions(${PROJNAME} PRIVATE IMGUI_DEFINE_MATH_OPERATORS )
-target_compile_definitions(${PROJNAME} PRIVATE NVPRO_CORE_DIR="${NVPRO_CORE_DIR}" )
-
-# Extra include directories
-target_include_directories(${PROJNAME} PRIVATE ${RAPIDJSON_INCLUDE_DIR})
-target_include_directories(${PROJNAME} PRIVATE ${MIKKTSPACE_DIR})
-
-# Folders for Visual Studio
-source_group("Common" FILES ${COMMON_SOURCE_FILES} ${PACKAGE_SOURCE_FILES} )
-source_group("Shader Files" FILES ${SHADER_SOURCE} ${SHADER_SLANG})
-source_group("Shader Files/common" FILES ${SHADER_COMMON_FILES} ${SHADER_HEADER})
-source_group("MikkTSpace" FILES ${MIKKTSPACE_SRC})
-
-
-
-
-# ---- DRACO ----
-if(USE_DRACO)
-  add_draco()
-endif()
-
-
-# Linking with other libraries
-target_link_libraries(${PROJNAME} PRIVATE nvpro_core)
-target_link_libraries(${PROJNAME} PRIVATE optimized ${LIBRARIES_OPTIMIZED})
-target_link_libraries(${PROJNAME} PRIVATE debug ${LIBRARIES_DEBUG})
-target_link_libraries(${PROJNAME} PRIVATE ${PLATFORM_LIBRARIES})
-if(UNIX)
-    target_link_libraries(${PROJNAME} PRIVATE dl pthread)
-endif()
-
-# Resources
-download_files(FILENAMES FlightHelmet.zip EXTRACT)
+# Adding download resources
+# download_files(FILENAMES FlightHelmet.zip EXTRACT)
 download_files(FILENAMES daytime.hdr std_env.hdr)
 
-
 #####################################################################################
-# GLSL Shader compilation
-#
-set(_GLSL_FLAGS  
-   -Ishaders 
-   -I${NVPRO_CORE_DIR} 
-   -g
-   -D_glsl)
- 
-# Compiling shaders to Spir-V header
-compile_glsl(
-     SOURCE_FILES ${SHADER_SOURCE}
-     HEADER_FILES ${SHADER_HEADER}
-     DST "${CMAKE_CURRENT_SOURCE_DIR}/_autogen" 
-     VULKAN_TARGET "vulkan1.3"
-     HEADER ON
-     DEPENDENCY ${Vulkan_BUILD_DEPENDENCIES}
-     FLAGS ${_GLSL_FLAGS}
-     )
-
-target_sources(${PROJNAME} PRIVATE ${GLSL_SOURCES} ${GLSL_HEADERS})
-
-####################################################################################################
-# Slang Shader compilation
-#
-target_sources(${PROJNAME} PRIVATE ${SHADER_SLANG})
-target_include_directories(${PROJNAME} PRIVATE "${Slang_INCLUDE_DIR}")
-target_link_libraries(${PROJNAME} PRIVATE ${Slang_LIBRARY})
-foreach(SLANG_FILE ${SHADER_SLANG})
-    compile_slang_file(
-        SOURCE_FILE ${SLANG_FILE}
-        DST "${CMAKE_CURRENT_SOURCE_DIR}/_autogen"
-        FLAGS -I${NVPRO_CORE_DIR}
-        )
-    # target_sources(${PROJNAME} PRIVATE ${SLANG_FILE})
-endforeach()
+# Installation, copy files for runtime
+copy_to_runtime_and_install(${PROJECT_NAME}
+  DIRECTORIES "${NVSHADERS_DIR}/nvshaders"
+  FILES ${NsightAftermath_DLLS} ${NVPRO_CORE2_DOWNLOAD_DIR}/daytime.hdr
+  LOCAL_DIRS "${CMAKE_CURRENT_LIST_DIR}/shaders" "${CMAKE_CURRENT_LIST_DIR}/resources"
+  AUTO
+)
 
 
-#####################################################################################
-# copies binaries that need to be put next to the exe files (ZLib, etc.)
-#
-_finalize_target( ${PROJNAME} )
-
-install(FILES ${SHADER_FILES} CONFIGURATIONS Release DESTINATION "bin_${ARCH}/GLSL_${PROJNAME}")
-install(FILES ${SHADER_FILES} CONFIGURATIONS Debug DESTINATION "bin_${ARCH}_debug/GLSL_${PROJNAME}")
-install(FILES ${SHADER_COMMON_FILES} CONFIGURATIONS Release DESTINATION "bin_${ARCH}/GLSL_${PROJNAME}/nvvkhl/shaders")
-install(FILES ${SHADER_COMMON_FILES} CONFIGURATIONS Debug DESTINATION "bin_${ARCH}_debug/GLSL_${PROJNAME}/nvvkhl/shaders")
-
-# Copying Slang DLLs
-add_custom_command(TARGET ${PROJNAME} POST_BUILD 
-    COMMAND ${CMAKE_COMMAND} -E copy_if_different ${Slang_DLL} ${Slang_glslang_DLL} $<TARGET_FILE_DIR:${PROJNAME}> VERBATIM
-    )
-install(FILES ${Slang_DLL} ${Slang_glslang_DLL} DESTINATION bin_${ARCH}$<IF:$<CONFIG:Debug>,_debug,>)
+# Make Visual Studio use this project as the startup project
+set_property(DIRECTORY ${CMAKE_CURRENT_SOURCE_DIR} PROPERTY VS_STARTUP_PROJECT ${PROJECT_NAME})

@@ -1,5 +1,5 @@
 /*
- * Copyright (c) 2024, NVIDIA CORPORATION.  All rights reserved.
+ * Copyright (c) 2023-2025, NVIDIA CORPORATION.  All rights reserved.
  *
  * Licensed under the Apache License, Version 2.0 (the "License");
  * you may not use this file except in compliance with the License.
@@ -13,59 +13,127 @@
  * See the License for the specific language governing permissions and
  * limitations under the License.
  *
- * SPDX-FileCopyrightText: Copyright (c) 2014-2024 NVIDIA CORPORATION
+ * SPDX-FileCopyrightText: Copyright (c) 2023-2025, NVIDIA CORPORATION.
  * SPDX-License-Identifier: Apache-2.0
  */
 
 #pragma once
 
-/* 
-  
-  This is the base class for the Renderer.
+#include <memory>
+#include <string>
+#include <unordered_map>
+#include <queue>
+#include <mutex>
 
-*/
+#include <vulkan/vulkan_core.h>
+#include <glm/glm.hpp>
 
+#include <nvapp/application.hpp>
+#include <nvgui/camera.hpp>
+#include <nvshaders_host/tonemapper.hpp>
+#include <nvslang/slang.hpp>
+#include <nvvk/descriptors.hpp>
+#include <nvvk/gbuffers.hpp>
+#include <nvvk/hdr_ibl.hpp>
+#include <nvvk/ray_picker.hpp>
+#include <nvvk/resource_allocator.hpp>
+#include <nvvkgltf/scene.hpp>
+#include <nvvkgltf/scene_rtx.hpp>
+#include <nvvkgltf/scene_vk.hpp>
+#include <nvvk/profiler_vk.hpp>
+#include "nvutils/parameter_registry.hpp"
 
-#include "scene.hpp"
-#include "nvvk/profiler_vk.hpp"
+// Shader Input/Output
+namespace shaderio {
+using namespace glm;
+#include "shaders/shaderio.h"  // Shared between host and device
+}  // namespace shaderio
 
-namespace DH {
-#include "shaders/device_host.h"  // Include the device/host structures
-}  // namespace DH
+#include "renderer_pathtracer.hpp"
+#include "renderer_rasterizer.hpp"
+#include "resources.hpp"
+#include "silhouette.hpp"
+#include "ui_animation_control.hpp"
+#include "ui_busy_window.hpp"
+#include "ui_scene_graph.hpp"
+#include "ui_renderer.hpp"
 
-
-namespace gltfr {
-
-class Renderer
+class GltfRenderer : public nvapp::IAppElement
 {
+
 public:
-  virtual ~Renderer() = default;
+  GltfRenderer(nvutils::ParameterRegistry* parameterReg);
+  ~GltfRenderer() override = default;
 
-  // Use init to create the resources and the pipeline
-  virtual bool init(Resources& res, Scene& scene) = 0;
+  void createScene(const std::filesystem::path& sceneFilename);
+  void createHDR(const std::filesystem::path& hdrFilename);
+  void setCameraManipulator(std::shared_ptr<nvutils::CameraManipulator> cameraManip)
+  {
+    m_resources.cameraManip = cameraManip;
+  }
 
-  // Use render to render the scene
-  virtual void render(VkCommandBuffer primary, Resources& res, Scene& scene, Settings& settings, nvvk::ProfilerVK& profiler) = 0;
+  friend struct GltfRendererUI;
 
-  // Use deinit to destroy the resources and the pipeline
-  virtual void deinit(Resources& res) = 0;
+private:
+  void onAttach(nvapp::Application* app) override;
+  void onDetach() override;
+  void onFileDrop(const std::filesystem::path& filename) override;
+  void onLastHeadlessFrame() override;
+  void onRender(VkCommandBuffer cmd) override;
+  void onResize(VkCommandBuffer cmd, const VkExtent2D& size) override;
+  void onUIMenu() override;
+  void onUIRender() override;
 
-  // Use onUI to show the UI for the renderer
-  virtual bool onUI() { return false; }
+  bool save(const std::filesystem::path& filename);
+  bool updateAnimation(VkCommandBuffer cmd);
+  bool updateFrameCounter();
+  bool processQueuedCommandBuffers();
 
-  // Use handleChange to react to changes in the scene
-  virtual void handleChange(Resources& res, Scene& scene) = 0;
+  void clearGbuffer(VkCommandBuffer cmd);
+  void compileShaders();
+  void createDescriptorSets();
+  void createResourceBuffers();
+  void createVulkanScene();
+  void destroyResources();
+  void resetFrame();
+  void silhouette(VkCommandBuffer cmd);
+  void tonemap(VkCommandBuffer cmd);
+  void updateNodeToRenderNodeMap();
+  void updateTextures();
+  void updateHdrImages();
 
-  // Use getOutputImage to get the final rendered image
-  virtual VkDescriptorImageInfo getOutputImage() const { return {}; }
+  bool updateSceneChanges(VkCommandBuffer cmd, bool didAnimate);
 
-  // Use hot-reload the shaders
-  virtual bool reloadShaders(Resources& res, Scene& scene) = 0;
+  //--------------------------------------------------------------------------------------------------
+  //
+  //
+  nvapp::Application*        m_app{};               // Application pointer
+  VkDevice                   m_device{};            // Convenient
+  nvvk::RayPicker            m_rayPicker{};         // Ray picker
+  nvutils::ProfilerTimeline* m_profilerTimeline{};  // Timeline profiler
+  nvvk::ProfilerGpuTimer     m_profilerGpuTimer{};  // GPU profiler
+
+  Resources  m_resources;
+  PathTracer m_pathTracer;  // Path tracer renderer
+  Rasterizer m_rasterizer;  // Rasterizer renderer
+
+  UiSceneGraph     m_uiSceneGraph;  // Model UI
+  BusyWindow       m_busy;
+  AnimationControl m_animControl;  // Animation control (UI)
+  Silhouette       m_silhouette;   // Silhouette renderer
+
+  std::unordered_map<int, int> m_nodeToRenderNodeMap;  // Maps node IDs to render node indices
+
+  // Command buffer queue for deferred submission
+  struct CommandBufferInfo
+  {
+    VkCommandBuffer cmdBuffer{};
+    bool            isBlasBuild{false};  // Indicates if this is a BLAS build command
+  };
+  std::queue<CommandBufferInfo> m_cmdBufferQueue;
+  std::mutex                    m_cmdBufferQueueMutex;
+
+  glm::mat4 m_prevMVP{1.f};  // Previous MVP matrix for motion vectors
+
+  VkCommandPool m_transientCmdPool{};  // Command pool for transient command buffers
 };
-
-// Add under here all the different renderers
-std::unique_ptr<Renderer> makeRendererEmpty();
-std::unique_ptr<Renderer> makeRendererPathtracer();
-std::unique_ptr<Renderer> makeRendererRaster();
-
-}  // namespace gltfr

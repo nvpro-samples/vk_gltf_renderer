@@ -16,7 +16,19 @@
  * SPDX-FileCopyrightText: Copyright (c) 2024-2025, NVIDIA CORPORATION.
  * SPDX-License-Identifier: Apache-2.0
  */
-#pragma once
 
+
+#define TINYGLTF_IMPLEMENTATION
+#define STB_IMAGE_IMPLEMENTATION
+#define STB_IMAGE_WRITE_IMPLEMENTATION
+#define TINYGLTF_NO_EXTERNAL_IMAGE  // Images loaded by SceneVk
+#define TINYGLTF_USE_RAPIDJSON
+#define TINYGLTF_USE_RAPIDJSON_CRTALLOCATOR
+#pragma warning(push)
+#pragma warning(disable : 4018)  // signed/unsigned mismatch
+#pragma warning(disable : 4267)  // conversion from 'size_t' to 'uint32_t', possible loss of data
+#pragma warning(disable : 4996)  //
 #include <tinygltf/tiny_gltf.h>
-void recomputeTangents(tinygltf::Model& model, bool forceCreation, bool mikktspace);
+#pragma warning(pop)
+#define TINYOBJLOADER_IMPLEMENTATION
+#include <tinyobjloader/tiny_obj_loader.h>

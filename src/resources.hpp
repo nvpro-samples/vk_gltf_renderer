@@ -1,5 +1,5 @@
 /*
- * Copyright (c) 2024, NVIDIA CORPORATION.  All rights reserved.
+ * Copyright (c) 2023-2025, NVIDIA CORPORATION.  All rights reserved.
  *
  * Licensed under the Apache License, Version 2.0 (the "License");
  * you may not use this file except in compliance with the License.
@@ -13,89 +13,126 @@
  * See the License for the specific language governing permissions and
  * limitations under the License.
  *
- * SPDX-FileCopyrightText: Copyright (c) 2014-2024 NVIDIA CORPORATION
+ * SPDX-FileCopyrightText: Copyright (c) 2023-2025, NVIDIA CORPORATION.
  * SPDX-License-Identifier: Apache-2.0
  */
 
+/**
+ * Core resource management header for the Vulkan GLTF renderer.
+ * 
+ * This header defines the main resource structures and settings for a Vulkan-based 3D renderer
+ * that supports both path tracing and rasterization. It manages Vulkan resources, GLTF scene data,
+ * environment maps, and rendering settings.
+ */
+
 #pragma once
+#include <bitset>
 
-/*
+#include <glm/glm.hpp>
+#include <glm/ext/scalar_constants.hpp>
 
-This class is used to hold the resources for the renderer.
+namespace shaderio {
+using namespace glm;
+#include "shaders/shaderio.h"  // Shared between host and device
+}  // namespace shaderio
 
-It holds the Vulkan resources, such as 
-- the device
-- the physical device
-- the queue
-- the queue family
-- the allocator
-- the G-Buffers (just the color final image)
-- the temporary command pool
-- and the GLSL compiler.
+#include <nvgui/sky.hpp>
+#include <nvshaders_host/hdr_env_dome.hpp>
+#include <nvshaders_host/tonemapper.hpp>
+#include <nvslang/slang.hpp>
+#include <nvutils/camera_manipulator.hpp>
+#include <nvvk/descriptors.hpp>
+#include <nvvk/gbuffers.hpp>
+#include <nvvk/hdr_ibl.hpp>
+#include <nvvk/resource_allocator.hpp>
+#include <nvvk/sampler_pool.hpp>
+#include <nvvkgltf/scene.hpp>
+#include <nvvkgltf/scene_rtx.hpp>
+#include <nvvkgltf/scene_vk.hpp>
 
-*/
-
-// nvpro-core
-#include "nvvk/resourceallocator_vk.hpp"
-#include "nvvk/context_vk.hpp"
-#include "nvvk/commands_vk.hpp"
-#include "nvvkhl/gbuffer.hpp"
-#include "nvvkhl/glsl_compiler.hpp"
-
-// Local to application
-#include "slang_compiler.hpp"
-
-namespace gltfr {
-struct Queue
+enum class RenderingMode
 {
-  VkQueue  queue       = VK_NULL_HANDLE;
-  uint32_t familyIndex = ~0U;
+  ePathtracer,
+  eRasterizer
 };
 
-struct VulkanInfo
+enum DirtyFlags
 {
-  VkDevice         device{};
-  VkPhysicalDevice physicalDevice{};
-  Queue            GCT0;
-  Queue            compute;
-  Queue            transfer;
+  eVulkanScene,       // When the Vulkan geometry buffers need to be updated
+  eVulkanMaterial,    // When the Vulkan material buffers need to be updated
+  eVulkanAttributes,  // When the Vulkan attributes need to be updated
+  eRtxScene,          // When the RTX acceleration structures need to be updated
+  eHdrEnv,            // When the HDR environment needs to be updated
+  eNodeVisibility,    // When the node visibility has changed
+
+  eNumDirtyFlags  // Keep last - Number of dirty flags
 };
 
-// Resources for the renderer
-class Resources
+struct Settings
 {
-public:
-  void init(VulkanInfo& _ctx);
-  void resizeGbuffers(const VkExtent2D& size);
-
-  // Create a temporary command buffer
-  VkCommandBuffer createTempCmdBuffer();
-  void            submitAndWaitTempCmdBuffer(VkCommandBuffer cmd);
-
-  // Shader compilation
-  shaderc::SpvCompilationResult compileGlslShader(const std::string& filename, shaderc_shader_kind shaderKind) const;
-  VkShaderModule                createShaderModule(shaderc::SpvCompilationResult& compResult) const;
-  static bool createShaderModuleCreateInfo(shaderc::SpvCompilationResult& compResult, VkShaderModuleCreateInfo& createInfo);
-  void resetSlangCompiler();
-
-  // Did the resolution changed?
-  bool hasGBuffersChanged() const { return m_hasGBufferChanged; }
-  void setGBuffersChanged(bool changed) { m_hasGBufferChanged = changed; }
-
-  bool hasGlslCompiler() const { return m_glslC != nullptr; }
-  bool hasSlangCompiler() const { return m_slangC != nullptr; }
-
-  // Vulkan context resources
-  VulkanInfo ctx{};
-
-  std::unique_ptr<nvvk::ResourceAllocatorDma> m_allocator{};
-  std::unique_ptr<nvvkhl::GBuffer>            m_finalImage{};  // G-Buffers: color
-  std::unique_ptr<nvvk::CommandPool>          m_tempCommandPool{};
-  std::unique_ptr<nvvkhl::GlslCompiler>       m_glslC{};
-  std::unique_ptr<SlangCompiler>              m_slangC{};
-
-private:
-  bool m_hasGBufferChanged{false};
+  RenderingMode         renderSystem           = RenderingMode::ePathtracer;    // Renderer to use
+  shaderio::DebugMethod debugMethod            = shaderio::DebugMethod::eNone;  // Debug method for the rasterizer
+  shaderio::EnvSystem   envSystem              = shaderio::EnvSystem::eSky;     // Environment system: Sky or HDR
+  bool                  showAxis               = true;                          // Show the axis (bottom left)
+  float                 hdrEnvIntensity        = 1.0f;                          // Intensity of the environment (HDR)
+  float                 hdrEnvRotation         = 0.0f;                          // Rotation of the environment (HDR)
+  float                 hdrBlur                = 0.0f;                          // Blur of the environment (HDR)
+  glm::vec3             silhouetteColor        = {0.6f, 0.4f, 0.0f};            // Color of the silhouette
+  bool                  useSolidBackground     = false;                         // Use solid background color
+  glm::vec3             solidBackgroundColor   = {0.0f, 0.0f, 0.0f};            // Solid background color
+  int                   maxFrames              = {10000};                       // Maximum number of frames to render
+  bool                  useInfinitePlane       = false;
+  float                 infinitePlaneDistance  = 0;
+  glm::vec3             infinitePlaneBaseColor = glm::vec3(0.5, 0.5, 0.5);  // Default gray color
+  float                 infinitePlaneMetallic  = 0.0;                       // Default non-metallic
+  float                 infinitePlaneRoughness = 0.5;                       // Default medium roughness
 };
 
-}  // namespace gltfr
+
+struct Resources
+{
+  enum
+  {
+    eImgTonemapped,
+    eImgRendered,
+    eImgSelection,
+  };
+
+  VkInstance              instance{};
+  nvvk::ResourceAllocator allocator{};  // Vulkan Memory Allocator
+  nvvk::StagingUploader   staging;
+
+  nvvk::SamplerPool      samplerPool{};    // Texture Sampler Pool
+  VkCommandPool          commandPool{};    // Command pool for secondary command buffer
+  nvslang::SlangCompiler slangCompiler{};  // Slang compiler
+
+  // Scene
+  nvvkgltf::Scene    scene;     // GLTF Scene
+  nvvkgltf::SceneVk  sceneVk;   // GLTF Scene buffers
+  nvvkgltf::SceneRtx sceneRtx;  // GLTF Scene BLAS/TLAS
+
+  // Resources
+  nvvk::HdrIbl                                hdrIbl;  // HDR environment map
+  nvshaders::HdrEnvDome                       hdrDome;
+  nvvk::GBuffer                               gBuffers;          // G-Buffers: color + depth
+  nvvk::Buffer                                bFrameInfo;        // Scene/Frame information
+  nvvk::Buffer                                bSkyParams;        // Sky parameters
+  shaderio::SkyPhysicalParameters             skyParams{};       // Sky parameters
+  nvshaders::Tonemapper                       tonemapper{};      // Tonemapper
+  shaderio::TonemapperData                    tonemapperData{};  // Tonemapper data
+  std::shared_ptr<nvutils::CameraManipulator> cameraManip;       // Camera manipulator
+
+  // Pipeline
+  std::array<nvvk::DescriptorBindings, 2> descriptorBinding{};    // Descriptor bindings: 0: textures, 1: tlas
+  std::array<VkDescriptorSetLayout, 2>    descriptorSetLayout{};  // Descriptor set layout
+  VkDescriptorSet                         descriptorSet{};        // Descriptor set for the textures
+  VkDescriptorPool                        descriptorPool{};
+
+
+  int frameCount{0};
+  int selectedObject{-1};  // Selected object in the scene
+
+  Settings settings;
+
+  std::bitset<32> dirtyFlags;
+};

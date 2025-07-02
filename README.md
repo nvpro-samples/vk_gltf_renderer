@@ -9,6 +9,26 @@
 
 This application demonstrates a dual-mode renderer for glTF 2.0 scenes, implementing both ray tracing and rasterization pipelines. It showcases the utilization of shared Vulkan resources across rendering modes, including geometry, materials, and textures.
 
+## What's New
+
+This version brings significant improvements and modernization:
+
+- **Modern Vulkan Framework**: Now using [Nvpro-Core2](https://github.com/nvpro-samples/nvpro_core2.git) which provides:
+  - Vulkan 1.4 support
+  - Volk for dynamic Vulkan loading
+  - Modern C++ features and improved architecture
+  - Enhanced debugging and validation layers
+  - Better resource management
+
+- **Slang Shading Language**: Replaced GLSL with [Slang](https://github.com/shader-slang/slang) for:
+  - Enhanced shader development experience
+  - Better cross-platform compatibility
+  - Improved shader debugging capabilities
+  - Hot-reloading support (F5)
+  - Modern shader language features
+
+- **DLSS-RR Denoiser**: Added support for NVIDIA's DLSS Ray Reconstruction denoiser (optional, enable with `USE_DLSS`).
+
 ## Key Features
 
 - glTF 2.0 (.gltf/.glb) scene loading
@@ -22,13 +42,14 @@ This application demonstrates a dual-mode renderer for glTF 2.0 scenes, implemen
 ## Dependencies
 
  - Vulkan SDK ([latest version](https://vulkan.lunarg.com/sdk/home))
- - [Nvpro-Core](https://github.com/nvpro-samples/nvpro_core.git) framework
+ - [Nvpro-Core2](https://github.com/nvpro-samples/nvpro_core2.git) framework
+ - [Slang](https://github.com/shader-slang/slang) shading language (included with nvpro_core2)
 
 ## Build Instructions
 
 1. Clone the repositories
 ```bash
-git clone https://github.com/nvpro-samples/nvpro_core.git
+git clone https://github.com/nvpro-samples/nvpro_core2.git
 git clone https://github.com/nvpro-samples/vk_gltf_renderer.git
 ```
 
@@ -54,6 +75,23 @@ cmake --install .
 ### Draco Compression
 
 To enable Draco mesh compression, you need to enable the option CMake. In the GUI interface, you will see the option `USE_DRACO`. If you are using the command line, you can add `-DUSE_DRACO=ON` to the cmake command. This will download the Draco library and it will be included in the project.
+
+### DLSS Ray Reconstruction Denoiser
+
+This release adds support for NVIDIA's [**DLSS Ray Reconstruction (DLSS-RR)**](https://developer.nvidia.com/rtx/dlss) denoiser. DLSS-RR provides state-of-the-art AI-based denoising for path-traced images, significantly improving image quality and temporal stability.
+
+**How to enable:**
+
+By default, DLSS-RR is **disabled**. To enable it, set the CMake option `USE_DLSS=ON` when configuring the project:
+
+```bash
+cmake -DUSE_DLSS=ON ..
+```
+
+This will automatically download and integrate the required DLSS SDK. The denoiser will then be available as an option in the renderer.
+
+> **Note:** DLSS-RR requires a compatible NVIDIA GPU and drivers.
+
 
 ## glTF Core features
 
@@ -81,6 +119,7 @@ To enable Draco mesh compression, you need to enable the option CMake. In the GU
 - [x] KHR_lights_punctual
 - [x] KHR_materials_anisotropy
 - [x] KHR_materials_clearcoat
+- [x] KHR_materials_diffuse_transmission
 - [x] KHR_materials_dispersion
 - [x] KHR_materials_emissive_strength
 - [x] KHR_materials_ior
@@ -343,15 +382,7 @@ It is possible to visualize the scene hierarchy, to select node, to modify their
 Here's a shorter version of the text, tailored for developers on GitHub:
 
 ### Recompiling Shaders
-For quick shader testing, use the `Recompile Shaders` button to hot-reload shaders. Requirements:
-
-- Shaders in the `shaders` folder
-- `shaderc_shared` and `slang` libraries in the path (copied to `bin` by default)
-
-To force using the external shaders:
-```bash
-vk_gltf_reenderer.exe -forceExternalShaders
-```
+For quick shader testing, use the `Recompile Shaders` button to hot-reload Slang shaders (F5). The shaders are located in the `shaders` folder and are automatically compiled during the build process.
 
 Note: Hot-reloading won't work without the shared libraries and shaders, but the app will still run.
 
