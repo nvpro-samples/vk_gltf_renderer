@@ -28,6 +28,7 @@
 #include <nvutils/parameter_registry.hpp>
 
 #include "renderer_pathtracer.hpp"
+#include "utils.hpp"
 
 // Pre-compiled shaders
 #include "_autogen/gltf_pathtrace.slang.h"
@@ -175,6 +176,9 @@ bool PathTracer::onUIRender(Resources& resources)
   }
 #if defined(USE_DLSS)
   m_dlss->onUi(resources);
+#else
+  ImGui::TextDisabled("DLSS is not enabled.");
+  nvsamples::HelpMarker("Define USE_DLSS in CMake to enable DLSS support.");
 #endif
   return changed;
 }

@@ -247,6 +247,16 @@ void GltfRendererUI::renderUI(GltfRenderer& renderer)
         {
           if(PE::begin("HDR"))
           {
+            if(PE::entry("", [&] { return ImGui::SmallButton("load"); }, "Load HDR Image"))
+            {
+              std::filesystem::path filename =
+                  nvgui::windowOpenFileDialog(renderer.m_app->getWindowHandle(), "Load HDR Image", "HDR(.hdr)|*.hdr");
+              if(!filename.empty())
+              {
+                renderer.onFileDrop(filename.c_str());
+              }
+              changed = true;
+            }
             changed |= PE::SliderFloat("Intensity", &renderer.m_resources.settings.hdrEnvIntensity, 0, 100, "%.3f",
                                        ImGuiSliderFlags_Logarithmic, "HDR intensity");
             changed |= PE::SliderAngle("Rotation", &renderer.m_resources.settings.hdrEnvRotation, -360, 360, "%.0f deg",
@@ -447,15 +457,14 @@ void GltfRendererUI::renderMenu(GltfRenderer& renderer)
       recomputeTangents(renderer.m_resources.scene.getModel(), true, false);
       renderer.m_resources.dirtyFlags.set(DirtyFlags::eVulkanScene);
     }
-    ImGui::SetItemTooltip("This recreate all tangents using MikkTSpace");
+    ImGui::SetItemTooltip("This recreate tangents using UV gradient method");
     if(ImGui::MenuItem("Recreate Tangents - MikkTSpace"))
     {
       recomputeTangents(renderer.m_resources.scene.getModel(), true, true);
       renderer.m_resources.dirtyFlags.set(DirtyFlags::eVulkanScene);
     }
+    ImGui::SetItemTooltip("This recreate tangents using MikkTSpace");
 
-
-    ImGui::SetItemTooltip("This fixes NULL tangents");
     ImGui::EndDisabled();
 
     ImGui::EndMenu();
