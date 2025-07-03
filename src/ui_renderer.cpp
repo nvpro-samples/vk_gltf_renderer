@@ -396,6 +396,7 @@ void GltfRendererUI::renderMenu(GltfRenderer& renderer)
   };
 
   GltfRendererUI::windowTitle(renderer);
+  bool clearScene     = ImGui::IsKeyChordPressed(ImGuiMod_Ctrl | ImGuiKey_N);
   bool loadFile       = ImGui::IsKeyChordPressed(ImGuiMod_Ctrl | ImGuiKey_O);
   bool saveFile       = ImGui::IsKeyChordPressed(ImGuiMod_Ctrl | ImGuiKey_S);
   bool saveScreenFile = ImGui::IsKeyChordPressed(ImGuiMod_Ctrl | ImGuiMod_Shift | ImGuiMod_Alt | ImGuiKey_S);
@@ -413,6 +414,7 @@ void GltfRendererUI::renderMenu(GltfRenderer& renderer)
   bool validScene = renderer.m_resources.scene.valid();
   if(ImGui::BeginMenu("File"))
   {
+    clearScene = ImGui::MenuItem("Clear Scene", "Ctrl+N");
     loadFile |= ImGui::MenuItem("Load", "Ctrl+O");
     ImGui::BeginDisabled(!validScene);  // Disable menu item if no scene is loaded
     saveFile |= ImGui::MenuItem("Save As", "Ctrl+S");
@@ -468,6 +470,16 @@ void GltfRendererUI::renderMenu(GltfRenderer& renderer)
     ImGui::EndDisabled();
 
     ImGui::EndMenu();
+  }
+
+  if(clearScene)
+  {
+    renderer.m_resources.scene.destroy();
+    renderer.m_resources.sceneVk.destroy();
+    renderer.m_resources.sceneRtx.destroy();
+    renderer.m_resources.dirtyFlags.set(DirtyFlags::eVulkanScene);
+    renderer.m_resources.selectedObject = -1;
+    renderer.m_uiSceneGraph.selectNode(-1);
   }
 
   if(reloadShader)
