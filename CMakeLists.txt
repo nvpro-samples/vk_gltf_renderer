@@ -1,8 +1,8 @@
 cmake_minimum_required(VERSION 3.22...3.31)
 project(GLTF_renderer VERSION 2.0 LANGUAGES C CXX)
 
-
 option(NVPRO2_ENABLE_nvgl off)
+option(USE_DEFAULT_SCENE "Using a default scene at startup" ON)
 
 # Add the cmake folder to the module path
 list(APPEND CMAKE_MODULE_PATH "${CMAKE_CURRENT_SOURCE_DIR}/cmake")
@@ -38,8 +38,13 @@ target_link_libraries(${PROJECT_NAME} PRIVATE
 
 add_project_definitions(${PROJECT_NAME})
 
+# Add compile definition for USE_DEFAULT_SCENE option
+if(USE_DEFAULT_SCENE)
+  target_compile_definitions(${PROJECT_NAME} PRIVATE USE_DEFAULT_SCENE)
+endif()
+
 # Include directory for generated files
-target_include_directories(${PROJECT_NAME} PRIVATE ${CMAKE_BINARY_DIR} ${CMAKE_SOURCE_DIR})
+target_include_directories(${PROJECT_NAME} PRIVATE ${CMAKE_BINARY_DIR} ${CMAKE_CURRENT_SOURCE_DIR})
 
 #------------------------------------------------------------------------------------------------------------------------------
 # Compile shaders

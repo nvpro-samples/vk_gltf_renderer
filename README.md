@@ -56,15 +56,13 @@ git clone https://github.com/nvpro-samples/vk_gltf_renderer.git
 2. Build the project
 ```bash
 cd vk_gltf_renderer
-mkdir build
-cd build
-cmake ..
-cmake --build . --config release
+cmake -B build -S . -DUSE_DLSS=ON -DUSE_DRACO=ON
+cmake --build build --config release
 ```
 
 3. Run the application
 ```bash
-.\bin_x64\Release\vk_gltf_renderer.exe
+.\_bin\Release\vk_gltf_renderer.exe
 ```
 
 4. Install [optional] : if you want to package the application

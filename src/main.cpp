@@ -77,8 +77,8 @@ auto main(int argc, char** argv) -> int
   nvutils::Logger::ShowFlags   logShow  = nvutils::Logger::ShowFlags::eSHOW_NONE;
 
   // Global variables
-  std::filesystem::path sceneFilename{"shader_ball.gltf"};  // Default scene
-  std::filesystem::path hdrFilename{};    // = "env3.hdr";          // Default HDR
+  std::filesystem::path sceneFilename{};  // "shader_ball.gltf"};  // Default scene
+  std::filesystem::path hdrFilename{};    // "env3.hdr"};         // Default HDR
 
   // Command line parameters registration
   nvutils::ParameterRegistry parameterRegistry;
@@ -282,6 +282,13 @@ auto main(int argc, char** argv) -> int
   app.addElement(elemProfiler);
 
   // Loading the scene and the HDR
+#ifdef USE_DEFAULT_SCENE
+  // If USE_DEFAULT_SCENE is enabled and no scene file is specified, load the default scene
+  if(sceneFilename.empty())
+  {
+    sceneFilename = "shader_ball.gltf";
+  }
+#endif
   if(!sceneFilename.empty())
     elemGltfRenderer->createScene(sceneFilename);
   if(!hdrFilename.empty())

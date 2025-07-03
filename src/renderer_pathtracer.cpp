@@ -514,6 +514,7 @@ void PathTracer::compileShader(Resources& resources, bool fromFile)
   };
   if(fromFile)
   {
+    SCOPED_TIMER("Slang compile from file");
     if(resources.slangCompiler.compileFile("gltf_pathtrace.slang"))
     {
       shaderInfo.codeSize = resources.slangCompiler.getSpirvSize();
@@ -524,19 +525,26 @@ void PathTracer::compileShader(Resources& resources, bool fromFile)
       LOGE("Error compiling gltf_pathtrace.slang\n");
     }
   }
-  vkDestroyShaderEXT(m_device, m_shader, nullptr);
-  NVVK_CHECK(vkCreateShadersEXT(m_device, 1U, &shaderInfo, nullptr, &m_shader));
-  NVVK_DBG_NAME(m_shader);
+  {
+    SCOPED_TIMER("Create Shader");
+    vkDestroyShaderEXT(m_device, m_shader, nullptr);
+    NVVK_CHECK(vkCreateShadersEXT(m_device, 1U, &shaderInfo, nullptr, &m_shader));
+    NVVK_DBG_NAME(m_shader);
+  }
 
   // Create a shader module
-  VkShaderModuleCreateInfo moduleInfo{
-      .sType    = VK_STRUCTURE_TYPE_SHADER_MODULE_CREATE_INFO,
-      .codeSize = gltf_pathtrace_slang_sizeInBytes,
-      .pCode    = gltf_pathtrace_slang,
-  };
-  vkDestroyShaderModule(m_device, m_shaderModule, nullptr);
-  NVVK_CHECK(vkCreateShaderModule(m_device, &moduleInfo, nullptr, &m_shaderModule));
-  NVVK_DBG_NAME(m_shaderModule);
+  {
+    SCOPED_TIMER("Create Shader Module");
+    VkShaderModuleCreateInfo moduleInfo{
+        .sType    = VK_STRUCTURE_TYPE_SHADER_MODULE_CREATE_INFO,
+        .codeSize = gltf_pathtrace_slang_sizeInBytes,
+        .pCode    = gltf_pathtrace_slang,
+    };
+
+    vkDestroyShaderModule(m_device, m_shaderModule, nullptr);
+    NVVK_CHECK(vkCreateShaderModule(m_device, &moduleInfo, nullptr, &m_shaderModule));
+    NVVK_DBG_NAME(m_shaderModule);
+  }
 
   // Destroy pipeline since shader was recompiled
   vkDestroyPipeline(m_device, m_pipeline, nullptr);
