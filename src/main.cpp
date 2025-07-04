@@ -74,7 +74,7 @@ auto main(int argc, char** argv) -> int
   nvvk::ContextInitInfo        vkSetup;
   nvutils::Logger&             logger   = nvutils::Logger::getInstance();
   nvutils::Logger::LogLevel    logLevel = nvutils::Logger::LogLevel::eINFO;
-  nvutils::Logger::ShowFlags   logShow  = nvutils::Logger::ShowFlags::eSHOW_NONE;
+  nvutils::Logger::ShowFlags   logShow  = nvutils::Logger::ShowBits::eSHOW_NONE;
 
   // Global variables
   std::filesystem::path sceneFilename{};  // "shader_ball.gltf"};  // Default scene
@@ -120,7 +120,7 @@ auto main(int argc, char** argv) -> int
   cli.parse(argc, argv);
 
   // Using the command line parameters
-  logger.setLogLevel(logLevel);
+  logger.setMinimumLogLevel(logLevel);
   logger.setShowFlags(logShow);
 
 

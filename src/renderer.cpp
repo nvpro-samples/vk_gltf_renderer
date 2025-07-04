@@ -400,6 +400,7 @@ void GltfRenderer::onFileDrop(const std::filesystem::path& filename)
     if(m_busy.isBusy())
       return;
 
+    m_cmdBufferQueue = {};             // Clear the command buffer queue
     m_resources.scene.destroy();       // Destroy the current scene
     m_resources.selectedObject = -1;   // Reset the selected object
     m_uiSceneGraph.setModel(nullptr);  // Reset the UI model
