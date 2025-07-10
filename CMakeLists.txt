@@ -44,7 +44,7 @@ if(USE_DEFAULT_SCENE)
 endif()
 
 # Include directory for generated files
-target_include_directories(${PROJECT_NAME} PRIVATE ${CMAKE_BINARY_DIR} ${CMAKE_CURRENT_SOURCE_DIR})
+target_include_directories(${PROJECT_NAME} PRIVATE ${CMAKE_BINARY_DIR}/${PROJECT_NAME} ${CMAKE_CURRENT_SOURCE_DIR})
 
 #------------------------------------------------------------------------------------------------------------------------------
 # Compile shaders
@@ -67,7 +67,7 @@ message(STATUS "Compiling shaders: ${SHADER_SLANG_FILES}")
 
 compile_slang(
   "${SHADER_SLANG_FILES}"
-  "${CMAKE_BINARY_DIR}/_autogen"
+  "${CMAKE_BINARY_DIR}/${PROJECT_NAME}/_autogen"
   GENERATED_SHADER_HEADERS
   EXTRA_FLAGS "-I${NVSHADERS_DIR}"
 )
@@ -113,7 +113,7 @@ target_sources(${PROJECT_NAME} PRIVATE ${MIKKTSPACE_SRC})
 source_group("MikkTSpace" FILES ${MIKKTSPACE_SRC})
 #####################################################################################
 # Adding DLSS if selected
-option(USE_DLSS "Use DLSS-RR for denoising" OFF)
+option(USE_DLSS "Use DLSS-RR for denoising" ON)
 if(USE_DLSS)
   message(STATUS "Using DLSS-RR for denoising")
     download_package(

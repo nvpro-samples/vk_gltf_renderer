@@ -80,6 +80,10 @@ auto main(int argc, char** argv) -> int
   std::filesystem::path sceneFilename{};  // "shader_ball.gltf"};  // Default scene
   std::filesystem::path hdrFilename{};    // "env3.hdr"};         // Default HDR
 
+  // Application defaults overrides
+  appInfo.preferredVsyncOffMode = VK_PRESENT_MODE_MAILBOX_KHR;
+  appInfo.vSync                 = false;
+
   // Command line parameters registration
   nvutils::ParameterRegistry parameterRegistry;
   parameterRegistry.add({"scenefile", "Input scene filename"}, {".gltf"}, &sceneFilename);
@@ -90,8 +94,11 @@ auto main(int argc, char** argv) -> int
   parameterRegistry.add({"vsync"}, &appInfo.vSync);
   parameterRegistry.add({"validation"}, &vkSetup.enableValidationLayers);
   parameterRegistry.add({"logLevel", "Log level: [Info:0, Warning:1, Error:2]"}, (int*)&logLevel);
-  parameterRegistry.add({"logShow", "Show extra log info (bitset): [None:0, Time:1, Level:2]"}, (int*)&logShow);
+  parameterRegistry.add({"logShow", "Show extra log info (bitset): [0:None, 1:Time, 2:Level]"}, (int*)&logShow);
   parameterRegistry.add({"device", "force a vulkan device via index into the device list"}, &vkSetup.forceGPU);
+  parameterRegistry.add({"vsyncOffMode", "Preferred VSync Off mode: [0:Immediate, 1:Mailbox, 2:FIFO, 3:FIFO Relax]"},
+                        (int*)&appInfo.preferredVsyncOffMode);
+
 
   // Don't show the profiler by default
   auto profilerSettings  = std::make_shared<nvapp::ElementProfiler::ViewSettings>();
@@ -233,7 +240,6 @@ auto main(int argc, char** argv) -> int
 
   // Application information
   appInfo.name           = fmt::format("{} ({})", nvutils::getExecutablePath().stem().string(), "Slang");
-  appInfo.vSync          = false;
   appInfo.instance       = vkContext.getInstance();
   appInfo.device         = vkContext.getDevice();
   appInfo.physicalDevice = vkContext.getPhysicalDevice();

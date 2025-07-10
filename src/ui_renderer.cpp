@@ -474,6 +474,7 @@ void GltfRendererUI::renderMenu(GltfRenderer& renderer)
 
   if(clearScene)
   {
+    vkQueueWaitIdle(renderer.m_app->getQueue(0).queue);
     renderer.m_resources.scene.destroy();
     renderer.m_resources.sceneVk.destroy();
     renderer.m_resources.sceneRtx.destroy();
