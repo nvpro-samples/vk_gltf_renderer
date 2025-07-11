@@ -113,7 +113,7 @@ target_sources(${PROJECT_NAME} PRIVATE ${MIKKTSPACE_SRC})
 source_group("MikkTSpace" FILES ${MIKKTSPACE_SRC})
 #####################################################################################
 # Adding DLSS if selected
-option(USE_DLSS "Use DLSS-RR for denoising" ON)
+option(USE_DLSS "Use DLSS-RR for denoising" OFF)
 if(USE_DLSS)
   message(STATUS "Using DLSS-RR for denoising")
     download_package(
@@ -169,7 +169,7 @@ download_files(FILENAMES daytime.hdr std_env.hdr)
 # Installation, copy files for runtime
 copy_to_runtime_and_install(${PROJECT_NAME}
   DIRECTORIES "${NVSHADERS_DIR}/nvshaders"
-  FILES ${NsightAftermath_DLLS} ${NVPRO_CORE2_DOWNLOAD_DIR}/daytime.hdr
+  FILES ${NsightAftermath_DLLS}
   LOCAL_DIRS "${CMAKE_CURRENT_LIST_DIR}/shaders" "${CMAKE_CURRENT_LIST_DIR}/resources"
   AUTO
 )
