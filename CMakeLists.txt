@@ -70,6 +70,8 @@ compile_slang(
   "${CMAKE_BINARY_DIR}/${PROJECT_NAME}/_autogen"
   GENERATED_SHADER_HEADERS
   EXTRA_FLAGS "-I${NVSHADERS_DIR}"
+  OPTIMIZATION_LEVEL 0
+  DEBUG_LEVEL 1
 )
 
 # Add shader files to the project

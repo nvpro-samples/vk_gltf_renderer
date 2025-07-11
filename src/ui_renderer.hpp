@@ -30,4 +30,6 @@ struct GltfRendererUI
   static void          mouseClickedInViewport(GltfRenderer& renderer);
   static nvutils::Bbox getRenderNodeBbox(GltfRenderer& renderer, int nodeID);
   static void          windowTitle(GltfRenderer& renderer);
+  static void          applyGltfCamera(GltfRenderer& renderer, int cameraIndex);
+  static void          setGltfCameraFromView(GltfRenderer& renderer, int cameraIndex);
 };

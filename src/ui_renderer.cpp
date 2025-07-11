@@ -165,20 +165,40 @@ void GltfRendererUI::renderUI(GltfRenderer& renderer)
     // Scene Graph UI
     {
       int selectedNode = renderer.m_uiSceneGraph.selectedNode();
+
+      // Use event-based approach for maximum decoupling
+      // The scene graph UI emits events instead of calling renderer methods directly
+      // This eliminates the circular dependency and makes the code more modular
+      renderer.m_uiSceneGraph.setEventCallback([&renderer](const UiSceneGraph::Event& event) {
+        switch(event.type)
+        {
+          case UiSceneGraph::EventType::CameraApply:
+            GltfRendererUI::applyGltfCamera(renderer, event.data);
+            break;
+          case UiSceneGraph::EventType::CameraSetFromView:
+            GltfRendererUI::setGltfCameraFromView(renderer, event.data);
+            break;
+          case UiSceneGraph::EventType::NodeSelected:
+            // Update the selected render node index when a node is selected
+            {
+              auto it = renderer.m_nodeToRenderNodeMap.find(event.data);
+              if(it != renderer.m_nodeToRenderNodeMap.end())
+              {
+                renderer.m_resources.selectedObject = it->second;
+              }
+              else
+              {
+                renderer.m_resources.selectedObject = -1;  // No matching render node
+              }
+            }
+            break;
+          case UiSceneGraph::EventType::MaterialSelected:
+            // [TODO] Handle material selection
+            break;
+        }
+      });
+
       renderer.m_uiSceneGraph.render();
-      // If the selected node has changed, update the selected render node index
-      if(selectedNode != renderer.m_resources.selectedObject)
-      {
-        auto it = renderer.m_nodeToRenderNodeMap.find(selectedNode);
-        if(it != renderer.m_nodeToRenderNodeMap.end())
-        {
-          renderer.m_resources.selectedObject = it->second;
-        }
-        else
-        {
-          renderer.m_resources.selectedObject = -1;  // No matching render node
-        }
-      }
     }
 
     if(frameCount < 2)  // This is a hack to make the settings window focus on the first frame
@@ -545,4 +565,132 @@ void GltfRendererUI::renderMenu(GltfRenderer& renderer)
   // Let both renderers handle their menus
   renderer.m_pathTracer.onUIMenu();
   renderer.m_rasterizer.onUIMenu();
+}
+
+//--------------------------------------------------------------------------------------------------
+// Apply a GLTF camera to the camera manipulator
+// This function converts GLTF camera parameters to camera manipulator settings
+// and applies them to the current view
+//
+void GltfRendererUI::applyGltfCamera(GltfRenderer& renderer, int cameraIndex)
+{
+  if(!renderer.m_resources.scene.valid())
+    return;
+
+  // Get the node that contains this camera to clear its extras
+  int nodeIndex = renderer.m_uiSceneGraph.getNodeForCamera(cameraIndex);
+  if(nodeIndex >= 0)
+  {
+    // Clear the camera extras so that eye/center/up are recalculated from the world matrix
+    tinygltf::Node& node = renderer.m_resources.scene.getModel().nodes[nodeIndex];
+    if(node.extras.IsObject())
+    {
+      tinygltf::Value::Object extras = node.extras.Get<tinygltf::Value::Object>();
+      extras.erase("camera::eye");
+      extras.erase("camera::center");
+      extras.erase("camera::up");
+      node.extras = tinygltf::Value(extras);
+    }
+  }
+
+  // Force refresh of render cameras to reflect latest UI changes
+  const std::vector<nvvkgltf::RenderCamera>& cameras = renderer.m_resources.scene.getRenderCameras(true);
+
+  if(cameraIndex < 0 || cameraIndex >= static_cast<int>(cameras.size()))
+    return;
+
+  const nvvkgltf::RenderCamera& camera = cameras[cameraIndex];
+
+  if(camera.type == nvvkgltf::RenderCamera::CameraType::ePerspective)
+  {
+    float fov = static_cast<float>(glm::degrees(camera.yfov));
+    renderer.m_resources.cameraManip->setCamera({camera.eye, camera.center, camera.up, fov});
+    renderer.m_resources.cameraManip->setClipPlanes({static_cast<float>(camera.znear), static_cast<float>(camera.zfar)});
+  }
+  else if(camera.type == nvvkgltf::RenderCamera::CameraType::eOrthographic)
+  {
+    float fov = 45.0f;
+    renderer.m_resources.cameraManip->setCamera({camera.eye, camera.center, camera.up, fov});
+    renderer.m_resources.cameraManip->setClipPlanes({static_cast<float>(camera.znear), static_cast<float>(camera.zfar)});
+  }
+
+  // Also update the scene's camera to keep extras (eye, center, up) in sync
+  renderer.m_resources.scene.setSceneCamera(camera);
+}
+
+//--------------------------------------------------------------------------------------------------
+// Set a GLTF camera from the current camera manipulator state
+// This function updates the GLTF camera parameters and node extras with the current view
+//
+void GltfRendererUI::setGltfCameraFromView(GltfRenderer& renderer, int cameraIndex)
+{
+  if(!renderer.m_resources.scene.valid() || !renderer.m_resources.cameraManip)
+  {
+    return;
+  }
+
+  // Get the node that contains this camera
+  int nodeIndex = renderer.m_uiSceneGraph.getNodeForCamera(cameraIndex);
+  if(nodeIndex < 0)
+  {
+    return;
+  }
+
+  tinygltf::Node&   node   = renderer.m_resources.scene.getModel().nodes[nodeIndex];
+  tinygltf::Camera& camera = renderer.m_resources.scene.getModel().cameras[cameraIndex];
+
+  // Get current camera state from manipulator
+  nvutils::CameraManipulator::Camera cameraState = renderer.m_resources.cameraManip->getCamera();
+  glm::vec2                          clipPlanes  = renderer.m_resources.cameraManip->getClipPlanes();
+
+  // Update the camera parameters
+  if(camera.type == "perspective")
+  {
+    tinygltf::PerspectiveCamera& persp = camera.perspective;
+    // Convert FOV from degrees (manipulator) to radians (GLTF)
+    persp.yfov  = glm::radians(cameraState.fov);
+    persp.znear = static_cast<double>(clipPlanes.x);
+    persp.zfar  = static_cast<double>(clipPlanes.y);
+    // Aspect ratio will be calculated from viewport when camera is applied
+  }
+  else if(camera.type == "orthographic")
+  {
+    tinygltf::OrthographicCamera& ortho = camera.orthographic;
+    // For orthographic cameras, is it not yet supported
+    ortho.znear = static_cast<double>(clipPlanes.x);
+    ortho.zfar  = static_cast<double>(clipPlanes.y);
+  }
+
+  // Update the node transformation to match the current camera position
+  // The camera's eye position becomes the node's translation
+  node.translation = {cameraState.eye.x, cameraState.eye.y, cameraState.eye.z};
+
+  // Calculate the rotation that points the camera from eye to center with the given up vector
+  glm::vec3 forward = glm::normalize(cameraState.ctr - cameraState.eye);
+  glm::vec3 right   = glm::normalize(glm::cross(forward, cameraState.up));
+  glm::vec3 up      = glm::normalize(glm::cross(right, forward));
+
+  // Create rotation matrix and convert to quaternion
+  glm::mat3 rotationMatrix(right, up, -forward);  // -forward because GLTF cameras look down -Z
+  glm::quat rotation = glm::quat_cast(rotationMatrix);
+
+  node.rotation = {rotation.x, rotation.y, rotation.z, rotation.w};
+  node.scale    = {1.0, 1.0, 1.0};
+
+  // Clear any existing matrix since we're using TRS
+  node.matrix.clear();
+
+  // Update the node extras with the current eye, center, and up vectors
+  if(!node.extras.IsObject())
+  {
+    node.extras = tinygltf::Value(tinygltf::Value::Object());
+  }
+
+  tinygltf::Value::Object extras = node.extras.Get<tinygltf::Value::Object>();
+
+  // Store eye vector
+  extras["camera::eye"]    = tinygltf::utils::convertToTinygltfValue(3, glm::value_ptr(cameraState.eye));
+  extras["camera::center"] = tinygltf::utils::convertToTinygltfValue(3, glm::value_ptr(cameraState.ctr));
+  extras["camera::up"]     = tinygltf::utils::convertToTinygltfValue(3, glm::value_ptr(cameraState.up));
+  node.extras              = tinygltf::Value(extras);
 }

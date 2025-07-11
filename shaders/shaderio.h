@@ -35,12 +35,14 @@
 #define HDR_IMAGE_INDEX 0
 #define HDR_LUT_INDEX 1
 
+// Environment types
 enum class EnvSystem
 {
   eSky,
   eHdr,
 };
 
+// Output image types
 enum OutputImage
 {
   eResultImage = 0,      // Output image (RGBA32)

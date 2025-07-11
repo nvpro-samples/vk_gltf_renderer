@@ -17,6 +17,8 @@
  * SPDX-License-Identifier: Apache-2.0
  */
 
+#include <algorithm>
+#include <functional>
 #include <glm/glm.hpp>
 
 namespace glm {
@@ -34,6 +36,7 @@ GLM_FUNC_QUALIFIER vec3 fma(vec3 const& a, vec3 const& b, vec3 const& c)
 #include <nvgui/fonts.hpp>
 
 #include "ui_scene_graph.hpp"
+#include "ui_renderer.hpp"
 
 namespace shaderio {
 using namespace glm;
@@ -47,6 +50,8 @@ static ImGuiTreeNodeFlags s_treeNodeFlags = ImGuiTreeNodeFlags_SpanAllColumns | 
                                             | ImGuiTreeNodeFlags_SpanTextWidth | ImGuiTreeNodeFlags_OpenOnArrow
                                             | ImGuiTreeNodeFlags_OpenOnDoubleClick;
 
+static const double f64_zero = 0., f64_one = 1., f64_ten = 10., f64_179 = 179., f64_001 = 0.001, f64_1000 = 1000.,
+                    f64_10000 = 10000., f64_01 = 0.1, f64_100 = 100., f64_neg1000 = -1000.;
 
 //--------------------------------------------------------------------------------------------------
 // Entry point for rendering the scene graph
@@ -110,29 +115,79 @@ void UiSceneGraph::renderSceneGraph()
   ImGui::End();
 }
 
+//--------------------------------------------------------------------------------------------------
+// This function renders the details of the selected node, light, camera, or material
 void UiSceneGraph::renderDetails()
 {
   if(ImGui::Begin("Properties"))
   {
-    if(m_selectedIndex < 0 || m_model == nullptr)
+    if(m_model == nullptr)
     {
-      ImGui::TextDisabled("No selection");
+      ImGui::TextDisabled("No model loaded");
       ImGui::End();
       return;
     }
-    switch(m_selectType)
+
+    // Handle light or camera selection
+    if((m_selectType == eLight || m_selectType == eCamera) && m_selectedIndex >= 0)
     {
-      case UiSceneGraph::eNode:
+      // Show node properties first
+      renderNodeDetails(m_selectedIndex);
+
+      // Add a separator between node and light/camera properties
+      ImGui::Separator();
+
+      // Show light or camera specific properties
+      if(m_selectType == eLight)
+      {
+        // Find the light index for the selected node
+        const tinygltf::Node& node = m_model->nodes[m_selectedIndex];
+        if(node.light >= 0)
+        {
+          renderLightDetails(node.light);
+        }
+      }
+      else if(m_selectType == eCamera)
+      {
+        // Find the camera index for the selected node
+        const tinygltf::Node& node = m_model->nodes[m_selectedIndex];
+        if(node.camera >= 0)
+        {
+          renderCameraDetailsWithEvents(node.camera);
+        }
+      }
+    }
+    else
+    {
+      // Always show node properties if a node is selected
+      if(m_selectedIndex >= 0)
+      {
         renderNodeDetails(m_selectedIndex);
-        break;
-      case UiSceneGraph::eMaterial:
-        renderMaterial(m_selectedIndex);
-        break;
-      case UiSceneGraph::eLight:
-        renderLightDetails(m_selectedIndex);
-        break;
-      default:
-        break;
+
+        // Add a separator between node and material properties
+        ImGui::Separator();
+      }
+
+      // Show material properties if a material is selected
+      if(m_selectedMaterialIndex >= 0)
+      {
+        // Show material selector if we have a node context
+        if(m_selectedNodeForMaterial >= 0)
+        {
+          renderMaterialSelector(m_selectedNodeForMaterial);
+        }
+
+        renderMaterial(m_selectedMaterialIndex);
+      }
+      else if(m_selectedIndex >= 0)
+      {
+        // If no material is selected but we have a node, show a message
+        ImGui::TextDisabled("No material selected for this node");
+      }
+      else
+      {
+        ImGui::TextDisabled("No selection");
+      }
     }
   }
   ImGui::End();
@@ -144,12 +199,61 @@ void UiSceneGraph::renderDetails()
 //
 void UiSceneGraph::selectNode(int nodeIndex)
 {
-  m_selectType    = eNode;
+  m_selectType = eNode;
+
+  // Emit node selection event
+  if(m_eventCallback)
+  {
+    m_eventCallback({EventType::NodeSelected, nodeIndex});
+  }
   m_selectedIndex = nodeIndex;
   m_openNodes.clear();
   if(nodeIndex >= 0)
+  {
     preprocessOpenNodes();
+    // Auto-select the first available material for this node
+    auto materials = getMaterialsForNode(nodeIndex);
+    if(!materials.empty())
+    {
+      m_selectedMaterialIndex   = materials[0];
+      m_selectedNodeForMaterial = nodeIndex;
+    }
+    else
+    {
+      m_selectedMaterialIndex   = -1;
+      m_selectedNodeForMaterial = -1;
+    }
+  }
+  else
+  {
+    m_selectedMaterialIndex   = -1;
+    m_selectedNodeForMaterial = -1;
+  }
   m_doScroll = true;
+}
+
+//--------------------------------------------------------------------------------------------------
+// This function is called when a material is selected
+// It will also select the node that contains this material if nodeIndex is provided
+//
+void UiSceneGraph::selectMaterial(int materialIndex, int nodeIndex)
+{
+  m_selectedMaterialIndex = materialIndex;
+  if(nodeIndex >= 0)
+  {
+    m_selectedNodeForMaterial = nodeIndex;
+    // Also select the node if it's not already selected
+    if(m_selectedIndex != nodeIndex)
+    {
+      selectNode(nodeIndex);
+    }
+  }
+
+  // Emit material selection event
+  if(m_eventCallback)
+  {
+    m_eventCallback({EventType::MaterialSelected, materialIndex});
+  }
 }
 
 //--------------------------------------------------------------------------------------------------
@@ -190,8 +294,15 @@ void UiSceneGraph::renderNode(int nodeIndex)
 
   if(ImGui::IsItemClicked() && !ImGui::IsItemToggledOpen())
   {
-    m_selectedIndex = ((m_selectType == eNode) && (m_selectedIndex == nodeIndex)) ? -1 : nodeIndex;
-    m_selectType    = eNode;
+    // Use selectNode to ensure proper material selection
+    if((m_selectType == eNode) && (m_selectedIndex == nodeIndex))
+    {
+      selectNode(-1);  // Deselect if clicking the same node
+    }
+    else
+    {
+      selectNode(nodeIndex);  // Select the new node
+    }
   }
 
   ImGui::TableNextColumn();
@@ -236,37 +347,74 @@ void UiSceneGraph::renderNode(int nodeIndex)
   }
 }
 
+
+//--------------------------------------------------------------------------------------------------
+// Convenience functions using the template
+//
+int UiSceneGraph::getNodeForMesh(int meshIndex)
+{
+  return getNodeForElement(meshIndex, m_meshToNodeMap, m_meshToNodeMapDirty, &tinygltf::Node::mesh);
+}
+
+int UiSceneGraph::getNodeForLight(int lightIndex)
+{
+  return getNodeForElement(lightIndex, m_lightToNodeMap, m_lightToNodeMapDirty, &tinygltf::Node::light);
+}
+
+int UiSceneGraph::getNodeForCamera(int cameraIndex)
+{
+  return getNodeForElement(cameraIndex, m_cameraToNodeMap, m_cameraToNodeMapDirty, &tinygltf::Node::camera);
+}
+
 void UiSceneGraph::renderMesh(int meshIndex)
 {
   const tinygltf::Mesh& mesh = m_model->meshes[meshIndex];
   ImGui::TableNextRow();
   ImGui::TableNextColumn();
-  bool meshOpen = ImGui::TreeNodeEx("Mesh", s_treeNodeFlags, "%s", mesh.name.c_str());
+
+  // Get the node index that contains this mesh
+  int nodeIndex = getNodeForMesh(meshIndex);
+
+  // Create a selectable mesh item
+  std::string meshLabel = "Mesh: " + mesh.name;
+  if(ImGui::Selectable(meshLabel.c_str(), (m_selectedIndex == nodeIndex) && (m_selectType == eNode)))
+  {
+    // Select the parent node and its first material
+    if(nodeIndex >= 0)
+    {
+      selectNode(nodeIndex);
+    }
+  }
+
   ImGui::TableNextColumn();
   ImGui::Text("Mesh %d", meshIndex);
   ImGui::TableNextColumn();
 
-  if(meshOpen)
+  // Render primitives as a tree node
+  if(ImGui::TreeNodeEx("Primitives", s_treeNodeFlags, "Primitives (%zu)", mesh.primitives.size()))
   {
     int primID{};
     for(const auto& primitive : mesh.primitives)
     {
-      renderPrimitive(primitive, primID++);
+      renderPrimitive(primitive, primID++, nodeIndex);
     }
     ImGui::TreePop();
   }
 }
 
-void UiSceneGraph::renderPrimitive(const tinygltf::Primitive& primitive, int primID)
+void UiSceneGraph::renderPrimitive(const tinygltf::Primitive& primitive, int primID, int nodeIndex)
 {
   ImGui::TableNextRow();
   ImGui::TableNextColumn();
   const int         materialID = std::clamp(primitive.material, 0, static_cast<int>(m_model->materials.size() - 1));
   const std::string primName   = "Prim " + std::to_string(primID);
-  if(ImGui::Selectable(primName.c_str(), (m_selectedIndex == materialID) && (m_selectType == eMaterial)))
+
+  // Check if this primitive's material is currently selected
+  bool isSelected = (m_selectedMaterialIndex == materialID) && (m_selectedNodeForMaterial == nodeIndex);
+
+  if(ImGui::Selectable(primName.c_str(), isSelected))
   {
-    m_selectType    = eMaterial;
-    m_selectedIndex = materialID;
+    selectMaterial(materialID, nodeIndex);
   }
   ImGui::TableNextColumn();
   ImGui::Text("Primitive");
@@ -278,10 +426,20 @@ void UiSceneGraph::renderLight(int lightIndex)
   const tinygltf::Light& light = m_model->lights[lightIndex];
   ImGui::TableNextRow();
   ImGui::TableNextColumn();
-  if(ImGui::Selectable(light.name.c_str(), (m_selectedIndex == lightIndex) && (m_selectType == eLight)))
+
+  // Get the node index that contains this light
+  int nodeIndex = getNodeForLight(lightIndex);
+
+  if(ImGui::Selectable(light.name.c_str(), (m_selectedIndex == nodeIndex) && (m_selectType == eLight)))
   {
-    m_selectType    = eLight;
-    m_selectedIndex = lightIndex;
+    if(nodeIndex >= 0)
+    {
+      m_selectType    = eLight;
+      m_selectedIndex = nodeIndex;
+      // Clear material selection when selecting a light
+      m_selectedMaterialIndex   = -1;
+      m_selectedNodeForMaterial = -1;
+    }
   }
   ImGui::TableNextColumn();
   ImGui::Text("Light %d", lightIndex);
@@ -293,10 +451,92 @@ void UiSceneGraph::renderCamera(int cameraIndex)
   const tinygltf::Camera& camera = m_model->cameras[cameraIndex];
   ImGui::TableNextRow();
   ImGui::TableNextColumn();
-  ImGui::Text("%s", camera.name.c_str());
+
+  // Get the node index that contains this camera
+  int nodeIndex = getNodeForCamera(cameraIndex);
+
+  if(ImGui::Selectable(camera.name.c_str(), (m_selectedIndex == nodeIndex) && (m_selectType == eCamera)))
+  {
+    if(nodeIndex >= 0)
+    {
+      m_selectType    = eCamera;
+      m_selectedIndex = nodeIndex;
+      // Clear material selection when selecting a camera
+      m_selectedMaterialIndex   = -1;
+      m_selectedNodeForMaterial = -1;
+    }
+  }
   ImGui::TableNextColumn();
   ImGui::Text("Camera %d", cameraIndex);
   ImGui::TableNextColumn();
+}
+// Utility struct to handle material UI
+struct MaterialUI
+{
+  glm::vec4 baseColorFactor;
+  glm::vec3 emissiveFactor;
+  int       alphaMode;
+
+  static constexpr const char* alphaModes[] = {"OPAQUE", "MASK", "BLEND"};
+
+  void toUI(tinygltf::Material& material)
+  {
+    baseColorFactor = glm::make_vec4(material.pbrMetallicRoughness.baseColorFactor.data());
+    emissiveFactor  = glm::make_vec3(material.emissiveFactor.data());
+    alphaMode       = material.alphaMode == "OPAQUE" ? 0 : material.alphaMode == "MASK" ? 1 : 2;
+  }
+  void fromUI(tinygltf::Material& material) const
+  {
+    material.pbrMetallicRoughness.baseColorFactor = {baseColorFactor.x, baseColorFactor.y, baseColorFactor.z,
+                                                     baseColorFactor.w};
+    material.emissiveFactor                       = {emissiveFactor.x, emissiveFactor.y, emissiveFactor.z};
+    material.alphaMode                            = alphaModes[alphaMode];
+  }
+};
+
+// Utility struct to handle material UI
+struct LightUI
+{
+  glm::vec3 color;
+  int       type;
+  float     innerAngle;
+  float     outerAngle;
+  float     intensity;
+  float     radius;
+
+  static constexpr const char* lightType[] = {"point", "spot", "directional"};
+
+  void toUI(const tinygltf::Light& light)
+  {
+    color      = shaderio::toSrgb(glm::make_vec3(light.color.data()));
+    type       = light.type == "point" ? 0 : light.type == "spot" ? 1 : 2;
+    intensity  = static_cast<float>(light.intensity);
+    innerAngle = static_cast<float>(light.spot.innerConeAngle);
+    outerAngle = static_cast<float>(light.spot.outerConeAngle);
+    radius     = light.extras.Has("radius") ? float(light.extras.Get("radius").GetNumberAsDouble()) : 0.0f;
+  }
+
+  void fromUI(tinygltf::Light& light) const
+  {
+    glm::vec3 linearColor     = shaderio::toLinear(color);
+    light.color               = {linearColor.x, linearColor.y, linearColor.z};
+    light.type                = lightType[type];
+    light.intensity           = intensity;
+    light.spot.innerConeAngle = innerAngle;
+    light.spot.outerConeAngle = outerAngle;
+    if(!light.extras.IsObject())
+    {
+      light.extras = tinygltf::Value(tinygltf::Value::Object());
+    }
+    tinygltf::Value::Object extras = light.extras.Get<tinygltf::Value::Object>();
+    extras["radius"]               = tinygltf::Value(radius);
+    light.extras                   = tinygltf::Value(extras);
+  }
+};
+
+static float logarithmicStep(float value)
+{
+  return std::max(0.1f * std::pow(10.0f, std::floor(std::log10(value))), 0.001f);
 }
 
 //--------------------------------------------------------------------------------------------------
@@ -385,75 +625,6 @@ void UiSceneGraph::getNodeTransform(const tinygltf::Node& node, glm::vec3& trans
   }
 }
 
-// Utility struct to handle material UI
-struct MaterialUI
-{
-  glm::vec4 baseColorFactor;
-  glm::vec3 emissiveFactor;
-  int       alphaMode;
-
-  static constexpr const char* alphaModes[] = {"OPAQUE", "MASK", "BLEND"};
-
-  void toUI(tinygltf::Material& material)
-  {
-    baseColorFactor = glm::make_vec4(material.pbrMetallicRoughness.baseColorFactor.data());
-    emissiveFactor  = glm::make_vec3(material.emissiveFactor.data());
-    alphaMode       = material.alphaMode == "OPAQUE" ? 0 : material.alphaMode == "MASK" ? 1 : 2;
-  }
-  void fromUI(tinygltf::Material& material) const
-  {
-    material.pbrMetallicRoughness.baseColorFactor = {baseColorFactor.x, baseColorFactor.y, baseColorFactor.z,
-                                                     baseColorFactor.w};
-    material.emissiveFactor                       = {emissiveFactor.x, emissiveFactor.y, emissiveFactor.z};
-    material.alphaMode                            = alphaModes[alphaMode];
-  }
-};
-
-// Utility struct to handle material UI
-struct LightUI
-{
-  glm::vec3 color;
-  int       type;
-  float     innerAngle;
-  float     outerAngle;
-  float     intensity;
-  float     radius;
-
-  static constexpr const char* lightType[] = {"point", "spot", "directional"};
-
-  void toUI(const tinygltf::Light& light)
-  {
-    color      = shaderio::toSrgb(glm::make_vec3(light.color.data()));
-    type       = light.type == "point" ? 0 : light.type == "spot" ? 1 : 2;
-    intensity  = static_cast<float>(light.intensity);
-    innerAngle = static_cast<float>(light.spot.innerConeAngle);
-    outerAngle = static_cast<float>(light.spot.outerConeAngle);
-    radius     = light.extras.Has("radius") ? float(light.extras.Get("radius").GetNumberAsDouble()) : 0.0f;
-  }
-
-  void fromUI(tinygltf::Light& light) const
-  {
-    glm::vec3 linearColor     = shaderio::toLinear(color);
-    light.color               = {linearColor.x, linearColor.y, linearColor.z};
-    light.type                = lightType[type];
-    light.intensity           = intensity;
-    light.spot.innerConeAngle = innerAngle;
-    light.spot.outerConeAngle = outerAngle;
-    if(!light.extras.IsObject())
-    {
-      light.extras = tinygltf::Value(tinygltf::Value::Object());
-    }
-    tinygltf::Value::Object extras = light.extras.Get<tinygltf::Value::Object>();
-    extras["radius"]               = tinygltf::Value(radius);
-    light.extras                   = tinygltf::Value(extras);
-  }
-};
-
-static float logarithmicStep(float value)
-{
-  return std::max(0.1f * std::pow(10.0f, std::floor(std::log10(value))), 0.001f);
-}
-
 //--------------------------------------------------------------------------------------------------
 // Rendering the material properties
 // - Base color
@@ -469,8 +640,6 @@ void UiSceneGraph::renderMaterial(int materialIndex)
   // Example: Basic PBR properties
   if(PE::begin())
   {
-    const double f64_zero = 0., f64_one = 1.;
-
     bool       modif      = false;
     MaterialUI materialUI = {};
     materialUI.toUI(material);
@@ -884,6 +1053,122 @@ bool UiSceneGraph::markOpenNodes(int nodeIndex, int targetNodeIndex, std::unorde
   return false;
 }
 
+//--------------------------------------------------------------------------------------------------
+// Helper function to get all materials used by a node
+//
+std::vector<int> UiSceneGraph::getMaterialsForNode(int nodeIndex) const
+{
+  std::vector<int> materials;
+  if(nodeIndex < 0 || nodeIndex >= static_cast<int>(m_model->nodes.size()))
+    return materials;
+
+  const tinygltf::Node& node = m_model->nodes[nodeIndex];
+  if(node.mesh < 0 || node.mesh >= static_cast<int>(m_model->meshes.size()))
+    return materials;
+
+  const tinygltf::Mesh& mesh = m_model->meshes[node.mesh];
+  for(const auto& primitive : mesh.primitives)
+  {
+    if(primitive.material >= 0)
+    {
+      materials.push_back(primitive.material);
+    }
+  }
+
+  // Remove duplicates while preserving order
+  std::vector<int> uniqueMaterials;
+  for(int material : materials)
+  {
+    if(std::find(uniqueMaterials.begin(), uniqueMaterials.end(), material) == uniqueMaterials.end())
+    {
+      uniqueMaterials.push_back(material);
+    }
+  }
+
+  return uniqueMaterials;
+}
+
+//--------------------------------------------------------------------------------------------------
+// Helper function to get primitive information for a node
+//
+std::vector<std::pair<int, std::string>> UiSceneGraph::getPrimitiveInfoForNode(int nodeIndex) const
+{
+  std::vector<std::pair<int, std::string>> primitiveInfo;
+  if(nodeIndex < 0 || nodeIndex >= static_cast<int>(m_model->nodes.size()))
+    return primitiveInfo;
+
+  const tinygltf::Node& node = m_model->nodes[nodeIndex];
+  if(node.mesh < 0 || node.mesh >= static_cast<int>(m_model->meshes.size()))
+    return primitiveInfo;
+
+  const tinygltf::Mesh& mesh = m_model->meshes[node.mesh];
+  for(size_t i = 0; i < mesh.primitives.size(); ++i)
+  {
+    const auto& primitive = mesh.primitives[i];
+    std::string primName  = "Primitive " + std::to_string(i);
+    if(primitive.material >= 0 && primitive.material < static_cast<int>(m_model->materials.size()))
+    {
+      const std::string& materialName = m_model->materials[primitive.material].name;
+      if(!materialName.empty())
+      {
+        primName += " (" + materialName + ")";
+      }
+    }
+    primitiveInfo.emplace_back(primitive.material, primName);
+  }
+
+  return primitiveInfo;
+}
+
+//--------------------------------------------------------------------------------------------------
+// Render material selector for a node
+//
+void UiSceneGraph::renderMaterialSelector(int nodeIndex)
+{
+  auto primitiveInfo = getPrimitiveInfoForNode(nodeIndex);
+  if(primitiveInfo.empty())
+    return;
+
+  ImGui::Text("Material Selection:");
+
+  // Create a combo box for material selection
+  std::vector<const char*> items;
+  std::vector<int>         materialIndices;
+
+  for(const auto& [materialIndex, primName] : primitiveInfo)
+  {
+    if(materialIndex >= 0)
+    {
+      items.push_back(primName.c_str());
+      materialIndices.push_back(materialIndex);
+    }
+  }
+
+  if(items.empty())
+    return;
+
+  // Find current selection index
+  int currentSelection = 0;
+  for(size_t i = 0; i < materialIndices.size(); ++i)
+  {
+    if(materialIndices[i] == m_selectedMaterialIndex)
+    {
+      currentSelection = static_cast<int>(i);
+      break;
+    }
+  }
+
+  if(ImGui::Combo("##MaterialSelector", &currentSelection, items.data(), static_cast<int>(items.size())))
+  {
+    if(currentSelection >= 0 && currentSelection < static_cast<int>(materialIndices.size()))
+    {
+      m_selectedMaterialIndex = materialIndices[currentSelection];
+    }
+  }
+
+  ImGui::Separator();
+}
+
 void UiSceneGraph::renderLightDetails(int lightIndex)
 {
   tinygltf::Light& light = m_model->lights[lightIndex];
@@ -914,4 +1199,214 @@ void UiSceneGraph::renderLightDetails(int lightIndex)
 
     PE::end();
   }
+}
+
+//--------------------------------------------------------------------------------------------------
+// Renders the details of a camera
+//
+// This function displays the properties of a camera in a collapsible section.
+// It supports both perspective and orthographic cameras.
+//
+// Parameters:
+//   cameraIndex - The index of the camera to render
+//
+void UiSceneGraph::renderCameraDetails(int                              cameraIndex,
+                                       const CameraApplyCallback&       applyCameraCallback,
+                                       const CameraSetFromViewCallback& setCameraFromViewCallback)
+{
+  tinygltf::Camera& camera = m_model->cameras[cameraIndex];
+
+  ImGui::Text("Camera: %s", camera.name.c_str());
+
+  if(PE::begin())
+  {
+    bool modif = false;
+
+    if(camera.type == "perspective")
+    {
+      ImGui::Text("Type: Perspective");
+      ImGui::Separator();
+
+      tinygltf::PerspectiveCamera& persp = camera.perspective;
+
+      // Convert FOV from radians (GLTF) to degrees (UI)
+      double fovDegrees = glm::degrees(persp.yfov);
+      modif |= PE::DragScalar("Y FOV (degrees)", ImGuiDataType_Double, &fovDegrees, 0.1f, &f64_one, &f64_179);
+      // Convert back to radians when saving
+      if(modif)
+      {
+        persp.yfov = glm::radians(fovDegrees);
+      }
+
+      modif |= PE::DragScalar("Z Near", ImGuiDataType_Double, &persp.znear, 0.01f, &f64_001, &f64_1000);
+      modif |= PE::DragScalar("Z Far", ImGuiDataType_Double, &persp.zfar, 1.0f, &persp.znear, &f64_10000);
+    }
+    else if(camera.type == "orthographic")
+    {
+      ImGui::Text("Type: Orthographic");
+      ImGui::Separator();
+
+      tinygltf::OrthographicCamera& ortho = camera.orthographic;
+      modif |= PE::DragScalar("X Magnification", ImGuiDataType_Double, &ortho.xmag, 0.1f, &f64_01, &f64_100);
+      modif |= PE::DragScalar("Y Magnification", ImGuiDataType_Double, &ortho.ymag, 0.1f, &f64_01, &f64_100);
+      modif |= PE::DragScalar("Z Near", ImGuiDataType_Double, &ortho.znear, 0.01f, &f64_neg1000, &f64_1000);
+      double ortho_zfar_min = ortho.znear + 1.0;
+      modif |= PE::DragScalar("Z Far", ImGuiDataType_Double, &ortho.zfar, 0.01f, &ortho_zfar_min, &f64_10000);
+    }
+
+    if(modif)
+    {
+      m_changes.set(eCameraDirty);
+    }
+
+    // Add buttons to sync between GLTF camera and current view
+    ImGui::Separator();
+    ImGui::Text("Camera Sync:");
+
+    if(ImGui::Button("Apply to Current View"))
+    {
+      if(applyCameraCallback)
+      {
+        applyCameraCallback(cameraIndex);
+      }
+      m_changes.set(eCameraApplyToView);
+    }
+
+    ImGui::SameLine();
+    if(ImGui::Button("Set from Current View"))
+    {
+      if(setCameraFromViewCallback)
+      {
+        setCameraFromViewCallback(cameraIndex);
+      }
+      m_changes.set(eCameraDirty);
+    }
+
+    PE::end();
+  }
+}
+
+void UiSceneGraph::renderCameraDetailsWithEvents(int cameraIndex)
+{
+  tinygltf::Camera& camera = m_model->cameras[cameraIndex];
+
+  ImGui::Text("Camera: %s", camera.name.c_str());
+
+  if(PE::begin())
+  {
+    bool modif = false;
+
+    if(camera.type == "perspective")
+    {
+      ImGui::Text("Type: Perspective");
+      ImGui::Separator();
+
+      tinygltf::PerspectiveCamera& persp = camera.perspective;
+
+      // Convert FOV from radians (GLTF) to degrees (UI)
+      double fovDegrees = glm::degrees(persp.yfov);
+      modif |= PE::DragScalar("Y FOV (degrees)", ImGuiDataType_Double, &fovDegrees, 0.1f, &f64_one, &f64_179);
+      // Convert back to radians when saving
+      if(modif)
+      {
+        persp.yfov = glm::radians(fovDegrees);
+      }
+
+      modif |= PE::DragScalar("Z Near", ImGuiDataType_Double, &persp.znear, 0.01f, &f64_001, &f64_1000);
+      modif |= PE::DragScalar("Z Far", ImGuiDataType_Double, &persp.zfar, 1.0f, &persp.znear, &f64_10000);
+    }
+    else if(camera.type == "orthographic")
+    {
+      ImGui::Text("Type: Orthographic");
+      ImGui::Separator();
+
+      tinygltf::OrthographicCamera& ortho = camera.orthographic;
+      modif |= PE::DragScalar("X Magnification", ImGuiDataType_Double, &ortho.xmag, 0.1f, &f64_01, &f64_100);
+      modif |= PE::DragScalar("Y Magnification", ImGuiDataType_Double, &ortho.ymag, 0.1f, &f64_01, &f64_100);
+      modif |= PE::DragScalar("Z Near", ImGuiDataType_Double, &ortho.znear, 0.01f, &f64_neg1000, &f64_1000);
+      double ortho_zfar_min = ortho.znear + 1.0;
+      modif |= PE::DragScalar("Z Far", ImGuiDataType_Double, &ortho.zfar, 0.01f, &ortho_zfar_min, &f64_10000);
+    }
+
+    if(modif)
+    {
+      m_changes.set(eCameraDirty);
+    }
+
+    // Add buttons to sync between GLTF camera and current view
+    ImGui::Separator();
+    ImGui::Text("Camera Sync:");
+
+    if(ImGui::Button("Apply to Current View"))
+    {
+      if(m_eventCallback)
+      {
+        m_eventCallback({EventType::CameraApply, cameraIndex});
+      }
+      m_changes.set(eCameraApplyToView);
+    }
+
+    ImGui::SameLine();
+    if(ImGui::Button("Set from Current View"))
+    {
+      if(m_eventCallback)
+      {
+        m_eventCallback({EventType::CameraSetFromView, cameraIndex});
+      }
+      m_changes.set(eCameraDirty);
+    }
+
+    PE::end();
+  }
+}
+
+//--------------------------------------------------------------------------------------------------
+// Builds a lookup cache mapping element indices to their containing node indices
+//
+// This function creates a reverse lookup table that maps from element indices
+// (mesh, light, or camera) to the node index that contains them.
+//
+// Parameters:
+//   cache     - The cache map to populate (elementIndex -> nodeIndex)
+//   dirtyFlag - Flag indicating if the cache needs to be rebuilt
+//   member    - Pointer to member function that returns the element index (e.g., &tinygltf::Node::mesh)
+//
+void UiSceneGraph::buildCache(std::unordered_map<int, int>& cache, bool& dirtyFlag, int(tinygltf::Node::* member)) const
+{
+  if(!dirtyFlag || m_model == nullptr)
+    return;
+
+  cache.clear();
+
+  for(size_t i = 0; i < m_model->nodes.size(); ++i)
+  {
+    const tinygltf::Node& node         = m_model->nodes[i];
+    int                   elementIndex = node.*member;
+    if(elementIndex >= 0)
+    {
+      cache[elementIndex] = static_cast<int>(i);
+    }
+  }
+
+  dirtyFlag = false;
+}
+
+//--------------------------------------------------------------------------------------------------
+// Gets the node index that contains a specific element using cached lookup
+//
+// Parameters:
+//   elementIndex - The index of the element to find (mesh, light, or camera index)
+//   cache        - The cache map for fast element->node lookup
+//   dirtyFlag    - Flag indicating if the cache needs to be rebuilt
+//   member       - Pointer to member function that returns the element index
+//
+// Returns:
+//   The node index that contains the specified element, or -1 if not found
+//
+int UiSceneGraph::getNodeForElement(int elementIndex, std::unordered_map<int, int>& cache, bool& dirtyFlag, int(tinygltf::Node::* member)) const
+{
+  buildCache(cache, dirtyFlag, member);
+
+  auto it = cache.find(elementIndex);
+  return (it != cache.end()) ? it->second : -1;
 }
