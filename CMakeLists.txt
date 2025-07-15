@@ -91,7 +91,7 @@ option(USE_DRACO "Use Draco for compression" OFF)
 if(USE_DRACO)
   include(cmake/draco.cmake)
   download_draco()
-  target_include_directories(${PROJECT_NAME} PRIVATE ${draco_SOURCE_DIR}/src ${draco_BINARY_DIR})
+  target_include_directories(${PROJECT_NAME} PRIVATE ${draco_SOURCE_DIR}/src ${draco_BINARY_DIR} ${CMAKE_CURRENT_BINARY_DIR})
   target_link_libraries(${PROJECT_NAME} PRIVATE draco::draco)
   target_compile_definitions(tinygltf INTERFACE TINYGLTF_ENABLE_DRACO) # Tinygltf needs to know about Draco
   target_compile_definitions(nvvkgltf PRIVATE USE_DRACO) # Our glTF needs to know about Draco to support the extension
@@ -171,7 +171,7 @@ download_files(FILENAMES daytime.hdr std_env.hdr)
 # Installation, copy files for runtime
 copy_to_runtime_and_install(${PROJECT_NAME}
   DIRECTORIES "${NVSHADERS_DIR}/nvshaders"
-  FILES ${NsightAftermath_DLLS}
+  FILES ${NsightAftermath_DLLS} ${Slang_GLSLANG}
   LOCAL_DIRS "${CMAKE_CURRENT_LIST_DIR}/shaders" "${CMAKE_CURRENT_LIST_DIR}/resources"
   AUTO
 )

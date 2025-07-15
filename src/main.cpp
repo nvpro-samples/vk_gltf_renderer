@@ -280,6 +280,7 @@ auto main(int argc, char** argv) -> int
   // Set the camera manipulator to elements that need it.
   elemCamera->setCameraManipulator(cameraManip);
   elemGltfRenderer->setCameraManipulator(cameraManip);
+  elemGltfRenderer->registerRecentFilesHandler();
 
   app.addElement(elemCamera);
   app.addElement(elemGltfRenderer);

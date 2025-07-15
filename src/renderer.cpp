@@ -90,7 +90,6 @@ using namespace glm;
 #include "renderer.hpp"
 #include "ui_collapsing_header_manager.h"
 #include "ui_mouse_state.hpp"
-#include "ui_renderer.hpp"
 #include "utils.hpp"
 #include "tinyobjloader/tiny_obj_loader.h"
 #include "nvvkgltf/converter.hpp"
@@ -276,7 +275,7 @@ void GltfRenderer::onResize(VkCommandBuffer cmd, const VkExtent2D& size)
 // The UI layout is organized hierarchically with collapsible sections for better usability
 void GltfRenderer::onUIRender()
 {
-  GltfRendererUI::renderUI(*this);
+  renderUI();
 }
 
 
@@ -377,7 +376,7 @@ void GltfRenderer::onRender(VkCommandBuffer cmd)
 // Render the UI menu: File, Tools, Renderer
 void GltfRenderer::onUIMenu()
 {
-  GltfRendererUI::renderMenu(*this);
+  renderMenu();
 }
 
 //--------------------------------------------------------------------------------------------------
@@ -546,6 +545,8 @@ void GltfRenderer::createScene(const std::filesystem::path& sceneFilename)
 
   // Need to update (push) all textures
   updateTextures();
+
+  addToRecentFiles(sceneFilename);
 }
 
 //--------------------------------------------------------------------------------------------------

@@ -36,7 +36,6 @@ GLM_FUNC_QUALIFIER vec3 fma(vec3 const& a, vec3 const& b, vec3 const& c)
 #include <nvgui/fonts.hpp>
 
 #include "ui_scene_graph.hpp"
-#include "ui_renderer.hpp"
 
 namespace shaderio {
 using namespace glm;

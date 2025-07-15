@@ -56,7 +56,6 @@ using namespace glm;
 #include "ui_animation_control.hpp"
 #include "ui_busy_window.hpp"
 #include "ui_scene_graph.hpp"
-#include "ui_renderer.hpp"
 
 class GltfRenderer : public nvapp::IAppElement
 {
@@ -71,8 +70,7 @@ public:
   {
     m_resources.cameraManip = cameraManip;
   }
-
-  friend struct GltfRendererUI;
+  void registerRecentFilesHandler();
 
 private:
   void onAttach(nvapp::Application* app) override;
@@ -103,6 +101,20 @@ private:
   void updateHdrImages();
 
   bool updateSceneChanges(VkCommandBuffer cmd, bool didAnimate);
+
+  /////
+  /// UI
+  void          renderUI();
+  void          renderMenu();
+  void          addToRecentFiles(const std::filesystem::path& filePath, int historySize = 20);
+  void          mouseClickedInViewport();
+  nvutils::Bbox getRenderNodeBbox(int nodeID);
+  void          windowTitle();
+  void          applyGltfCamera(int cameraIndex);
+  void          setGltfCameraFromView(int cameraIndex);
+
+  // Recent files management
+  std::vector<std::filesystem::path> m_recentFiles;
 
   //--------------------------------------------------------------------------------------------------
   //
