@@ -115,7 +115,7 @@ target_sources(${PROJECT_NAME} PRIVATE ${MIKKTSPACE_SRC})
 source_group("MikkTSpace" FILES ${MIKKTSPACE_SRC})
 #####################################################################################
 # Adding DLSS if selected
-option(USE_DLSS "Use DLSS-RR for denoising" OFF)
+option(USE_DLSS "Use DLSS-RR for denoising" ON)
 if(USE_DLSS)
   message(STATUS "Using DLSS-RR for denoising")
     download_package(
@@ -148,9 +148,9 @@ if(USE_DLSS)
         endif()
     else()
         if(CMAKE_BUILD_TYPE STREQUAL "Debug")
-            file(GLOB DLSS_DLLS "${NGX_SDK_ROOT}/lib/Linux_x86_64/dev/libnvidia-ngx*.so")
+            file(GLOB DLSS_DLLS "${NGX_SDK_ROOT}/lib/Linux_x86_64/dev/libnvidia-ngx*.so.*")
         else()
-            file(GLOB DLSS_DLLS "${NGX_SDK_ROOT}/lib/Linux_x86_64/rel/libnvidia-ngx*.so")
+            file(GLOB DLSS_DLLS "${NGX_SDK_ROOT}/lib/Linux_x86_64/rel/libnvidia-ngx*.so.*")
         endif()    
     endif()
 

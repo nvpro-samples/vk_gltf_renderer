@@ -98,6 +98,7 @@ auto main(int argc, char** argv) -> int
   parameterRegistry.add({"device", "force a vulkan device via index into the device list"}, &vkSetup.forceGPU);
   parameterRegistry.add({"vsyncOffMode", "Preferred VSync Off mode: [0:Immediate, 1:Mailbox, 2:FIFO, 3:FIFO Relax]"},
                         (int*)&appInfo.preferredVsyncOffMode);
+  parameterRegistry.add({"floatingWindows", "Allow dock windows to be separate windows"}, &appInfo.hasUndockableViewport, true);
 
 
   // Don't show the profiler by default
