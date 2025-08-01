@@ -86,6 +86,7 @@ void GltfRenderer::mouseClickedInViewport()
       glm::vec3 eye, center, up;
       m_resources.cameraManip->getLookat(eye, center, up);
       m_resources.cameraManip->setLookat(eye, worldPos, up, false);  // Nice with CameraManip.updateAnim();
+      m_resources.cameraManip->setSpeed(glm::length(center - eye));  // Re-adjust speed based on the new distance
     }
 
     {
