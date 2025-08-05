@@ -193,7 +193,7 @@ void GltfRenderer::onAttach(nvapp::Application* app)
   m_silhouette.init(m_resources);
 
   // ===== Scene & Acceleration Structure =====
-  m_resources.sceneVk.init(&m_resources.allocator);
+  m_resources.sceneVk.init(&m_resources.allocator, &m_resources.samplerPool);
   m_resources.sceneRtx.init(&m_resources.allocator);
 
   // ===== Profiling & Performance =====
