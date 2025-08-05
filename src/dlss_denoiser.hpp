@@ -55,7 +55,7 @@ public:
   ~DlssDenoiser() = default;
 
   void init(Resources& resources);
-  void deinit();
+  void deinit(Resources& resources);
 
   void initDenoiser(Resources& resources);
   // Return the descriptor for the DLSS
@@ -110,4 +110,5 @@ private:
   bool          m_dlssSupported = false;
   VkExtent2D    m_renderingSize{};
   VkDevice      m_device{};
+  VkSampler     m_linearSampler{};
 };

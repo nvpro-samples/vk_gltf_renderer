@@ -92,7 +92,7 @@ void PathTracer::onDetach(Resources& resources)
   resources.allocator.destroyBuffer(m_sbtBuffer);
 
 #if USE_DLSS
-  m_dlss->deinit();
+  m_dlss->deinit(resources);
 #endif  //  USE_DLSS
   vkDestroyPipelineLayout(m_device, m_pipelineLayout, nullptr);
   vkDestroyShaderEXT(m_device, m_shader, nullptr);

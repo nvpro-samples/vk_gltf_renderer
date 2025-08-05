@@ -41,17 +41,18 @@ void DlssDenoiser::registerParameters(nvutils::ParameterRegistry* paramReg)
 
 void DlssDenoiser::init(Resources& resources)
 {
-  VkSampler linearSampler{};
-  resources.samplerPool.acquireSampler(linearSampler);
+
+  resources.samplerPool.acquireSampler(m_linearSampler);
   // G-Buffer
   m_dlssGBuffers.init({.allocator      = &resources.allocator,
                        .colorFormats   = m_bufferInfos,
-                       .imageSampler   = linearSampler,
+                       .imageSampler   = m_linearSampler,
                        .descriptorPool = resources.descriptorPool});
 }
 
-void DlssDenoiser::deinit()
+void DlssDenoiser::deinit(Resources& resources)
 {
+  resources.samplerPool.releaseSampler(m_linearSampler);
   m_dlssGBuffers.deinit();
   m_dlss.deinit();
   m_ngx.deinit();
