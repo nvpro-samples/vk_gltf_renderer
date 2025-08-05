@@ -414,7 +414,7 @@ void selectObject(float2 samplePos, float2 imageSize)
 //-----------------------------------------------------------------------
 bool checkInfinitePlaneIntersection(RayDesc ray, inout HitPayload payload, inout HitState hit, SceneFrameInfo* frameInfo)
 {
-  if (frameInfo.useInfinitePlane != 1)
+  if(frameInfo.useInfinitePlane != 1)
     return false;
 
   // Plane definition
@@ -437,13 +437,13 @@ bool checkInfinitePlaneIntersection(RayDesc ray, inout HitPayload payload, inout
     return false;
 
   // Update hit information
-  payload.hitT     = intersectionDist;  // Update hit distance
-  hit.pos          = ray.Origin + ray.Direction * payload.hitT;
-  hit.nrm          = normal;           // Plane normal pointing up
-  hit.geonrm       = normal;           // Geometric normal is the same as the plane normal
-  hit.tangent      = float3(1, 0, 0);  // Arbitrary tangent
-  hit.bitangent    = float3(0, 0, 1);  // Arbitrary bitangent
-  
+  payload.hitT  = intersectionDist;  // Update hit distance
+  hit.pos       = ray.Origin + ray.Direction * payload.hitT;
+  hit.nrm       = normal;           // Plane normal pointing up
+  hit.geonrm    = normal;           // Geometric normal is the same as the plane normal
+  hit.tangent   = float3(1, 0, 0);  // Arbitrary tangent
+  hit.bitangent = float3(0, 0, 1);  // Arbitrary bitangent
+
   return true;  // We hit the infinite plane
 }
 
@@ -492,6 +492,9 @@ SampleResult pathTrace(IRaytracer raytracer, RayDesc ray, inout uint seed)
       if(firstRay)  // If we come in here, the first ray didn't hit anything
       {
         sampleResult.radiance.a = 0.0;  // Set it to transparent
+
+        // #DLSS - Set environment hit position for proper motion vectors
+        sampleResult.dlssOutput.hitPosition = ray.Origin + ray.Direction * 1000000.0f;
 
         // Solid color background and blurred HDR environment, aren't part of the
         // lighting equation (backplate), so we can return them directly.
@@ -542,9 +545,10 @@ SampleResult pathTrace(IRaytracer raytracer, RayDesc ray, inout uint seed)
     GltfShadeMaterial material;
     if(hitInfinitePlane)
     {
-        // Evaluate the material at the hit point
-        pbrMat = defaultPbrMaterial(frameInfo.infinitePlaneBaseColor, frameInfo.infinitePlaneMetallic, frameInfo.infinitePlaneRoughness, hit.nrm, hit.nrm);
-      material           = defaultGltfMaterial();
+      // Evaluate the material at the hit point
+      pbrMat   = defaultPbrMaterial(frameInfo.infinitePlaneBaseColor, frameInfo.infinitePlaneMetallic,
+                                    frameInfo.infinitePlaneRoughness, hit.nrm, hit.nrm);
+      material = defaultGltfMaterial();
     }
     else
     {
@@ -812,18 +816,13 @@ void processPixel(IRaytracer raytracer, float2 samplePos, float2 imageSize)
   // #DLSS - Storing the GBuffer for the DLSS denoiser
   if(pushConst.useDlss == 1)
   {
-    // Transform world position to view space using inverse view matrix
-    float4 posScreen = mul(float4(sampleResult.dlssOutput.hitPosition, 1.0), pushConst.frameInfo.viewMatrix);
-    float  viewZ = posScreen.z / posScreen.w;  // NOTE: viewZ is the 'Z' of the world hitState position in camera space
-    if(sampleResult.dlssOutput.hitPosition.z >= 1e33f)  // The hit position is invalid (environment), set viewZ to a large value (1.0)
-    {
-      viewZ = 1.0f;
-    }
+    // Transform world position to clip space and calculate depth
+    float4 posScreen = mul(float4(sampleResult.dlssOutput.hitPosition, 1.0), pushConst.frameInfo.viewProjMatrix);
+    float  viewZ     = posScreen.z / posScreen.w;  // Depth in NDC space
 
-    float2 motionVec = float2(0);
-    if(sampleResult.dlssOutput.hitPosition.x < 1e33f)
-      motionVec = calculateMotionVector(sampleResult.dlssOutput.hitPosition, pushConst.frameInfo.prevMVP,
-                                        pushConst.frameInfo.viewProjMatrix, imageSize);
+    // Calculate motion vectors using the hit position (works for both geometry and environment)
+    float2 motionVec = calculateMotionVector(sampleResult.dlssOutput.hitPosition, pushConst.frameInfo.prevMVP,
+                                             pushConst.frameInfo.viewProjMatrix, imageSize);
     outImages[int(OutputImage::eDlssDepth)][int2(samplePos)]           = float4(abs(viewZ));
     outImages[int(OutputImage::eDlssMotion)][int2(samplePos)]          = float4(motionVec, 0, 0);
     outImages[int(OutputImage::eDlssNormalRoughness)][int2(samplePos)] = sampleResult.dlssOutput.normalRoughness;

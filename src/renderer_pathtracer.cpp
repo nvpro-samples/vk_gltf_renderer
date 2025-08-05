@@ -227,6 +227,16 @@ void PathTracer::onRender(VkCommandBuffer cmd, Resources& resources)
   // Make sure buffer is ready to be used
   nvvk::cmdMemoryBarrier(cmd, VK_PIPELINE_STAGE_2_TRANSFER_BIT, VK_PIPELINE_STAGE_2_COMPUTE_SHADER_BIT);
 
+  // Trace rays
+  VkExtent2D renderingSize = resources.gBuffers.getSize();
+#if USE_DLSS
+  if(m_dlss->isEnabled())
+  {
+    renderingSize = m_dlss->getRenderSize();
+  }
+#endif
+
+
   if(m_renderTechnique == RenderTechnique::Compute)
   {
     // Bind the shader to use
@@ -243,8 +253,7 @@ void PathTracer::onRender(VkCommandBuffer cmd, Resources& resources)
     pushDescriptorSet(cmd, resources, VK_PIPELINE_BIND_POINT_COMPUTE);
 
     // Dispatch the compute shader
-    const VkExtent2D& size      = resources.gBuffers.getSize();
-    VkExtent2D        numGroups = nvvk::getGroupCounts(size, WORKGROUP_SIZE);
+    VkExtent2D numGroups = nvvk::getGroupCounts(renderingSize, WORKGROUP_SIZE);
     vkCmdDispatch(cmd, numGroups.width, numGroups.height, 1);
   }
   else  // RayTracing
@@ -267,10 +276,9 @@ void PathTracer::onRender(VkCommandBuffer cmd, Resources& resources)
 
     pushDescriptorSet(cmd, resources, VK_PIPELINE_BIND_POINT_RAY_TRACING_KHR);
 
-    // Trace rays
-    const VkExtent2D& size = resources.gBuffers.getSize();
+
     vkCmdTraceRaysKHR(cmd, &m_sbtRegions.raygen, &m_sbtRegions.miss, &m_sbtRegions.hit, &m_sbtRegions.callable,
-                      size.width, size.height, 1);
+                      renderingSize.width, renderingSize.height, 1);
   }
 
   // Making sure the rendered image is ready to be used by tonemapper
