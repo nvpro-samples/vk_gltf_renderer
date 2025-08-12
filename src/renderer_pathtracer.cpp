@@ -177,7 +177,7 @@ bool PathTracer::onUIRender(Resources& resources)
     }
   }
 #if defined(USE_DLSS)
-  m_dlss->onUi(resources);
+  changed |= m_dlss->onUi(resources);
 #else
   ImGui::TextDisabled("DLSS is not enabled.");
   nvsamples::HelpMarker("Define USE_DLSS in CMake to enable DLSS support.");
@@ -211,7 +211,7 @@ void PathTracer::onRender(VkCommandBuffer cmd, Resources& resources)
   {
     frameCount = ++haltonIndex;  // Override frame count with Halton index
     // If the initialization is successful, update the DLSS resources
-    if(m_dlss->ensureInitialized(resources))
+    if(m_dlss->ensureInitialized(resources) || m_dlss->needsSizeUpdate())
       updateDlssResources(cmd, resources);
   }
   m_pushConst.jitter = shaderio::dlssJitter(frameCount);

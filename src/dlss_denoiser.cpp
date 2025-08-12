@@ -104,10 +104,34 @@ VkExtent2D DlssDenoiser::updateSize(VkCommandBuffer cmd, VkExtent2D size)
   if(!m_dlssSupported || !m_initialized)
     return size;
 
-  // Choose the size of the DLSS buffers
+  // Query the supported sizes
   DlssRayReconstruction::SupportedSizes supportedSizes{};
-  DlssRayReconstruction::querySupportedInputSizes(m_ngx, {size, NVSDK_NGX_PerfQuality_Value_MaxQuality}, &supportedSizes);
-  m_renderingSize = supportedSizes.optimalSize;
+  NVSDK_NGX_Result                      result =
+      DlssRayReconstruction::querySupportedInputSizes(m_ngx, {size, NVSDK_NGX_PerfQuality_Value_MaxQuality}, &supportedSizes);
+  if(NVSDK_NGX_FAILED(result))
+  {
+    m_renderingSize = size;
+    LOGE("DLSS: Failed to query supported input sizes: %d\n", result);
+    return m_renderingSize;  // Return the original size if query fails
+  }
+
+  // Choose the size based on the selected mode
+  switch(m_settings.sizeMode)
+  {
+    case SizeMode::eMin:
+      m_renderingSize = supportedSizes.minSize;
+      break;
+    case SizeMode::eMax:
+      m_renderingSize = supportedSizes.maxSize;
+      break;
+    case SizeMode::eOptimal:
+    default:
+      m_renderingSize = supportedSizes.optimalSize;
+      break;
+  }
+
+  // Update the last used size mode and clear the change flag
+  m_sizeModeChanged = false;
 
   DlssRayReconstruction::InitInfo initInfo{
       .inputSize  = m_renderingSize,
@@ -153,22 +177,39 @@ void DlssDenoiser::denoise(VkCommandBuffer cmd, glm::vec2 jitter, const glm::mat
   m_dlss.cmdDenoise(cmd, m_ngx, {jitter, modelView, projection, reset});
 }
 
-void DlssDenoiser::onUi(Resources& resources)
+bool DlssDenoiser::onUi(Resources& resources)
 {
+  bool changed = false;
+
   if(!m_dlssSupported && m_initialized)
   {
     ImGui::Text("DLSS is not available");
-    return;
+    return changed;
   }
 
-  ImGui::Checkbox("Enable DLSS", &m_settings.enable);
+  changed |= ImGui::Checkbox("Enable DLSS", &m_settings.enable);
   if(!m_initialized)
-    return;
+    return changed;
 
   if(!m_settings.enable)
-    return;
+    return changed;
 
-  ImGui::Text("Resolution: %d x %d", m_renderingSize.width, m_renderingSize.height);
+  // Size mode selection
+  const char* sizeModes[]     = {"Min", "Optimal", "Max"};
+  int         currentSizeMode = static_cast<int>(m_settings.sizeMode);
+
+  namespace PE = nvgui::PropertyEditor;
+  PE::begin();
+  if(PE::Combo("DLSS Size Mode", &currentSizeMode, sizeModes, IM_ARRAYSIZE(sizeModes)))
+  {
+    m_settings.sizeMode = static_cast<SizeMode>(currentSizeMode);
+    m_sizeModeChanged   = true;  // Mark that size mode has changed
+    changed             = true;  // Mark that changes were made
+  }
+  PE::end();
+
+  ImGui::Text("Current Resolution: %d x %d", m_renderingSize.width, m_renderingSize.height);
+
 
   ImVec2 tumbnailSize = {100 * m_dlssGBuffers.getAspectRatio(), 100};
   int    m_showBuffer = -1;
@@ -198,4 +239,6 @@ void DlssDenoiser::onUi(Resources& resources)
       ImGui::EndTable();
     }
   }
+
+  return changed;
 }

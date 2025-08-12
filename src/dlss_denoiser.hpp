@@ -42,9 +42,17 @@
 class DlssDenoiser
 {
 public:
+  enum class SizeMode
+  {
+    eMin,
+    eOptimal,
+    eMax
+  };
+
   struct Settings
   {
-    bool enable = false;
+    bool     enable   = false;
+    SizeMode sizeMode = SizeMode::eOptimal;
   };
 
 
@@ -74,10 +82,13 @@ public:
   void denoise(VkCommandBuffer cmd, glm::vec2 jitter, const glm::mat4& modelView, const glm::mat4& projection, bool reset = false);
 
   // This is for the UI
-  void onUi(Resources& resources);
+  bool onUi(Resources& resources);
 
   // Return the render size
   VkExtent2D getRenderSize() const { return m_dlssGBuffers.getSize(); }
+
+  // Check if the rendering size needs to be updated based on current settings
+  bool needsSizeUpdate() const { return m_sizeModeChanged; }
 
   const nvvk::GBuffer& getGBuffers() { return m_dlssGBuffers; }
 
@@ -108,4 +119,5 @@ private:
   VkExtent2D    m_renderingSize{};
   VkDevice      m_device{};
   VkSampler     m_linearSampler{};
+  bool          m_sizeModeChanged = false;  // Track if size mode has changed
 };
