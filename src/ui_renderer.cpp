@@ -55,8 +55,8 @@ void GltfRenderer::mouseClickedInViewport()
     ImVec2 avail         = ImGui::GetContentRegionAvail();
     ImVec2 localMousePos = ImVec2((mousePos.x - cursorPos.x) / avail.x, (mousePos.y - cursorPos.y) / avail.y);
 
-    m_rayPicker.run(cmd, {.modelViewInv   = glm::inverse(m_resources.cameraManip->getViewMatrix()),
-                          .perspectiveInv = glm::inverse(m_resources.cameraManip->getPerspectiveMatrix()),
+    m_rayPicker.run(cmd, {.modelViewInv   = glm::inverse(m_cameraManip->getViewMatrix()),
+                          .perspectiveInv = glm::inverse(m_cameraManip->getPerspectiveMatrix()),
                           .pickPos        = {localMousePos.x, localMousePos.y},
                           .tlas           = m_resources.sceneRtx.tlas()});
     m_app->submitAndWaitTempCmdBuffer(cmd);
@@ -84,9 +84,9 @@ void GltfRenderer::mouseClickedInViewport()
     {
       // Set the camera CENTER to the hit position
       glm::vec3 eye, center, up;
-      m_resources.cameraManip->getLookat(eye, center, up);
-      m_resources.cameraManip->setLookat(eye, worldPos, up, false);  // Nice with CameraManip.updateAnim();
-      m_resources.cameraManip->setSpeed(glm::length(center - eye));  // Re-adjust speed based on the new distance
+      m_cameraManip->getLookat(eye, center, up);
+      m_cameraManip->setLookat(eye, worldPos, up, false);  // Nice with CameraManip.updateAnim();
+      m_cameraManip->setSpeed(glm::length(center - eye));  // Re-adjust speed based on the new distance
     }
 
     {
@@ -158,7 +158,7 @@ void GltfRenderer::renderUI()
 
     if(ImGui::Begin("Camera"))
     {
-      nvgui::CameraWidget(m_resources.cameraManip);
+      nvgui::CameraWidget(m_cameraManip);
     }
     ImGui::End();  // End Camera
 
@@ -227,10 +227,13 @@ void GltfRenderer::renderUI()
           if(headerManager.beginHeader("Path Tracer"))
           {
             changed |= m_pathTracer.onUIRender(m_resources);
-            PE::begin();
-            PE::Text("Current frame", std::to_string(m_resources.frameCount));
-            changed |= PE::SliderInt("Max Iterations", &m_resources.settings.maxFrames, 0, 10000, "%d", 0, "Maximum number of iterations");
-            PE::end();
+            if(PE::begin())
+            {
+              PE::Text("Current frame", std::to_string(m_resources.frameCount));
+              changed |= PE::SliderInt("Max Iterations", &m_resources.settings.maxFrames, 0, 10000, "%d", 0,
+                                       "Maximum number of iterations");
+              PE::end();
+            }
           }
         }
         else
@@ -390,7 +393,7 @@ void GltfRenderer::renderUI()
     // Adding Axis at the bottom left corner of the viewport
     if(m_resources.settings.showAxis)
     {
-      nvgui::Axis(m_resources.cameraManip->getViewMatrix(), 25.f);
+      nvgui::Axis(m_cameraManip->getViewMatrix(), 25.f);
     }
 
     ImGui::End();
@@ -568,7 +571,7 @@ void GltfRenderer::renderMenu()
   if(validScene && (fitScene || (fitObject && m_resources.selectedObject > -1)))
   {
     nvutils::Bbox bbox = fitScene ? m_resources.scene.getSceneBounds() : GltfRenderer::getRenderNodeBbox(m_resources.selectedObject);
-    m_resources.cameraManip->fit(bbox.min(), bbox.max(), false, true, m_resources.cameraManip->getAspectRatio());
+    m_cameraManip->fit(bbox.min(), bbox.max(), false, true, m_cameraManip->getAspectRatio());
   }
 
   if(closeApp)
@@ -684,14 +687,14 @@ void GltfRenderer::applyGltfCamera(int cameraIndex)
   if(camera.type == nvvkgltf::RenderCamera::CameraType::ePerspective)
   {
     float fov = static_cast<float>(glm::degrees(camera.yfov));
-    m_resources.cameraManip->setCamera({camera.eye, camera.center, camera.up, fov});
-    m_resources.cameraManip->setClipPlanes({static_cast<float>(camera.znear), static_cast<float>(camera.zfar)});
+    m_cameraManip->setCamera({camera.eye, camera.center, camera.up, fov});
+    m_cameraManip->setClipPlanes({static_cast<float>(camera.znear), static_cast<float>(camera.zfar)});
   }
   else if(camera.type == nvvkgltf::RenderCamera::CameraType::eOrthographic)
   {
     float fov = 45.0f;
-    m_resources.cameraManip->setCamera({camera.eye, camera.center, camera.up, fov});
-    m_resources.cameraManip->setClipPlanes({static_cast<float>(camera.znear), static_cast<float>(camera.zfar)});
+    m_cameraManip->setCamera({camera.eye, camera.center, camera.up, fov});
+    m_cameraManip->setClipPlanes({static_cast<float>(camera.znear), static_cast<float>(camera.zfar)});
   }
 
   // Also update the scene's camera to keep extras (eye, center, up) in sync
@@ -704,7 +707,7 @@ void GltfRenderer::applyGltfCamera(int cameraIndex)
 //
 void GltfRenderer::setGltfCameraFromView(int cameraIndex)
 {
-  if(!m_resources.scene.valid() || !m_resources.cameraManip)
+  if(!m_resources.scene.valid() || !m_cameraManip)
   {
     return;
   }
@@ -720,8 +723,8 @@ void GltfRenderer::setGltfCameraFromView(int cameraIndex)
   tinygltf::Camera& camera = m_resources.scene.getModel().cameras[cameraIndex];
 
   // Get current camera state from manipulator
-  nvutils::CameraManipulator::Camera cameraState = m_resources.cameraManip->getCamera();
-  glm::vec2                          clipPlanes  = m_resources.cameraManip->getClipPlanes();
+  nvutils::CameraManipulator::Camera cameraState = m_cameraManip->getCamera();
+  glm::vec2                          clipPlanes  = m_cameraManip->getClipPlanes();
 
   // Update the camera parameters
   if(camera.type == "perspective")

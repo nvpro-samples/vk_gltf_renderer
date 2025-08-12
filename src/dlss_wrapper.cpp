@@ -35,13 +35,16 @@
 #include <filesystem>
 #include <stdexcept>
 #include <sstream>
-#include <string.h>  // memset
+#include <cstring>  // memset
 #include "nvutils/logger.hpp"
 
 
 ///////////////////////////////////////////////////////////////////////////////////////////////////////////////////////
 // Helpers
 ///////////////////////////////////////////////////////////////////////////////////////////////////////////////////////
+
+uint64_t g_ApplicationID = 0x12345678ABCDEF01ULL;  // Dummy ULL for testing, replace with actual application ID for production (ask NVIDIA DevRel)
+
 
 // Function taken from stack overflow https://stackoverflow.com/questions/4804298/how-to-convert-wstring-into-string
 static std::string wstringToString(const std::wstring& wstr)
@@ -109,17 +112,10 @@ NVSDK_NGX_Result NgxContext::init(const NgxContext::InitInfo& initInfo)
   m_initInfo = initInfo;
 
   NVSDK_NGX_FeatureCommonInfo info     = {};
-  info.LoggingInfo.LoggingCallback     = &NGX_AppLogCallback;
   info.LoggingInfo.MinimumLoggingLevel = initInfo.loggingLevel;
-  info.PathListInfo.Path               = &exeWString;
-  info.PathListInfo.Length             = 1;
 
-  // Init NGX API
-  // FIXME: provide correct ProjectID here
-  CALL_NGX(NVSDK_NGX_VULKAN_Init_with_ProjectID(initInfo.appInfo.projectId.c_str(), initInfo.appInfo.engineType,
-                                                initInfo.appInfo.engineVersion.c_str(), exeString.c_str(),
-                                                initInfo.instance, initInfo.physicalDevice, initInfo.device,
-                                                vkGetInstanceProcAddr, vkGetDeviceProcAddr, &info));
+  CALL_NGX(NVSDK_NGX_VULKAN_Init(g_ApplicationID, exeWString, initInfo.instance, initInfo.physicalDevice,
+                                 initInfo.device, vkGetInstanceProcAddr, vkGetDeviceProcAddr, &info));
 
   CALL_NGX(NVSDK_NGX_VULKAN_GetCapabilityParameters(&m_ngxParams));
 
@@ -145,44 +141,21 @@ NVSDK_NGX_Result NgxContext::isDlssRRAvailable()
   if(m_ngxParams == nullptr)
     return NVSDK_NGX_Result_Fail;
 
-  int      DLSS_Supported;
-  int      needsUpdatedDriver;
-  unsigned minDriverVersionMajor;
-  unsigned minDriverVersionMinor;
+  NVSDK_NGX_FeatureCommonInfo    commonInfo = {};
+  NVSDK_NGX_FeatureDiscoveryInfo info       = {};
+  info.SDKVersion                           = NVSDK_NGX_Version_API;
+  info.FeatureID                            = NVSDK_NGX_Feature_RayReconstruction;
+  info.Identifier.IdentifierType            = NVSDK_NGX_Application_Identifier_Type_Application_Id;
+  info.Identifier.v.ApplicationId           = g_ApplicationID;
+  info.ApplicationDataPath                  = L" ";  // Non-empty string required by NGX API
+  info.FeatureInfo                          = &commonInfo;
 
-  // Check if DLSS_D (which is the DLSS_RR RayReconstruction Denoiser) is available.
-  // Beware: Don't confuse this with DLSS, which is a different feature just providing upscaling
-  NVSDK_NGX_Result resUpdatedDriver =
-      (m_ngxParams->Get(NVSDK_NGX_Parameter_SuperSamplingDenoising_NeedsUpdatedDriver, &needsUpdatedDriver));
-  NVSDK_NGX_Result resVersionMajor =
-      (m_ngxParams->Get(NVSDK_NGX_Parameter_SuperSamplingDenoising_MinDriverVersionMajor, &minDriverVersionMajor));
-  NVSDK_NGX_Result resVersionMinor =
-      (m_ngxParams->Get(NVSDK_NGX_Parameter_SuperSamplingDenoising_MinDriverVersionMinor, &minDriverVersionMinor));
+  NVSDK_NGX_FeatureRequirement requirement = {};
 
-  if(NVSDK_NGX_SUCCEED(resUpdatedDriver))
-  {
-    if(needsUpdatedDriver)
-    {
-      // NVIDIA DLSS cannot be loaded due to outdated driver.
-      if(NVSDK_NGX_SUCCEED(resVersionMajor) && NVSDK_NGX_SUCCEED(resVersionMinor))
-      {
-        // Min Driver Version required: minDriverVersionMajor.minDriverVersionMinor
-        LOGW("DLSS_RR: Minimum driver version required: %d.%d\n", minDriverVersionMajor, minDriverVersionMinor);
-        return NVSDK_NGX_Result_FAIL_OutOfDate;
-      }
-    }
-  }
+  NVSDK_NGX_VULKAN_GetFeatureRequirements(m_initInfo.instance, m_initInfo.physicalDevice, &info, &requirement);
 
-  NVSDK_NGX_Result resDlssSupported = (m_ngxParams->Get(NVSDK_NGX_Parameter_SuperSamplingDenoising_Available, &DLSS_Supported));
-  if(NVSDK_NGX_FAILED(resDlssSupported) || !DLSS_Supported)
+  if(requirement.FeatureSupported != NVSDK_NGX_FeatureSupportResult_Supported)
   {
-    LOGW("DLSS_RR: not available on this hardware/platform\n");
-    return NVSDK_NGX_Result_FAIL_FeatureNotSupported;
-  }
-  resDlssSupported = (m_ngxParams->Get(NVSDK_NGX_Parameter_SuperSamplingDenoising_FeatureInitResult, &DLSS_Supported));
-  if(NVSDK_NGX_FAILED(resDlssSupported) || !DLSS_Supported)
-  {
-    LOGW("DLSS_RR: denied for this application\n");
     return NVSDK_NGX_Result_FAIL_Denied;
   }
 

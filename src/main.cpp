@@ -106,7 +106,6 @@ auto main(int argc, char** argv) -> int
   profilerSettings->show = false;
 
   // Create all application elements
-  static auto cameraManip      = std::make_shared<nvutils::CameraManipulator>();
   static auto elemCamera       = std::make_shared<nvapp::ElementCamera>();
   static auto elemGltfRenderer = std::make_shared<GltfRenderer>(&parameterRegistry);
   static auto elemGpuMonitor   = std::make_shared<nvgpu_monitor::ElementGpuMonitor>();
@@ -179,65 +178,38 @@ auto main(int argc, char** argv) -> int
   validation.printf_to_stdout   = VK_TRUE;
   vkSetup.instanceCreateInfoExt = validation.buildPNextChain();
 
+
+#if USE_DLSS
+  // Adding the DLSS extensions to the instance
+  static std::vector<VkExtensionProperties> extraInstanceExtensions;
+  DlssRayReconstruction::getRequiredInstanceExtensions({}, extraInstanceExtensions);
+  for(auto& ext : extraInstanceExtensions)
+  {
+    vkSetup.instanceExtensions.emplace_back(ext.extensionName);
+  }
+
+  // Adding the extra device extensions required by DLSS (Using callback)
+  static std::vector<VkExtensionProperties> extraDeviceExtensions;
+  vkSetup.postSelectPhysicalDeviceCallback = [](VkInstance instance, VkPhysicalDevice physicalDevice, nvvk::ContextInitInfo& vkSetup) {
+    DlssRayReconstruction::getRequiredDeviceExtensions({}, instance, physicalDevice, extraDeviceExtensions);
+    for(auto& ext : extraDeviceExtensions)
+    {
+      vkSetup.deviceExtensions.push_back({.extensionName = ext.extensionName, .specVersion = ext.specVersion});
+    }
+
+    return true;
+  };
+#endif
+
+
   // Create the Vulkan context
   nvvk::Context vkContext;
+  if(vkContext.init(vkSetup) != VK_SUCCESS)
   {
-    // Initialize the context information
-    vkContext.contextInfo = vkSetup;
-
-    // Initialize the Vulkan loader
-    NVVK_CHECK(volkInitialize());
-
-    {
-      nvutils::ScopedTimer st("Creating Vulkan Context");
-
-
-#if USE_DLSS
-      // Adding the DLSS extensions to the instance
-      static std::vector<VkExtensionProperties> extraInstanceExtensions;
-      DlssRayReconstruction::getRequiredInstanceExtensions({}, extraInstanceExtensions);
-      for(auto& ext : extraInstanceExtensions)
-      {
-        vkSetup.instanceExtensions.emplace_back(ext.extensionName);
-      }
-#endif
-      VkResult result{};
-      result = vkContext.createInstance();
-      result = vkContext.selectPhysicalDevice();
-
-#if USE_DLSS
-      // Adding the extra device extensions required by DLSS
-      static std::vector<VkExtensionProperties> extraDeviceExtensions;
-      DlssRayReconstruction::getRequiredDeviceExtensions({}, vkContext.getInstance(), vkContext.getPhysicalDevice(),
-                                                         extraDeviceExtensions);
-      for(auto& ext : extraDeviceExtensions)
-      {
-        vkContext.contextInfo.deviceExtensions.push_back({.extensionName = ext.extensionName, .specVersion = ext.specVersion});
-      }
-#endif
-
-      result = vkContext.createDevice();
-      NVVK_CHECK(result);
-
-      nvvk::DebugUtil::getInstance().init(vkContext.getDevice());
-      NVVK_DBG_NAME(vkContext.getInstance());
-      NVVK_DBG_NAME(vkContext.getDevice());
-      NVVK_DBG_NAME(vkContext.getPhysicalDevice());
-      for(auto& q : vkContext.getQueueInfos())
-      {
-        NVVK_DBG_NAME(q.queue);
-      }
-    }
-    if(vkContext.contextInfo.verbose)
-    {
-      NVVK_CHECK(nvvk::Context::printVulkanVersion());
-      NVVK_CHECK(nvvk::Context::printInstanceLayers());
-      NVVK_CHECK(nvvk::Context::printInstanceExtensions(vkContext.contextInfo.instanceExtensions));
-      NVVK_CHECK(nvvk::Context::printDeviceExtensions(vkContext.getPhysicalDevice(), vkContext.contextInfo.deviceExtensions));
-      NVVK_CHECK(nvvk::Context::printGpus(vkContext.getInstance(), vkContext.getPhysicalDevice()));
-      LOGI("_________________________________________________\n");
-    }
+    LOGE("Failed to initialize Vulkan context!");
+    return -1;
   }
+
 
   // Application information
   appInfo.name           = fmt::format("{} ({})", nvutils::getExecutablePath().stem().string(), "Slang");
@@ -279,8 +251,8 @@ auto main(int argc, char** argv) -> int
 
 
   // Set the camera manipulator to elements that need it.
+  auto cameraManip = elemGltfRenderer->getCameraManipulator();
   elemCamera->setCameraManipulator(cameraManip);
-  elemGltfRenderer->setCameraManipulator(cameraManip);
   elemGltfRenderer->registerRecentFilesHandler();
 
   app.addElement(elemCamera);

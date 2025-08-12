@@ -65,9 +65,11 @@ struct AnimationControl
     {
       animationNames.push_back(gltfScene->getAnimationInfo(i).name.c_str());
     }
-    PE::begin("");
-    PE::Combo("Animations", &currentAnimation, animationNames.data(), static_cast<int>(animationNames.size()));
-    PE::end();
+    if(PE::begin(""))
+    {
+      PE::Combo("Animations", &currentAnimation, animationNames.data(), static_cast<int>(animationNames.size()));
+      PE::end();
+    }
 
     ImGui::SeparatorText("Animation Controls");
     ImGui::PushFont(nvgui::getIconicFont());

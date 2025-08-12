@@ -22,6 +22,8 @@
 
 #include "nvshaders/slang_types.h"
 
+NAMESPACE_SHADERIO_BEGIN()
+
 #ifdef __cplusplus
 #define INLINE inline
 #else
@@ -129,6 +131,6 @@ INLINE float2 dlssJitter(uint32_t frameIndex)
     return halton(frameIndex) - float2(0.5,0.5);
 }
 
-
+NAMESPACE_SHADERIO_END()
 
 #endif  // DLSS_UTIL_H

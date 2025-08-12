@@ -31,10 +31,7 @@
 #include <glm/glm.hpp>
 #include <glm/ext/scalar_constants.hpp>
 
-namespace shaderio {
-using namespace glm;
 #include "shaders/shaderio.h"  // Shared between host and device
-}  // namespace shaderio
 
 #include <nvgui/sky.hpp>
 #include <nvshaders_host/hdr_env_dome.hpp>
@@ -120,7 +117,7 @@ struct Resources
   shaderio::SkyPhysicalParameters             skyParams{};       // Sky parameters
   nvshaders::Tonemapper                       tonemapper{};      // Tonemapper
   shaderio::TonemapperData                    tonemapperData{};  // Tonemapper data
-  std::shared_ptr<nvutils::CameraManipulator> cameraManip;       // Camera manipulator
+  std::shared_ptr<nvutils::CameraManipulator> cameraManip;       // Camera manipulator (owned by GltfRenderer)
 
   // Pipeline
   std::array<nvvk::DescriptorBindings, 2> descriptorBinding{};    // Descriptor bindings: 0: textures, 1: tlas

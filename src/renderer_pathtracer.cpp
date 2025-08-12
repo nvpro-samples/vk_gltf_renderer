@@ -161,17 +161,19 @@ bool PathTracer::onUIRender(Resources& resources)
     if(resources.settings.useInfinitePlane)
     {
       const float extentY = resources.scene.valid() ? resources.scene.getSceneBounds().extents().y : 10.0f;
-      PE::begin();
-      if(PE::treeNode("Infinite Plane Settings"))
+      if(PE::begin())
       {
-        changed |= PE::SliderFloat("Height", &resources.settings.infinitePlaneDistance, -extentY, extentY, "%5.9f",
-                                   ImGuiSliderFlags_NoRoundToFormat, "Distance to infinite plane");
-        changed |= PE::ColorEdit3("Color", glm::value_ptr(resources.settings.infinitePlaneBaseColor));
-        changed |= PE::SliderFloat("Metallic", &resources.settings.infinitePlaneMetallic, 0.0f, 1.0f);
-        changed |= PE::SliderFloat("Roughness", &resources.settings.infinitePlaneRoughness, 0.0f, 1.0f);
-        PE::treePop();
+        if(PE::treeNode("Infinite Plane Settings"))
+        {
+          changed |= PE::SliderFloat("Height", &resources.settings.infinitePlaneDistance, -extentY, extentY, "%5.9f",
+                                     ImGuiSliderFlags_NoRoundToFormat, "Distance to infinite plane");
+          changed |= PE::ColorEdit3("Color", glm::value_ptr(resources.settings.infinitePlaneBaseColor));
+          changed |= PE::SliderFloat("Metallic", &resources.settings.infinitePlaneMetallic, 0.0f, 1.0f);
+          changed |= PE::SliderFloat("Roughness", &resources.settings.infinitePlaneRoughness, 0.0f, 1.0f);
+          PE::treePop();
+        }
+        PE::end();
       }
-      PE::end();
     }
   }
 #if defined(USE_DLSS)
@@ -205,7 +207,7 @@ void PathTracer::onRender(VkCommandBuffer cmd, Resources& resources)
   // Lazy initialize DLSS if enabled and not yet initialized
   static uint32_t haltonIndex = 0;
   m_pushConst.useDlss         = m_dlss->isEnabled();
-  if(m_dlss && m_dlss->isEnabled())
+  if(m_pushConst.useDlss)
   {
     frameCount = ++haltonIndex;  // Override frame count with Halton index
     // If the initialization is successful, update the DLSS resources
@@ -293,6 +295,10 @@ void PathTracer::onRender(VkCommandBuffer cmd, Resources& resources)
     glm::vec2        jitter = m_pushConst.jitter;
 
     m_dlss->denoise(cmd, jitter, view, proj, false);
+
+    // Memory barrier to ensure DLSS operations are complete before blit operations
+    nvvk::cmdMemoryBarrier(cmd, VK_PIPELINE_STAGE_2_ALL_GRAPHICS_BIT, VK_PIPELINE_STAGE_2_BLIT_BIT,
+                           VK_ACCESS_2_SHADER_WRITE_BIT | VK_ACCESS_2_COLOR_ATTACHMENT_WRITE_BIT, VK_ACCESS_2_TRANSFER_READ_BIT);
 
     {
       // Blit the selection image from the DLSS GBuffer (different resolution) to the Renderer GBuffer Selection

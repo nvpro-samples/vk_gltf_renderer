@@ -37,11 +37,7 @@ GLM_FUNC_QUALIFIER vec3 fma(vec3 const& a, vec3 const& b, vec3 const& c)
 
 #include "ui_scene_graph.hpp"
 
-namespace shaderio {
-using namespace glm;
 #include <nvshaders/tonemap_functions.h.slang>
-}  // namespace shaderio
-
 
 namespace PE = nvgui::PropertyEditor;
 

@@ -58,10 +58,7 @@
 #undef APIENTRY
 
 // Shader Input/Output
-namespace shaderio {
-using namespace glm;
 #include "shaders/shaderio.h"  // Shared between host and device
-}  // namespace shaderio
 
 // Pre-compiled shaders
 #include "_autogen/tonemapper.slang.h"
@@ -123,6 +120,10 @@ GltfRenderer::GltfRenderer(nvutils::ParameterRegistry* paramReg)
   // Register PathTracer-specific command line parameters
   m_pathTracer.registerParameters(paramReg);
   m_rasterizer.registerParameters(paramReg);
+
+  // Initialize camera manipulator
+  m_cameraManip           = std::make_shared<nvutils::CameraManipulator>();
+  m_resources.cameraManip = m_cameraManip;  // Share with resources
 }
 
 //--------------------------------------------------------------------------------------------------
@@ -325,14 +326,14 @@ void GltfRenderer::onRender(VkCommandBuffer cmd)
 
     // Update the scene frame information uniform buffer
     shaderio::SceneFrameInfo finfo{
-        .viewMatrix     = m_resources.cameraManip->getViewMatrix(),
-        .projInv        = glm::inverse(m_resources.cameraManip->getPerspectiveMatrix()),
-        .viewInv        = glm::inverse(m_resources.cameraManip->getViewMatrix()),
-        .viewProjMatrix = m_resources.cameraManip->getPerspectiveMatrix() * m_resources.cameraManip->getViewMatrix(),
-        .prevMVP        = m_prevMVP,
-        .envRotation    = m_resources.settings.hdrEnvRotation,
-        .envBlur        = m_resources.settings.hdrBlur,
-        .envIntensity   = m_resources.settings.hdrEnvIntensity,
+        .viewMatrix             = m_cameraManip->getViewMatrix(),
+        .projInv                = glm::inverse(m_cameraManip->getPerspectiveMatrix()),
+        .viewInv                = glm::inverse(m_cameraManip->getViewMatrix()),
+        .viewProjMatrix         = m_cameraManip->getPerspectiveMatrix() * m_cameraManip->getViewMatrix(),
+        .prevMVP                = m_prevMVP,
+        .envRotation            = m_resources.settings.hdrEnvRotation,
+        .envBlur                = m_resources.settings.hdrBlur,
+        .envIntensity           = m_resources.settings.hdrEnvIntensity,
         .useSolidBackground     = m_resources.settings.useSolidBackground ? 1 : 0,
         .backgroundColor        = m_resources.settings.solidBackgroundColor,
         .environmentType        = (int)m_resources.settings.envSystem,
@@ -349,7 +350,7 @@ void GltfRenderer::onRender(VkCommandBuffer cmd)
 
     vkCmdUpdateBuffer(cmd, m_resources.bFrameInfo.buffer, 0, sizeof(shaderio::SceneFrameInfo), &finfo);
     // Update the sky
-    m_resources.skyParams.yIsUp = m_resources.cameraManip->getUp().y > 0.5f;
+    m_resources.skyParams.yIsUp = m_cameraManip->getUp().y > 0.5f;
     vkCmdUpdateBuffer(cmd, m_resources.bSkyParams.buffer, 0, sizeof(shaderio::SkyPhysicalParameters), &m_resources.skyParams);
     // Make sure buffer is ready to be used
     nvvk::cmdMemoryBarrier(cmd, VK_PIPELINE_STAGE_2_TRANSFER_BIT, VK_PIPELINE_STAGE_2_COMPUTE_SHADER_BIT);
@@ -405,12 +406,11 @@ void GltfRenderer::onFileDrop(const std::filesystem::path& filename)
     m_uiSceneGraph.setModel(nullptr);  // Reset the UI model
     m_rasterizer.freeRecordCommandBuffer();
 
-    std::filesystem::path loadFile = filename;
     std::thread([=, this]() {
       m_busy.start("Loading");
-      createScene(loadFile);
+      createScene(filename);
       m_busy.stop();
-    }).detach();  // Load the scene in a separate thread
+    }).detach();
   }
   else if(nvutils::extensionMatches(filename, ".hdr"))
   {
@@ -430,10 +430,10 @@ bool GltfRenderer::save(const std::filesystem::path& filename)
   {
     // First, copy the camera
     nvvkgltf::RenderCamera camera;
-    m_resources.cameraManip->getLookat(camera.eye, camera.center, camera.up);
-    camera.yfov  = glm::radians(m_resources.cameraManip->getFov());
-    camera.znear = m_resources.cameraManip->getClipPlanes().x;
-    camera.zfar  = m_resources.cameraManip->getClipPlanes().y;
+    m_cameraManip->getLookat(camera.eye, camera.center, camera.up);
+    camera.yfov  = glm::radians(m_cameraManip->getFov());
+    camera.znear = m_cameraManip->getClipPlanes().x;
+    camera.zfar  = m_cameraManip->getClipPlanes().y;
     m_resources.scene.setSceneCamera(camera);
 
     // Saving the scene
@@ -452,6 +452,9 @@ void GltfRenderer::tonemap(VkCommandBuffer cmd)
   m_resources.tonemapper.runCompute(cmd, m_resources.gBuffers.getSize(), m_resources.tonemapperData,
                                     m_resources.gBuffers.getDescriptorImageInfo(Resources::eImgRendered),
                                     m_resources.gBuffers.getDescriptorImageInfo(Resources::eImgTonemapped));
+  
+  // Memory barrier to ensure compute shader writes are complete before fragment shader reads
+  nvvk::cmdMemoryBarrier(cmd, VK_PIPELINE_STAGE_2_COMPUTE_SHADER_BIT, VK_PIPELINE_STAGE_2_FRAGMENT_SHADER_BIT);
 }
 
 //--------------------------------------------------------------------------------------------------
@@ -537,7 +540,7 @@ void GltfRenderer::createScene(const std::filesystem::path& sceneFilename)
   m_resources.settings.infinitePlaneDistance = m_resources.scene.getSceneBounds().min().y;  // Set the infinite plane distance to the bottom of the scene
 
   // Set camera from scene
-  nvvkgltf::addSceneCamerasToWidget(m_resources.cameraManip, filename, m_resources.scene.getRenderCameras(),
+  nvvkgltf::addSceneCamerasToWidget(m_cameraManip, filename, m_resources.scene.getRenderCameras(),
                                     m_resources.scene.getSceneBounds());
 
   // Default sky parameters
@@ -785,8 +788,8 @@ bool GltfRenderer::updateFrameCounter()
   static float     ref_fov{0};
   static glm::mat4 ref_cam_matrix;
 
-  const auto& m   = m_resources.cameraManip->getViewMatrix();
-  const auto  fov = m_resources.cameraManip->getFov();
+  const auto& m   = m_cameraManip->getViewMatrix();
+  const auto  fov = m_cameraManip->getFov();
 
   if(ref_cam_matrix != m || ref_fov != fov)
   {

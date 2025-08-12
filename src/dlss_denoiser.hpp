@@ -26,10 +26,7 @@
 
 #include <glm/glm.hpp>
 
-namespace shaderio {
-using namespace glm;
 #include "shaders/dlss_util.h"
-}  // namespace shaderio
 
 #include "nvvk/gbuffers.hpp"
 #include "nvutils/parameter_registry.hpp"

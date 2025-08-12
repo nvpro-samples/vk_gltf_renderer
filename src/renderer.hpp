@@ -44,10 +44,7 @@
 #include "nvutils/parameter_registry.hpp"
 
 // Shader Input/Output
-namespace shaderio {
-using namespace glm;
 #include "shaders/shaderio.h"  // Shared between host and device
-}  // namespace shaderio
 
 #include "renderer_pathtracer.hpp"
 #include "renderer_rasterizer.hpp"
@@ -64,13 +61,10 @@ public:
   GltfRenderer(nvutils::ParameterRegistry* parameterReg);
   ~GltfRenderer() override = default;
 
-  void createScene(const std::filesystem::path& sceneFilename);
-  void createHDR(const std::filesystem::path& hdrFilename);
-  void setCameraManipulator(std::shared_ptr<nvutils::CameraManipulator> cameraManip)
-  {
-    m_resources.cameraManip = cameraManip;
-  }
-  void registerRecentFilesHandler();
+  void                                        createScene(const std::filesystem::path& sceneFilename);
+  void                                        createHDR(const std::filesystem::path& hdrFilename);
+  std::shared_ptr<nvutils::CameraManipulator> getCameraManipulator() { return m_cameraManip; }
+  void                                        registerRecentFilesHandler();
 
 private:
   void onAttach(nvapp::Application* app) override;
@@ -119,11 +113,12 @@ private:
   //--------------------------------------------------------------------------------------------------
   //
   //
-  nvapp::Application*        m_app{};               // Application pointer
-  VkDevice                   m_device{};            // Convenient
-  nvvk::RayPicker            m_rayPicker{};         // Ray picker
-  nvutils::ProfilerTimeline* m_profilerTimeline{};  // Timeline profiler
-  nvvk::ProfilerGpuTimer     m_profilerGpuTimer{};  // GPU profiler
+  nvapp::Application*                         m_app{};               // Application pointer
+  VkDevice                                    m_device{};            // Convenient
+  nvvk::RayPicker                             m_rayPicker{};         // Ray picker
+  nvutils::ProfilerTimeline*                  m_profilerTimeline{};  // Timeline profiler
+  nvvk::ProfilerGpuTimer                      m_profilerGpuTimer{};  // GPU profiler
+  std::shared_ptr<nvutils::CameraManipulator> m_cameraManip;         // Camera manipulator
 
   Resources  m_resources;
   PathTracer m_pathTracer;  // Path tracer renderer

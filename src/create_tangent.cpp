@@ -43,10 +43,7 @@
 #include <vector>
 #include <glm/gtx/norm.hpp>
 
-namespace shaderio {
-using namespace glm;
 #include "nvshaders/functions.h.slang"
-}  // namespace shaderio
 
 #include <nvutils/parallel_work.hpp>
 #include <nvutils/timers.hpp>

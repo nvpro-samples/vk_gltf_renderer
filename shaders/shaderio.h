@@ -25,6 +25,7 @@
 #include "nvshaders/gltf_scene_io.h.slang"
 #include "nvshaders/hdr_io.h.slang"
 
+NAMESPACE_SHADERIO_BEGIN()
 
 #define WORKGROUP_SIZE 32
 #define SILHOUETTE_WORKGROUP_SIZE 16
@@ -147,5 +148,7 @@ struct SilhouettePushConstant
 {
   float3 color;
 };
+
+NAMESPACE_SHADERIO_END()
 
 #endif  // HOST_DEVICE_H
