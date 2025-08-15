@@ -540,7 +540,7 @@ void PathTracer::compileShader(Resources& resources, bool fromFile)
     }
     else
     {
-      LOGE("Error compiling gltf_pathtrace.slang\n");
+      LOGW("Error compiling gltf_pathtrace.slang\n");
     }
   }
   {

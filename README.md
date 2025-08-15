@@ -329,7 +329,7 @@ This function is called to allow the `IAppElement` to render the UI and to query
 Will be modifying what we see in the the window title. It will also create the menu, like `File`, `Help` and deal with some key combinations.
 
 * **onFileDrop()** <br>
-Will receive the path of the file been dropped on. If it is a .gltf, .glb or .hdr, it will load that file. 
+Will receive the path of the file been dropped on. If it is a .gltf, .glb, .obj or .hdr, it will load that file. The file type is determined by its extension - 3D scene files (.gltf, .glb, .obj) are loaded as scenes, while HDR files (.hdr) are loaded as environment maps. 
 
 
 

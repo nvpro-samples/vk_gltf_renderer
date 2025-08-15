@@ -39,9 +39,9 @@ float3 debugValue(PbrMaterial pbrMat, HitState hit, DebugMethod dbgMethod)
     case DebugMethod::eOpacity:
         return float3(pbrMat.opacity * (1.0 - pbrMat.transmission));
     case DebugMethod::eTexCoord0:
-        return float3(hit.uv[0], 0);
+        return float3(fract(hit.uv[0]), 0);
     case DebugMethod::eTexCoord1:
-        return float3(hit.uv[1], 0);
+        return float3(fract(hit.uv[1]), 0);
     }
     return float3(0);
 }

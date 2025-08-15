@@ -1,3 +1,9 @@
+
+# NGX already defined
+if(TARGET ngx) 
+    return() 
+endif()
+
 set(NGX_SDK_ROOT NGX-SDK-ROOT-NOTFOUND CACHE STRING "NGX SDK Root Directory")
 
 if ("${NGX_SDK_ROOT}" STREQUAL "NGX-SDK-ROOT-NOTFOUND")

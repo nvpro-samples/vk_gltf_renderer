@@ -389,7 +389,7 @@ void GltfRenderer::onLastHeadlessFrame()
 }
 
 //--------------------------------------------------------------------------------------------------
-// Load a glTF scene or an HDR file
+// Load a glTF scene or an HDR file (called from both Load Scene and Load HDR Environment menu items)
 void GltfRenderer::onFileDrop(const std::filesystem::path& filename)
 {
   vkQueueWaitIdle(m_app->getQueue(0).queue);
@@ -449,10 +449,16 @@ void GltfRenderer::tonemap(VkCommandBuffer cmd)
   NVVK_DBG_SCOPE(cmd);  // <-- Helps to debug in NSight
   auto timerSection = m_profilerGpuTimer.cmdFrameSection(cmd, __FUNCTION__);
 
-  m_resources.tonemapper.runCompute(cmd, m_resources.gBuffers.getSize(), m_resources.tonemapperData,
+  // When debug method is not none, the tonemapper should do nothing to visualize the data
+  shaderio::TonemapperData tonemapperData = m_resources.tonemapperData;
+  if(m_resources.settings.debugMethod != shaderio::DebugMethod::eNone)
+  {
+    tonemapperData.isActive = 0;
+  }
+  m_resources.tonemapper.runCompute(cmd, m_resources.gBuffers.getSize(), tonemapperData,
                                     m_resources.gBuffers.getDescriptorImageInfo(Resources::eImgRendered),
                                     m_resources.gBuffers.getDescriptorImageInfo(Resources::eImgTonemapped));
-  
+
   // Memory barrier to ensure compute shader writes are complete before fragment shader reads
   nvvk::cmdMemoryBarrier(cmd, VK_PIPELINE_STAGE_2_COMPUTE_SHADER_BIT, VK_PIPELINE_STAGE_2_FRAGMENT_SHADER_BIT);
 }
@@ -489,10 +495,11 @@ void GltfRenderer::createScene(const std::filesystem::path& sceneFilename)
     return;
   }
 
-  std::filesystem::path filename = nvutils::findFile(sceneFilename, nvsamples::getResourcesDirs());
+  std::filesystem::path filename = nvutils::findFile(sceneFilename, nvsamples::getResourcesDirs(), false);
   if(!filename.has_filename())
   {
-    LOGE("Cannot find file: %s\n", nvutils::utf8FromPath(sceneFilename).c_str());
+    LOGW("Cannot find file: %s\n", nvutils::utf8FromPath(sceneFilename).c_str());
+    removeFromRecentFiles(sceneFilename);
     return;
   }
 
@@ -516,8 +523,9 @@ void GltfRenderer::createScene(const std::filesystem::path& sceneFilename)
     }
     else
     {
-      LOGE("Error loading OBJ: %s\n", error.c_str());
+      LOGW("Error loading OBJ: %s\n", error.c_str());
       LOGW("Warning: %s\n", warn.c_str());
+      removeFromRecentFiles(sceneFilename);
       return;
     }
   }
@@ -526,7 +534,8 @@ void GltfRenderer::createScene(const std::filesystem::path& sceneFilename)
     LOGI("Loading scene: %s\n", nvutils::utf8FromPath(filename).c_str());
     if(!m_resources.scene.load(filename))  // Loading the scene
     {
-      LOGE("Error loading scene: %s\n", nvutils::utf8FromPath(filename).c_str());
+      LOGW("Error loading scene: %s\n", nvutils::utf8FromPath(filename).c_str());
+      removeFromRecentFiles(sceneFilename);
       return;
     }
   }
@@ -819,7 +828,7 @@ void GltfRenderer::createHDR(const std::filesystem::path& hdrFilename)
   // Load an HDR and create the important sampling acceleration structure
   std::filesystem::path filename;
   if(!hdrFilename.empty())
-    filename = nvutils::findFile(hdrFilename, nvsamples::getResourcesDirs());
+    filename = nvutils::findFile(hdrFilename, nvsamples::getResourcesDirs(), false);
   m_resources.hdrIbl.destroyEnvironment();
   m_resources.hdrIbl.loadEnvironment(cmd, uploader, filename, true);
 
@@ -842,6 +851,7 @@ void GltfRenderer::createHDR(const std::filesystem::path& hdrFilename)
 
   updateHdrImages();
   m_resources.hdrDome.setOutImage(m_resources.gBuffers.getDescriptorImageInfo(Resources::eImgRendered));
+  addToRecentFiles(hdrFilename);
 }
 
 //--------------------------------------------------------------------------------------------------

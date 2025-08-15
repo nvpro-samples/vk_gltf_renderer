@@ -357,7 +357,7 @@ void Rasterizer::compileShader(Resources& resources, bool fromFile)
     }
     else
     {
-      LOGE("Error compiling gltf_raster.slang\n");
+      LOGW("Error compiling gltf_raster.slang\n");
     }
   }
 

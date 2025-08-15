@@ -101,14 +101,20 @@ private:
   void          renderUI();
   void          renderMenu();
   void          addToRecentFiles(const std::filesystem::path& filePath, int historySize = 20);
+  void          removeFromRecentFiles(const std::filesystem::path& filePath);
   void          mouseClickedInViewport();
   nvutils::Bbox getRenderNodeBbox(int nodeID);
   void          windowTitle();
   void          applyGltfCamera(int cameraIndex);
   void          setGltfCameraFromView(int cameraIndex);
+  void          loadHdrFileDialog();
 
   // Recent files management
   std::vector<std::filesystem::path> m_recentFiles;
+
+  // File dialog directories
+  std::filesystem::path m_lastSceneDirectory;
+  std::filesystem::path m_lastHdrDirectory;
 
   //--------------------------------------------------------------------------------------------------
   //

@@ -116,17 +116,18 @@ source_group("MikkTSpace" FILES ${MIKKTSPACE_SRC})
 #####################################################################################
 # Adding DLSS if selected
 option(USE_DLSS "Use DLSS-RR for denoising" ON)
+set(DLSS_VERSION 310.3.0)
 if(USE_DLSS)
   message(STATUS "Using DLSS-RR for denoising")
     download_package(
       NAME DLSSRR
-      URLS https://github.com/NVIDIA/DLSS/archive/refs/tags/v310.3.0.zip
-      VERSION 310.3.0
+      URLS https://github.com/NVIDIA/DLSS/archive/refs/tags/v${DLSS_VERSION}.zip
+      VERSION ${DLSS_VERSION}
       LOCATION DLSSRR_SOURCE_DIR
     )
 
     # Set NGX SDK root path
-    set(NGX_SDK_ROOT "${DLSSRR_SOURCE_DIR}/DLSS-310.3.0/")
+    set(NGX_SDK_ROOT "${DLSSRR_SOURCE_DIR}/DLSS-${DLSS_VERSION}/")
     message(STATUS " - DLSS path: " ${NGX_SDK_ROOT})
     include(cmake/ngx.cmake)
     

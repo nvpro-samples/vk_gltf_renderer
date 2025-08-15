@@ -147,6 +147,17 @@ void GltfRenderer::windowTitle()
   }
 }
 
+// Helper function to load HDR files
+void GltfRenderer::loadHdrFileDialog()
+{
+  std::filesystem::path filename =
+      nvgui::windowOpenFileDialog(m_app->getWindowHandle(), "Load HDR Environment", "HDR(.hdr)|*.hdr", m_lastHdrDirectory);
+  if(!filename.empty())
+  {
+    onFileDrop(filename.c_str());
+  }
+}
+
 void GltfRenderer::renderUI()
 {
   static int frameCount    = 0;
@@ -269,12 +280,7 @@ void GltfRenderer::renderUI()
           {
             if(PE::entry("", [&] { return ImGui::SmallButton("load"); }, "Load HDR Image"))
             {
-              std::filesystem::path filename =
-                  nvgui::windowOpenFileDialog(m_app->getWindowHandle(), "Load HDR Image", "HDR(.hdr)|*.hdr");
-              if(!filename.empty())
-              {
-                onFileDrop(filename.c_str());
-              }
+              loadHdrFileDialog();
               changed = true;
             }
             changed |= PE::SliderFloat("Intensity", &m_resources.settings.hdrEnvIntensity, 0, 100, "%.3f",
@@ -426,6 +432,7 @@ void GltfRenderer::renderMenu()
   GltfRenderer::windowTitle();
   bool clearScene     = ImGui::IsKeyChordPressed(ImGuiMod_Ctrl | ImGuiKey_N);
   bool loadFile       = ImGui::IsKeyChordPressed(ImGuiMod_Ctrl | ImGuiKey_O);
+  bool loadHdrFile    = ImGui::IsKeyChordPressed(ImGuiMod_Ctrl | ImGuiMod_Shift | ImGuiKey_O);
   bool saveFile       = ImGui::IsKeyChordPressed(ImGuiMod_Ctrl | ImGuiKey_S);
   bool saveScreenFile = ImGui::IsKeyChordPressed(ImGuiMod_Ctrl | ImGuiMod_Shift | ImGuiMod_Alt | ImGuiKey_S);
   bool saveImageFile  = ImGui::IsKeyChordPressed(ImGuiMod_Ctrl | ImGuiMod_Shift | ImGuiKey_S);
@@ -442,7 +449,8 @@ void GltfRenderer::renderMenu()
   bool validScene = m_resources.scene.valid();
   if(ImGui::BeginMenu("File"))
   {
-    loadFile |= ImGui::MenuItem("Load", "Ctrl+O");
+    loadFile |= ImGui::MenuItem("Load Scene", "Ctrl+O");
+    loadHdrFile |= ImGui::MenuItem("Load HDR Environment", "Ctrl+Shift+O");
     if(ImGui::BeginMenu("Recent Files"))
     {
       for(const auto& file : m_recentFiles)
@@ -450,6 +458,15 @@ void GltfRenderer::renderMenu()
         if(ImGui::MenuItem(file.string().c_str()))
         {
           sceneToLoadFilename = file;
+          // Update the appropriate directory based on file extension
+          if(nvutils::extensionMatches(file, ".hdr"))
+          {
+            m_lastHdrDirectory = file.parent_path();
+          }
+          else
+          {
+            m_lastSceneDirectory = file.parent_path();
+          }
         }
       }
       ImGui::EndMenu();
@@ -532,14 +549,17 @@ void GltfRenderer::renderMenu()
 
   if(loadFile)
   {
-    sceneToLoadFilename = nvgui::windowOpenFileDialog(m_app->getWindowHandle(), "Load glTF | HDR",
-                                                      "glTF(.gltf, .glb), OBJ(.obj), "
-                                                      "HDR(.hdr)|*.gltf;*.glb;*.obj;*.hdr");
+    sceneToLoadFilename = nvgui::windowOpenFileDialog(m_app->getWindowHandle(), "Load 3D Scene",
+                                                      "glTF(.gltf, .glb), OBJ(.obj)|*.gltf;*.glb;*.obj", m_lastSceneDirectory);
   }
-
   if(!sceneToLoadFilename.empty())
   {
     onFileDrop(sceneToLoadFilename.c_str());
+  }
+
+  if(loadHdrFile)
+  {
+    loadHdrFileDialog();
   }
 
   if(saveFile && validScene)
@@ -592,6 +612,9 @@ void GltfRenderer::renderMenu()
 
 void GltfRenderer::addToRecentFiles(const std::filesystem::path& filePath, int historySize)
 {
+  if(filePath.empty())
+    return;
+
   auto it = std::find(m_recentFiles.begin(), m_recentFiles.end(), filePath);
   if(it != m_recentFiles.end())
   {
@@ -601,6 +624,15 @@ void GltfRenderer::addToRecentFiles(const std::filesystem::path& filePath, int h
   if(m_recentFiles.size() > historySize)
   {
     m_recentFiles.pop_back();
+  }
+}
+
+void GltfRenderer::removeFromRecentFiles(const std::filesystem::path& filePath)
+{
+  auto it = std::find(m_recentFiles.begin(), m_recentFiles.end(), filePath);
+  if(it != m_recentFiles.end())
+  {
+    m_recentFiles.erase(it);
   }
 }
 
@@ -622,6 +654,15 @@ void GltfRenderer::registerRecentFilesHandler()
     {
       buf->appendf("File=%s\n", file.string().c_str());
     }
+    // Save directory preferences
+    if(!self->m_lastSceneDirectory.empty())
+    {
+      buf->appendf("SceneDir=%s\n", self->m_lastSceneDirectory.string().c_str());
+    }
+    if(!self->m_lastHdrDirectory.empty())
+    {
+      buf->appendf("HdrDir=%s\n", self->m_lastHdrDirectory.string().c_str());
+    }
     buf->append("\n");
   };
 
@@ -636,6 +677,16 @@ void GltfRenderer::registerRecentFilesHandler()
       {
         self->m_recentFiles.push_back(filePath);
       }
+    }
+    else if(strncmp(line, "SceneDir=", 9) == 0)
+    {
+      const char* dirPath        = line + 9;
+      self->m_lastSceneDirectory = std::filesystem::path(dirPath);
+    }
+    else if(strncmp(line, "HdrDir=", 7) == 0)
+    {
+      const char* dirPath      = line + 7;
+      self->m_lastHdrDirectory = std::filesystem::path(dirPath);
     }
   };
 
