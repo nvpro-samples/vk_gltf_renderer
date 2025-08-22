@@ -43,6 +43,10 @@ void main(uint3 dispatchThreadID: SV_DispatchThreadID)
 
   const uint2 pixelCoord = uint2(dispatchThreadID.xy);
 
+  // Early exit if pixel is outside image bounds
+  if(pixelCoord.x >= texSize.x || pixelCoord.y >= texSize.y)
+    return;
+
   // Define the Sobel kernel in the x and y directions
   const float kernelX[9] = float[](-1, 0, 1, -2, 0, 2, -1, 0, 1);
   const float kernelY[9] = float[](-1, -2, -1, 0, 0, 0, 1, 2, 1);
@@ -50,20 +54,25 @@ void main(uint3 dispatchThreadID: SV_DispatchThreadID)
   float sumX = 0.0;
   float sumY = 0.0;
 
-  // Check boundaries
-  if(pixelCoord.x > 0 && pixelCoord.x < texSize.x - 1 && pixelCoord.y > 0 && pixelCoord.y < texSize.y - 1)
+  // Apply Sobel filter with proper boundary handling
+  [unroll]
+  for(int i = -1; i <= 1; i++)
   {
     [unroll]
-    for(int i = -1; i <= 1; i++)
+    for(int j = -1; j <= 1; j++)
     {
-      [unroll]
-      for(int j = -1; j <= 1; j++)
-      {
-        const uint2 offset = uint2(i, j);
-        const float val    = u_R8Buffer[pixelCoord + offset].r;
-        sumX += val * kernelX[(i + 1) * 3 + (j + 1)];
-        sumY += val * kernelY[(i + 1) * 3 + (j + 1)];
-      }
+      const uint2 offset = uint2(i, j);
+      const uint2 sampleCoord = pixelCoord + offset;
+      
+      // Clamp coordinates to image bounds
+      const uint2 clampedCoord = uint2(
+        clamp(sampleCoord.x, 0u, texSize.x - 1u),
+        clamp(sampleCoord.y, 0u, texSize.y - 1u)
+      );
+      
+      const float val = u_R8Buffer[clampedCoord].r;
+      sumX += val * kernelX[(i + 1) * 3 + (j + 1)];
+      sumY += val * kernelY[(i + 1) * 3 + (j + 1)];
     }
   }
 

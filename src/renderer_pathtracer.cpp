@@ -312,6 +312,10 @@ void PathTracer::onRender(VkCommandBuffer cmd, Resources& resources)
       vkCmdBlitImage(cmd, m_dlss->getGBuffers().getColorImage(shaderio::OutputImage::eSelectImage),
                      VK_IMAGE_LAYOUT_GENERAL, resources.gBuffers.getColorImage(Resources::eImgSelection),
                      VK_IMAGE_LAYOUT_GENERAL, 1, &blitRegions, VK_FILTER_LINEAR);
+
+      // Ensure the blit operation completes before any subsequent reads from this image
+      nvvk::cmdMemoryBarrier(cmd, VK_PIPELINE_STAGE_2_BLIT_BIT, VK_PIPELINE_STAGE_2_COMPUTE_SHADER_BIT,
+                             VK_ACCESS_2_TRANSFER_WRITE_BIT, VK_ACCESS_2_SHADER_READ_BIT);
     }
   }
 #endif

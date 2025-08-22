@@ -473,12 +473,12 @@ void GltfRenderer::silhouette(VkCommandBuffer cmd)
     NVVK_DBG_SCOPE(cmd);  // <-- Helps to debug in NSight
     auto timerSection = m_profilerGpuTimer.cmdFrameSection(cmd, __FUNCTION__);
 
-    nvvk::cmdMemoryBarrier(cmd, VK_PIPELINE_STAGE_2_COMPUTE_SHADER_BIT, VK_PIPELINE_STAGE_2_COMPUTE_SHADER_BIT);
     std::vector<VkDescriptorImageInfo> imageInfos = {
         m_resources.gBuffers.getDescriptorImageInfo(Resources::eImgSelection),
         m_resources.gBuffers.getDescriptorImageInfo(Resources::eImgTonemapped),
     };
     m_silhouette.dispatch(cmd, m_resources.gBuffers.getSize(), imageInfos);
+    nvvk::cmdMemoryBarrier(cmd, VK_PIPELINE_STAGE_2_COMPUTE_SHADER_BIT, VK_PIPELINE_STAGE_2_FRAGMENT_SHADER_BIT);
   }
 }
 
@@ -637,6 +637,10 @@ void GltfRenderer::clearGbuffer(VkCommandBuffer cmd)
   VkImageSubresourceRange range      = {.aspectMask = VK_IMAGE_ASPECT_COLOR_BIT, .levelCount = 1, .layerCount = 1};
   vkCmdClearColorImage(cmd, m_resources.gBuffers.getColorImage(Resources::eImgTonemapped), VK_IMAGE_LAYOUT_GENERAL,
                        &clearValue, 1, &range);
+
+  // Ensure the clear operation completes before any subsequent reads from this image
+  nvvk::cmdMemoryBarrier(cmd, VK_PIPELINE_STAGE_2_CLEAR_BIT, VK_PIPELINE_STAGE_2_FRAGMENT_SHADER_BIT,
+                         VK_ACCESS_2_TRANSFER_WRITE_BIT, VK_ACCESS_2_SHADER_READ_BIT);
 }
 
 //--------------------------------------------------------------------------------------------------
@@ -963,6 +967,9 @@ bool GltfRenderer::updateSceneChanges(VkCommandBuffer cmd, bool didAnimate)
     m_resources.sceneVk.updateRenderLightsBuffer(cmd, m_resources.staging, m_resources.scene);
     // Make sure the staging buffers are uploaded before the acceleration structures are updated
     m_resources.staging.cmdUploadAppended(cmd);
+    // Ensure all buffer copy operations complete before acceleration structure build begins
+    nvvk::cmdMemoryBarrier(cmd, VK_PIPELINE_STAGE_2_COPY_BIT, VK_PIPELINE_STAGE_2_ACCELERATION_STRUCTURE_BUILD_BIT_KHR,
+                           VK_ACCESS_2_TRANSFER_WRITE_BIT, VK_ACCESS_2_SHADER_READ_BIT);
     m_resources.sceneRtx.updateBottomLevelAS(cmd, m_resources.scene);
     m_resources.sceneRtx.updateTopLevelAS(cmd, m_resources.staging, m_resources.scene);
   }

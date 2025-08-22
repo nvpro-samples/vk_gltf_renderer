@@ -33,7 +33,7 @@ class Silhouette
 {
 public:
   Silhouette() = default;
-  ~Silhouette() { assert(!m_shader && "deinit must be called"); }
+  ~Silhouette() { assert(!m_pipeline && "deinit must be called"); }
 
 
   void init(Resources& res);
@@ -46,7 +46,7 @@ private:
   shaderio::SilhouettePushConstant m_pushConstant{};
 
   nvvk::DescriptorBindings m_bindings;
-  VkShaderEXT              m_shader{};
   VkPipelineLayout         m_pipelineLayout{};       // Pipeline layout
   VkDescriptorSetLayout    m_descriptorSetLayout{};  // Descriptor set layout
+  VkPipeline               m_pipeline{};             // Compute pipeline
 };

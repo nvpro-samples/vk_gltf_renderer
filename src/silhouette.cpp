@@ -75,26 +75,21 @@ void Silhouette::init(Resources& res)
   NVVK_CHECK(vkCreatePipelineLayout(device, &plCreateInfo, nullptr, &m_pipelineLayout));
   NVVK_DBG_NAME(m_pipelineLayout);
 
-  // Create compute shader with dispatch base support
-  VkShaderCreateInfoEXT shaderCreateInfos = {
-      .sType                  = VK_STRUCTURE_TYPE_SHADER_CREATE_INFO_EXT,
-      .pNext                  = NULL,
-      .flags                  = VK_SHADER_CREATE_DISPATCH_BASE_BIT_EXT,
-      .stage                  = VK_SHADER_STAGE_COMPUTE_BIT,
-      .nextStage              = 0,
-      .codeType               = VK_SHADER_CODE_TYPE_SPIRV_EXT,
-      .codeSize               = silhouette_comp_slang_sizeInBytes,
-      .pCode                  = silhouette_comp_slang,
-      .pName                  = "main",
-      .setLayoutCount         = 1,
-      .pSetLayouts            = &m_descriptorSetLayout,
-      .pushConstantRangeCount = 1,
-      .pPushConstantRanges    = &pushConstant,
-      .pSpecializationInfo    = NULL,
-  };
+  // Compute Pipeline
+  VkComputePipelineCreateInfo compInfo   = {VK_STRUCTURE_TYPE_COMPUTE_PIPELINE_CREATE_INFO};
+  VkShaderModuleCreateInfo    shaderInfo = {VK_STRUCTURE_TYPE_SHADER_MODULE_CREATE_INFO};
+  compInfo.stage                         = {VK_STRUCTURE_TYPE_PIPELINE_SHADER_STAGE_CREATE_INFO};
+  compInfo.stage.stage                   = VK_SHADER_STAGE_COMPUTE_BIT;
+  compInfo.stage.pName                   = "main";
+  compInfo.stage.pNext                   = &shaderInfo;
+  compInfo.layout                        = m_pipelineLayout;
+
+  shaderInfo.codeSize = uint32_t(silhouette_comp_slang_sizeInBytes);
+  shaderInfo.pCode    = silhouette_comp_slang;
 
   // Create the compute shader
-  NVVK_CHECK(vkCreateShadersEXT(device, 1, &shaderCreateInfos, NULL, &m_shader));
+  vkCreateComputePipelines(device, nullptr, 1, &compInfo, nullptr, &m_pipeline);
+  NVVK_DBG_NAME(m_pipeline);
 }
 
 //--------------------------------------------------------------------------------------------------
@@ -102,11 +97,11 @@ void Silhouette::init(Resources& res)
 void Silhouette::deinit(Resources& res)
 {
   VkDevice device = res.allocator.getDevice();
-  vkDestroyShaderEXT(device, m_shader, nullptr);
+  vkDestroyPipeline(device, m_pipeline, nullptr);
   vkDestroyPipelineLayout(device, m_pipelineLayout, nullptr);
   vkDestroyDescriptorSetLayout(device, m_descriptorSetLayout, nullptr);
   m_bindings.clear();
-  m_shader              = {};
+  m_pipeline            = {};
   m_pipelineLayout      = {};
   m_descriptorSetLayout = {};
 }
@@ -128,8 +123,7 @@ void Silhouette::dispatch(VkCommandBuffer cmd, const VkExtent2D& imgSize, std::v
                             static_cast<uint32_t>(writeContainer.size()), writeContainer.data());
 
   // Bind compute shader
-  const VkShaderStageFlagBits stages[1] = {VK_SHADER_STAGE_COMPUTE_BIT};
-  vkCmdBindShadersEXT(cmd, 1, stages, &m_shader);
+  vkCmdBindPipeline(cmd, VK_PIPELINE_BIND_POINT_COMPUTE, m_pipeline);
 
   // Push constants for silhouette color
   vkCmdPushConstants(cmd, m_pipelineLayout, VK_SHADER_STAGE_COMPUTE_BIT, 0, sizeof(shaderio::SilhouettePushConstant), &m_pushConstant);

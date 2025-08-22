@@ -36,16 +36,20 @@ void GltfRenderer::mouseClickedInViewport()
 {
   static UiMouseState s_mouseClickState;  // Mouse click state
 
-  s_mouseClickState.update();
+  // The mouse click state is only updated when the "Viewport" window is hovered.
+  if(!ImGui::IsWindowHovered(ImGuiFocusedFlags_RootWindow))
+    return;
 
   if(!m_resources.scene.valid())
   {
     return;
   }
 
+  s_mouseClickState.update();
+
   // If double-clicking in the "Viewport", shoot a ray to the scene under the mouse.
   // If the ray hit something, set the camera center to the hit position.
-  if(ImGui::IsWindowHovered(ImGuiFocusedFlags_RootWindow) && (s_mouseClickState.isMouseClicked(ImGuiMouseButton_Left)))
+  if(s_mouseClickState.isMouseClicked(ImGuiMouseButton_Left))
   {
     nvutils::ScopedTimer st("RayPicker");
     VkCommandBuffer      cmd = m_app->createTempCmdBuffer();
