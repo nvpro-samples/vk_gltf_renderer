@@ -88,7 +88,7 @@ struct Settings
 
 struct Resources
 {
-  enum
+  enum ImageType
   {
     eImgTonemapped,
     eImgRendered,

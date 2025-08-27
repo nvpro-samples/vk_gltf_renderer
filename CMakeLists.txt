@@ -116,51 +116,16 @@ source_group("MikkTSpace" FILES ${MIKKTSPACE_SRC})
 #####################################################################################
 # Adding DLSS if selected
 option(USE_DLSS "Use DLSS-RR for denoising" ON)
-set(DLSS_VERSION 310.3.0)
 if(USE_DLSS)
-  message(STATUS "Using DLSS-RR for denoising")
-    download_package(
-      NAME DLSSRR
-      URLS https://github.com/NVIDIA/DLSS/archive/refs/tags/v${DLSS_VERSION}.zip
-      VERSION ${DLSS_VERSION}
-      LOCATION DLSSRR_SOURCE_DIR
-    )
-
-    # Set NGX SDK root path
-    set(NGX_SDK_ROOT "${DLSSRR_SOURCE_DIR}/DLSS-${DLSS_VERSION}/")
-    message(STATUS " - DLSS path: " ${NGX_SDK_ROOT})
-    include(cmake/ngx.cmake)
-    
-    target_link_libraries(${PROJECT_NAME} PRIVATE ngx)
-    target_compile_definitions(${PROJECT_NAME} PRIVATE USE_DLSS)
-    list(APPEND SOURCE_FILES 
-        ${CMAKE_CURRENT_SOURCE_DIR}/src/dlss_wrapper.cpp 
-        ${CMAKE_CURRENT_SOURCE_DIR}/src/dlss_wrapper.hpp
-        ${CMAKE_CURRENT_SOURCE_DIR}/src/dlss_denoiser.cpp 
-        ${CMAKE_CURRENT_SOURCE_DIR}/src/dlss_denoiser.hpp
-        )
-    target_sources(${PROJECT_NAME} PRIVATE ${SOURCE_FILES})
-
-    if (WIN32)
-        if(CMAKE_BUILD_TYPE STREQUAL "Debug")
-            file(GLOB DLSS_DLLS "${NGX_SDK_ROOT}/lib/Windows_x86_64/dev/nvngx_*.dll")
-        else()
-            file(GLOB DLSS_DLLS "${NGX_SDK_ROOT}/lib/Windows_x86_64/rel/nvngx_*.dll")
-        endif()
-    else()
-        if(CMAKE_BUILD_TYPE STREQUAL "Debug")
-            file(GLOB DLSS_DLLS "${NGX_SDK_ROOT}/lib/Linux_x86_64/dev/libnvidia-ngx*.so.*")
-        else()
-            file(GLOB DLSS_DLLS "${NGX_SDK_ROOT}/lib/Linux_x86_64/rel/libnvidia-ngx*.so.*")
-        endif()    
-    endif()
-
-    add_custom_command(TARGET ${PROJECT_NAME} POST_BUILD
-        COMMAND ${CMAKE_COMMAND} -E copy_if_different ${DLSS_DLLS} $<TARGET_FILE_DIR:${PROJECT_NAME}> VERBATIM
-        )
-
-    install(FILES ${DLSS_DLLS} DESTINATION ${CMAKE_INSTALL_PREFIX})
-
+  find_package(NGX REQUIRED)
+  target_link_libraries(${PROJECT_NAME} PRIVATE ngx)
+  target_compile_definitions(${PROJECT_NAME} PRIVATE USE_DLSS)
+  target_sources(${PROJECT_NAME} PRIVATE
+    ${CMAKE_CURRENT_SOURCE_DIR}/src/dlss_wrapper.cpp 
+    ${CMAKE_CURRENT_SOURCE_DIR}/src/dlss_wrapper.hpp
+    ${CMAKE_CURRENT_SOURCE_DIR}/src/dlss_denoiser.cpp 
+    ${CMAKE_CURRENT_SOURCE_DIR}/src/dlss_denoiser.hpp
+  )
 endif()
 
 #####################################################################################
@@ -172,7 +137,7 @@ download_files(FILENAMES daytime.hdr std_env.hdr)
 # Installation, copy files for runtime
 copy_to_runtime_and_install(${PROJECT_NAME}
   DIRECTORIES "${NVSHADERS_DIR}/nvshaders"
-  FILES ${NsightAftermath_DLLS} ${Slang_GLSLANG}
+  FILES ${NsightAftermath_DLLS} ${Slang_GLSLANG} ${DLSS_DLLS}
   LOCAL_DIRS "${CMAKE_CURRENT_LIST_DIR}/shaders" "${CMAKE_CURRENT_LIST_DIR}/resources"
   AUTO
 )

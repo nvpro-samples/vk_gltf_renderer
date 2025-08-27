@@ -81,7 +81,7 @@ void UiSceneGraph::renderSceneGraph()
       ImGui::TableSetupScrollFreeze(1, 1);
       ImGui::TableSetupColumn("Name", ImGuiTableColumnFlags_NoHide);
       ImGui::TableSetupColumn("Type", ImGuiTableColumnFlags_NoHide | ImGuiTableColumnFlags_WidthFixed, textBaseWidth * 8.0f);
-      ImGui::TableSetupColumn("-", ImGuiTableColumnFlags_NoHide | ImGuiTableColumnFlags_WidthFixed, textBaseWidth * 1.0f);
+      ImGui::TableSetupColumn(" ", ImGuiTableColumnFlags_NoHide | ImGuiTableColumnFlags_WidthFixed, textBaseWidth * 2.2f);
       ImGui::TableHeadersRow();
 
       for(size_t sceneID = 0; sceneID < m_model->scenes.size(); sceneID++)
@@ -306,9 +306,7 @@ void UiSceneGraph::renderNode(int nodeIndex)
   if(!visibility.visible)
   {
     ImGui::TableNextColumn();
-    ImGui::PushFont(nvgui::getIconicFont());
-    ImGui::Text("%s", nvgui::icon_ban);
-    ImGui::PopFont();
+    ImGui::Text("%s",  ICON_MS_VISIBILITY_OFF);
   }
   else
   {
@@ -414,6 +412,10 @@ void UiSceneGraph::renderPrimitive(const tinygltf::Primitive& primitive, int pri
   ImGui::TableNextColumn();
   ImGui::Text("Primitive");
   ImGui::TableNextColumn();
+  if(materialID >= 0)
+  {
+    ImGui::Text("%s", ICON_MS_SHAPES);
+  }
 }
 
 void UiSceneGraph::renderLight(int lightIndex)
@@ -439,6 +441,7 @@ void UiSceneGraph::renderLight(int lightIndex)
   ImGui::TableNextColumn();
   ImGui::Text("Light %d", lightIndex);
   ImGui::TableNextColumn();
+  ImGui::Text("%s", ICON_MS_LIGHTBULB);
 }
 
 void UiSceneGraph::renderCamera(int cameraIndex)
@@ -464,6 +467,7 @@ void UiSceneGraph::renderCamera(int cameraIndex)
   ImGui::TableNextColumn();
   ImGui::Text("Camera %d", cameraIndex);
   ImGui::TableNextColumn();
+  ImGui::Text("%s", ICON_MS_PHOTO_CAMERA);
 }
 // Utility struct to handle material UI
 struct MaterialUI

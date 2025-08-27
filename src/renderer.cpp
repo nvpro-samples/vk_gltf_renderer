@@ -408,12 +408,14 @@ void GltfRenderer::onFileDrop(const std::filesystem::path& filename)
 
     std::thread([=, this]() {
       m_busy.start("Loading");
+      m_lastSceneDirectory = filename.parent_path();
       createScene(filename);
       m_busy.stop();
     }).detach();
   }
   else if(nvutils::extensionMatches(filename, ".hdr"))
   {
+    m_lastHdrDirectory = filename.parent_path();
     createHDR(filename);
     m_resources.settings.envSystem                 = shaderio::EnvSystem::eHdr;
     m_pathTracer.m_pushConst.fireflyClampThreshold = m_resources.hdrIbl.getIntegral();
@@ -499,7 +501,7 @@ void GltfRenderer::createScene(const std::filesystem::path& sceneFilename)
   if(!filename.has_filename())
   {
     LOGW("Cannot find file: %s\n", nvutils::utf8FromPath(sceneFilename).c_str());
-    removeFromRecentFiles(sceneFilename);
+    removeFromRecentFiles(filename);
     return;
   }
 
@@ -525,7 +527,7 @@ void GltfRenderer::createScene(const std::filesystem::path& sceneFilename)
     {
       LOGW("Error loading OBJ: %s\n", error.c_str());
       LOGW("Warning: %s\n", warn.c_str());
-      removeFromRecentFiles(sceneFilename);
+      removeFromRecentFiles(filename);
       return;
     }
   }
@@ -535,7 +537,7 @@ void GltfRenderer::createScene(const std::filesystem::path& sceneFilename)
     if(!m_resources.scene.load(filename))  // Loading the scene
     {
       LOGW("Error loading scene: %s\n", nvutils::utf8FromPath(filename).c_str());
-      removeFromRecentFiles(sceneFilename);
+      removeFromRecentFiles(filename);
       return;
     }
   }
@@ -558,7 +560,7 @@ void GltfRenderer::createScene(const std::filesystem::path& sceneFilename)
   // Need to update (push) all textures
   updateTextures();
 
-  addToRecentFiles(sceneFilename);
+  addToRecentFiles(filename);
 }
 
 //--------------------------------------------------------------------------------------------------
@@ -855,7 +857,7 @@ void GltfRenderer::createHDR(const std::filesystem::path& hdrFilename)
 
   updateHdrImages();
   m_resources.hdrDome.setOutImage(m_resources.gBuffers.getDescriptorImageInfo(Resources::eImgRendered));
-  addToRecentFiles(hdrFilename);
+  // addToRecentFiles(hdrFilename);
 }
 
 //--------------------------------------------------------------------------------------------------

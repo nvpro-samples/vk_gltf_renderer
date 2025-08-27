@@ -23,14 +23,16 @@
 #include <glm/gtc/type_ptr.hpp>
 #include <imgui.h>
 
-#include "create_tangent.hpp"
-#include "nvgui/axis.hpp"
-#include "nvgui/file_dialog.hpp"
-#include "nvgui/tonemapper.hpp"
-#include "nvutils/bounding_box.hpp"
+#include <nvvk/helpers.hpp>
+#include <nvutils/bounding_box.hpp>
+#include <nvgui/tonemapper.hpp>
+#include <nvgui/file_dialog.hpp>
+#include <nvgui/axis.hpp>
+
 #include "renderer.hpp"
-#include "ui_collapsing_header_manager.h"
+#include "create_tangent.hpp"
 #include "ui_mouse_state.hpp"
+#include "ui_collapsing_header_manager.h"
 
 void GltfRenderer::mouseClickedInViewport()
 {
@@ -155,7 +157,7 @@ void GltfRenderer::windowTitle()
 void GltfRenderer::loadHdrFileDialog()
 {
   std::filesystem::path filename =
-      nvgui::windowOpenFileDialog(m_app->getWindowHandle(), "Load HDR Environment", "HDR(.hdr)|*.hdr", m_lastHdrDirectory);
+      nvgui::windowOpenFileDialog(m_app->getWindowHandle(), "Load HDR Environment", "HDR Image|*.hdr", m_lastHdrDirectory);
   if(!filename.empty())
   {
     onFileDrop(filename.c_str());
@@ -357,28 +359,62 @@ void GltfRenderer::renderUI()
 
       if(m_resources.scene.valid() && headerManager.beginHeader("Statistics"))
       {
-        static bool copyToClipboard = false;
-        if(copyToClipboard)
+        const tinygltf::Model& tiny = m_resources.scene.getModel();
+        
+        // Create a table for better organization
+        if(ImGui::BeginTable("Statistics", 2, ImGuiTableFlags_Borders | ImGuiTableFlags_RowBg))
+        {
+          ImGui::TableSetupColumn("Property", ImGuiTableColumnFlags_WidthStretch);
+          ImGui::TableSetupColumn("Value", ImGuiTableColumnFlags_WidthFixed, 80.0f);
+          ImGui::TableHeadersRow();
+          
+          // Lambda function to add table rows
+          auto addStatRow = [](const char* icon, const char* label, size_t value) {
+            ImGui::TableNextRow();
+            ImGui::TableSetColumnIndex(0);
+            ImGui::Text("%s %s", icon, label);
+            ImGui::TableSetColumnIndex(1);
+            ImGui::Text("%zu", value);
+          };
+          
+          // Scene Structure
+          addStatRow(ICON_MS_LAYERS, "Nodes", tiny.nodes.size());
+          addStatRow(ICON_MS_VIEW_LIST, "Render Nodes", m_resources.scene.getRenderNodes().size());
+          addStatRow(ICON_MS_EXTENSION, "Render Primitives", m_resources.scene.getNumRenderPrimitives());
+          
+          // Materials & Geometry
+          addStatRow(ICON_MS_BRUSH, "Materials", tiny.materials.size());
+          addStatRow(ICON_MS_SIGNAL_CELLULAR_NULL, "Triangles", m_resources.scene.getNumTriangles());
+          
+          // Lighting & Assets
+          addStatRow(ICON_MS_LIGHTBULB, "Lights", tiny.lights.size());
+          addStatRow(ICON_MS_IMAGE_INSET, "Textures", tiny.textures.size());
+          addStatRow(ICON_MS_IMAGE, "Images", tiny.images.size());
+          
+          ImGui::EndTable();
+        }
+        
+        // Copy to clipboard button with proper spacing
+        ImGui::Spacing();
+
+        if(ImGui::Button(fmt::format("{} Copy to Clipboard", ICON_MS_CONTENT_COPY).c_str()))
         {
           ImGui::LogToClipboard();
+          // Log all statistics to clipboard
+          ImGui::LogText("Scene Statistics:\n");
+          ImGui::LogText("Nodes: %zu\n", tiny.nodes.size());
+          ImGui::LogText("Render Nodes: %zu\n", m_resources.scene.getRenderNodes().size());
+          ImGui::LogText("Render Primitives: %zu\n", m_resources.scene.getNumRenderPrimitives());
+          ImGui::LogText("Materials: %zu\n", tiny.materials.size());
+          ImGui::LogText("Triangles: %zu\n", m_resources.scene.getNumTriangles());
+          ImGui::LogText("Lights: %zu\n", tiny.lights.size());
+          ImGui::LogText("Textures: %zu\n", tiny.textures.size());
+          ImGui::LogText("Images: %zu\n", tiny.images.size());
+          ImGui::LogFinish();
         }
-        if(PE::begin("Stat_Val"))
+        if(ImGui::IsItemHovered())
         {
-          const tinygltf::Model& tiny = m_resources.scene.getModel();
-          PE::Text("Nodes", std::to_string(tiny.nodes.size()));
-          PE::Text("Render Nodes", std::to_string(m_resources.scene.getRenderNodes().size()));
-          PE::Text("Render Primitives", std::to_string(m_resources.scene.getNumRenderPrimitives()));
-          PE::Text("Materials", std::to_string(tiny.materials.size()));
-          PE::Text("Triangles", std::to_string(m_resources.scene.getNumTriangles()));
-          PE::Text("Lights", std::to_string(tiny.lights.size()));
-          PE::Text("Textures", std::to_string(tiny.textures.size()));
-          PE::Text("Images", std::to_string(tiny.images.size()));
-          PE::end();
-          if(copyToClipboard)
-          {
-            ImGui::LogFinish();
-          }
-          copyToClipboard = ImGui::SmallButton("Copy");
+          ImGui::SetTooltip("Copy statistics to clipboard");
         }
       }
     }
@@ -424,7 +460,8 @@ void GltfRenderer::renderMenu()
 
   auto getSaveImage = [&]() {
     std::filesystem::path filename =
-        nvgui::windowSaveFileDialog(m_app->getWindowHandle(), "Save Image", "PNG(.png),JPG(.jpg)|*.png;*.jpg");
+        nvgui::windowSaveFileDialog(m_app->getWindowHandle(), "Save Image",
+                                    "Image Files|*.png;*.jpg;*.hdr|PNG Files|*.png|JPG Files|*.jpg|HDR Files|*.hdr");
     if(!filename.empty())
     {
       std::filesystem::path ext = std::filesystem::path(filename).extension();
@@ -434,8 +471,8 @@ void GltfRenderer::renderMenu()
   std::filesystem::path sceneToLoadFilename{};
 
   GltfRenderer::windowTitle();
-  bool clearScene     = ImGui::IsKeyChordPressed(ImGuiMod_Ctrl | ImGuiKey_N);
-  bool loadFile       = ImGui::IsKeyChordPressed(ImGuiMod_Ctrl | ImGuiKey_O);
+  bool newScene     = ImGui::IsKeyChordPressed(ImGuiMod_Ctrl | ImGuiKey_N);
+  bool openFile       = ImGui::IsKeyChordPressed(ImGuiMod_Ctrl | ImGuiKey_O);
   bool loadHdrFile    = ImGui::IsKeyChordPressed(ImGuiMod_Ctrl | ImGuiMod_Shift | ImGuiKey_O);
   bool saveFile       = ImGui::IsKeyChordPressed(ImGuiMod_Ctrl | ImGuiKey_S);
   bool saveScreenFile = ImGui::IsKeyChordPressed(ImGuiMod_Ctrl | ImGuiMod_Shift | ImGuiMod_Alt | ImGuiKey_S);
@@ -453,38 +490,29 @@ void GltfRenderer::renderMenu()
   bool validScene = m_resources.scene.valid();
   if(ImGui::BeginMenu("File"))
   {
-    loadFile |= ImGui::MenuItem("Load Scene", "Ctrl+O");
-    loadHdrFile |= ImGui::MenuItem("Load HDR Environment", "Ctrl+Shift+O");
-    if(ImGui::BeginMenu("Recent Files"))
+    newScene = ImGui::MenuItem(fmt::format("{} New Scene", ICON_MS_FILTER_NONE).c_str(), "Ctrl+N");
+    openFile |= ImGui::MenuItem(fmt::format("{} Open", ICON_MS_FILE_OPEN).c_str(), "Ctrl+O");
+    loadHdrFile |= ImGui::MenuItem(fmt::format("{} Load HDR Environment", ICON_MS_IMAGE).c_str(), "Ctrl+Shift+O");
+    if(ImGui::BeginMenu(fmt::format("{} Open Recent", ICON_MS_HISTORY).c_str()))
     {
       for(const auto& file : m_recentFiles)
       {
         if(ImGui::MenuItem(file.string().c_str()))
         {
           sceneToLoadFilename = file;
-          // Update the appropriate directory based on file extension
-          if(nvutils::extensionMatches(file, ".hdr"))
-          {
-            m_lastHdrDirectory = file.parent_path();
-          }
-          else
-          {
-            m_lastSceneDirectory = file.parent_path();
-          }
         }
       }
       ImGui::EndMenu();
     }
 
     ImGui::BeginDisabled(!validScene);  // Disable menu item if no scene is loaded
-    saveFile |= ImGui::MenuItem("Save As", "Ctrl+S");
-    clearScene = ImGui::MenuItem("Clear Scene", "Ctrl+N");
+    saveFile |= ImGui::MenuItem(fmt::format("{} Save As", ICON_MS_FILE_SAVE).c_str(), "Ctrl+S");
     ImGui::EndDisabled();
     ImGui::Separator();
-    saveImageFile |= ImGui::MenuItem("Save Image", "Ctrl+Shift+S");
-    saveScreenFile |= ImGui::MenuItem("Save Screen", "Ctrl+Alt+Shift+S");
+    saveImageFile |= ImGui::MenuItem(fmt::format("{} Save Image", ICON_MS_IMAGE).c_str(), "Ctrl+Shift+S");
+    saveScreenFile |= ImGui::MenuItem(fmt::format("{} Save Screen", ICON_MS_DESKTOP_WINDOWS).c_str(), "Ctrl+Alt+Shift+S");
     ImGui::Separator();
-    closeApp |= ImGui::MenuItem("Exit", "Ctrl+Q");
+    closeApp |= ImGui::MenuItem(fmt::format("{} Exit", ICON_MS_POWER_SETTINGS_NEW).c_str(), "Ctrl+Q");
     ImGui::EndMenu();
   }
 
@@ -498,30 +526,30 @@ void GltfRenderer::renderMenu()
   if(ImGui::BeginMenu("View"))
   {
     ImGui::BeginDisabled(!validScene);  // Disable menu item if no scene is loaded)
-    fitScene |= ImGui::MenuItem("Fit Scene", "Ctrl+Shift+F");
+    fitScene |= ImGui::MenuItem(fmt::format("{} Fit Scene", ICON_MS_ZOOM_OUT).c_str(), "Ctrl+Shift+F");
     ImGui::BeginDisabled(m_resources.selectedObject < 0);  // Disable menu item if no object is selected
-    fitObject |= ImGui::MenuItem("Fit Object", "Ctrl+F");
+    fitObject |= ImGui::MenuItem(fmt::format("{} Fit Object", ICON_MS_ZOOM_IN).c_str(), "Ctrl+F");
     ImGui::EndDisabled();
     ImGui::EndDisabled();
     ImGui::Separator();
-    ImGui::MenuItem("V-Sync", "Ctrl+Shift+V", &v_sync);
-    ImGui::MenuItem("3D-Axis", nullptr, &m_resources.settings.showAxis);
+    ImGui::MenuItem(fmt::format("{} V-Sync", ICON_MS_SYNC).c_str(), "Ctrl+Shift+V", &v_sync);
+    ImGui::MenuItem(fmt::format("{} 3D-Axis", ICON_MS_VIEW_IN_AR).c_str(), nullptr, &m_resources.settings.showAxis);
     ImGui::EndMenu();
   }
 
   if(ImGui::BeginMenu("Tools"))
   {
-    reloadShader |= ImGui::MenuItem("Reload Shaders", "F5");
+    reloadShader |= ImGui::MenuItem(fmt::format("{} Reload Shaders", ICON_MS_REFRESH).c_str(), "F5");
     ImGui::Separator();
     ImGui::BeginDisabled(!validScene);  // Disable menu item if no scene is loaded)
 
-    if(ImGui::MenuItem("Recreate Tangents - Simple"))
+    if(ImGui::MenuItem(fmt::format("{} Recreate Tangents - Simple", ICON_MS_BUILD).c_str()))
     {
       recomputeTangents(m_resources.scene.getModel(), true, false);
       m_resources.dirtyFlags.set(DirtyFlags::eVulkanScene);
     }
     ImGui::SetItemTooltip("This recreate tangents using UV gradient method");
-    if(ImGui::MenuItem("Recreate Tangents - MikkTSpace"))
+    if(ImGui::MenuItem(fmt::format("{} Recreate Tangents - MikkTSpace", ICON_MS_BUILD).c_str()))
     {
       recomputeTangents(m_resources.scene.getModel(), true, true);
       m_resources.dirtyFlags.set(DirtyFlags::eVulkanScene);
@@ -533,7 +561,7 @@ void GltfRenderer::renderMenu()
     ImGui::EndMenu();
   }
 
-  if(clearScene)
+  if(newScene)
   {
     vkQueueWaitIdle(m_app->getQueue(0).queue);
     m_resources.scene.destroy();
@@ -551,10 +579,11 @@ void GltfRenderer::renderMenu()
     resetFrame();
   }
 
-  if(loadFile)
+  if(openFile)
   {
     sceneToLoadFilename = nvgui::windowOpenFileDialog(m_app->getWindowHandle(), "Load 3D Scene",
-                                                      "glTF(.gltf, .glb), OBJ(.obj)|*.gltf;*.glb;*.obj", m_lastSceneDirectory);
+                                                      "3D Scene Files|*.gltf;*.glb;*.obj|glTF Text|*.gltf|glTF Binary|*.glb|OBJ Files|*.obj",
+                                                      m_lastSceneDirectory);
   }
   if(!sceneToLoadFilename.empty())
   {
@@ -568,8 +597,8 @@ void GltfRenderer::renderMenu()
 
   if(saveFile && validScene)
   {
-    std::filesystem::path filename =
-        nvgui::windowSaveFileDialog(m_app->getWindowHandle(), "Save glTF", "glTF(.gltf, .glb)|*.gltf;*.glb");
+    std::filesystem::path filename = nvgui::windowSaveFileDialog(m_app->getWindowHandle(), "Save glTF",
+                                                                 "glTF Files|*.gltf;*.glb|glTF Text|*.gltf|glTF Binary|*.glb");
     if(!filename.empty())
       save(filename);
   }
@@ -588,7 +617,11 @@ void GltfRenderer::renderMenu()
     std::filesystem::path filename = getSaveImage();
     if(!filename.empty())
     {
-      m_app->saveImageToFile(m_resources.gBuffers.getColorImage(Resources::eImgTonemapped), m_resources.gBuffers.getSize(), filename);
+      // Save the G-Buffer color image to a file (RAW image for HDR and tonemapped for JPG, PNG)
+      Resources::ImageType imageType = (filename.extension() == ".hdr") ? imageType = Resources::ImageType::eImgRendered :
+                                                                          Resources::ImageType::eImgTonemapped;
+
+      m_app->saveImageToFile(m_resources.gBuffers.getColorImage(imageType), m_resources.gBuffers.getSize(), filename);
     }
   }
 

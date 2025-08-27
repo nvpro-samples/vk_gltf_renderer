@@ -44,6 +44,7 @@
 #include <nvgui/fonts.hpp>
 #include <nvvkgltf/scene.hpp>
 #include <nvgui/property_editor.hpp>
+#include <nvgui/tooltip.hpp>
 
 
 // Simple structure to hold the animation controls
@@ -72,22 +73,24 @@ struct AnimationControl
     }
 
     ImGui::SeparatorText("Animation Controls");
-    ImGui::PushFont(nvgui::getIconicFont());
-    if(ImGui::Button(play ? nvgui::icon_media_pause : nvgui::icon_media_play))
+    if(ImGui::Button(play ? ICON_MS_PAUSE: ICON_MS_PLAY_ARROW))
+    {
       play = !play;
+    }
+    nvgui::tooltip("Play/Pause the animation");
     ImGui::SameLine();
-    if(ImGui::Button(nvgui::icon_media_step_forward))
+    if(ImGui::Button(ICON_MS_SKIP_NEXT))
     {
       runOnce = true;
       play    = false;
     }
+    nvgui::tooltip("Advance one frame");
     ImGui::SameLine();
-    if(ImGui::Button(nvgui::icon_media_skip_backward))
+    if(ImGui::Button(ICON_MS_REPLAY))
     {
       reset = true;
     }
-
-    ImGui::PopFont();
+    nvgui::tooltip("Reset animation to start");
 
     ImGui::SameLine(0, 10.0f);
     ImGui::PushItemWidth(60.0f);  // Adjust width to make it compact
