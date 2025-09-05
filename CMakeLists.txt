@@ -142,6 +142,11 @@ copy_to_runtime_and_install(${PROJECT_NAME}
   AUTO
 )
 
+# Add Windows resource file
+if(WIN32)
+ set(RESOURCE_FILE "${CMAKE_CURRENT_SOURCE_DIR}/resource.rc")
+  target_sources(${PROJECT_NAME} PRIVATE ${RESOURCE_FILE})
+endif()
 
 # Make Visual Studio use this project as the startup project
 set_property(DIRECTORY ${CMAKE_CURRENT_SOURCE_DIR} PROPERTY VS_STARTUP_PROJECT ${PROJECT_NAME})

@@ -109,15 +109,17 @@ struct Resources
   nvvkgltf::SceneRtx sceneRtx;  // GLTF Scene BLAS/TLAS
 
   // Resources
-  nvvk::HdrIbl                                hdrIbl;  // HDR environment map
-  nvshaders::HdrEnvDome                       hdrDome;
-  nvvk::GBuffer                               gBuffers;          // G-Buffers: color + depth
-  nvvk::Buffer                                bFrameInfo;        // Scene/Frame information
-  nvvk::Buffer                                bSkyParams;        // Sky parameters
-  shaderio::SkyPhysicalParameters             skyParams{};       // Sky parameters
-  nvshaders::Tonemapper                       tonemapper{};      // Tonemapper
-  shaderio::TonemapperData                    tonemapperData{};  // Tonemapper data
-  std::shared_ptr<nvutils::CameraManipulator> cameraManip;       // Camera manipulator (owned by GltfRenderer)
+  nvvk::HdrIbl                    hdrIbl;  // HDR environment map
+  nvshaders::HdrEnvDome           hdrDome;
+  nvvk::GBuffer                   gBuffers;      // G-Buffers: color + depth
+  nvvk::Buffer                    bFrameInfo;    // Scene/Frame information
+  nvvk::Buffer                    bSkyParams;    // Sky parameters
+  shaderio::SkyPhysicalParameters skyParams{};   // Sky parameters
+  nvshaders::Tonemapper           tonemapper{};  // Tonemapper
+  shaderio::TonemapperData        tonemapperData{
+             .autoExposure = 1,
+  };  // Tonemapper data
+  std::shared_ptr<nvutils::CameraManipulator> cameraManip;  // Camera manipulator (owned by GltfRenderer)
 
   // Pipeline
   std::array<nvvk::DescriptorBindings, 2> descriptorBinding{};    // Descriptor bindings: 0: textures, 1: tlas

@@ -59,7 +59,8 @@ static void setWindowIcon(GLFWwindow* window)
   icon.pixels        = stbi_load_from_memory(app_icon_png, app_icon_png_len, &icon.width, &icon.height, &channels, 4);
   if(icon.pixels)
   {
-    glfwSetWindowIcon(window, 1, &icon);
+    glfwSetWindowIcon(window, 1, &icon);  // Set icon to window
+    glfwPollEvents();                     // Force icon to be immediately shown
     stbi_image_free(icon.pixels);
   }
 }
@@ -141,22 +142,23 @@ auto main(int argc, char** argv) -> int
   VkPhysicalDeviceRayTracingPipelineFeaturesKHR rtPipelineFeature{VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_RAY_TRACING_PIPELINE_FEATURES_KHR};
   VkPhysicalDeviceShaderObjectFeaturesEXT shaderObjectFeatures{.sType = VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_SHADER_OBJECT_FEATURES_EXT};
   VkPhysicalDeviceRayTracingInvocationReorderFeaturesNV reorderFeature{VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_RAY_TRACING_INVOCATION_REORDER_FEATURES_NV};
-
   // clang-format on
 
   // Requesting the extensions and features needed
   vkSetup.instanceExtensions = {VK_EXT_DEBUG_UTILS_EXTENSION_NAME};
-  vkSetup.deviceExtensions   = {{VK_KHR_PUSH_DESCRIPTOR_EXTENSION_NAME},
-                                {VK_KHR_DEFERRED_HOST_OPERATIONS_EXTENSION_NAME},
-                                {VK_KHR_PUSH_DESCRIPTOR_EXTENSION_NAME},
-                                {VK_KHR_ACCELERATION_STRUCTURE_EXTENSION_NAME, &accelFeature},
-                                {VK_KHR_RAY_TRACING_PIPELINE_EXTENSION_NAME, &rtPipelineFeature},
-                                {VK_KHR_RAY_QUERY_EXTENSION_NAME, &rayqueryFeature},
-                                {VK_KHR_COMPUTE_SHADER_DERIVATIVES_EXTENSION_NAME, &computeDerivativesFeature},
-                                {VK_EXT_SHADER_OBJECT_EXTENSION_NAME, &shaderObjectFeatures},
-                                {VK_KHR_FRAGMENT_SHADER_BARYCENTRIC_EXTENSION_NAME, &baryFeatures},
-                                {VK_EXT_NESTED_COMMAND_BUFFER_EXTENSION_NAME, &nestedCmdFeature},
-                                {VK_NV_RAY_TRACING_INVOCATION_REORDER_EXTENSION_NAME, &reorderFeature, false}};
+  vkSetup.deviceExtensions   = {
+      {VK_KHR_PUSH_DESCRIPTOR_EXTENSION_NAME},
+      {VK_KHR_DEFERRED_HOST_OPERATIONS_EXTENSION_NAME},
+      {VK_KHR_PUSH_DESCRIPTOR_EXTENSION_NAME},
+      {VK_KHR_ACCELERATION_STRUCTURE_EXTENSION_NAME, &accelFeature},
+      {VK_KHR_RAY_TRACING_PIPELINE_EXTENSION_NAME, &rtPipelineFeature},
+      {VK_KHR_RAY_QUERY_EXTENSION_NAME, &rayqueryFeature},
+      {VK_KHR_COMPUTE_SHADER_DERIVATIVES_EXTENSION_NAME, &computeDerivativesFeature},
+      {VK_EXT_SHADER_OBJECT_EXTENSION_NAME, &shaderObjectFeatures},
+      {VK_KHR_FRAGMENT_SHADER_BARYCENTRIC_EXTENSION_NAME, &baryFeatures},
+      {VK_EXT_NESTED_COMMAND_BUFFER_EXTENSION_NAME, &nestedCmdFeature},
+      {VK_NV_RAY_TRACING_INVOCATION_REORDER_EXTENSION_NAME, &reorderFeature, false},
+  };
   if(!appInfo.headless)
   {
     nvvk::addSurfaceExtensions(vkSetup.instanceExtensions);
@@ -243,12 +245,11 @@ auto main(int argc, char** argv) -> int
   nvapp::Application app;
   app.init(appInfo);
 
-
+  // Set the window icon
   if(!appInfo.headless)
   {
     setWindowIcon(app.getWindowHandle());
   }
-
 
   // Set the camera manipulator to elements that need it.
   auto cameraManip = elemGltfRenderer->getCameraManipulator();

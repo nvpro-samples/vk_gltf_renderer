@@ -92,7 +92,7 @@ void GltfRenderer::mouseClickedInViewport()
       glm::vec3 eye, center, up;
       m_cameraManip->getLookat(eye, center, up);
       m_cameraManip->setLookat(eye, worldPos, up, false);  // Nice with CameraManip.updateAnim();
-      m_cameraManip->setSpeed(glm::length(center - eye));  // Re-adjust speed based on the new distance
+      m_cameraManip->setSpeed(pickResult.hitT);            // Re-adjust speed based on the new distance
     }
 
     {
@@ -360,14 +360,14 @@ void GltfRenderer::renderUI()
       if(m_resources.scene.valid() && headerManager.beginHeader("Statistics"))
       {
         const tinygltf::Model& tiny = m_resources.scene.getModel();
-        
+
         // Create a table for better organization
         if(ImGui::BeginTable("Statistics", 2, ImGuiTableFlags_Borders | ImGuiTableFlags_RowBg))
         {
           ImGui::TableSetupColumn("Property", ImGuiTableColumnFlags_WidthStretch);
           ImGui::TableSetupColumn("Value", ImGuiTableColumnFlags_WidthFixed, 80.0f);
           ImGui::TableHeadersRow();
-          
+
           // Lambda function to add table rows
           auto addStatRow = [](const char* icon, const char* label, size_t value) {
             ImGui::TableNextRow();
@@ -376,28 +376,28 @@ void GltfRenderer::renderUI()
             ImGui::TableSetColumnIndex(1);
             ImGui::Text("%zu", value);
           };
-          
+
           // Scene Structure
           addStatRow(ICON_MS_LAYERS, "Nodes", tiny.nodes.size());
           addStatRow(ICON_MS_VIEW_LIST, "Render Nodes", m_resources.scene.getRenderNodes().size());
           addStatRow(ICON_MS_EXTENSION, "Render Primitives", m_resources.scene.getNumRenderPrimitives());
-          
+
           // Materials & Geometry
           addStatRow(ICON_MS_BRUSH, "Materials", tiny.materials.size());
           addStatRow(ICON_MS_SIGNAL_CELLULAR_NULL, "Triangles", m_resources.scene.getNumTriangles());
-          
+
           // Lighting & Assets
           addStatRow(ICON_MS_LIGHTBULB, "Lights", tiny.lights.size());
           addStatRow(ICON_MS_IMAGE_INSET, "Textures", tiny.textures.size());
           addStatRow(ICON_MS_IMAGE, "Images", tiny.images.size());
-          
+
           ImGui::EndTable();
         }
-        
+
         // Copy to clipboard button with proper spacing
         ImGui::Spacing();
 
-        if(ImGui::Button(fmt::format("{} Copy to Clipboard", ICON_MS_CONTENT_COPY).c_str()))
+        if(ImGui::Button(ICON_MS_CONTENT_COPY " Copy to Clipboard"))
         {
           ImGui::LogToClipboard();
           // Log all statistics to clipboard
@@ -471,7 +471,7 @@ void GltfRenderer::renderMenu()
   std::filesystem::path sceneToLoadFilename{};
 
   GltfRenderer::windowTitle();
-  bool newScene     = ImGui::IsKeyChordPressed(ImGuiMod_Ctrl | ImGuiKey_N);
+  bool newScene       = ImGui::IsKeyChordPressed(ImGuiMod_Ctrl | ImGuiKey_N);
   bool openFile       = ImGui::IsKeyChordPressed(ImGuiMod_Ctrl | ImGuiKey_O);
   bool loadHdrFile    = ImGui::IsKeyChordPressed(ImGuiMod_Ctrl | ImGuiMod_Shift | ImGuiKey_O);
   bool saveFile       = ImGui::IsKeyChordPressed(ImGuiMod_Ctrl | ImGuiKey_S);
@@ -490,10 +490,10 @@ void GltfRenderer::renderMenu()
   bool validScene = m_resources.scene.valid();
   if(ImGui::BeginMenu("File"))
   {
-    newScene = ImGui::MenuItem(fmt::format("{} New Scene", ICON_MS_FILTER_NONE).c_str(), "Ctrl+N");
-    openFile |= ImGui::MenuItem(fmt::format("{} Open", ICON_MS_FILE_OPEN).c_str(), "Ctrl+O");
-    loadHdrFile |= ImGui::MenuItem(fmt::format("{} Load HDR Environment", ICON_MS_IMAGE).c_str(), "Ctrl+Shift+O");
-    if(ImGui::BeginMenu(fmt::format("{} Open Recent", ICON_MS_HISTORY).c_str()))
+    newScene = ImGui::MenuItem(ICON_MS_FILTER_NONE " New Scene", "Ctrl+N");
+    openFile |= ImGui::MenuItem(ICON_MS_FILE_OPEN " Open", "Ctrl+O");
+    loadHdrFile |= ImGui::MenuItem(ICON_MS_IMAGE " Load HDR Environment", "Ctrl+Shift+O");
+    if(ImGui::BeginMenu(ICON_MS_HISTORY " Open Recent"))
     {
       for(const auto& file : m_recentFiles)
       {
@@ -506,13 +506,13 @@ void GltfRenderer::renderMenu()
     }
 
     ImGui::BeginDisabled(!validScene);  // Disable menu item if no scene is loaded
-    saveFile |= ImGui::MenuItem(fmt::format("{} Save As", ICON_MS_FILE_SAVE).c_str(), "Ctrl+S");
+    saveFile |= ImGui::MenuItem(ICON_MS_FILE_SAVE " Save As", "Ctrl+S");
     ImGui::EndDisabled();
     ImGui::Separator();
-    saveImageFile |= ImGui::MenuItem(fmt::format("{} Save Image", ICON_MS_IMAGE).c_str(), "Ctrl+Shift+S");
-    saveScreenFile |= ImGui::MenuItem(fmt::format("{} Save Screen", ICON_MS_DESKTOP_WINDOWS).c_str(), "Ctrl+Alt+Shift+S");
+    saveImageFile |= ImGui::MenuItem(ICON_MS_IMAGE " Save Image", "Ctrl+Shift+S");
+    saveScreenFile |= ImGui::MenuItem(ICON_MS_DESKTOP_WINDOWS " Save Screen", "Ctrl+Alt+Shift+S");
     ImGui::Separator();
-    closeApp |= ImGui::MenuItem(fmt::format("{} Exit", ICON_MS_POWER_SETTINGS_NEW).c_str(), "Ctrl+Q");
+    closeApp |= ImGui::MenuItem(ICON_MS_POWER_SETTINGS_NEW " Exit", "Ctrl+Q");
     ImGui::EndMenu();
   }
 
@@ -526,30 +526,30 @@ void GltfRenderer::renderMenu()
   if(ImGui::BeginMenu("View"))
   {
     ImGui::BeginDisabled(!validScene);  // Disable menu item if no scene is loaded)
-    fitScene |= ImGui::MenuItem(fmt::format("{} Fit Scene", ICON_MS_ZOOM_OUT).c_str(), "Ctrl+Shift+F");
+    fitScene |= ImGui::MenuItem(ICON_MS_ZOOM_OUT " Fit Scene", "Ctrl+Shift+F");
     ImGui::BeginDisabled(m_resources.selectedObject < 0);  // Disable menu item if no object is selected
-    fitObject |= ImGui::MenuItem(fmt::format("{} Fit Object", ICON_MS_ZOOM_IN).c_str(), "Ctrl+F");
+    fitObject |= ImGui::MenuItem(ICON_MS_ZOOM_IN " Fit Object", "Ctrl+F");
     ImGui::EndDisabled();
     ImGui::EndDisabled();
     ImGui::Separator();
-    ImGui::MenuItem(fmt::format("{} V-Sync", ICON_MS_SYNC).c_str(), "Ctrl+Shift+V", &v_sync);
-    ImGui::MenuItem(fmt::format("{} 3D-Axis", ICON_MS_VIEW_IN_AR).c_str(), nullptr, &m_resources.settings.showAxis);
+    ImGui::MenuItem(ICON_MS_BOTTOM_PANEL_OPEN " V-Sync", "Ctrl+Shift+V", &v_sync);
+    ImGui::MenuItem(ICON_MS_VIEW_IN_AR " 3D-Axis", nullptr, &m_resources.settings.showAxis);
     ImGui::EndMenu();
   }
 
   if(ImGui::BeginMenu("Tools"))
   {
-    reloadShader |= ImGui::MenuItem(fmt::format("{} Reload Shaders", ICON_MS_REFRESH).c_str(), "F5");
+    reloadShader |= ImGui::MenuItem(ICON_MS_REFRESH " Reload Shaders", "F5");
     ImGui::Separator();
     ImGui::BeginDisabled(!validScene);  // Disable menu item if no scene is loaded)
 
-    if(ImGui::MenuItem(fmt::format("{} Recreate Tangents - Simple", ICON_MS_BUILD).c_str()))
+    if(ImGui::MenuItem(ICON_MS_BUILD " Recreate Tangents - Simple"))
     {
       recomputeTangents(m_resources.scene.getModel(), true, false);
       m_resources.dirtyFlags.set(DirtyFlags::eVulkanScene);
     }
     ImGui::SetItemTooltip("This recreate tangents using UV gradient method");
-    if(ImGui::MenuItem(fmt::format("{} Recreate Tangents - MikkTSpace", ICON_MS_BUILD).c_str()))
+    if(ImGui::MenuItem(ICON_MS_BUILD " Recreate Tangents - MikkTSpace"))
     {
       recomputeTangents(m_resources.scene.getModel(), true, true);
       m_resources.dirtyFlags.set(DirtyFlags::eVulkanScene);
