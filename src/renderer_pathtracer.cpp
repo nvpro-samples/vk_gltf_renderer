@@ -190,7 +190,6 @@ bool PathTracer::onUIRender(Resources& resources)
 void PathTracer::onRender(VkCommandBuffer cmd, Resources& resources)
 {
   NVVK_DBG_SCOPE(cmd);  // <-- Helps to debug in NSight
-  auto timerSection = m_profiler->cmdFrameSection(cmd, "Pathtrace");
 
   m_sceneRadius = resources.scene.getSceneBounds().radius();
 
@@ -241,6 +240,8 @@ void PathTracer::onRender(VkCommandBuffer cmd, Resources& resources)
 
   if(m_renderTechnique == RenderTechnique::Compute)
   {
+    auto timerSection = m_profiler->cmdFrameSection(cmd, "Path Trace");
+
     // Bind the shader to use
     VkShaderStageFlagBits stage = VK_SHADER_STAGE_COMPUTE_BIT;
     vkCmdBindShadersEXT(cmd, 1, &stage, &m_shader);
@@ -260,6 +261,8 @@ void PathTracer::onRender(VkCommandBuffer cmd, Resources& resources)
   }
   else  // RayTracing
   {
+    auto timerSection = m_profiler->cmdFrameSection(cmd, "Path Trace (RTX)");
+
     // Create pipeline if it doesn't exist
     if(m_pipeline == VK_NULL_HANDLE)
     {
@@ -289,6 +292,8 @@ void PathTracer::onRender(VkCommandBuffer cmd, Resources& resources)
 #if defined(USE_DLSS)
   if(m_dlss->isEnabled())
   {
+    auto timerSection = m_profiler->cmdFrameSection(cmd, "DLSS");
+
     // #DLSS - Denoising
     const glm::mat4& view   = resources.cameraManip->getViewMatrix();
     const glm::mat4& proj   = resources.cameraManip->getPerspectiveMatrix();
