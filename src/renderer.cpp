@@ -235,6 +235,7 @@ void GltfRenderer::onAttach(nvapp::Application* app)
 
   // Initialize the renderers
   m_pathTracer.onAttach(m_resources, &m_profilerGpuTimer);
+  m_pathTracer.setProfilerTimeline(m_profilerTimeline);
   m_rasterizer.onAttach(m_resources, &m_profilerGpuTimer);
 
   m_pathTracer.createPipeline(m_resources);

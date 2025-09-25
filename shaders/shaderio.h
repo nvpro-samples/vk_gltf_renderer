@@ -119,6 +119,7 @@ struct PathtracePushConstant
   int   frameCount            = 0;     // Frame number
   float fireflyClampThreshold = 10.f;  // Firefly clamp threshold
   int   numSamples            = 1;     // Number of samples per pixel per frame
+  int   totalSamples          = 0;     // Total samples accumulated so far
   float focalDistance         = 0.0f;  // Focal distance for depth of field
   float aperture              = 0.0f;  // Aperture for depth of field
   int   useDlss               = 0;     // Use DLSS (0: no, 1: yes)

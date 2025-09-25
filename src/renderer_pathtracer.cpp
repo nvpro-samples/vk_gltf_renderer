@@ -26,6 +26,7 @@
 #include <nvvk/sbt_generator.hpp>
 #include <nvvk/specialization.hpp>
 #include <nvutils/parameter_registry.hpp>
+#include <nvgui/tooltip.hpp>
 
 #include "renderer_pathtracer.hpp"
 #include "utils.hpp"
@@ -80,6 +81,9 @@ void PathTracer::registerParameters(nvutils::ParameterRegistry* paramReg)
   paramReg->add({"ptFocalDistance", "PathTracer: Focal distance"}, &m_pushConst.focalDistance);
   paramReg->add({"ptAutoFocus", "PathTracer: Enable auto focus"}, &m_autoFocus);
   paramReg->add({"ptTechnique", "PathTracer: Rendering technique [Compute:0, RayTracing:1]"}, (int*)&m_renderTechnique);
+  paramReg->add({"ptAdaptiveSampling", "PathTracer: Enable adaptive sampling"}, &m_adaptiveSampling);
+  paramReg->add({"ptPerformanceTarget", "PathTracer: Performance target [Interactive:0, Balanced:1, Quality:2, MaxQuality:3]"},
+                (int*)&m_performanceTarget);
 #if defined(USE_DLSS)
   m_dlss->registerParameters(paramReg);
 #endif
@@ -141,7 +145,10 @@ bool PathTracer::onUIRender(Resources& resources)
     }
 
     changed |= PE::SliderInt("Depth", &m_pushConst.maxDepth, 0, 20, "%d", 0, "Maximum number of bounces");
-    changed |= PE::SliderInt("Samples", &m_pushConst.numSamples, 1, 10, "%d", 0, "Number of samples per pixel");
+    ImGui::BeginDisabled(m_adaptiveSampling);
+    PE::SliderInt("Samples", &m_pushConst.numSamples, MIN_SAMPLES_PER_PIXEL, MAX_SAMPLES_PER_PIXEL, "%d", 0,
+                  "Number of samples per pixel");
+    ImGui::EndDisabled();
     changed |= PE::SliderFloat("FireFly Clamp", &m_pushConst.fireflyClampThreshold, 0.0f, 10.0f, "%.2f", 0,
                                "Clamp threshold for fireflies");
 
@@ -154,6 +161,36 @@ bool PathTracer::onUIRender(Resources& resources)
                              ImGuiSliderFlags_Logarithmic | ImGuiSliderFlags_NoRoundToFormat, "Distance to focal point");
     m_pushConst.focalDistance = std::max(0.000000001f, m_pushConst.focalDistance);
     ImGui::EndDisabled();
+
+    // Adaptive sampling controls
+    PE::Checkbox("Auto SPP", &m_adaptiveSampling, "Samples Per Pixel: Automatically adjust samples per pixel based on performance target");
+    if(m_adaptiveSampling)
+    {
+      ImGui::SameLine();
+      ImGui::TextDisabled("(Auto: %d spp)", m_pushConst.numSamples);
+
+      // Performance target selection
+      const char* targets[] = {"Interactive (60 FPS)", "Balanced (30 FPS)", "Quality (15 FPS)", "Max Quality (10 FPS)"};
+      int         currentTarget = static_cast<int>(m_performanceTarget);
+      if(PE::Combo("Performance Target", &currentTarget, targets, IM_ARRAYSIZE(targets)))
+      {
+        m_performanceTarget = static_cast<PerformanceTarget>(currentTarget);
+        changed             = true;
+      }
+    }
+    // Show performance info
+    ImGui::TextDisabled("Total samples: %d/%d (%.1fx)", m_totalSamplesAccumulated, resources.frameCount + 1,
+                        m_totalSamplesAccumulated / float(resources.frameCount + 1));
+
+    float throughput = calculateRawSampleThroughput(resources);
+    throughput /= 1'000'000.0f;  // Convert to mega-samples per second
+    if(throughput > 0.0f)
+    {
+      ImGui::TextDisabled("Throughput: %.2f MS/s", throughput);
+      nvgui::tooltip("Number of mega-samples per second", true);
+    }
+
+
     PE::end();
 
     // Infinite plane
@@ -193,6 +230,19 @@ void PathTracer::onRender(VkCommandBuffer cmd, Resources& resources)
 
   m_sceneRadius = resources.scene.getSceneBounds().radius();
 
+  // Handle frame reset detection (needed for both adaptive and non-adaptive modes)
+  if(resources.frameCount == 0)
+  {
+    m_totalSamplesAccumulated = 0;                 // Reset sample counter when scene/camera changes
+    m_accumulationStartTime   = ImGui::GetTime();  // Reset timing for throughput calculation
+  }
+
+  // Handle adaptive sampling
+  updateAdaptiveSampling(resources);
+
+  // Track total samples accumulated
+  m_totalSamplesAccumulated += m_pushConst.numSamples;
+
   // Update the push constant: the camera information, sky parameters and the scene to render
   if(m_autoFocus)
   {
@@ -219,6 +269,7 @@ void PathTracer::onRender(VkCommandBuffer cmd, Resources& resources)
   m_pushConst.renderSelection   = resources.selectedObject != lastRenderedObject || resources.frameCount == 0;
   lastRenderedObject            = resources.selectedObject;
   m_pushConst.frameCount        = frameCount;
+  m_pushConst.totalSamples      = m_totalSamplesAccumulated;
   m_pushConst.frameInfo         = (shaderio::SceneFrameInfo*)resources.bFrameInfo.address;
   m_pushConst.skyParams         = (shaderio::SkyPhysicalParameters*)resources.bSkyParams.address;
   m_pushConst.gltfScene         = (shaderio::GltfScene*)resources.sceneVk.sceneDesc().address;
@@ -581,4 +632,72 @@ void PathTracer::compileShader(Resources& resources, bool fromFile)
 void PathTracer::onUIMenu()
 {
   BaseRenderer::onUIMenu();
+}
+
+//--------------------------------------------------------------------------------------------------
+// Update adaptive sampling based on frame timing
+void PathTracer::updateAdaptiveSampling(Resources& resources)
+{
+  if(!m_adaptiveSampling || !m_profilerTimeline)
+    return;
+
+  // Reset samples when frame count resets to 0 (scene change, etc.)
+  if(resources.frameCount == 0)
+  {
+    m_pushConst.numSamples = MIN_SAMPLES_PER_PIXEL;
+    return;
+  }
+
+  // Don't adjust on the first few frames to allow for stabilization
+  if(resources.frameCount < 5)
+    return;
+
+  // Get timing information for the path tracing section
+  nvutils::ProfilerTimeline::TimerInfo timerInfo;
+  std::string                          apiName;
+
+  // Try both possible timer names based on rendering technique
+  const char* timerName = (m_renderTechnique == RenderTechnique::Compute) ? "Path Trace" : "Path Trace (RTX)";
+
+  if(m_profilerTimeline->getFrameTimerInfo(timerName, timerInfo, apiName))
+  {
+    // Convert from microseconds to milliseconds
+    double currentFrameTimeMs = timerInfo.gpu.last / 1000.0;
+
+    // Adjust samples based on performance target
+    double targetTime = getTargetFrameTimeMs();
+    if(currentFrameTimeMs < targetTime * 0.8 && m_pushConst.numSamples < MAX_SAMPLES_PER_PIXEL)
+    {
+      // We have headroom, increase samples
+      m_pushConst.numSamples++;
+    }
+    else if(currentFrameTimeMs > targetTime * 1.1 && m_pushConst.numSamples > MIN_SAMPLES_PER_PIXEL)
+    {
+      // We're over budget, decrease samples
+      m_pushConst.numSamples--;
+    }
+
+    // Clamp to valid range
+    m_pushConst.numSamples = std::clamp(m_pushConst.numSamples, MIN_SAMPLES_PER_PIXEL, MAX_SAMPLES_PER_PIXEL);
+  }
+}
+
+//--------------------------------------------------------------------------------------------------
+// Calculate samples per pixel per second throughput
+float PathTracer::calculateRawSampleThroughput(const Resources& resources) const
+{
+  if(m_totalSamplesAccumulated <= 0 || m_accumulationStartTime <= 0.0)
+    return 0.0f;
+
+  double elapsedTime = ImGui::GetTime() - m_accumulationStartTime;
+  if(elapsedTime <= 0.0)
+    return 0.0f;
+
+  VkExtent2D imageSize   = resources.gBuffers.getSize();
+  uint64_t   totalPixels = static_cast<uint64_t>(imageSize.width) * static_cast<uint64_t>(imageSize.height);
+
+  if(totalPixels == 0)
+    return 0.0f;
+
+  return (static_cast<float>(m_totalSamplesAccumulated) * static_cast<float>(totalPixels)) / static_cast<float>(elapsedTime);
 }

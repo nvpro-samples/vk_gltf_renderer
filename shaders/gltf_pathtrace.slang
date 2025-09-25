@@ -808,8 +808,11 @@ void processPixel(IRaytracer raytracer, float2 samplePos, float2 imageSize)
   }
   else
   {  // Do accumulation over time
-    float  a                                                   = 1.0F / float(pushConst.frameCount + 1);
-    float4 old_color                                           = outImages[0][int2(samplePos)];
+    // Use total accumulated samples for proper weighting instead of just frame count
+    // This ensures frames with more samples per pixel contribute proportionally more
+    float  totalSamplesAfter = float(pushConst.totalSamples + pushConst.numSamples);
+    float  a                 = float(pushConst.numSamples) / totalSamplesAfter;
+    float4 old_color         = outImages[0][int2(samplePos)];
     outImages[int(OutputImage::eResultImage)][int2(samplePos)] = lerp(old_color, pixel_color, a);
   }
 

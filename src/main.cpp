@@ -83,7 +83,6 @@ auto main(int argc, char** argv) -> int
 
   // Application defaults overrides
   appInfo.preferredVsyncOffMode = VK_PRESENT_MODE_MAILBOX_KHR;
-  appInfo.vSync                 = false;
 
   // Command line parameters registration
   nvutils::ParameterRegistry parameterRegistry;
@@ -161,8 +160,8 @@ auto main(int argc, char** argv) -> int
   };
   if(!appInfo.headless)
   {
-    nvvk::addSurfaceExtensions(vkSetup.instanceExtensions);
-    vkSetup.deviceExtensions.emplace_back(VK_KHR_SWAPCHAIN_EXTENSION_NAME);
+    nvvk::addSurfaceExtensions(vkSetup.instanceExtensions, &vkSetup.deviceExtensions);
+    //vkSetup.deviceExtensions.emplace_back(VK_KHR_SWAPCHAIN_EXTENSION_NAME);
   }
 
 

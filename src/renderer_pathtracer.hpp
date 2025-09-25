@@ -25,6 +25,7 @@
 #include "shaders/shaderio.h"  // Shared between host and device
 
 #include <nvvk/sbt_generator.hpp>
+#include <nvutils/profiler.hpp>
 #include "renderer_base.hpp"
 
 // #DLSS
@@ -46,6 +47,7 @@ public:
   };
 
   void onAttach(Resources& resources, nvvk::ProfilerGpuTimer* profiler) override;
+  void setProfilerTimeline(nvutils::ProfilerTimeline* timeline) { m_profilerTimeline = timeline; }
   void onDetach(Resources& resources) override;
   void onResize(VkCommandBuffer cmd, const VkExtent2D& size, Resources& resources) override;
   bool onUIRender(Resources& resources) override;
@@ -81,8 +83,48 @@ public:
 
   RenderTechnique m_renderTechnique{RenderTechnique::Compute};
 
+  // Adaptive sampling for performance optimization
+  void                       updateAdaptiveSampling(Resources& resources);
+  nvutils::ProfilerTimeline* m_profilerTimeline{nullptr};
+  bool                       m_adaptiveSampling{true};
+  int                        m_totalSamplesAccumulated{0};  // Track total samples separately
+  double                     m_accumulationStartTime{0.0};  // Start time for throughput calculation
+
+  // Adaptive performance targets
+  enum class PerformanceTarget
+  {
+    eInteractive = 0,  // 60 FPS - for real-time interaction
+    eBalanced    = 1,  // 30 FPS - good balance of responsiveness and quality
+    eQuality     = 2,  // 15 FPS - prioritize quality convergence
+    eMaxQuality  = 3   // 10 FPS - maximum GPU utilization for fastest convergence
+  };
+
+  PerformanceTarget    m_performanceTarget{PerformanceTarget::eBalanced};  // Default to balanced for path tracing
+  static constexpr int MAX_SAMPLES_PER_PIXEL = 100;
+  static constexpr int MIN_SAMPLES_PER_PIXEL = 1;
+
+  double getTargetFrameTimeMs() const
+  {
+    switch(m_performanceTarget)
+    {
+      case PerformanceTarget::eInteractive:
+        return 1000.0 / 60.0;  // 16.67ms
+      case PerformanceTarget::eBalanced:
+        return 1000.0 / 30.0;  // 33.33ms
+      case PerformanceTarget::eQuality:
+        return 1000.0 / 15.0;  // 66.67ms
+      case PerformanceTarget::eMaxQuality:
+        return 1000.0 / 10.0;  // 100ms
+      default:
+        return 1000.0 / 30.0;
+    }
+  }
+
   // #DLSS - Implementation of the DLSS denoiser
 #if defined(USE_DLSS)
   std::unique_ptr<DlssDenoiser> m_dlss;
 #endif
+
+private:
+  float calculateRawSampleThroughput(const Resources& resources) const;
 };
