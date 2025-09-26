@@ -120,6 +120,15 @@ public:
     }
   }
 
+  bool isDlssEnabled() const
+  {
+#if defined(USE_DLSS)
+    return m_dlss && m_dlss->isEnabled();
+#else
+    return false;
+#endif
+  }
+
   // #DLSS - Implementation of the DLSS denoiser
 #if defined(USE_DLSS)
   std::unique_ptr<DlssDenoiser> m_dlss;

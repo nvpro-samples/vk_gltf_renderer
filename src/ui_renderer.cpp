@@ -244,19 +244,14 @@ void GltfRenderer::renderUI()
           if(headerManager.beginHeader("Path Tracer"))
           {
             changed |= m_pathTracer.onUIRender(m_resources);
-            if(PE::begin())
-            {
-              PE::Text("Current frame", std::to_string(m_resources.frameCount));
-              changed |= PE::SliderInt("Max Iterations", &m_resources.settings.maxFrames, 0, 10000, "%d", 0,
-                                       "Maximum number of iterations");
-              PE::end();
-            }
           }
         }
-        else
+        else  // Rasterizer
         {
           if(headerManager.beginHeader("Rasterizer"))
+          {
             changed |= m_rasterizer.onUIRender(m_resources);
+          }
         }
       }
       ImGui::Separator();

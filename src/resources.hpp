@@ -77,12 +77,12 @@ struct Settings
   glm::vec3             silhouetteColor        = {0.6f, 0.4f, 0.0f};            // Color of the silhouette
   bool                  useSolidBackground     = false;                         // Use solid background color
   glm::vec3             solidBackgroundColor   = {0.0f, 0.0f, 0.0f};            // Solid background color
-  int                   maxFrames              = {10000};                       // Maximum number of frames to render
-  bool                  useInfinitePlane       = false;
-  float                 infinitePlaneDistance  = 0;
-  glm::vec3             infinitePlaneBaseColor = glm::vec3(0.5, 0.5, 0.5);  // Default gray color
-  float                 infinitePlaneMetallic  = 0.0;                       // Default non-metallic
-  float                 infinitePlaneRoughness = 0.5;                       // Default medium roughness
+  int                   maxFrames              = {200};                         // Maximum number of frames to render
+  bool                  useInfinitePlane       = false;                         // Use infinite plane
+  float                 infinitePlaneDistance  = 0;                             // Distance/height of the infinite plane
+  glm::vec3             infinitePlaneBaseColor = glm::vec3(0.5, 0.5, 0.5);      // Default gray color
+  float                 infinitePlaneMetallic  = 0.0;                           // Default non-metallic
+  float                 infinitePlaneRoughness = 0.5;                           // Default medium roughness
 };
 
 

@@ -135,7 +135,7 @@ bool PathTracer::onUIRender(Resources& resources)
   bool changed = false;
   if(PE::begin())
   {
-    // Add rendering technique selector
+    // Rendering technique selector
     const char* techniques[] = {"Compute", "Ray Tracing"};
     int         current      = static_cast<int>(m_renderTechnique);
     if(PE::Combo("Rendering Technique", &current, techniques, IM_ARRAYSIZE(techniques)))
@@ -144,26 +144,35 @@ bool PathTracer::onUIRender(Resources& resources)
       changed           = true;
     }
 
-    changed |= PE::SliderInt("Depth", &m_pushConst.maxDepth, 0, 20, "%d", 0, "Maximum number of bounces");
-    ImGui::BeginDisabled(m_adaptiveSampling);
+    changed |= PE::SliderInt("Max Depth", &m_pushConst.maxDepth, 0, 20, "%d", 0, "Maximum number of bounces");
+    changed |= PE::SliderFloat("FireFly Clamp", &m_pushConst.fireflyClampThreshold, 0.0f, 10.0f, "%.2f", 0,
+                               "Clamp threshold for fireflies");
+    PE::end();
+  }
+
+  // Manual sampling controls
+  if(PE::begin())
+  {
+    PE::SliderInt("Max Iterations", &resources.settings.maxFrames, 0, 10000, "%d", 0, "Maximum number of iterations");
+    ImGui::BeginDisabled(m_adaptiveSampling || isDlssEnabled());
     PE::SliderInt("Samples", &m_pushConst.numSamples, MIN_SAMPLES_PER_PIXEL, MAX_SAMPLES_PER_PIXEL, "%d", 0,
                   "Number of samples per pixel");
     ImGui::EndDisabled();
-    changed |= PE::SliderFloat("FireFly Clamp", &m_pushConst.fireflyClampThreshold, 0.0f, 10.0f, "%.2f", 0,
-                               "Clamp threshold for fireflies");
-
-
-    changed |= PE::SliderFloat("Aperture", &m_pushConst.aperture, 0.0f, apertureMax, "%5.9f",
-                               ImGuiSliderFlags_Logarithmic | ImGuiSliderFlags_NoRoundToFormat, "Out-of-focus effect");
-    changed |= PE::Checkbox("Auto Focus", &m_autoFocus, "Use interest position");
-    ImGui::BeginDisabled(m_autoFocus);
-    changed |= PE::DragFloat("Focal Distance", &m_pushConst.focalDistance, 100.0f, 0.0f, 1000000.0f, "%5.9f",
-                             ImGuiSliderFlags_Logarithmic | ImGuiSliderFlags_NoRoundToFormat, "Distance to focal point");
-    m_pushConst.focalDistance = std::max(0.000000001f, m_pushConst.focalDistance);
-    ImGui::EndDisabled();
+    if(isDlssEnabled())
+    {
+      ImGui::SameLine();
+      ImGui::TextDisabled("(DLSS: 1 spp)");
+    }
 
     // Adaptive sampling controls
-    PE::Checkbox("Auto SPP", &m_adaptiveSampling, "Samples Per Pixel: Automatically adjust samples per pixel based on performance target");
+    ImGui::BeginDisabled(isDlssEnabled());
+    PE::Checkbox("Auto SPP", &m_adaptiveSampling, "Automatically adjust samples per pixel based on performance target");
+    ImGui::EndDisabled();
+    if(isDlssEnabled())
+    {
+      ImGui::SameLine();
+      ImGui::TextDisabled("(DLSS disabled)");
+    }
     if(m_adaptiveSampling)
     {
       ImGui::SameLine();
@@ -175,11 +184,10 @@ bool PathTracer::onUIRender(Resources& resources)
       if(PE::Combo("Performance Target", &currentTarget, targets, IM_ARRAYSIZE(targets)))
       {
         m_performanceTarget = static_cast<PerformanceTarget>(currentTarget);
-        changed             = true;
       }
     }
-    // Show performance info
-    ImGui::TextDisabled("Total samples: %d/%d (%.1fx)", m_totalSamplesAccumulated, resources.frameCount + 1,
+    // Performance info - always visible
+    ImGui::TextDisabled("Samples: %d/%d (%.1fx)", m_totalSamplesAccumulated, resources.frameCount + 1,
                         m_totalSamplesAccumulated / float(resources.frameCount + 1));
 
     float throughput = calculateRawSampleThroughput(resources);
@@ -190,35 +198,52 @@ bool PathTracer::onUIRender(Resources& resources)
       nvgui::tooltip("Number of mega-samples per second", true);
     }
 
-
     PE::end();
+  }
 
-    // Infinite plane
-    changed |= ImGui::Checkbox("Infinite Plane", (bool*)&resources.settings.useInfinitePlane);
+  // Camera controls
+  if(PE::begin())
+  {
+    changed |= PE::SliderFloat("Aperture", &m_pushConst.aperture, 0.0f, apertureMax, "%5.9f",
+                               ImGuiSliderFlags_Logarithmic | ImGuiSliderFlags_NoRoundToFormat, "Out-of-focus effect");
+    changed |= PE::Checkbox("Auto Focus", &m_autoFocus, "Use interest position");
+    ImGui::BeginDisabled(m_autoFocus);
+    changed |= PE::DragFloat("Focal Distance", &m_pushConst.focalDistance, 100.0f, 0.0f, 1000000.0f, "%5.9f",
+                             ImGuiSliderFlags_Logarithmic | ImGuiSliderFlags_NoRoundToFormat, "Distance to focal point");
+    m_pushConst.focalDistance = std::max(0.000000001f, m_pushConst.focalDistance);
+    ImGui::EndDisabled();
+    PE::end();
+  }
+
+  // Infinite plane
+  if(PE::begin())
+  {
+    changed |= PE::Checkbox("Infinite Plane", (bool*)&resources.settings.useInfinitePlane);
     if(resources.settings.useInfinitePlane)
     {
       const float extentY = resources.scene.valid() ? resources.scene.getSceneBounds().extents().y : 10.0f;
-      if(PE::begin())
+      if(PE::treeNode("Infinite Plane Settings"))
       {
-        if(PE::treeNode("Infinite Plane Settings"))
-        {
-          changed |= PE::SliderFloat("Height", &resources.settings.infinitePlaneDistance, -extentY, extentY, "%5.9f",
-                                     ImGuiSliderFlags_NoRoundToFormat, "Distance to infinite plane");
-          changed |= PE::ColorEdit3("Color", glm::value_ptr(resources.settings.infinitePlaneBaseColor));
-          changed |= PE::SliderFloat("Metallic", &resources.settings.infinitePlaneMetallic, 0.0f, 1.0f);
-          changed |= PE::SliderFloat("Roughness", &resources.settings.infinitePlaneRoughness, 0.0f, 1.0f);
-          PE::treePop();
-        }
-        PE::end();
+        changed |= PE::SliderFloat("Height", &resources.settings.infinitePlaneDistance, -extentY, extentY, "%5.9f",
+                                   ImGuiSliderFlags_NoRoundToFormat, "Distance to infinite plane");
+        changed |= PE::ColorEdit3("Color", glm::value_ptr(resources.settings.infinitePlaneBaseColor));
+        changed |= PE::SliderFloat("Metallic", &resources.settings.infinitePlaneMetallic, 0.0f, 1.0f);
+        changed |= PE::SliderFloat("Roughness", &resources.settings.infinitePlaneRoughness, 0.0f, 1.0f);
+        PE::treePop();
       }
     }
+
+    PE::end();
   }
+
+// DLSS section
 #if defined(USE_DLSS)
   changed |= m_dlss->onUi(resources);
 #else
   ImGui::TextDisabled("DLSS is not enabled.");
   nvsamples::HelpMarker("Define USE_DLSS in CMake to enable DLSS support.");
 #endif
+
   return changed;
 }
 
@@ -258,6 +283,9 @@ void PathTracer::onRender(VkCommandBuffer cmd, Resources& resources)
   m_pushConst.useDlss         = m_dlss->isEnabled();
   if(m_pushConst.useDlss)
   {
+    // When DLSS is enabled, force numSamples to 1 and disable adaptive sampling
+    m_pushConst.numSamples = 1;
+
     frameCount = ++haltonIndex;  // Override frame count with Halton index
     // If the initialization is successful, update the DLSS resources
     if(m_dlss->ensureInitialized(resources) || m_dlss->needsSizeUpdate())
@@ -638,6 +666,10 @@ void PathTracer::onUIMenu()
 // Update adaptive sampling based on frame timing
 void PathTracer::updateAdaptiveSampling(Resources& resources)
 {
+  // Don't update adaptive sampling if DLSS is enabled
+  if(isDlssEnabled())
+    return;
+
   if(!m_adaptiveSampling || !m_profilerTimeline)
     return;
 
