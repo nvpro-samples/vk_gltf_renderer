@@ -27,6 +27,7 @@
 #include <nvvk/sbt_generator.hpp>
 #include <nvutils/profiler.hpp>
 #include "renderer_base.hpp"
+#include "utils.hpp"
 
 // #DLSS
 #if defined(USE_DLSS)
@@ -52,7 +53,6 @@ public:
   void onResize(VkCommandBuffer cmd, const VkExtent2D& size, Resources& resources) override;
   bool onUIRender(Resources& resources) override;
   void onRender(VkCommandBuffer cmd, Resources& resources) override;
-  void onUIMenu() override;
 
   void updateDlssResources(VkCommandBuffer cmd, Resources& resources);
   void pushDescriptorSet(VkCommandBuffer cmd, Resources& resources, VkPipelineBindPoint bindPoint) const;
@@ -88,7 +88,8 @@ public:
   nvutils::ProfilerTimeline* m_profilerTimeline{nullptr};
   bool                       m_adaptiveSampling{true};
   int                        m_totalSamplesAccumulated{0};  // Track total samples separately
-  double                     m_accumulationStartTime{0.0};  // Start time for throughput calculation
+
+  nvsamples::RollingAverage<float, 100> m_throughputRollingAvg;  // Rolling average of mega-sample-pixels per second (MSPP/s)
 
   // Adaptive performance targets
   enum class PerformanceTarget
@@ -133,7 +134,4 @@ public:
 #if defined(USE_DLSS)
   std::unique_ptr<DlssDenoiser> m_dlss;
 #endif
-
-private:
-  float calculateRawSampleThroughput(const Resources& resources) const;
 };

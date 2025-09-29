@@ -807,13 +807,12 @@ void processPixel(IRaytracer raytracer, float2 samplePos, float2 imageSize)
     outImages[int(OutputImage::eResultImage)][int2(samplePos)] = pixel_color;
   }
   else
-  {  // Do accumulation over time
-    // Use total accumulated samples for proper weighting instead of just frame count
-    // This ensures frames with more samples per pixel contribute proportionally more
+  {
+    // Do accumulation over time using uniform weighting
     float  totalSamplesAfter = float(pushConst.totalSamples + pushConst.numSamples);
-    float  a                 = float(pushConst.numSamples) / totalSamplesAfter;
     float4 old_color         = outImages[0][int2(samplePos)];
-    outImages[int(OutputImage::eResultImage)][int2(samplePos)] = lerp(old_color, pixel_color, a);
+    outImages[int(OutputImage::eResultImage)][int2(samplePos)] =
+        (old_color * pushConst.totalSamples + pixel_color * pushConst.numSamples) / totalSamplesAfter;
   }
 
   // #DLSS - Storing the GBuffer for the DLSS denoiser
@@ -837,10 +836,7 @@ void processPixel(IRaytracer raytracer, float2 samplePos, float2 imageSize)
 //-----------------------------------------------------------------------
 // RAY GENERATION
 //-----------------------------------------------------------------------
-[shader("compute")]
-[numthreads(WORKGROUP_SIZE, WORKGROUP_SIZE, 1)]
-void computeMain(uint3 threadIdx: SV_DispatchThreadID)
-{
+[shader("compute")][numthreads(WORKGROUP_SIZE, WORKGROUP_SIZE, 1)] void computeMain(uint3 threadIdx : SV_DispatchThreadID) {
   RayQueryRaytracer raytracer;
   float2            samplePos = (float2)threadIdx.xy;
   uint2             imageSize;
@@ -849,11 +845,10 @@ void computeMain(uint3 threadIdx: SV_DispatchThreadID)
   processPixel(raytracer, samplePos, imageSize);
 }
 
-//-----------------------------------------------------------------------
-// RAY GENERATION
-//-----------------------------------------------------------------------
-[shader("raygeneration")]
-void rgenMain()
+    //-----------------------------------------------------------------------
+    // RAY GENERATION
+    //-----------------------------------------------------------------------
+    [shader("raygeneration")] void rgenMain()
 {
   TraditionalRaytracer raytracer;
   float2               samplePos = (float2)DispatchRaysIndex().xy;
@@ -865,9 +860,7 @@ void rgenMain()
 //-----------------------------------------------------------------------
 // CLOSEST HIT
 //-----------------------------------------------------------------------
-[shader("closesthit")]
-void rchitMain(inout HitPayload payload, in BuiltInTriangleIntersectionAttributes attr)
-{
+[shader("closesthit")] void rchitMain(inout HitPayload payload, in BuiltInTriangleIntersectionAttributes attr) {
   float3 barycentrics = float3(1 - attr.barycentrics.x - attr.barycentrics.y, attr.barycentrics.x, attr.barycentrics.y);
 
   int instanceID   = InstanceIndex();
@@ -891,8 +884,7 @@ void rchitMain(inout HitPayload payload, in BuiltInTriangleIntersectionAttribute
   payload.hitState = hit;
 }
 
-[shader("closesthit")]
-void rchitShadow(inout ShadowPayload payload, in BuiltInTriangleIntersectionAttributes attr)
+    [shader("closesthit")] void rchitShadow(inout ShadowPayload payload, in BuiltInTriangleIntersectionAttributes attr)
 {
   payload.totalTransmission = float3(0.0);
 }
@@ -901,14 +893,9 @@ void rchitShadow(inout ShadowPayload payload, in BuiltInTriangleIntersectionAttr
 //-----------------------------------------------------------------------
 // MISS
 //-----------------------------------------------------------------------
-[shader("miss")]
-void rmissMain(inout HitPayload payload)
-{
-  payload.hitT = INFINITE;
-}
+[shader("miss")] void rmissMain(inout HitPayload payload) { payload.hitT = INFINITE; }
 
-[shader("miss")]
-void rmissShadow(inout ShadowPayload payload)
+    [shader("miss")] void rmissShadow(inout ShadowPayload payload)
 {
   payload.hitT              = INFINITE;
   payload.totalTransmission = float3(1.0);
@@ -918,9 +905,7 @@ void rmissShadow(inout ShadowPayload payload)
 // INTERSECTION (Any Hit)
 //-----------------------------------------------------------------------
 
-[shader("anyhit")]
-void rahitMain(inout HitPayload payload, in BuiltInTriangleIntersectionAttributes attr)
-{
+[shader("anyhit")] void rahitMain(inout HitPayload payload, in BuiltInTriangleIntersectionAttributes attr) {
   float3 barycentrics = float3(1 - attr.barycentrics.x - attr.barycentrics.y, attr.barycentrics.x, attr.barycentrics.y);
 
   uint instanceID   = InstanceIndex();
@@ -944,8 +929,7 @@ void rahitMain(inout HitPayload payload, in BuiltInTriangleIntersectionAttribute
 }
 
 
-[shader("anyhit")]
-void rahitShadow(inout ShadowPayload payload, in BuiltInTriangleIntersectionAttributes attr)
+    [shader("anyhit")] void rahitShadow(inout ShadowPayload payload, in BuiltInTriangleIntersectionAttributes attr)
 {
   float3 barycentrics = float3(1 - attr.barycentrics.x - attr.barycentrics.y, attr.barycentrics.x, attr.barycentrics.y);
 

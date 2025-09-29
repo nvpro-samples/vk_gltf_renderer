@@ -20,6 +20,7 @@
 
 #pragma once
 
+#include <algorithm>
 #include <filesystem>
 #include <string>
 #include <vector>
@@ -28,6 +29,64 @@
 #include <vulkan/vulkan_core.h>
 
 namespace nvsamples {
+
+// A templated rolling average calculator similar to ImGui's FPS calculation
+template <typename T, size_t N>
+class RollingAverage
+{
+public:
+  static constexpr size_t SAMPLE_COUNT = N;
+
+  RollingAverage()
+      : m_frameIdx(0)
+      , m_frameCount(0)
+      , m_accum(T{})
+  {
+    std::fill(std::begin(m_values), std::end(m_values), T{});
+  }
+
+  // Add a new value to the rolling average
+  void addValue(T value)
+  {
+    m_accum += value - m_values[m_frameIdx];
+    m_values[m_frameIdx] = value;
+    m_frameIdx           = (m_frameIdx + 1) % N;
+    m_frameCount         = std::min(m_frameCount + 1, static_cast<int>(N));
+  }
+
+  // Get the current rolling average
+  T getAverage() const
+  {
+    if(m_frameCount <= 0 || m_accum <= T{})
+      return T{};
+
+    return m_accum / static_cast<T>(m_frameCount);
+  }
+
+  // Get the number of samples currently in the average
+  int getSampleCount() const { return m_frameCount; }
+
+  // Check if the rolling average has enough samples
+  bool hasData() const { return m_frameCount > 0; }
+
+  // Reset the rolling average to initial state
+  void reset()
+  {
+    m_frameIdx   = 0;
+    m_frameCount = 0;
+    m_accum      = T{};
+    std::fill(std::begin(m_values), std::end(m_values), T{});
+  }
+
+  // Get the total accumulated value
+  T getAccumulated() const { return m_accum; }
+
+private:
+  T   m_values[N];   // Circular buffer of values
+  int m_frameIdx;    // Current frame index in circular buffer
+  int m_frameCount;  // Number of frames accumulated
+  T   m_accum;       // Accumulated values
+};
 
 inline static std::vector<std::filesystem::path> getResourcesDirs()
 {

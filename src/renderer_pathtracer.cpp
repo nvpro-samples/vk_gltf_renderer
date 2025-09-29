@@ -37,6 +37,12 @@
 
 PathTracer::PathTracer()
 {
+  // Default parameters for overall material
+  m_pushConst.maxDepth              = 5;
+  m_pushConst.frameCount            = 0;
+  m_pushConst.fireflyClampThreshold = 10.;
+  m_pushConst.numSamples            = 1;  // Number of samples per pixel
+
 #if defined(USE_DLSS)
   m_dlss = std::make_unique<DlssDenoiser>();
 #endif
@@ -49,11 +55,6 @@ void PathTracer::onAttach(Resources& resources, nvvk::ProfilerGpuTimer* profiler
 {
   ::BaseRenderer::onAttach(resources, profiler);
   m_device = resources.allocator.getDevice();
-  // Default parameters for overall material
-  m_pushConst.maxDepth              = 5;
-  m_pushConst.frameCount            = 0;
-  m_pushConst.fireflyClampThreshold = 10.;
-  m_pushConst.numSamples            = 1;  // Number of samples per pixel
 
   compileShader(resources, false);
 
@@ -190,13 +191,8 @@ bool PathTracer::onUIRender(Resources& resources)
     ImGui::TextDisabled("Samples: %d/%d (%.1fx)", m_totalSamplesAccumulated, resources.frameCount + 1,
                         m_totalSamplesAccumulated / float(resources.frameCount + 1));
 
-    float throughput = calculateRawSampleThroughput(resources);
-    throughput /= 1'000'000.0f;  // Convert to mega-samples per second
-    if(throughput > 0.0f)
-    {
-      ImGui::TextDisabled("Throughput: %.2f MS/s", throughput);
-      nvgui::tooltip("Number of mega-samples per second", true);
-    }
+    ImGui::TextDisabled("Throughput: %.2f MSPP/s", m_throughputRollingAvg.getAverage());
+    nvgui::tooltip("Mega-sample-pixels per second (rolling average over last %zu frames)", m_throughputRollingAvg.SAMPLE_COUNT);
 
     PE::end();
   }
@@ -258,15 +254,12 @@ void PathTracer::onRender(VkCommandBuffer cmd, Resources& resources)
   // Handle frame reset detection (needed for both adaptive and non-adaptive modes)
   if(resources.frameCount == 0)
   {
-    m_totalSamplesAccumulated = 0;                 // Reset sample counter when scene/camera changes
-    m_accumulationStartTime   = ImGui::GetTime();  // Reset timing for throughput calculation
+    m_totalSamplesAccumulated = 0;  // Reset sample counter when scene/camera changes
   }
 
   // Handle adaptive sampling
   updateAdaptiveSampling(resources);
 
-  // Track total samples accumulated
-  m_totalSamplesAccumulated += m_pushConst.numSamples;
 
   // Update the push constant: the camera information, sky parameters and the scene to render
   if(m_autoFocus)
@@ -303,6 +296,9 @@ void PathTracer::onRender(VkCommandBuffer cmd, Resources& resources)
   m_pushConst.gltfScene         = (shaderio::GltfScene*)resources.sceneVk.sceneDesc().address;
   m_pushConst.mouseCoord        = nvapp::ElementDbgPrintf::getMouseCoord();  // Use for debugging: printf in shader
   vkCmdPushConstants(cmd, m_pipelineLayout, VK_SHADER_STAGE_ALL, 0, sizeof(shaderio::PathtracePushConstant), &m_pushConst);
+
+  // Track total samples accumulated
+  m_totalSamplesAccumulated += m_pushConst.numSamples;
 
   // Make sure buffer is ready to be used
   nvvk::cmdMemoryBarrier(cmd, VK_PIPELINE_STAGE_2_TRANSFER_BIT, VK_PIPELINE_STAGE_2_COMPUTE_SHADER_BIT);
@@ -403,6 +399,25 @@ void PathTracer::onRender(VkCommandBuffer cmd, Resources& resources)
     }
   }
 #endif
+
+  // Update rolling average throughput calculation using wall-clock time
+  {
+    // Time elapsed for this frame (wall-clock time from user perspective)
+    float wallClockFrameTime = ImGui::GetIO().DeltaTime;
+
+    // Total number of pixels in the image
+    VkExtent2D imageSize   = resources.gBuffers.getSize();
+    uint64_t   totalPixels = static_cast<uint64_t>(imageSize.width) * static_cast<uint64_t>(imageSize.height);
+
+    // Calculate mega-sample-pixels per second of wall-clock time
+    // This tells the user how much rendering work is being done per real-world second
+    const float MEGA_SCALE_FACTOR = 1000000.0f;  // Convert to mega-sample-pixels
+    float       megaSamplePixelsPerSecond =
+        (static_cast<float>(m_pushConst.numSamples) * static_cast<float>(totalPixels) / MEGA_SCALE_FACTOR) / wallClockFrameTime;
+
+    // Update rolling average with wall-clock throughput for this frame
+    m_throughputRollingAvg.addValue(megaSamplePixelsPerSecond);
+  }
 }
 
 //--------------------------------------------------------------------------------------------------
@@ -657,10 +672,6 @@ void PathTracer::compileShader(Resources& resources, bool fromFile)
   m_pipeline = VK_NULL_HANDLE;
 }
 
-void PathTracer::onUIMenu()
-{
-  BaseRenderer::onUIMenu();
-}
 
 //--------------------------------------------------------------------------------------------------
 // Update adaptive sampling based on frame timing
@@ -712,24 +723,4 @@ void PathTracer::updateAdaptiveSampling(Resources& resources)
     // Clamp to valid range
     m_pushConst.numSamples = std::clamp(m_pushConst.numSamples, MIN_SAMPLES_PER_PIXEL, MAX_SAMPLES_PER_PIXEL);
   }
-}
-
-//--------------------------------------------------------------------------------------------------
-// Calculate samples per pixel per second throughput
-float PathTracer::calculateRawSampleThroughput(const Resources& resources) const
-{
-  if(m_totalSamplesAccumulated <= 0 || m_accumulationStartTime <= 0.0)
-    return 0.0f;
-
-  double elapsedTime = ImGui::GetTime() - m_accumulationStartTime;
-  if(elapsedTime <= 0.0)
-    return 0.0f;
-
-  VkExtent2D imageSize   = resources.gBuffers.getSize();
-  uint64_t   totalPixels = static_cast<uint64_t>(imageSize.width) * static_cast<uint64_t>(imageSize.height);
-
-  if(totalPixels == 0)
-    return 0.0f;
-
-  return (static_cast<float>(m_totalSamplesAccumulated) * static_cast<float>(totalPixels)) / static_cast<float>(elapsedTime);
 }
