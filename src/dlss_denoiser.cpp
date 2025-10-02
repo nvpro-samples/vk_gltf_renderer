@@ -174,7 +174,9 @@ void DlssDenoiser::setResource(DlssRayReconstruction::ResourceType resourceId, V
 void DlssDenoiser::denoise(VkCommandBuffer cmd, glm::vec2 jitter, const glm::mat4& modelView, const glm::mat4& projection, bool reset /*= false*/)
 {
   NVVK_DBG_SCOPE(cmd);  // <-- Helps to debug in NSight
+  reset = reset || m_forceReset;
   m_dlss.cmdDenoise(cmd, m_ngx, {jitter, modelView, projection, reset});
+  m_forceReset = false;
 }
 
 bool DlssDenoiser::onUi(Resources& resources)
@@ -187,7 +189,11 @@ bool DlssDenoiser::onUi(Resources& resources)
     return changed;
   }
 
-  changed |= ImGui::Checkbox("Enable DLSS", &m_settings.enable);
+  if(ImGui::Checkbox("Enable DLSS", &m_settings.enable))
+  {
+    m_forceReset = true;  // Force a reset when enabling/disabling DLSS
+    changed      = true;
+  }
   if(!m_initialized)
     return changed;
 

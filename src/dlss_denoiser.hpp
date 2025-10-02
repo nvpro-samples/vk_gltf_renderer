@@ -120,4 +120,5 @@ private:
   VkDevice      m_device{};
   VkSampler     m_linearSampler{};
   bool          m_sizeModeChanged = false;  // Track if size mode has changed
+  bool          m_forceReset      = false;  // Force reset of the denoiser
 };
