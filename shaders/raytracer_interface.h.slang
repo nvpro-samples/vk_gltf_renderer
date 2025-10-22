@@ -18,6 +18,21 @@
  */
 
 #include "get_hit.h.slang"
+#include "shaderio.h"
+
+#include "nvshaders/constants.h.slang"
+#include "nvshaders/random.h.slang"
+
+// Forward declarations
+float  getOpacity(GltfRenderNode renderNode, GltfRenderPrimitive renderPrim, int triangleID, float3 barycentrics);
+float3 getShadowTransmission(GltfRenderNode      renderNode,
+                             GltfRenderPrimitive renderPrim,
+                             int                 triangleID,
+                             float3              barycentrics,
+                             float               hitT,
+                             float4x3            worldToObject,
+                             float3              rayDirection,
+                             inout bool          isInside);
 
 // Payload for the path tracer
 struct HitPayload
