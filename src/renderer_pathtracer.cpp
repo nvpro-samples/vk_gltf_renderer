@@ -56,6 +56,9 @@ void PathTracer::onAttach(Resources& resources, nvvk::ProfilerGpuTimer* profiler
   ::BaseRenderer::onAttach(resources, profiler);
   m_device = resources.allocator.getDevice();
 
+  // Create pipeline cache for faster pipeline creation
+  m_pipelineCache.init(m_device, "pipeline_cache.bin");
+
   compileShader(resources, false);
 
   // Requesting ray tracing properties
@@ -63,6 +66,10 @@ void PathTracer::onAttach(Resources& resources, nvvk::ProfilerGpuTimer* profiler
   prop2.pNext                  = &m_rtPipelineProperties;
   m_rtPipelineProperties.pNext = &m_reorderProperties;
   vkGetPhysicalDeviceProperties2(resources.allocator.getPhysicalDevice(), &prop2);
+
+  m_supportSER =
+      (bool)(m_reorderProperties.rayTracingInvocationReorderReorderingHint & VK_RAY_TRACING_INVOCATION_REORDER_MODE_REORDER_NV) ? 1 : 0;
+  m_useSER = m_supportSER;
 
   // #DLSS - Create the DLSS denoiser
 #if defined(USE_DLSS)
@@ -81,7 +88,7 @@ void PathTracer::registerParameters(nvutils::ParameterRegistry* paramReg)
   paramReg->add({"ptAperture", "PathTracer: Camera aperture"}, &m_pushConst.aperture);
   paramReg->add({"ptFocalDistance", "PathTracer: Focal distance"}, &m_pushConst.focalDistance);
   paramReg->add({"ptAutoFocus", "PathTracer: Enable auto focus"}, &m_autoFocus);
-  paramReg->add({"ptTechnique", "PathTracer: Rendering technique [Compute:0, RayTracing:1]"}, (int*)&m_renderTechnique);
+  paramReg->add({"ptTechnique", "PathTracer: Rendering technique [RayQuery:0, RayTracing:1]"}, (int*)&m_renderTechnique);
   paramReg->add({"ptAdaptiveSampling", "PathTracer: Enable adaptive sampling"}, &m_adaptiveSampling);
   paramReg->add({"ptPerformanceTarget", "PathTracer: Performance target [Interactive:0, Balanced:1, Quality:2, MaxQuality:3]"},
                 (int*)&m_performanceTarget);
@@ -100,9 +107,11 @@ void PathTracer::onDetach(Resources& resources)
   m_dlss->deinit(resources);
 #endif  //  USE_DLSS
   vkDestroyPipelineLayout(m_device, m_pipelineLayout, nullptr);
-  vkDestroyShaderEXT(m_device, m_shader, nullptr);
+  //vkDestroyShaderEXT(m_device, m_shader, nullptr);
   vkDestroyShaderModule(m_device, m_shaderModule, nullptr);
-  vkDestroyPipeline(m_device, m_pipeline, nullptr);
+  vkDestroyPipeline(m_device, m_rtxPipeline, nullptr);
+  vkDestroyPipeline(m_device, m_rqPipeline, nullptr);
+  m_pipelineCache.deinit();
 }
 
 //--------------------------------------------------------------------------------------------------
@@ -137,12 +146,29 @@ bool PathTracer::onUIRender(Resources& resources)
   if(PE::begin())
   {
     // Rendering technique selector
-    const char* techniques[] = {"Compute", "Ray Tracing"};
+    const char* techniques[] = {"Ray Query", "Ray Tracing"};
     int         current      = static_cast<int>(m_renderTechnique);
     if(PE::Combo("Rendering Technique", &current, techniques, IM_ARRAYSIZE(techniques)))
     {
       m_renderTechnique = static_cast<RenderTechnique>(current);
       changed           = true;
+    }
+    nvgui::tooltip(
+        "Both Ray Query and Ray Tracing use hardware accelerated ray tracing."
+        "Ray Query uses a compute shader interface, while Ray Tracing uses the dedicated RTX pipeline.");
+
+    if(m_supportSER && m_renderTechnique == RenderTechnique::RayTracing)
+    {
+      bool oldUseSER = m_useSER;
+      changed |= PE::Checkbox("Use SER", &m_useSER, "Use shader execution reorder");
+
+      // Recreate RTX pipeline if SER setting changed
+      if(oldUseSER != m_useSER)
+      {
+        vkDeviceWaitIdle(m_device);
+        vkDestroyPipeline(m_device, m_rtxPipeline, nullptr);
+        m_rtxPipeline = VK_NULL_HANDLE;
+      }
     }
 
     changed |= PE::SliderInt("Max Depth", &m_pushConst.maxDepth, 0, 20, "%d", 0, "Maximum number of bounces");
@@ -313,13 +339,21 @@ void PathTracer::onRender(VkCommandBuffer cmd, Resources& resources)
 #endif
 
 
-  if(m_renderTechnique == RenderTechnique::Compute)
+  if(m_renderTechnique == RenderTechnique::RayQuery)
   {
-    auto timerSection = m_profiler->cmdFrameSection(cmd, "Path Trace");
+    auto timerSection = m_profiler->cmdFrameSection(cmd, "Path Trace (RQ)");
+
+    // Create pipeline if it doesn't exist
+    if(m_rqPipeline == VK_NULL_HANDLE)
+    {
+      createRqPipeline(resources);
+    }
 
     // Bind the shader to use
     VkShaderStageFlagBits stage = VK_SHADER_STAGE_COMPUTE_BIT;
-    vkCmdBindShadersEXT(cmd, 1, &stage, &m_shader);
+    //vkCmdBindShadersEXT(cmd, 1, &stage, &m_shader);
+    vkCmdBindPipeline(cmd, VK_PIPELINE_BIND_POINT_COMPUTE, m_rqPipeline);
+
 
     // Bind the descriptor set: TLAS, output image, textures, etc. (Set: 0)
     vkCmdBindDescriptorSets(cmd, VK_PIPELINE_BIND_POINT_COMPUTE, m_pipelineLayout, 0, 1, &resources.descriptorSet, 0, nullptr);
@@ -339,13 +373,13 @@ void PathTracer::onRender(VkCommandBuffer cmd, Resources& resources)
     auto timerSection = m_profiler->cmdFrameSection(cmd, "Path Trace (RTX)");
 
     // Create pipeline if it doesn't exist
-    if(m_pipeline == VK_NULL_HANDLE)
+    if(m_rtxPipeline == VK_NULL_HANDLE)
     {
       createRtxPipeline(resources);
     }
 
     // Bind the ray tracing pipeline
-    vkCmdBindPipeline(cmd, VK_PIPELINE_BIND_POINT_RAY_TRACING_KHR, m_pipeline);
+    vkCmdBindPipeline(cmd, VK_PIPELINE_BIND_POINT_RAY_TRACING_KHR, m_rtxPipeline);
 
     // Bind the descriptor set: TLAS, output image, textures, etc. (Set: 0)
     vkCmdBindDescriptorSets(cmd, VK_PIPELINE_BIND_POINT_RAY_TRACING_KHR, m_pipelineLayout, 0, 1, &resources.descriptorSet, 0, nullptr);
@@ -475,6 +509,33 @@ void PathTracer::createPipeline(Resources& resources)
   NVVK_DBG_NAME(m_pipelineLayout);
 }
 
+//--------------------------------------------------------------------------------------------------
+// Create the compute pipeline
+void PathTracer::createRqPipeline(Resources& resources)
+{
+  SCOPED_TIMER(__FUNCTION__);
+
+  VkPipelineShaderStageCreateInfo shaderStage{
+      .sType  = VK_STRUCTURE_TYPE_PIPELINE_SHADER_STAGE_CREATE_INFO,
+      .stage  = VK_SHADER_STAGE_COMPUTE_BIT,
+      .module = m_shaderModule,
+      .pName  = "computeMain",
+  };
+
+  VkComputePipelineCreateInfo cpCreateInfo{
+      .sType  = VK_STRUCTURE_TYPE_COMPUTE_PIPELINE_CREATE_INFO,
+      .stage  = shaderStage,
+      .layout = m_pipelineLayout,
+  };
+
+  // NOTE: if the creation is slow, disable the validation layers for faster creation (--vvl 0)
+  NVVK_CHECK(vkCreateComputePipelines(m_device, m_pipelineCache.getCache(), 1, &cpCreateInfo, nullptr, &m_rqPipeline));
+  NVVK_DBG_NAME(m_rqPipeline);
+}
+
+
+//--------------------------------------------------------------------------------------------------
+// Create the RTX pipeline
 void PathTracer::createRtxPipeline(Resources& resources)
 {
   SCOPED_TIMER(__FUNCTION__);
@@ -535,12 +596,12 @@ void PathTracer::createRtxPipeline(Resources& resources)
   group.generalShader = eRaygen;
   shader_groups.push_back(group);
 
-  // Miss
+  // Miss-0
   group.type          = VK_RAY_TRACING_SHADER_GROUP_TYPE_GENERAL_KHR;
   group.generalShader = eMiss;
   shader_groups.push_back(group);
 
-  // Shadow Miss
+  // Shadow Miss-1
   group.type          = VK_RAY_TRACING_SHADER_GROUP_TYPE_GENERAL_KHR;
   group.generalShader = eShadowMiss;
   shader_groups.push_back(group);
@@ -560,11 +621,8 @@ void PathTracer::createRtxPipeline(Resources& resources)
   shader_groups.push_back(group);
 
   // Shader Execution Reorder (SER)
-  int supportSER =
-      (m_reorderProperties.rayTracingInvocationReorderReorderingHint & VK_RAY_TRACING_INVOCATION_REORDER_MODE_REORDER_NV) ? 1 : 0;
   nvvk::Specialization specialization;
-  specialization.add(0, supportSER);
-  //specialization.add(0, 0);
+  specialization.add(0, m_useSER ? 1 : 0);
   stages[eRaygen].pSpecializationInfo = specialization.getSpecializationInfo();
 
 
@@ -578,9 +636,12 @@ void PathTracer::createRtxPipeline(Resources& resources)
       .maxPipelineRayRecursionDepth = 2,  // Ray depth
       .layout                       = m_pipelineLayout,
   };
-  vkDestroyPipeline(m_device, m_pipeline, nullptr);
-  NVVK_CHECK(vkCreateRayTracingPipelinesKHR(m_device, {}, {}, 1, &rtPipelineCreateInfo, nullptr, &m_pipeline));
-  NVVK_DBG_NAME(m_pipeline);
+  vkDestroyPipeline(m_device, m_rtxPipeline, nullptr);
+
+
+  // NOTE: if the creation is slow, disable the validation layers for faster creation (--vvl 0)
+  NVVK_CHECK(vkCreateRayTracingPipelinesKHR(m_device, {}, m_pipelineCache.getCache(), 1, &rtPipelineCreateInfo, nullptr, &m_rtxPipeline));
+  NVVK_DBG_NAME(m_rtxPipeline);
 
   // Create the Shading Binding Table
   {
@@ -591,7 +652,7 @@ void PathTracer::createRtxPipeline(Resources& resources)
     sbtGenerator.init(m_device, m_rtPipelineProperties);
 
     // Prepare SBT data from ray pipeline
-    size_t bufferSize = sbtGenerator.calculateSBTBufferSize(m_pipeline, rtPipelineCreateInfo);
+    size_t bufferSize = sbtGenerator.calculateSBTBufferSize(m_rtxPipeline, rtPipelineCreateInfo);
 
     // Create SBT buffer using the size from above
     NVVK_CHECK(resources.allocator.createBuffer(
@@ -633,6 +694,8 @@ void PathTracer::compileShader(Resources& resources, bool fromFile)
       .pushConstantRangeCount = 1,
       .pPushConstantRanges    = &pushConstant,
   };
+
+  // Compile from shader file if requested, used when reloading the shader
   if(fromFile)
   {
     SCOPED_TIMER("Slang compile from file");
@@ -646,30 +709,26 @@ void PathTracer::compileShader(Resources& resources, bool fromFile)
       LOGW("Error compiling gltf_pathtrace.slang\n");
     }
   }
-  {
-    SCOPED_TIMER("Create Shader");
-    vkDestroyShaderEXT(m_device, m_shader, nullptr);
-    NVVK_CHECK(vkCreateShadersEXT(m_device, 1U, &shaderInfo, nullptr, &m_shader));
-    NVVK_DBG_NAME(m_shader);
-  }
 
   // Create a shader module
   {
     SCOPED_TIMER("Create Shader Module");
+    vkDestroyShaderModule(m_device, m_shaderModule, nullptr);
+
     VkShaderModuleCreateInfo moduleInfo{
         .sType    = VK_STRUCTURE_TYPE_SHADER_MODULE_CREATE_INFO,
-        .codeSize = gltf_pathtrace_slang_sizeInBytes,
-        .pCode    = gltf_pathtrace_slang,
+        .codeSize = shaderInfo.codeSize,
+        .pCode    = static_cast<const uint32_t*>(shaderInfo.pCode),
     };
-
-    vkDestroyShaderModule(m_device, m_shaderModule, nullptr);
     NVVK_CHECK(vkCreateShaderModule(m_device, &moduleInfo, nullptr, &m_shaderModule));
     NVVK_DBG_NAME(m_shaderModule);
   }
 
-  // Destroy pipeline since shader was recompiled
-  vkDestroyPipeline(m_device, m_pipeline, nullptr);
-  m_pipeline = VK_NULL_HANDLE;
+  // Destroy pipeline since there is a new shader
+  vkDestroyPipeline(m_device, m_rtxPipeline, nullptr);
+  m_rtxPipeline = VK_NULL_HANDLE;
+  vkDestroyPipeline(m_device, m_rqPipeline, nullptr);
+  m_rqPipeline = VK_NULL_HANDLE;
 }
 
 
@@ -700,7 +759,7 @@ void PathTracer::updateAdaptiveSampling(Resources& resources)
   std::string                          apiName;
 
   // Try both possible timer names based on rendering technique
-  const char* timerName = (m_renderTechnique == RenderTechnique::Compute) ? "Path Trace" : "Path Trace (RTX)";
+  const char* timerName = (m_renderTechnique == RenderTechnique::RayQuery) ? "Path Trace (RQ)" : "Path Trace (RTX)";
 
   if(m_profilerTimeline->getFrameTimerInfo(timerName, timerInfo, apiName))
   {

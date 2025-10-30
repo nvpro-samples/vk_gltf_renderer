@@ -73,10 +73,10 @@ static const float MIN_TRANSMISSION = 0.01;  // Minimum transmission factor to c
 // #DLSS - Information for the DLSS
 struct DlssOutput
 {
-  float4 albedo          = float4(0);
-  float3 specularAlbedo  = float3(0);
-  float4 normalRoughness = float4(0);
-  float3 hitPosition     = 1e34f;
+  float16_t4 albedo          = float16_t4(0);
+  float16_t3 specularAlbedo  = float16_t3(0);
+  float16_t4 normalRoughness = float16_t4(0);
+  float3     hitPosition     = 1e34f;
 };
 
 struct SampleResult
@@ -460,239 +460,268 @@ bool checkInfinitePlaneIntersection(RayDesc ray, inout HitPayload payload, inout
 //
 SampleResult pathTrace(IRaytracer raytracer, RayDesc ray, inout uint seed)
 {
-  SampleResult sampleResult = {};
-  float3       radiance     = float3(0.0F, 0.0F, 0.0F);
-  float3       throughput   = float3(1.0F, 1.0F, 1.0F);
-  bool         isInside     = false;
-  float2       maxRoughness = float2(0.0);
-
-  SceneFrameInfo* frameInfo = pushConst.frameInfo;
-
-  HitPayload payload = {};
+  float3 radiance     = float3(0.0F, 0.0F, 0.0F);
+  float3 throughput   = float3(1.0F, 1.0F, 1.0F);
+  bool   isInside     = false;
+  float2 maxRoughness = float2(0.0);
+  bool   solid        = true;
 
   float lastSamplePdf = DIRAC;
+
+  // #DLSS - Store data temporarily to avoid writing to sampleResult during loop (reduces live state)
+  bool       dlss_hasData         = false;
+  float16_t3 dlss_albedo          = float16_t3(0);
+  float16_t3 dlss_specularAlbedo  = float16_t3(0);
+  float16_t4 dlss_normalRoughness = float16_t4(0);
+  float3     dlss_hitPosition     = 1e32f;
 
   // Path tracing loop, until the ray hits the environment or the maximum depth is reached or the ray is absorbed
   for(int depth = 0; depth < pushConst.maxDepth; depth++)
   {
-    // Trace the ray through the scene
-    raytracer.Trace(ray, payload, seed, depth);
-
-    // Getting the hit information (primitive/mesh that was hit)
-    HitState hit = payload.hitState;
-
-    bool firstRay = (depth == 0);
-
-    // Check if we hit the infinite plane
-    bool hitInfinitePlane = checkInfinitePlaneIntersection(ray, payload, hit, frameInfo);
-
-    // Hitting the environment, then exit
-    if(payload.hitT == INFINITE)
-    {
-      if(firstRay)  // If we come in here, the first ray didn't hit anything
-      {
-        sampleResult.radiance.a = 0.0;  // Set it to transparent
-
-        // #DLSS - Set environment hit position for proper motion vectors
-        sampleResult.dlssOutput.hitPosition = ray.Origin + ray.Direction * 1000000.0f;
-
-        // Solid color background and blurred HDR environment, aren't part of the
-        // lighting equation (backplate), so we can return them directly.
-        if(frameInfo->useSolidBackground == 1)
-        {
-          sampleResult.radiance.rgb = frameInfo->backgroundColor;
-          return sampleResult;
-        }
-        else if(pushConst.frameInfo->environmentType == EnvSystem::eHdr && pushConst.frameInfo->envBlur > 0)
-        {
-          float3 dir = rotate(ray.Direction, float3(0, 1, 0), -frameInfo.envRotation);
-          float2 uv  = getSphericalUv(dir);  // See sampling.glsl
-          sampleResult.radiance.xyz =
-              smoothHDRBlur(texturesHdr[HDR_IMAGE_INDEX], uv, frameInfo->envBlur).xyz * frameInfo->envIntensity;
-          return sampleResult;
-        }
-      }
-
-      // Add sky or HDR texture
-      float3 envColor;
-      float  envPdf;
-      if(frameInfo->environmentType == EnvSystem::eSky)
-      {
-        envColor = evalPhysicalSky(*pushConst.skyParams, ray.Direction);
-        envPdf   = samplePhysicalSkyPDF(*pushConst.skyParams, ray.Direction);
-      }
-      else
-      {
-        // Adding HDR lookup
-        float3 dir = rotate(ray.Direction, float3(0, 1, 0), -frameInfo.envRotation);
-        float2 uv  = getSphericalUv(dir);  // See sampling.glsl
-        float4 env = texturesHdr[HDR_IMAGE_INDEX].SampleLevel(uv, 0);
-        envColor   = env.rgb * frameInfo.envIntensity;
-        envPdf     = env.w;
-      }
-
-      // We may hit the environment twice: once via sampleLights() and once when hitting the sky while probing
-      // for more indirect hits. This is the counter part of the MIS weighting in sampleLights()
-      float misWeight = (lastSamplePdf == DIRAC) ? 1.0 : (lastSamplePdf / (lastSamplePdf + envPdf));
-      radiance += throughput * misWeight * envColor;
-
-      sampleResult.radiance.xyz = radiance;
-      return sampleResult;
-    }
-
-
-    PbrMaterial       pbrMat;
-    GltfShadeMaterial material;
-    if(hitInfinitePlane)
-    {
-      // Evaluate the material at the hit point
-      pbrMat   = defaultPbrMaterial(frameInfo.infinitePlaneBaseColor, frameInfo.infinitePlaneMetallic,
-                                    frameInfo.infinitePlaneRoughness, hit.nrm, hit.nrm);
-      material = defaultGltfMaterial();
-    }
-    else
-    {
-      // Getting the scene information
-      GltfShadeMaterial*   materials       = pushConst.gltfScene->materials;         // Buffer of materials
-      GltfRenderNode*      renderNodes     = pushConst.gltfScene->renderNodes;       // Buffer of render nodes
-      GltfRenderPrimitive* renderPrimitive = pushConst.gltfScene->renderPrimitives;  // Buffer of meshes
-      GltfTextureInfo*     texInfos        = pushConst.gltfScene->textureInfos;      // Buffer of texture infos
-
-      // Setting up the material
-      GltfRenderPrimitive renderPrim    = renderPrimitive[payload.rprimID];  // Primitive information
-      GltfRenderNode      renderNode    = renderNodes[payload.rnodeID];      // Node information
-      int                 materialIndex = max(0, renderNode.materialID);     // Material ID of hit mesh
-      material                          = materials[materialIndex];          // Material of the hit object
-
-      material.pbrBaseColorFactor *= hit.color;  // Modulate the base color with the vertex color
-
-      // Evaluate the material at the hit point
-      MeshState mesh = MeshState(hit.nrm, hit.tangent, hit.bitangent, hit.geonrm, hit.uv, isInside);
-      pbrMat         = evaluateMaterial(material, mesh, allTextures, texInfos);
-    }
-
-    // #DLSS - Gather data from first hit
-    if(firstRay)
-    {
-      sampleResult.dlssOutput.albedo = float4(pbrMat.baseColor.xyz, 1.0f);
-      sampleResult.dlssOutput.specularAlbedo =
-          EnvBRDFApprox2(pbrMat.specularColor, pbrMat.roughness.x, dot(pbrMat.N, ray.Direction));
-      sampleResult.dlssOutput.normalRoughness = float4(pbrMat.N, pbrMat.roughness.x);
-      sampleResult.dlssOutput.hitPosition     = ray.Origin + ray.Direction * payload.hitT;
-    }
-
-
-    // Keep track of the maximum roughness to prevent firefly artifacts
-    // by forcing subsequent bounces to be at least as rough
-    maxRoughness     = max(pbrMat.roughness, maxRoughness);
-    pbrMat.roughness = maxRoughness;
-
-    // Debugging, single frame
-    if(frameInfo.debugMethod != DebugMethod::eNone && firstRay)
-    {
-      sampleResult.radiance.xyz = debugValue(pbrMat, hit, frameInfo.debugMethod);
-      sampleResult.radiance.a   = 1.0;
-      return sampleResult;
-    }
-
-
-    // Adding emissive
-    radiance += pbrMat.emissive * throughput;
-
-    // Unlit
-    if(material.unlit > 0)
-    {
-      radiance += pbrMat.baseColor;
-      sampleResult.radiance.xyz = radiance;
-      sampleResult.radiance.a   = 1.0;
-      return sampleResult;
-    }
-
-    // Apply volume attenuation
-    if(isInside && !pbrMat.isThinWalled)
-    {
-      const float3 abs_coeff = absorptionCoefficient(pbrMat);
-      throughput *= exp(-payload.hitT * abs_coeff);
-    }
-
-
+    bool   nextEventValid;
     float3 contribution = float3(0);  // Direct lighting contribution
 
-    // Light contribution; can be environment or punctual lights
-    DirectLight directLight;
-    sampleLights(hit.pos, pbrMat.N, ray.Direction, seed, directLight);
+    // Shadow ray data (minimal extraction to reduce live state)
+    float3 shadowRayBasePos;
+    float3 shadowRayNormal;
+    float3 shadowRayDir;
+    float  shadowRayDist;
 
-    // Do not next event estimation (but delay the adding of contribution)
-    bool nextEventValid = (dot(directLight.direction, hit.geonrm) > 0.0f || pbrMat.diffuseTransmissionFactor > 0.0f)
-                          && directLight.pdf != 0.0f;
-
-    // Evaluate BSDF for Light
-    if(nextEventValid)
     {
-      // Evaluate the BSDF at the hit point
-      BsdfEvaluateData evalData;
-      evalData.k1 = -ray.Direction;
-      evalData.k2 = directLight.direction;
-      evalData.xi = float3(rand(seed), rand(seed), rand(seed));
-      bsdfEvaluate(evalData, pbrMat);
+      //DirectLight directLight;
+      SceneFrameInfo* frameInfo = pushConst.frameInfo;
+      HitPayload      payload   = {};
 
-      // If the PDF is greater than 0, then we can sample the BSDF
-      if(evalData.pdf > 0.0)
+      // Trace the ray through the scene
+      raytracer.Trace(ray, payload, seed);
+
+      // Getting the hit information (primitive/mesh that was hit)
+      HitState hit = payload.hitState;
+
+      bool firstRay = (depth == 0);
+
+      // Check if we hit the infinite plane
+      bool hitInfinitePlane = checkInfinitePlaneIntersection(ray, payload, hit, frameInfo);
+
+      // Hitting the environment, then exit
+      if(payload.hitT == INFINITE)
       {
-        // Weight for combining light and BSDF sampling strategies (Multiple Importance Sampling)
-        const float mis_weight = (directLight.pdf == DIRAC) ? 1.0F : directLight.pdf / (directLight.pdf + evalData.pdf);
+        if(firstRay)  // If we come in here, the first ray didn't hit anything
+        {
+          solid = false;  // Set it to transparent
 
-        // sample weight
-        const float3 w = throughput * directLight.radianceOverPdf * mis_weight;
-        contribution += w * evalData.bsdf_diffuse;
-        contribution += w * evalData.bsdf_glossy;
+          // #DLSS - Set environment hit position for proper motion vectors (store temporarily)
+          // sampleResult.dlssOutput.hitPosition = ray.Origin + ray.Direction * 1000000.0f;
+          dlss_hitPosition = ray.Origin + ray.Direction * 1000000.0f;
+
+          // Solid color background and blurred HDR environment, aren't part of the
+          // lighting equation (backplate), so we can return them directly.
+          if(frameInfo->useSolidBackground == 1)
+          {
+            //sampleResult.radiance.rgb = frameInfo->backgroundColor;
+            //return sampleResult;
+            radiance = frameInfo->backgroundColor;
+            break;
+          }
+          else if(pushConst.frameInfo->environmentType == EnvSystem::eHdr && pushConst.frameInfo->envBlur > 0)
+          {
+            float3 dir = rotate(ray.Direction, float3(0, 1, 0), -frameInfo.envRotation);
+            float2 uv  = getSphericalUv(dir);  // See sampling.glsl
+            //sampleResult.radiance.xyz =
+            //    smoothHDRBlur(texturesHdr[HDR_IMAGE_INDEX], uv, frameInfo->envBlur).xyz * frameInfo->envIntensity;
+            //return sampleResult;
+            radiance = smoothHDRBlur(texturesHdr[HDR_IMAGE_INDEX], uv, frameInfo->envBlur).xyz * frameInfo->envIntensity;
+            break;
+          }
+        }
+
+        // Add sky or HDR texture
+        float3 envColor;
+        float  envPdf;
+        if(frameInfo->environmentType == EnvSystem::eSky)
+        {
+          envColor = evalPhysicalSky(*pushConst.skyParams, ray.Direction);
+          envPdf   = samplePhysicalSkyPDF(*pushConst.skyParams, ray.Direction);
+        }
+        else
+        {
+          // Adding HDR lookup
+          float3 dir = rotate(ray.Direction, float3(0, 1, 0), -frameInfo.envRotation);
+          float2 uv  = getSphericalUv(dir);  // See sampling.glsl
+          float4 env = texturesHdr[HDR_IMAGE_INDEX].SampleLevel(uv, 0);
+          envColor   = env.rgb * frameInfo.envIntensity;
+          envPdf     = env.w;
+        }
+
+        // We may hit the environment twice: once via sampleLights() and once when hitting the sky while probing
+        // for more indirect hits. This is the counter part of the MIS weighting in sampleLights()
+        float misWeight = (lastSamplePdf == DIRAC) ? 1.0 : (lastSamplePdf / (lastSamplePdf + envPdf));
+        radiance += throughput * misWeight * envColor;
+
+        break;
+        //sampleResult.radiance.xyz = radiance;
+        //return sampleResult;
       }
-    }
 
-    {
-      // Sample the BSDF
-      BsdfSampleData sampleData;
-      sampleData.k1 = -ray.Direction;                              // outgoing direction
-      sampleData.xi = float3(rand(seed), rand(seed), rand(seed));  // random number
-      bsdfSample(sampleData, pbrMat);
 
-      // Update the throughput
-      throughput *= sampleData.bsdf_over_pdf;
-      ray.Direction = sampleData.k2;  // new direction
-      lastSamplePdf = sampleData.pdf;
-
-      // If the ray is absorbed, then break
-      if(sampleData.event_type == BSDF_EVENT_ABSORB)
+      PbrMaterial       pbrMat;
+      GltfShadeMaterial material;
+      if(hitInfinitePlane)
       {
-        // Exit tracing rays, but still finish this iteration; in particular the visibility test
-        // for the light that we may have hit.
-        depth = pushConst.maxDepth;
+        // Evaluate the material at the hit point
+        pbrMat   = defaultPbrMaterial(frameInfo.infinitePlaneBaseColor, frameInfo.infinitePlaneMetallic,
+                                      frameInfo.infinitePlaneRoughness, hit.nrm, hit.nrm);
+        material = defaultGltfMaterial();
       }
       else
       {
-        // Continue path
-        bool isSpecular     = (sampleData.event_type & BSDF_EVENT_IMPULSE) != 0;
-        bool isTransmission = (sampleData.event_type & BSDF_EVENT_TRANSMISSION) != 0;
+        // Getting the scene information
+        GltfShadeMaterial*   materials       = pushConst.gltfScene->materials;         // Buffer of materials
+        GltfRenderNode*      renderNodes     = pushConst.gltfScene->renderNodes;       // Buffer of render nodes
+        GltfRenderPrimitive* renderPrimitive = pushConst.gltfScene->renderPrimitives;  // Buffer of meshes
+        GltfTextureInfo*     texInfos        = pushConst.gltfScene->textureInfos;      // Buffer of texture infos
 
-        float3 offsetDir = dot(ray.Direction, hit.geonrm) > 0 ? hit.geonrm : -hit.geonrm;
-        ray.Origin       = offsetRay(hit.pos, offsetDir);
+        // Setting up the material
+        GltfRenderPrimitive renderPrim    = renderPrimitive[payload.rprimID];  // Primitive information
+        GltfRenderNode      renderNode    = renderNodes[payload.rnodeID];      // Node information
+        int                 materialIndex = max(0, renderNode.materialID);     // Material ID of hit mesh
+        material                          = materials[materialIndex];          // Material of the hit object
 
-        // Flip the information if we are inside the object, but only if it is a solid object
-        // The doubleSided flag is used to know if the object is solid or thin-walled.
-        // This is not a glTF specification, but works in many cases.
-        if(isTransmission)
+        material.pbrBaseColorFactor *= hit.color;  // Modulate the base color with the vertex color
+
+        // Evaluate the material at the hit point
+        MeshState mesh = MeshState(hit.nrm, hit.tangent, hit.bitangent, hit.geonrm, hit.uv, isInside);
+        pbrMat         = evaluateMaterial(material, mesh, allTextures, texInfos);
+      }
+
+      // #DLSS - Gather data from first hit (store temporarily, write at end to reduce live state)
+      if(firstRay)
+      {
+        float3 specularAlbedo = EnvBRDFApprox2(pbrMat.specularColor, pbrMat.roughness.x, dot(pbrMat.N, ray.Direction));
+        dlss_albedo           = float16_t3(pbrMat.baseColor.xyz);
+        dlss_specularAlbedo   = float16_t3(specularAlbedo);
+        dlss_normalRoughness  = float16_t4(float16_t3(pbrMat.N), float16_t(pbrMat.roughness.x));
+        dlss_hitPosition      = ray.Origin + ray.Direction * payload.hitT;
+      }
+
+      // Keep track of the maximum roughness to prevent firefly artifacts
+      // by forcing subsequent bounces to be at least as rough
+      maxRoughness     = max(pbrMat.roughness, maxRoughness);
+      pbrMat.roughness = maxRoughness;
+
+      // Debugging, single frame
+      if(frameInfo.debugMethod != DebugMethod::eNone && firstRay)
+      {
+        radiance.xyz = debugValue(pbrMat, hit, frameInfo.debugMethod);
+        break;
+        // return sampleResult;
+      }
+
+
+      // Adding emissive
+      radiance += pbrMat.emissive * throughput;
+
+      // Unlit
+      if(material.unlit > 0)
+      {
+        radiance += pbrMat.baseColor;
+        break;
+        //sampleResult.radiance.xyz = radiance;
+        //sampleResult.radiance.a   = 1.0;
+        //return sampleResult;
+      }
+
+      // Apply volume attenuation
+      if(isInside && !pbrMat.isThinWalled)
+      {
+        const float3 abs_coeff = absorptionCoefficient(pbrMat);
+        throughput *= exp(-payload.hitT * abs_coeff);
+      }
+
+      // Light contribution; can be environment or punctual lights
+      DirectLight directLight;
+      sampleLights(hit.pos, pbrMat.N, ray.Direction, seed, directLight);
+
+      // Do not next event estimation (but delay the adding of contribution)
+      nextEventValid = (dot(directLight.direction, hit.geonrm) > 0.0f || pbrMat.diffuseTransmissionFactor > 0.0f)
+                       && directLight.pdf != 0.0f;
+
+      // Evaluate BSDF for Light
+      if(nextEventValid)
+      {
+        // Evaluate the BSDF at the hit point
+        BsdfEvaluateData evalData;
+        evalData.k1 = -ray.Direction;
+        evalData.k2 = directLight.direction;
+        evalData.xi = float3(rand(seed), rand(seed), rand(seed));
+        bsdfEvaluate(evalData, pbrMat);
+
+        // If the PDF is greater than 0, then we can sample the BSDF
+        if(evalData.pdf > 0.0)
         {
-          isInside = !isInside;
+          // Weight for combining light and BSDF sampling strategies (Multiple Importance Sampling)
+          const float mis_weight = (directLight.pdf == DIRAC) ? 1.0F : directLight.pdf / (directLight.pdf + evalData.pdf);
+
+          // sample weight
+          const float3 w = throughput * directLight.radianceOverPdf * mis_weight;
+          contribution += w * evalData.bsdf_diffuse;
+          contribution += w * evalData.bsdf_glossy;
         }
       }
+
+
+      {
+        // Sample the BSDF
+        BsdfSampleData sampleData;
+        sampleData.k1 = -ray.Direction;                              // outgoing direction
+        sampleData.xi = float3(rand(seed), rand(seed), rand(seed));  // random number
+        bsdfSample(sampleData, pbrMat);
+
+        // Update the throughput
+        throughput *= sampleData.bsdf_over_pdf;
+        ray.Direction = sampleData.k2;  // new direction
+        lastSamplePdf = sampleData.pdf;
+
+        // If the ray is absorbed, then break
+        if(sampleData.event_type == BSDF_EVENT_ABSORB)
+        {
+          // Exit tracing rays, but still finish this iteration; in particular the visibility test
+          // for the light that we may have hit.
+          depth = pushConst.maxDepth;
+        }
+        else
+        {
+          // Continue path
+          bool isSpecular     = (sampleData.event_type & BSDF_EVENT_IMPULSE) != 0;
+          bool isTransmission = (sampleData.event_type & BSDF_EVENT_TRANSMISSION) != 0;
+
+          float3 offsetDir = dot(ray.Direction, hit.geonrm) > 0 ? hit.geonrm : -hit.geonrm;
+          ray.Origin       = offsetRay(hit.pos, offsetDir);
+
+          // Flip the information if we are inside the object, but only if it is a solid object
+          // The doubleSided flag is used to know if the object is solid or thin-walled.
+          // This is not a glTF specification, but works in many cases.
+          if(isTransmission)
+          {
+            isInside = !isInside;
+          }
+        }
+      }
+
+      // Extract minimal shadow ray data before scope closes (to free hit/directLight structures)
+      shadowRayBasePos = hit.pos;
+      shadowRayNormal  = hit.geonrm;
+      shadowRayDir     = directLight.direction;
+      shadowRayDist    = directLight.distance;
     }
 
     // We are adding the contribution to the radiance only if the ray is not occluded by an object.
     if(nextEventValid)
     {
       // shadow origin is the hit position offset by a small amount in the direction of the light
-      float3 shadowRayOrigin = offsetRay(hit.pos, (dot(directLight.direction, hit.geonrm) > 0.0f) ? hit.geonrm : -hit.geonrm);
-      RayDesc shadowRay    = RayDesc(shadowRayOrigin, 0, directLight.direction, directLight.distance);
+      float3 shadowRayOrigin =
+          offsetRay(shadowRayBasePos, (dot(shadowRayDir, shadowRayNormal) > 0.0f) ? shadowRayNormal : -shadowRayNormal);
+      RayDesc shadowRay    = RayDesc(shadowRayOrigin, 0, shadowRayDir, shadowRayDist);
       float3  shadowFactor = raytracer.TraceShadow(shadowRay, seed);
       radiance += contribution * shadowFactor;
     }
@@ -704,8 +733,15 @@ SampleResult pathTrace(IRaytracer raytracer, RayDesc ray, inout uint seed)
     throughput /= rrPcont;  // boost the energy of the non-terminated paths
   }
 
-  // Return the radiance
-  sampleResult.radiance.xyz = radiance;
+  // Returning the sample result; radiance + DLSS data
+  SampleResult sampleResult = {};
+  sampleResult.radiance     = float4(radiance, solid ? 1 : 0);
+
+  sampleResult.dlssOutput.albedo          = float16_t4(dlss_albedo, solid ? 1.0h : 0.0h);
+  sampleResult.dlssOutput.specularAlbedo  = dlss_specularAlbedo;
+  sampleResult.dlssOutput.normalRoughness = dlss_normalRoughness;
+  sampleResult.dlssOutput.hitPosition     = dlss_hitPosition;
+
   return sampleResult;
 }
 
@@ -836,7 +872,10 @@ void processPixel(IRaytracer raytracer, float2 samplePos, float2 imageSize)
 //-----------------------------------------------------------------------
 // RAY GENERATION
 //-----------------------------------------------------------------------
-[shader("compute")][numthreads(WORKGROUP_SIZE, WORKGROUP_SIZE, 1)] void computeMain(uint3 threadIdx : SV_DispatchThreadID) {
+[shader("compute")]
+[numthreads(WORKGROUP_SIZE, WORKGROUP_SIZE, 1)]
+void computeMain(uint3 threadIdx: SV_DispatchThreadID)
+{
   RayQueryRaytracer raytracer;
   float2            samplePos = (float2)threadIdx.xy;
   uint2             imageSize;
@@ -845,10 +884,11 @@ void processPixel(IRaytracer raytracer, float2 samplePos, float2 imageSize)
   processPixel(raytracer, samplePos, imageSize);
 }
 
-    //-----------------------------------------------------------------------
-    // RAY GENERATION
-    //-----------------------------------------------------------------------
-    [shader("raygeneration")] void rgenMain()
+//-----------------------------------------------------------------------
+// RAY GENERATION
+//-----------------------------------------------------------------------
+[shader("raygeneration")]
+void rgenMain()
 {
   TraditionalRaytracer raytracer;
   float2               samplePos = (float2)DispatchRaysIndex().xy;
@@ -860,7 +900,9 @@ void processPixel(IRaytracer raytracer, float2 samplePos, float2 imageSize)
 //-----------------------------------------------------------------------
 // CLOSEST HIT
 //-----------------------------------------------------------------------
-[shader("closesthit")] void rchitMain(inout HitPayload payload, in BuiltInTriangleIntersectionAttributes attr) {
+[shader("closesthit")]
+void rchitMain(inout HitPayload payload, in BuiltInTriangleIntersectionAttributes attr)
+{
   float3 barycentrics = float3(1 - attr.barycentrics.x - attr.barycentrics.y, attr.barycentrics.x, attr.barycentrics.y);
 
   int instanceID   = InstanceIndex();
@@ -884,8 +926,12 @@ void processPixel(IRaytracer raytracer, float2 samplePos, float2 imageSize)
   payload.hitState = hit;
 }
 
-    [shader("closesthit")] void rchitShadow(inout ShadowPayload payload, in BuiltInTriangleIntersectionAttributes attr)
+[shader("closesthit")]
+void rchitShadow(inout ShadowPayload payload, in BuiltInTriangleIntersectionAttributes attr)
 {
+  // When we reach the closest hit for shadow rays, it means we've accepted a hit
+  // in rahitShadow due to low transmission. The transmission has already been
+  // processed in rahitShadow, so we just ensure it's set to fully occluded.
   payload.totalTransmission = float3(0.0);
 }
 
@@ -893,19 +939,28 @@ void processPixel(IRaytracer raytracer, float2 samplePos, float2 imageSize)
 //-----------------------------------------------------------------------
 // MISS
 //-----------------------------------------------------------------------
-[shader("miss")] void rmissMain(inout HitPayload payload) { payload.hitT = INFINITE; }
-
-    [shader("miss")] void rmissShadow(inout ShadowPayload payload)
+[shader("miss")]
+void rmissMain(inout HitPayload payload)
 {
-  payload.hitT              = INFINITE;
-  payload.totalTransmission = float3(1.0);
+  payload.hitT = INFINITE;
+}
+
+[shader("miss")]
+void rmissShadow(inout ShadowPayload payload)
+{
+    // When we miss, we've passed through all surfaces along the ray.
+    // Keep the accumulated transmission - don't reset it.
+    // totalTransmission already contains the accumulated value from rahitShadow
+    payload.approxHitT = INFINITE;
 }
 
 //-----------------------------------------------------------------------
 // INTERSECTION (Any Hit)
 //-----------------------------------------------------------------------
 
-[shader("anyhit")] void rahitMain(inout HitPayload payload, in BuiltInTriangleIntersectionAttributes attr) {
+[shader("anyhit")]
+void rahitMain(inout HitPayload payload, in BuiltInTriangleIntersectionAttributes attr)
+{
   float3 barycentrics = float3(1 - attr.barycentrics.x - attr.barycentrics.y, attr.barycentrics.x, attr.barycentrics.y);
 
   uint instanceID   = InstanceIndex();
@@ -929,7 +984,8 @@ void processPixel(IRaytracer raytracer, float2 samplePos, float2 imageSize)
 }
 
 
-    [shader("anyhit")] void rahitShadow(inout ShadowPayload payload, in BuiltInTriangleIntersectionAttributes attr)
+[shader("anyhit")]
+void rahitShadow(inout ShadowPayload payload, in BuiltInTriangleIntersectionAttributes attr)
 {
   float3 barycentrics = float3(1 - attr.barycentrics.x - attr.barycentrics.y, attr.barycentrics.x, attr.barycentrics.y);
 
@@ -950,9 +1006,9 @@ void processPixel(IRaytracer raytracer, float2 samplePos, float2 imageSize)
   float r       = rand(payload.seed);
   if(r < opacity)
   {
-    float  currentHitT  = abs(hitT - payload.hitT);
+    payload.approxHitT  = abs(hitT - payload.approxHitT);
     bool   isInside     = payload.isInside;
-    float3 transmission = getShadowTransmission(renderNode, renderPrim, primitiveID, barycentrics, currentHitT,
+    float3 transmission = getShadowTransmission(renderNode, renderPrim, primitiveID, barycentrics, payload.approxHitT,
                                                 worldToObject, worldRayDir, isInside);
 
     payload.isInside = isInside;

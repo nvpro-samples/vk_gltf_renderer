@@ -126,6 +126,9 @@ private:
   nvvk::ProfilerGpuTimer                      m_profilerGpuTimer{};  // GPU profiler
   std::shared_ptr<nvutils::CameraManipulator> m_cameraManip;         // Camera manipulator
 
+  nvutils::PerformanceTimer m_cpuTimer;               // CPU performance timer
+  bool                      m_cpuTimePrinted{false};  // Track if CPU time has been printed
+
   Resources  m_resources;
   PathTracer m_pathTracer;  // Path tracer renderer
   Rasterizer m_rasterizer;  // Rasterizer renderer

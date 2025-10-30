@@ -48,22 +48,22 @@ struct HitPayload
 struct ShadowPayload
 {
   uint   seed;
-  float  hitT              = 0.0f;
+  float  approxHitT        = 0.0f;
   bool   isInside          = false;
-  float3 totalTransmission = float3(0.0f);
+  float3 totalTransmission = float3(1.0f);
 };
 
 // Raytracer interface definition
 interface IRaytracer
 {
-  void   Trace(RayDesc ray, inout HitPayload payload, inout uint seed, int rayDepth = 0);
+  void   Trace(RayDesc ray, inout HitPayload payload, inout uint seed);
   float3 TraceShadow(RayDesc ray, inout uint seed);
 }
 
 // Implementation using RayQuery
 struct RayQueryRaytracer : IRaytracer
 {
-  void Trace(RayDesc ray, inout HitPayload payload, inout uint seed, int rayDepth)
+  void Trace(RayDesc ray, inout HitPayload payload, inout uint seed)
   {
     payload.hitT = INFINITE;  // Default when not hitting anything
 
@@ -169,15 +169,49 @@ struct RayQueryRaytracer : IRaytracer
 // Implementation using traditional ray tracing
 struct TraditionalRaytracer : IRaytracer
 {
-  void Trace(RayDesc ray, inout HitPayload payload, inout uint seed, int rayDepth)
+  void Trace(RayDesc ray, inout HitPayload payload, inout uint seed)
   {
     payload.seed = seed;
     if(USE_SER == 1)
     {
       HitObject hitObj = HitObject::TraceRay(topLevelAS, RAY_FLAG_CULL_BACK_FACING_TRIANGLES, 0xFF, 0, 0, 0, ray, payload);
-      uint hint = (rayDepth == 1 ? 1 : 0);
-      ReorderThread(hitObj, hint, 1);
-      HitObject::Invoke(topLevelAS, hitObj, payload);
+
+      // Simple default thread reordering, not coherence hinting
+      ReorderThread(hitObj);
+
+      // Miss everything, return early
+      if(hitObj.IsMiss())
+      {
+        payload.hitT = INFINITE;
+        seed         = payload.seed;
+        return;
+      }
+
+      // There is a hit: filling the payload with the hit information
+
+      // Barycentric coordinate on the triangle
+      BuiltInTriangleIntersectionAttributes attr = hitObj.GetAttributes<BuiltInTriangleIntersectionAttributes>();
+      float3 barycentrics = float3(1 - attr.barycentrics.x - attr.barycentrics.y, attr.barycentrics.x, attr.barycentrics.y);
+
+      int instanceID   = hitObj.GetInstanceIndex();
+      int renderPrimID = hitObj.GetInstanceID();
+      int primitiveID  = hitObj.GetPrimitiveIndex();
+
+      // Get the built-in ray tracing variables
+      float4x3 worldToObject  = hitObj.GetWorldToObject();
+      float4x3 objectToWorld  = hitObj.GetObjectToWorld();
+      float3   worldRayOrigin = ray.Origin;
+      float    hitT           = hitObj.GetRayDesc().TMax;  // Closest Hit point
+
+      // Retrieve the Primitive mesh buffer information
+      GltfRenderPrimitive renderPrim = pushConst.gltfScene->renderPrimitives[renderPrimID];
+
+      HitState hit = getHitState(renderPrim, barycentrics, worldToObject, objectToWorld, primitiveID, worldRayOrigin);
+
+      payload.hitT     = hitT;
+      payload.rprimID  = renderPrimID;
+      payload.rnodeID  = instanceID;
+      payload.hitState = hit;
     }
     else
     {
@@ -186,15 +220,27 @@ struct TraditionalRaytracer : IRaytracer
     seed = payload.seed;
   }
 
+
   float3 TraceShadow(RayDesc ray, inout uint seed)
   {
     ShadowPayload shadowPayload = {};
     shadowPayload.seed          = seed;
-    TraceRay(topLevelAS, RAY_FLAG_NONE, 0xFF, 1, 0, 1, ray, shadowPayload);
+
+    if(USE_SER == 1)
+    {
+      HitObject hitObj = HitObject::TraceRay(topLevelAS, RAY_FLAG_NONE, 0xFF, 1, 0, 1, ray, shadowPayload);
+
+      if(hitObj.IsHit())
+      {
+        return float3(0.0);
+      }
+    }
+    else
+    {
+      TraceRay(topLevelAS, RAY_FLAG_NONE, 0xFF, 1, 0, 1, ray, shadowPayload);
+    }
     seed = shadowPayload.seed;
 
     return shadowPayload.totalTransmission;
   }
 }
-
-

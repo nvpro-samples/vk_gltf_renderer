@@ -42,16 +42,8 @@
 
 nvutils::ProfilerManager g_profilerManager;  // #PROFILER
 
-/* ---- TODO 
-
-Rendering
-- Pathtracer
-    - Denoiser
-- Rasterizer
-    - Super-sampling
-
---- */
-
+//////////////////////////////////////////////////////////////////////////
+// Create and set the window icon
 static void setWindowIcon(GLFWwindow* window)
 {
   GLFWimage icon{};
@@ -92,12 +84,12 @@ auto main(int argc, char** argv) -> int
   parameterRegistry.add({"headless"}, &appInfo.headless, true);
   parameterRegistry.add({"frames", "Number of frames to run in headless mode"}, &appInfo.headlessFrameCount);
   parameterRegistry.add({"vsync"}, &appInfo.vSync);
-  parameterRegistry.add({"validation"}, &vkSetup.enableValidationLayers);
-  parameterRegistry.add({"logLevel", "Log level: [Info:0, Warning:1, Error:2]"}, (int*)&logLevel);
-  parameterRegistry.add({"logShow", "Show extra log info (bitset): [0:None, 1:Time, 2:Level]"}, (int*)&logShow);
+  parameterRegistry.add({"vvl", "Activate Vulkan Validation Layer"}, &vkSetup.enableValidationLayers);
+  parameterRegistry.add({"logLevel", "Log level: [Info:0, Warning:1, Error:2]"}, reinterpret_cast<int*>(&logLevel));
+  parameterRegistry.add({"logShow", "Show extra log info (bitset): [0:None, 1:Time, 2:Level]"}, reinterpret_cast<int*>(&logShow));
   parameterRegistry.add({"device", "force a vulkan device via index into the device list"}, &vkSetup.forceGPU);
   parameterRegistry.add({"vsyncOffMode", "Preferred VSync Off mode: [0:Immediate, 1:Mailbox, 2:FIFO, 3:FIFO Relax]"},
-                        (int*)&appInfo.preferredVsyncOffMode);
+                        reinterpret_cast<int*>(&appInfo.preferredVsyncOffMode));
   parameterRegistry.add({"floatingWindows", "Allow dock windows to be separate windows"}, &appInfo.hasUndockableViewport, true);
 
 
@@ -105,19 +97,20 @@ auto main(int argc, char** argv) -> int
   auto profilerSettings  = std::make_shared<nvapp::ElementProfiler::ViewSettings>();
   profilerSettings->show = false;
 
+
   // Create all application elements
-  static auto elemCamera       = std::make_shared<nvapp::ElementCamera>();
-  static auto elemGltfRenderer = std::make_shared<GltfRenderer>(&parameterRegistry);
-  static auto elemGpuMonitor   = std::make_shared<nvgpu_monitor::ElementGpuMonitor>();
-  static auto elemProfiler     = std::make_shared<nvapp::ElementProfiler>(&g_profilerManager, profilerSettings);
-  static auto elemLogger       = std::make_shared<nvapp::ElementLogger>(false);
+  auto elemCamera       = std::make_shared<nvapp::ElementCamera>();
+  auto elemGltfRenderer = std::make_shared<GltfRenderer>(&parameterRegistry);
+  auto elemGpuMonitor   = std::make_shared<nvgpu_monitor::ElementGpuMonitor>();
+  auto elemProfiler     = std::make_shared<nvapp::ElementProfiler>(&g_profilerManager, profilerSettings);
+  auto elemLogger       = std::make_shared<nvapp::ElementLogger>(false);
 
 
   // Adding an element logger (UI), where all log will be redirected to
   elemLogger->setLevelFilter(nvapp::ElementLogger::eBitERROR | nvapp::ElementLogger::eBitWARNING | nvapp::ElementLogger::eBitINFO);
 
   // The logger will redirect the log to the Element Logger, to be displayed in the UI
-  nvutils::Logger::getInstance().setLogCallback([](nvutils::Logger::LogLevel logLevel, const std::string& str) {
+  nvutils::Logger::getInstance().setLogCallback([elemLogger](nvutils::Logger::LogLevel logLevel, const std::string& str) {
     elemLogger->addLog(logLevel, "%s", str.c_str());
   });
 
@@ -148,7 +141,6 @@ auto main(int argc, char** argv) -> int
   vkSetup.deviceExtensions   = {
       {VK_KHR_PUSH_DESCRIPTOR_EXTENSION_NAME},
       {VK_KHR_DEFERRED_HOST_OPERATIONS_EXTENSION_NAME},
-      {VK_KHR_PUSH_DESCRIPTOR_EXTENSION_NAME},
       {VK_KHR_ACCELERATION_STRUCTURE_EXTENSION_NAME, &accelFeature},
       {VK_KHR_RAY_TRACING_PIPELINE_EXTENSION_NAME, &rtPipelineFeature},
       {VK_KHR_RAY_QUERY_EXTENSION_NAME, &rayqueryFeature},
@@ -158,10 +150,11 @@ auto main(int argc, char** argv) -> int
       {VK_EXT_NESTED_COMMAND_BUFFER_EXTENSION_NAME, &nestedCmdFeature},
       {VK_NV_RAY_TRACING_INVOCATION_REORDER_EXTENSION_NAME, &reorderFeature, false},
   };
+
+  // If not headless, add the surface extensions for both instance and device (i.e swapchain)
   if(!appInfo.headless)
   {
     nvvk::addSurfaceExtensions(vkSetup.instanceExtensions, &vkSetup.deviceExtensions);
-    //vkSetup.deviceExtensions.emplace_back(VK_KHR_SWAPCHAIN_EXTENSION_NAME);
   }
 
 
@@ -176,7 +169,16 @@ auto main(int argc, char** argv) -> int
 
   nvvk::ValidationSettings validation{};
   validation.setPreset(nvvk::ValidationSettings::LayerPresets::eStandard);
-  validation.printf_to_stdout   = VK_TRUE;
+  validation.printf_to_stdout = VK_TRUE;
+
+  // Optimize VVL for fast pipeline creation while keeping critical validation
+  if(vkSetup.enableValidationLayers)
+  {
+    // Disable expensive shader validation during pipeline creation
+    validation.check_shaders         = VK_FALSE;
+    validation.check_shaders_caching = VK_FALSE;
+  }
+
   vkSetup.instanceCreateInfoExt = validation.buildPNextChain();
 
 
@@ -269,12 +271,27 @@ auto main(int argc, char** argv) -> int
     sceneFilename = "shader_ball.gltf";
   }
 #endif
+
+  // Load a scene if specified, otherwise the application starts empty
   if(!sceneFilename.empty())
+  {
     elemGltfRenderer->createScene(sceneFilename);
+  }
+  // Load an HDR if specified
   if(!hdrFilename.empty())
+  {
     elemGltfRenderer->createHDR(hdrFilename);
+  }
 
   app.run();
   app.deinit();
+
+  // Clear callbacks before scope ends to avoid dangling references
+  nvutils::Logger::getInstance().setLogCallback(nullptr);
+#if defined(USE_NSIGHT_AFTERMATH)
+  nvvk::CheckError::getInstance().setCallbackFunction(nullptr);
+#endif
+
+  // Deinit Vulkan context
   vkContext.deinit();
 }

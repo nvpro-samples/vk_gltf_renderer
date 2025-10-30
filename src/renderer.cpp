@@ -324,6 +324,11 @@ void GltfRenderer::onRender(VkCommandBuffer cmd)
 
   if(changed || frameChanged)
   {
+    if(m_resources.frameCount == 0)
+    {
+      m_cpuTimer.reset();
+      m_cpuTimePrinted = false;  // Reset print flag when rendering starts
+    }
 
     // Update the scene frame information uniform buffer
     shaderio::SceneFrameInfo finfo{
@@ -365,6 +370,15 @@ void GltfRenderer::onRender(VkCommandBuffer cmd)
       case RenderingMode::eRasterizer:
         m_rasterizer.onRender(cmd, m_resources);
         break;
+    }
+  }
+  else
+  {
+    // Print CPU time only once after render completes
+    if(!m_cpuTimePrinted)
+    {
+      LOGI("Rendering finished: %f ms\n", m_cpuTimer.getMilliseconds());
+      m_cpuTimePrinted = true;
     }
   }
 

@@ -15,7 +15,7 @@ project(${PROJECT_NAME})
 message(STATUS "Processing: ${PROJECT_NAME}")
 
 # Adding all sources
-file(GLOB EXE_SOURCES "src/*.cpp" "src/*.hpp" "src/*.h")
+file(GLOB EXE_SOURCES "src/*.cpp" "src/*.hpp" "src/*.h" "*.md")
 list(FILTER EXE_SOURCES EXCLUDE REGEX "dlss*")
 
 source_group("Source Files" FILES ${EXE_SOURCES})

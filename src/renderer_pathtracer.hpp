@@ -28,6 +28,7 @@
 #include <nvutils/profiler.hpp>
 #include "renderer_base.hpp"
 #include "utils.hpp"
+#include "pipeline_cache_util.hpp"
 
 // #DLSS
 #if defined(USE_DLSS)
@@ -43,7 +44,7 @@ public:
 
   enum class RenderTechnique
   {
-    Compute,
+    RayQuery,
     RayTracing
   };
 
@@ -57,20 +58,24 @@ public:
   void updateDlssResources(VkCommandBuffer cmd, Resources& resources);
   void pushDescriptorSet(VkCommandBuffer cmd, Resources& resources, VkPipelineBindPoint bindPoint) const;
   void createPipeline(Resources& resources) override;
+  void createRqPipeline(Resources& resources);
   void createRtxPipeline(Resources& resources);
   void compileShader(Resources& resources, bool fromFile = true) override;
+
 
   // Register command line parameters
   void registerParameters(nvutils::ParameterRegistry* paramReg);
 
   VkDevice                        m_device{};  // Vulkan device
   VkPipelineLayout                m_pipelineLayout{};
-  VkPipeline                      m_pipeline{};   // Ray tracing pipeline
-  shaderio::PathtracePushConstant m_pushConst{};  // Information sent to the shader
-  VkShaderEXT                     m_shader{};
+  VkPipeline                      m_rtxPipeline{};  // Ray tracing pipeline
+  VkPipeline                      m_rqPipeline{};   // Ray tracing pipeline
+  shaderio::PathtracePushConstant m_pushConst{};    // Information sent to the shader
   float                           m_sceneRadius{1.0f};
   bool                            m_autoFocus{true};  // Enable auto-focus
   VkShaderModule                  m_shaderModule{};   // Shader module for RTX
+
+  nvvk::PipelineCacheManager m_pipelineCache{};  // Pipeline cache for faster creation
 
   // Shader Binding Table (SBT)
   nvvk::Buffer                m_sbtBuffer{};   // Buffer for the Shader Binding Table
@@ -81,7 +86,11 @@ public:
   VkPhysicalDeviceRayTracingInvocationReorderPropertiesNV m_reorderProperties{
       VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_RAY_TRACING_INVOCATION_REORDER_PROPERTIES_NV};
 
-  RenderTechnique m_renderTechnique{RenderTechnique::Compute};
+  bool m_supportSER{false};
+  bool m_useSER{false};
+
+  // The default rendering technique
+  RenderTechnique m_renderTechnique{RenderTechnique::RayTracing};
 
   // Adaptive sampling for performance optimization
   void                       updateAdaptiveSampling(Resources& resources);

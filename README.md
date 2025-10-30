@@ -70,6 +70,9 @@ cmake --build build --config release
 cmake --install .
 ```
 
+> **NOTE**: In Debug mode, validation layers are enabled by default. In Release mode, they are disabled for better performance. You can turn validation off to start the application faster, e.g., `vk_gltf_renderer --vvl 0`.
+
+
 ### Draco Compression
 
 To enable Draco mesh compression, you need to enable the option CMake. In the GUI interface, you will see the option `USE_DRACO`. If you are using the command line, you can add `-DUSE_DRACO=ON` to the cmake command. This will download the Draco library and it will be included in the project.
