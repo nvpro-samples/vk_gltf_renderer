@@ -19,6 +19,7 @@
 
 #define _CRT_SECURE_NO_WARNINGS
 #include <volk.h>
+#include <unordered_set>
 
 #include "dlss_wrapper.hpp"
 
@@ -152,11 +153,50 @@ NVSDK_NGX_Result NgxContext::isDlssRRAvailable()
 
   NVSDK_NGX_FeatureRequirement requirement = {};
 
-  NVSDK_NGX_VULKAN_GetFeatureRequirements(m_initInfo.instance, m_initInfo.physicalDevice, &info, &requirement);
+  NVSDK_NGX_Result result =
+      NVSDK_NGX_VULKAN_GetFeatureRequirements(m_initInfo.instance, m_initInfo.physicalDevice, &info, &requirement);
+  if(NVSDK_NGX_FAILED(result))
+  {
+    LOGW("DLSS_RR: Failed to get feature requirements: %d\n", result);
+    return result;
+  }
 
   if(requirement.FeatureSupported != NVSDK_NGX_FeatureSupportResult_Supported)
   {
     return NVSDK_NGX_Result_FAIL_Denied;
+  }
+
+  // Check if all required device extensions are supported by the physical device
+  std::vector<VkExtensionProperties> requiredExtensions;
+  result = DlssRayReconstruction::getRequiredDeviceExtensions(m_initInfo.appInfo, m_initInfo.instance,
+                                                              m_initInfo.physicalDevice, requiredExtensions);
+  if(NVSDK_NGX_FAILED(result))
+  {
+    return result;
+  }
+
+  // Query available device extensions from the physical device
+  uint32_t availableExtensionCount = 0;
+  vkEnumerateDeviceExtensionProperties(m_initInfo.physicalDevice, nullptr, &availableExtensionCount, nullptr);
+
+  std::vector<VkExtensionProperties> availableExtensions(availableExtensionCount);
+  vkEnumerateDeviceExtensionProperties(m_initInfo.physicalDevice, nullptr, &availableExtensionCount, availableExtensions.data());
+
+  // Create a map for the lookup
+  std::unordered_set<std::string_view> availableExtNames;
+  for(const auto& available : availableExtensions)
+  {
+    availableExtNames.insert(available.extensionName);
+  }
+
+  // Check if each required extension is available
+  for(const auto& required : requiredExtensions)
+  {
+    if(availableExtNames.find(required.extensionName) == availableExtNames.end())
+    {
+      LOGW("DLSS_RR: Required device extension %s is not supported by the physical device\n", required.extensionName);
+      return NVSDK_NGX_Result_FAIL_Denied;
+    }
   }
 
   return NVSDK_NGX_Result_Success;

@@ -17,7 +17,7 @@
  * SPDX-License-Identifier: Apache-2.0
  */
 
-#define USE_NSIGHT_AFTERMATH 1
+// #define USE_NSIGHT_AFTERMATH
 
 #include <fmt/format.h>
 #include <stb/stb_image.h>
@@ -197,7 +197,7 @@ auto main(int argc, char** argv) -> int
     DlssRayReconstruction::getRequiredDeviceExtensions({}, instance, physicalDevice, extraDeviceExtensions);
     for(auto& ext : extraDeviceExtensions)
     {
-      vkSetup.deviceExtensions.push_back({.extensionName = ext.extensionName, .specVersion = ext.specVersion});
+      vkSetup.deviceExtensions.push_back({.extensionName = ext.extensionName, .required = false, .specVersion = ext.specVersion});
     }
 
     return true;
@@ -212,7 +212,6 @@ auto main(int argc, char** argv) -> int
     LOGE("Failed to initialize Vulkan context!");
     return -1;
   }
-
 
   // Application information
   appInfo.name           = fmt::format("{} ({})", nvutils::getExecutablePath().stem().string(), "Slang");

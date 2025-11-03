@@ -97,6 +97,8 @@ VkDescriptorImageInfo DlssDenoiser::getDescriptorImageInfo(shaderio::OutputImage
 
 bool DlssDenoiser::isEnabled() const
 {
+  if(m_initialized)
+    return m_settings.enable && m_dlssSupported;
   return m_settings.enable;
 }
 
@@ -174,6 +176,8 @@ void DlssDenoiser::setResource(DlssRayReconstruction::ResourceType resourceId, V
 
 void DlssDenoiser::denoise(VkCommandBuffer cmd, glm::vec2 jitter, const glm::mat4& modelView, const glm::mat4& projection, bool reset /*= false*/)
 {
+  if(!m_dlssSupported && m_initialized)
+    return;
   NVVK_DBG_SCOPE(cmd);  // <-- Helps to debug in NSight
   reset = reset || m_forceReset;
   m_dlss.cmdDenoise(cmd, m_ngx, {jitter, modelView, projection, reset});
@@ -255,4 +259,11 @@ bool DlssDenoiser::onUi(Resources& resources)
   }
 
   return changed;
+}
+
+bool DlssDenoiser::needsSizeUpdate() const
+{
+  if(!m_dlssSupported && m_initialized)
+    return false;
+  return m_sizeModeChanged;
 }

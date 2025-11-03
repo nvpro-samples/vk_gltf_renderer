@@ -88,7 +88,7 @@ public:
   VkExtent2D getRenderSize() const { return m_dlssGBuffers.getSize(); }
 
   // Check if the rendering size needs to be updated based on current settings
-  bool needsSizeUpdate() const { return m_sizeModeChanged; }
+  bool needsSizeUpdate() const;
 
   const nvvk::GBuffer& getGBuffers() { return m_dlssGBuffers; }
 
