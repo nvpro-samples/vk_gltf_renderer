@@ -82,6 +82,7 @@ private:
   bool processQueuedCommandBuffers();
 
   void clearGbuffer(VkCommandBuffer cmd);
+  void cleanupScene();  // Helper to cleanup current scene
   void compileShaders();
   void createDescriptorSets();
   void createResourceBuffers();
@@ -91,7 +92,7 @@ private:
   void silhouette(VkCommandBuffer cmd);
   void tonemap(VkCommandBuffer cmd);
   void updateNodeToRenderNodeMap();
-  void updateTextures();
+  bool updateTextures();
   void updateHdrImages();
 
   bool updateSceneChanges(VkCommandBuffer cmd, bool didAnimate);
@@ -128,6 +129,8 @@ private:
 
   nvutils::PerformanceTimer m_cpuTimer;               // CPU performance timer
   bool                      m_cpuTimePrinted{false};  // Track if CPU time has been printed
+
+  uint32_t m_maxTextures{100'000U};  // Maximum number of textures supported by the descriptor set
 
   Resources  m_resources;
   PathTracer m_pathTracer;  // Path tracer renderer

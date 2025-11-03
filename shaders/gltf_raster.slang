@@ -17,6 +17,7 @@
  * SPDX-License-Identifier: Apache-2.0
  */
 
+// NVSHADERS are under: https://github.com/nvpro-samples/nvpro_core2/tree/main/nvshaders
 #include "nvshaders/bsdf_functions.h.slang"
 #include "nvshaders/bsdf_types.h.slang"
 #include "nvshaders/gltf_scene_io.h.slang"

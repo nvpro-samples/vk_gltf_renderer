@@ -415,10 +415,8 @@ void GltfRenderer::onFileDrop(const std::filesystem::path& filename)
     if(m_busy.isBusy())
       return;
 
-    m_cmdBufferQueue = {};             // Clear the command buffer queue
-    m_resources.scene.destroy();       // Destroy the current scene
-    m_resources.selectedObject = -1;   // Reset the selected object
-    m_uiSceneGraph.setModel(nullptr);  // Reset the UI model
+    m_cmdBufferQueue = {};  // Clear the command buffer queue
+    cleanupScene();         // Cleanup current scene
     m_rasterizer.freeRecordCommandBuffer();
 
     std::thread([=, this]() {
@@ -573,9 +571,31 @@ void GltfRenderer::createScene(const std::filesystem::path& sceneFilename)
   m_resources.skyParams = {};
 
   // Need to update (push) all textures
-  updateTextures();
+  if(!updateTextures())
+  {
+    LOGE("Failed to update textures - cannot safely render scene");
+
+    // Clean up the scene we just loaded - it's unsafe to render
+    vkDeviceWaitIdle(m_device);
+    cleanupScene();
+
+    removeFromRecentFiles(filename);
+    return;
+  }
 
   addToRecentFiles(filename);
+}
+
+//--------------------------------------------------------------------------------------------------
+// Helper function to cleanup the current scene
+//
+void GltfRenderer::cleanupScene()
+{
+  m_resources.scene.destroy();
+  m_resources.sceneVk.destroy();
+  m_resources.sceneRtx.destroy();
+  m_uiSceneGraph.setModel(nullptr);
+  m_resources.selectedObject = -1;
 }
 
 //--------------------------------------------------------------------------------------------------
@@ -692,11 +712,11 @@ void GltfRenderer::createDescriptorSets()
   // Reserve 2050 textures (2000 for scene textures + 50 for other purposes like the environment)
   VkPhysicalDeviceProperties deviceProperties;
   vkGetPhysicalDeviceProperties(m_app->getPhysicalDevice(), &deviceProperties);
-  uint32_t maxTextures = std::min(10000U, deviceProperties.limits.maxDescriptorSetSampledImages - 1);
+  m_maxTextures = std::min(m_maxTextures, deviceProperties.limits.maxDescriptorSetSampledImages - 1);  // Set limits of sample textures (defaut: 100 000)
 
   // 0: Descriptor SET: all textures of the scene
   m_resources.descriptorBinding[0].addBinding(shaderio::BindingPoints::eTextures, VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER,
-                                              maxTextures, VK_SHADER_STAGE_ALL, nullptr,
+                                              m_maxTextures, VK_SHADER_STAGE_ALL, nullptr,
                                               VK_DESCRIPTOR_BINDING_UPDATE_AFTER_BIND_BIT | VK_DESCRIPTOR_BINDING_UPDATE_UNUSED_WHILE_PENDING_BIT
                                                   | VK_DESCRIPTOR_BINDING_PARTIALLY_BOUND_BIT);
   // The 2 textures are for the HDR environment map: one is the pre-integrated BRDF LUT, the other is the HDR image
@@ -764,17 +784,35 @@ void GltfRenderer::compileShaders()
 //--------------------------------------------------------------------------------------------------
 // Update the textures: this is called when the scene is loaded
 // Textures are updated in the descriptor set (0)
-void GltfRenderer::updateTextures()
+bool GltfRenderer::updateTextures()
 {
   // Now do the textures
   nvvk::WriteSetContainer write{};
   VkWriteDescriptorSet allTextures = m_resources.descriptorBinding[0].getWriteSet(shaderio::BindingPoints::eTextures);
   allTextures.dstSet               = m_resources.descriptorSet;
-  allTextures.descriptorCount      = m_resources.sceneVk.nbTextures();
-  if(allTextures.descriptorCount == 0)
-    return;
+
+  uint32_t sceneTextureCount = m_resources.sceneVk.nbTextures();
+
+  if(sceneTextureCount == 0)
+    return true;
+
+  // CRITICAL: Materials directly index into allTextures[] - if scene exceeds capacity,
+  // materials will access uninitialized descriptors causing crashes or corruption
+  if(sceneTextureCount > m_maxTextures)
+  {
+    LOGE("FATAL: Scene has %u textures but descriptor set only supports %u!", sceneTextureCount, m_maxTextures);
+    LOGE("       Materials would access invalid texture descriptors (undefined behavior).");
+    LOGE("       Solutions:");
+    LOGE("         1. Increase m_maxTextures in renderer.hpp (currently %u)", m_maxTextures);
+    LOGE("         2. Reduce scene texture count (optimize/deduplicate textures)");
+    return false;
+  }
+
+  allTextures.descriptorCount = sceneTextureCount;
+
   write.append(allTextures, m_resources.sceneVk.textures().data());
   vkUpdateDescriptorSets(m_device, write.size(), write.data(), 0, nullptr);
+  return true;
 }
 
 //--------------------------------------------------------------------------------------------------

@@ -17,6 +17,7 @@
  * SPDX-License-Identifier: Apache-2.0
  */
 
+#include <nvgui/tooltip.hpp>
 #include <nvutils/logger.hpp>
 #include <nvutils/timers.hpp>
 #include <nvvk/debug_util.hpp>
@@ -206,6 +207,13 @@ bool DlssDenoiser::onUi(Resources& resources)
 
   namespace PE = nvgui::PropertyEditor;
   PE::begin();
+  if(PE::Checkbox("Skip Transparent Surfaces", &m_useDlssTransp,
+                  "Skip transparent surfaces when collecting DLSS auxiliary data. "
+                  "Uses the first opaque/diffuse surface instead of the first hit. "
+                  "May improve denoiser quality with transparent materials, but results vary by scene."))
+  {
+    changed = true;
+  }
   if(PE::Combo("DLSS Size Mode", &currentSizeMode, sizeModes, IM_ARRAYSIZE(sizeModes)))
   {
     m_settings.sizeMode = static_cast<SizeMode>(currentSizeMode);

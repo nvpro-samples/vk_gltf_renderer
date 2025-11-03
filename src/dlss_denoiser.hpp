@@ -96,6 +96,8 @@ public:
 
   void registerParameters(nvutils::ParameterRegistry* paramReg);
 
+  bool useDlssTransparency() const { return m_useDlssTransp; }
+
 private:
   Settings m_settings{};
   bool     m_initialized = false;
@@ -121,4 +123,5 @@ private:
   VkSampler     m_linearSampler{};
   bool          m_sizeModeChanged = false;  // Track if size mode has changed
   bool          m_forceReset      = false;  // Force reset of the denoiser
+  bool          m_useDlssTransp   = false;  // DLSS_SKIP_TRANSPARENT
 };

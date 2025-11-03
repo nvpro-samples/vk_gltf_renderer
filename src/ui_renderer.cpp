@@ -559,11 +559,8 @@ void GltfRenderer::renderMenu()
   if(newScene)
   {
     vkQueueWaitIdle(m_app->getQueue(0).queue);
-    m_resources.scene.destroy();
-    m_resources.sceneVk.destroy();
-    m_resources.sceneRtx.destroy();
+    cleanupScene();
     m_resources.dirtyFlags.set(DirtyFlags::eVulkanScene);
-    m_resources.selectedObject = -1;
     m_uiSceneGraph.selectNode(-1);
   }
 

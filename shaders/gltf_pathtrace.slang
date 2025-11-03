@@ -17,6 +17,7 @@
  * SPDX-License-Identifier: Apache-2.0
  */
 
+// NVSHADERS are under: https://github.com/nvpro-samples/nvpro_core2/tree/main/nvshaders
 #include "nvshaders/functions.h.slang"
 #include "nvshaders/random.h.slang"
 #include "nvshaders/sky_functions.h.slang"
@@ -41,18 +42,21 @@
 #include "raytracer_interface.h.slang"
 
 
-// Bindings
 // clang-format off
-[[vk::push_constant]]                               ConstantBuffer<PathtracePushConstant>   pushConst;
-[[vk::binding(BindingPoints::eTextures, 0)]]        Sampler2D                               allTextures[];
-[[vk::binding(BindingPoints::eTexturesHdr, 0)]]     Sampler2D                               texturesHdr[];
-[[vk::binding(BindingPoints::eTlas, 1)]]            RaytracingAccelerationStructure         topLevelAS;
-[[vk::binding(BindingPoints::eOutImages, 1)]]       RWTexture2D<float4>                     outImages[];
+
+// Bindings
+[[vk::push_constant]]                           ConstantBuffer<PathtracePushConstant> pushConst;
+[[vk::binding(BindingPoints::eTextures, 0)]]    Sampler2D allTextures[];
+[[vk::binding(BindingPoints::eTexturesHdr, 0)]] Sampler2D texturesHdr[];
+[[vk::binding(BindingPoints::eTlas, 1)]]        RaytracingAccelerationStructure topLevelAS;
+[[vk::binding(BindingPoints::eOutImages, 1)]]   RWTexture2D<float4> outImages[];
 
 // HDR Environment
-[[vk::binding(EnvBindings::eImpSamples, 2)]]    StructuredBuffer<EnvAccel>  envSamplingData;
+[[vk::binding(EnvBindings::eImpSamples, 2)]]    StructuredBuffer<EnvAccel> envSamplingData;
 
-[[vk::constant_id(0)]]          int USE_SER;
+// Specialization constants
+[[vk::constant_id(0)]]  int USE_SER = 1;
+[[vk::constant_id(1)]]  int USE_DLSS_TRANSP = 0; // Primary surface selection mode
 
 // clang-format on
 
@@ -518,8 +522,6 @@ SampleResult pathTrace(IRaytracer raytracer, RayDesc ray, inout uint seed)
           // lighting equation (backplate), so we can return them directly.
           if(frameInfo->useSolidBackground == 1)
           {
-            //sampleResult.radiance.rgb = frameInfo->backgroundColor;
-            //return sampleResult;
             radiance = frameInfo->backgroundColor;
             break;
           }
@@ -527,9 +529,6 @@ SampleResult pathTrace(IRaytracer raytracer, RayDesc ray, inout uint seed)
           {
             float3 dir = rotate(ray.Direction, float3(0, 1, 0), -frameInfo.envRotation);
             float2 uv  = getSphericalUv(dir);  // See sampling.glsl
-            //sampleResult.radiance.xyz =
-            //    smoothHDRBlur(texturesHdr[HDR_IMAGE_INDEX], uv, frameInfo->envBlur).xyz * frameInfo->envIntensity;
-            //return sampleResult;
             radiance = smoothHDRBlur(texturesHdr[HDR_IMAGE_INDEX], uv, frameInfo->envBlur).xyz * frameInfo->envIntensity;
             break;
           }
@@ -559,8 +558,6 @@ SampleResult pathTrace(IRaytracer raytracer, RayDesc ray, inout uint seed)
         radiance += throughput * misWeight * envColor;
 
         break;
-        //sampleResult.radiance.xyz = radiance;
-        //return sampleResult;
       }
 
 
@@ -598,10 +595,14 @@ SampleResult pathTrace(IRaytracer raytracer, RayDesc ray, inout uint seed)
       if(firstRay)
       {
         float3 specularAlbedo = EnvBRDFApprox2(pbrMat.specularColor, pbrMat.roughness.x, dot(pbrMat.N, ray.Direction));
-        dlss_albedo           = float16_t3(pbrMat.baseColor.xyz);
         dlss_specularAlbedo   = float16_t3(specularAlbedo);
-        dlss_normalRoughness  = float16_t4(float16_t3(pbrMat.N), float16_t(pbrMat.roughness.x));
-        dlss_hitPosition      = ray.Origin + ray.Direction * payload.hitT;
+        // Note: for transparency hack the other information are collected AFTER BSDF sampling to know if surface is transmissive
+        if(USE_DLSS_TRANSP == 0)
+        {
+          dlss_normalRoughness = float16_t4(float16_t3(pbrMat.N), float16_t(pbrMat.roughness.x));
+          dlss_hitPosition     = hit.pos;
+          dlss_albedo          = float16_t3(pbrMat.baseColor.xyz);
+        }
       }
 
       // Keep track of the maximum roughness to prevent firefly artifacts
@@ -626,9 +627,6 @@ SampleResult pathTrace(IRaytracer raytracer, RayDesc ray, inout uint seed)
       {
         radiance += pbrMat.baseColor;
         break;
-        //sampleResult.radiance.xyz = radiance;
-        //sampleResult.radiance.a   = 1.0;
-        //return sampleResult;
       }
 
       // Apply volume attenuation
@@ -682,14 +680,7 @@ SampleResult pathTrace(IRaytracer raytracer, RayDesc ray, inout uint seed)
         ray.Direction = sampleData.k2;  // new direction
         lastSamplePdf = sampleData.pdf;
 
-        // If the ray is absorbed, then break
-        if(sampleData.event_type == BSDF_EVENT_ABSORB)
-        {
-          // Exit tracing rays, but still finish this iteration; in particular the visibility test
-          // for the light that we may have hit.
-          depth = pushConst.maxDepth;
-        }
-        else
+        if(sampleData.event_type != BSDF_EVENT_ABSORB)
         {
           // Continue path
           bool isSpecular     = (sampleData.event_type & BSDF_EVENT_IMPULSE) != 0;
@@ -705,7 +696,29 @@ SampleResult pathTrace(IRaytracer raytracer, RayDesc ray, inout uint seed)
           {
             isInside = !isInside;
           }
+          // Transparency hack: collect data after knowing if surface is transmissive
+          // Skip clear, smooth glass but keep rough/frosted transmissive materials
+          if(USE_DLSS_TRANSP == 1)
+          {
+            // Only skip glass that's both highly transmissive AND smooth
+            bool isClearGlass = (pbrMat.transmission > 0.3f) && (pbrMat.roughness.x < 0.4f);
+            if(dlss_hasData == false && !isTransmission && !isClearGlass)
+            {
+              dlss_hasData         = true;
+              dlss_albedo          = float16_t3(pbrMat.baseColor.xyz);
+              dlss_normalRoughness = float16_t4(float16_t3(pbrMat.N), float16_t(pbrMat.roughness.x));
+              dlss_hitPosition     = hit.pos;
+            }
+          }
         }
+        else if(sampleData.event_type == BSDF_EVENT_ABSORB)  // If the ray is absorbed , then break
+        {
+          // Exit tracing rays, but still finish this iteration; in particular the visibility test
+          // for the light that we may have hit.
+          depth = pushConst.maxDepth;
+        }
+
+        // End scope to free live states
       }
 
       // Extract minimal shadow ray data before scope closes (to free hit/directLight structures)
@@ -948,10 +961,10 @@ void rmissMain(inout HitPayload payload)
 [shader("miss")]
 void rmissShadow(inout ShadowPayload payload)
 {
-    // When we miss, we've passed through all surfaces along the ray.
-    // Keep the accumulated transmission - don't reset it.
-    // totalTransmission already contains the accumulated value from rahitShadow
-    payload.approxHitT = INFINITE;
+  // When we miss, we've passed through all surfaces along the ray.
+  // Keep the accumulated transmission - don't reset it.
+  // totalTransmission already contains the accumulated value from rahitShadow
+  payload.approxHitT = INFINITE;
 }
 
 //-----------------------------------------------------------------------

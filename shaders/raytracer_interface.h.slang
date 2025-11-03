@@ -20,6 +20,7 @@
 #include "get_hit.h.slang"
 #include "shaderio.h"
 
+// NVSHADERS are under: https://github.com/nvpro-samples/nvpro_core2/tree/main/nvshaders
 #include "nvshaders/constants.h.slang"
 #include "nvshaders/random.h.slang"
 

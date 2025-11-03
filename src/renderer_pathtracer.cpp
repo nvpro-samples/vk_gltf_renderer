@@ -260,7 +260,16 @@ bool PathTracer::onUIRender(Resources& resources)
 
 // DLSS section
 #if defined(USE_DLSS)
+  bool oldTransp = m_dlss->useDlssTransparency();
   changed |= m_dlss->onUi(resources);
+  if(oldTransp != m_dlss->useDlssTransparency())
+  {
+    vkDeviceWaitIdle(m_device);
+    vkDestroyPipeline(m_device, m_rtxPipeline, nullptr);
+    m_rtxPipeline = VK_NULL_HANDLE;
+    vkDestroyPipeline(m_device, m_rqPipeline, nullptr);
+    m_rqPipeline = VK_NULL_HANDLE;
+  }
 #else
   ImGui::TextDisabled("DLSS is not enabled.");
   nvsamples::HelpMarker("Define USE_DLSS in CMake to enable DLSS support.");
@@ -515,11 +524,18 @@ void PathTracer::createRqPipeline(Resources& resources)
 {
   SCOPED_TIMER(__FUNCTION__);
 
+  nvvk::Specialization specialization;
+  specialization.add(0, m_useSER ? 1 : 0);  // USE_SER
+#if USE_DLSS
+  specialization.add(1, m_dlss->useDlssTransparency() ? 1 : 0);  // USE_DLSS_TRANSP
+#endif
+
   VkPipelineShaderStageCreateInfo shaderStage{
-      .sType  = VK_STRUCTURE_TYPE_PIPELINE_SHADER_STAGE_CREATE_INFO,
-      .stage  = VK_SHADER_STAGE_COMPUTE_BIT,
-      .module = m_shaderModule,
-      .pName  = "computeMain",
+      .sType               = VK_STRUCTURE_TYPE_PIPELINE_SHADER_STAGE_CREATE_INFO,
+      .stage               = VK_SHADER_STAGE_COMPUTE_BIT,
+      .module              = m_shaderModule,
+      .pName               = "computeMain",
+      .pSpecializationInfo = specialization.getSpecializationInfo(),
   };
 
   VkComputePipelineCreateInfo cpCreateInfo{
@@ -622,7 +638,10 @@ void PathTracer::createRtxPipeline(Resources& resources)
 
   // Shader Execution Reorder (SER)
   nvvk::Specialization specialization;
-  specialization.add(0, m_useSER ? 1 : 0);
+  specialization.add(0, m_useSER ? 1 : 0);  // USE_SER
+#if USE_DLSS
+  specialization.add(1, m_dlss->useDlssTransparency() ? 1 : 0);  // USE_DLSS_TRANSP
+#endif
   stages[eRaygen].pSpecializationInfo = specialization.getSpecializationInfo();
 
 
