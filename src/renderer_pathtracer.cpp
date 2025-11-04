@@ -71,7 +71,7 @@ void PathTracer::onAttach(Resources& resources, nvvk::ProfilerGpuTimer* profiler
       (bool)(m_reorderProperties.rayTracingInvocationReorderReorderingHint & VK_RAY_TRACING_INVOCATION_REORDER_MODE_REORDER_NV) ? 1 : 0;
   m_useSER = m_supportSER;
 
-  // #DLSS - Create the DLSS denoiser
+  // #DLSS - Fast initialization: create GBuffers if hardware available
 #if defined(USE_DLSS)
   m_dlss->init(resources);
 #endif
@@ -264,6 +264,7 @@ bool PathTracer::onUIRender(Resources& resources)
   changed |= m_dlss->onUi(resources);
   if(oldTransp != m_dlss->useDlssTransparency())
   {
+    // Need to recompile the shader using the specialization constant
     vkDeviceWaitIdle(m_device);
     vkDestroyPipeline(m_device, m_rtxPipeline, nullptr);
     m_rtxPipeline = VK_NULL_HANDLE;
@@ -306,17 +307,17 @@ void PathTracer::onRender(VkCommandBuffer cmd, Resources& resources)
   int frameCount = resources.frameCount;
 
 #if defined(USE_DLSS)
-  // Lazy initialize DLSS if enabled and not yet initialized
+  // Lazy initialize DLSS NGX on first use (2-5 second delay occurs here, once)
   static uint32_t haltonIndex = 0;
   m_pushConst.useDlss         = m_dlss->isEnabled();
   if(m_pushConst.useDlss)
   {
-    // When DLSS is enabled, force numSamples to 1 and disable adaptive sampling
+    // When DLSS is enabled, force numSamples to 1
     m_pushConst.numSamples = 1;
+    frameCount             = ++haltonIndex;  // Override frame count with Halton index
 
-    frameCount = ++haltonIndex;  // Override frame count with Halton index
-    // If the initialization is successful, update the DLSS resources
-    if(m_dlss->ensureInitialized(resources) || m_dlss->needsSizeUpdate())
+    // Lazy NGX initialization (2-5s, once) OR size update triggers resource setup
+    if(m_dlss->tryInitializeNGX(resources) || m_dlss->needsSizeUpdate())
       updateDlssResources(cmd, resources);
   }
   m_pushConst.jitter = shaderio::dlssJitter(frameCount);

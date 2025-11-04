@@ -499,6 +499,14 @@ void GltfRenderer::silhouette(VkCommandBuffer cmd)
 
 
 //--------------------------------------------------------------------------------------------------
+// Set DLSS hardware/extension availability
+// This should be called early, before any DLSS initialization occurs
+void GltfRenderer::setDlssHardwareAvailability(bool available)
+{
+  m_resources.settings.dlssHardwareAvailable = available;
+}
+
+//--------------------------------------------------------------------------------------------------
 // Load the scene
 void GltfRenderer::createScene(const std::filesystem::path& sceneFilename)
 {

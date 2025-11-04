@@ -49,6 +49,13 @@ public:
     eMax
   };
 
+  enum class DlssState
+  {
+    eNotChecked,   // Haven't attempted NGX initialization yet
+    eUnavailable,  // Hardware/extensions missing or NGX initialization failed
+    eAvailable     // Fully initialized and ready to use
+  };
+
   struct Settings
   {
     bool     enable   = false;
@@ -62,11 +69,16 @@ public:
   void init(Resources& resources);
   void deinit(Resources& resources);
 
-  void initDenoiser(Resources& resources);
+  // Slow (2-5s): NGX initialization, returns true only on first successful init
+  bool tryInitializeNGX(Resources& resources);
+
   // Return the descriptor for the DLSS
   VkDescriptorImageInfo getDescriptorImageInfo(shaderio::OutputImage name) const;
 
-  // Return if the DLSS is enabled
+  // Check if DLSS hardware/NGX is available and ready
+  bool isAvailable() const;
+
+  // Return if the DLSS is enabled (user wants it AND it's available)
   bool isEnabled() const;
 
   // When the size of the rendering changes, we need to update the DLSS buffers
@@ -92,15 +104,15 @@ public:
 
   const nvvk::GBuffer& getGBuffers() { return m_dlssGBuffers; }
 
-  bool ensureInitialized(Resources& resources);
-
   void registerParameters(nvutils::ParameterRegistry* paramReg);
 
   bool useDlssTransparency() const { return m_useDlssTransp; }
 
+  DlssState getState() const { return m_state; }  // For debugging/UI
+
 private:
-  Settings m_settings{};
-  bool     m_initialized = false;
+  Settings  m_settings{};
+  DlssState m_state = DlssState::eNotChecked;
 
   // #DLSS - Wrapper for DLSS
   NgxContext            m_ngx{};
@@ -117,7 +129,6 @@ private:
   };
 
   nvvk::GBuffer m_dlssGBuffers{};  // G-Buffers: for denoising
-  bool          m_dlssSupported = false;
   VkExtent2D    m_renderingSize{};
   VkDevice      m_device{};
   VkSampler     m_linearSampler{};

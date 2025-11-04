@@ -83,6 +83,7 @@ struct Settings
   glm::vec3             infinitePlaneBaseColor = glm::vec3(0.5, 0.5, 0.5);      // Default gray color
   float                 infinitePlaneMetallic  = 0.0;                           // Default non-metallic
   float                 infinitePlaneRoughness = 0.5;                           // Default medium roughness
+  bool                  dlssHardwareAvailable  = false;  // DLSS hardware/extensions available (set at startup)
 };
 
 

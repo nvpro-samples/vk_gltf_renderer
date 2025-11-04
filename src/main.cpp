@@ -213,6 +213,25 @@ auto main(int argc, char** argv) -> int
     return -1;
   }
 
+  // Check that DLSS extensions are enabled
+  bool dlssHardwareAvailable = false;  // Default: DLSS not available
+#if USE_DLSS
+  dlssHardwareAvailable = true;
+  for(auto& dlssExt : extraDeviceExtensions)
+  {
+    dlssHardwareAvailable &= vkContext.hasExtensionEnabled(dlssExt.extensionName);
+  }
+
+  if(!dlssHardwareAvailable)
+  {
+    LOGW("DLSS: Required Vulkan extensions not available - DLSS will be disabled\n");
+  }
+
+  // Set DLSS hardware availability based on extension check
+  elemGltfRenderer->setDlssHardwareAvailability(dlssHardwareAvailable);
+#endif
+
+
   // Application information
   appInfo.name           = fmt::format("{} ({})", nvutils::getExecutablePath().stem().string(), "Slang");
   appInfo.instance       = vkContext.getInstance();

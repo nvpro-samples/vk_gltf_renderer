@@ -65,6 +65,7 @@ public:
   void                                        createHDR(const std::filesystem::path& hdrFilename);
   std::shared_ptr<nvutils::CameraManipulator> getCameraManipulator() { return m_cameraManip; }
   void                                        registerRecentFilesHandler();
+  void setDlssHardwareAvailability(bool available);  // Set DLSS hardware/extension availability
 
 private:
   void onAttach(nvapp::Application* app) override;

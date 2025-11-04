@@ -140,8 +140,12 @@ NVSDK_NGX_Result NgxContext::deinit()
 NVSDK_NGX_Result NgxContext::isDlssRRAvailable()
 {
   if(m_ngxParams == nullptr)
+  {
+    LOGW("DLSS_RR: NGX parameters not initialized\n");
     return NVSDK_NGX_Result_Fail;
+  }
 
+  // Query NGX for DLSS Ray Reconstruction feature support
   NVSDK_NGX_FeatureCommonInfo    commonInfo = {};
   NVSDK_NGX_FeatureDiscoveryInfo info       = {};
   info.SDKVersion                           = NVSDK_NGX_Version_API;
@@ -157,46 +161,14 @@ NVSDK_NGX_Result NgxContext::isDlssRRAvailable()
       NVSDK_NGX_VULKAN_GetFeatureRequirements(m_initInfo.instance, m_initInfo.physicalDevice, &info, &requirement);
   if(NVSDK_NGX_FAILED(result))
   {
-    LOGW("DLSS_RR: Failed to get feature requirements: %d\n", result);
+    LOGW("DLSS_RR: Failed to query feature requirements from NGX (error: %d)\n", result);
     return result;
   }
 
   if(requirement.FeatureSupported != NVSDK_NGX_FeatureSupportResult_Supported)
   {
+    LOGW("DLSS_RR: Feature not supported by GPU/driver\n");
     return NVSDK_NGX_Result_FAIL_Denied;
-  }
-
-  // Check if all required device extensions are supported by the physical device
-  std::vector<VkExtensionProperties> requiredExtensions;
-  result = DlssRayReconstruction::getRequiredDeviceExtensions(m_initInfo.appInfo, m_initInfo.instance,
-                                                              m_initInfo.physicalDevice, requiredExtensions);
-  if(NVSDK_NGX_FAILED(result))
-  {
-    return result;
-  }
-
-  // Query available device extensions from the physical device
-  uint32_t availableExtensionCount = 0;
-  vkEnumerateDeviceExtensionProperties(m_initInfo.physicalDevice, nullptr, &availableExtensionCount, nullptr);
-
-  std::vector<VkExtensionProperties> availableExtensions(availableExtensionCount);
-  vkEnumerateDeviceExtensionProperties(m_initInfo.physicalDevice, nullptr, &availableExtensionCount, availableExtensions.data());
-
-  // Create a map for the lookup
-  std::unordered_set<std::string_view> availableExtNames;
-  for(const auto& available : availableExtensions)
-  {
-    availableExtNames.insert(available.extensionName);
-  }
-
-  // Check if each required extension is available
-  for(const auto& required : requiredExtensions)
-  {
-    if(availableExtNames.find(required.extensionName) == availableExtNames.end())
-    {
-      LOGW("DLSS_RR: Required device extension %s is not supported by the physical device\n", required.extensionName);
-      return NVSDK_NGX_Result_FAIL_Denied;
-    }
   }
 
   return NVSDK_NGX_Result_Success;
@@ -209,7 +181,8 @@ bool DlssRayReconstruction::querySupport(const NgxContext& context)
   uint32_t minDriverVersionMajor = ~0u;
   uint32_t minDriverVersionMinor = ~0u;
 
-  // Check if DLSS_D (which is the DLSS_RR RayReconstruction Denoiser) is available.
+  // Query NGX parameters for DLSS Ray Reconstruction (DLSS_D/DLSS_RR) support
+  // This checks driver version compatibility
   NVSDK_NGX_Result resUpdatedDriver =
       context.getNgxParams()->Get(NVSDK_NGX_Parameter_SuperSamplingDenoising_NeedsUpdatedDriver, &needsUpdatedDriver);
   NVSDK_NGX_Result resVersionMajor =
@@ -217,30 +190,33 @@ bool DlssRayReconstruction::querySupport(const NgxContext& context)
   NVSDK_NGX_Result resVersionMinor =
       context.getNgxParams()->Get(NVSDK_NGX_Parameter_SuperSamplingDenoising_MinDriverVersionMinor, &minDriverVersionMinor);
 
-  if(NVSDK_NGX_SUCCEED(resUpdatedDriver))
+  if(NVSDK_NGX_SUCCEED(resUpdatedDriver) && needsUpdatedDriver)
   {
-    if(needsUpdatedDriver)
+    // Driver update is required
+    if(NVSDK_NGX_SUCCEED(resVersionMajor) && NVSDK_NGX_SUCCEED(resVersionMinor))
     {
-      // NVIDIA DLSS cannot be loaded due to outdated driver.
-      if(NVSDK_NGX_SUCCEED(resVersionMajor) && NVSDK_NGX_SUCCEED(resVersionMinor))
-      {
-        // Min Driver Version required: minDriverVersionMajor.minDriverVersionMinor
-        LOGW("DLSS_RR: Minimum driver version required: %d.%d\n", minDriverVersionMajor, minDriverVersionMinor);
-        return false;
-      }
+      LOGW("DLSS_RR: Driver update required - minimum version: %d.%d\n", minDriverVersionMajor, minDriverVersionMinor);
     }
+    else
+    {
+      LOGW("DLSS_RR: Driver update required (version information unavailable)\n");
+    }
+    return false;
   }
 
+  // Check if DLSS Ray Reconstruction is available on this hardware/platform
   NVSDK_NGX_Result resDlssSupported = context.getNgxParams()->Get(NVSDK_NGX_Parameter_SuperSamplingDenoising_Available, &supported);
   if(NVSDK_NGX_FAILED(resDlssSupported) || !supported)
   {
-    LOGW("DLSS_RR: not available on this hardware/platform\n");
+    LOGW("DLSS_RR: Not available on this GPU/platform\n");
     return false;
   }
+
+  // Check if feature initialization is allowed for this application
   resDlssSupported = context.getNgxParams()->Get(NVSDK_NGX_Parameter_SuperSamplingDenoising_FeatureInitResult, &supported);
   if(NVSDK_NGX_FAILED(resDlssSupported) || !supported)
   {
-    LOGW("DLSS_RR: denied for this application\n");
+    LOGW("DLSS_RR: Feature initialization denied for this application\n");
     return false;
   }
 

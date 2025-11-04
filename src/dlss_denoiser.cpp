@@ -25,50 +25,61 @@
 
 #include "dlss_denoiser.hpp"
 
-bool DlssDenoiser::ensureInitialized(Resources& resources)
-{
-  if(!m_initialized)
-  {
-    initDenoiser(resources);
-    return true;
-  }
-  return false;
-}
-
 void DlssDenoiser::registerParameters(nvutils::ParameterRegistry* paramReg)
 {
   paramReg->add({"dlssEnable", "DLSS Denoiser: Enable DLSS denoiser"}, &m_settings.enable);
 }
 
+//--------------------------------------------------------------------------------------------------
+// Initialization, not actual creation - called at PathTracer startup
+// See also tryInitializeNGX() for expensive NGX init
 void DlssDenoiser::init(Resources& resources)
 {
+  // Early exit if hardware/extensions not available (already logged in main.cpp)
+  if(!resources.settings.dlssHardwareAvailable)
+  {
+    m_state = DlssState::eUnavailable;
+    return;  // Don't create GBuffers if DLSS will never work
+  }
 
+  // Create GBuffers (fast operation - only done if hardware available)
   resources.samplerPool.acquireSampler(m_linearSampler);
-  // G-Buffer
   m_dlssGBuffers.init({.allocator      = &resources.allocator,
                        .colorFormats   = m_bufferInfos,
                        .imageSampler   = m_linearSampler,
                        .descriptorPool = resources.descriptorPool});
+
+  // State remains eNotChecked - NGX initialization will be attempted on first use
 }
 
+//--------------------------------------------------------------------------------------------------
 void DlssDenoiser::deinit(Resources& resources)
 {
-  resources.samplerPool.releaseSampler(m_linearSampler);
-  m_dlssGBuffers.deinit();
-  m_dlss.deinit();
-  m_ngx.deinit();
-  m_initialized = false;
+  if(m_state != DlssState::eUnavailable)
+  {
+    resources.samplerPool.releaseSampler(m_linearSampler);
+    m_dlssGBuffers.deinit();
+    m_dlss.deinit();
+    m_ngx.deinit();
+  }
+  m_state = DlssState::eNotChecked;
 }
 
-void DlssDenoiser::initDenoiser(Resources& resources)
+//--------------------------------------------------------------------------------------------------
+// Expensive NGX initialization (2-5 seconds) - lazy called on first DLSS use
+// Returns true ONLY on first successful initialization (triggers resource setup)
+bool DlssDenoiser::tryInitializeNGX(Resources& resources)
 {
-  if(m_initialized)
-    return;
-  SCOPED_TIMER("Initializing DLSS Denoiser");
+  // Already checked?
+  if(m_state != DlssState::eNotChecked)
+    return false;  // Return false if already initialized (not first time)
+
+  SCOPED_TIMER("DLSS NGX Initialization (may take 2-5 seconds)");
+  LOGI("DLSS: Starting NGX initialization (this may take a few seconds)...\n");
 
   m_device = resources.allocator.getDevice();
 
-  // #DLSS - Create the DLSS
+  // #DLSS - Initialize NGX (EXPENSIVE: 2-5 seconds)
   NgxContext::InitInfo ngxInitInfo{
       .instance       = resources.instance,
       .physicalDevice = resources.allocator.getPhysicalDevice(),
@@ -77,16 +88,25 @@ void DlssDenoiser::initDenoiser(Resources& resources)
   // ngxInitInfo.loggingLevel = NVSDK_NGX_LOGGING_LEVEL_VERBOSE;
 
   NVSDK_NGX_Result ngxResult = m_ngx.init(ngxInitInfo);
-  if(ngxResult == NVSDK_NGX_Result_Success)
+  if(ngxResult != NVSDK_NGX_Result_Success)
   {
-    m_dlssSupported = (m_ngx.isDlssRRAvailable() == NVSDK_NGX_Result_Success);
+    LOGW("DLSS: NGX initialization failed (error: %d) - DLSS disabled\n", ngxResult);
+    m_state = DlssState::eUnavailable;
+    return false;
   }
 
-  if(!m_dlssSupported)
+  // Check DLSS Ray Reconstruction support
+  if(m_ngx.isDlssRRAvailable() != NVSDK_NGX_Result_Success)
   {
-    LOGW("NGX init failed: %d - DLSS unsupported\n", ngxResult);
+    LOGW("DLSS: Ray Reconstruction not available - DLSS disabled\n");
+    m_state = DlssState::eUnavailable;
+    return false;
   }
-  m_initialized = true;
+
+  // Success!
+  m_state = DlssState::eAvailable;
+  LOGI("DLSS: Successfully initialized and ready\n");
+  return true;
 }
 
 
@@ -95,16 +115,28 @@ VkDescriptorImageInfo DlssDenoiser::getDescriptorImageInfo(shaderio::OutputImage
   return m_dlssGBuffers.getDescriptorImageInfo(name);
 }
 
+//--------------------------------------------------------------------------------------------------
+bool DlssDenoiser::isAvailable() const
+{
+  return m_state == DlssState::eAvailable;
+}
+
+//--------------------------------------------------------------------------------------------------
 bool DlssDenoiser::isEnabled() const
 {
-  if(m_initialized)
-    return m_settings.enable && m_dlssSupported;
-  return m_settings.enable;
+  // Before NGX initialization attempt, return user's setting (allows lazy init trigger)
+  if(m_state == DlssState::eNotChecked)
+    return m_settings.enable;
+
+  // After NGX check, DLSS is enabled only if:
+  // 1. User has enabled it in settings
+  // 2. NGX initialization succeeded
+  return m_settings.enable && (m_state == DlssState::eAvailable);
 }
 
 VkExtent2D DlssDenoiser::updateSize(VkCommandBuffer cmd, VkExtent2D size)
 {
-  if(!m_dlssSupported || !m_initialized)
+  if(m_state != DlssState::eAvailable)
     return size;
 
   // Query the supported sizes
@@ -152,7 +184,7 @@ VkExtent2D DlssDenoiser::updateSize(VkCommandBuffer cmd, VkExtent2D size)
 
 void DlssDenoiser::setResources()
 {
-  if(!m_dlssSupported || !m_initialized)
+  if(m_state != DlssState::eAvailable)
     return;
 
   auto dlssResourceFromGBufTexture = [&](DlssRayReconstruction::ResourceType resource, shaderio::OutputImage gbufIndex) {
@@ -176,7 +208,7 @@ void DlssDenoiser::setResource(DlssRayReconstruction::ResourceType resourceId, V
 
 void DlssDenoiser::denoise(VkCommandBuffer cmd, glm::vec2 jitter, const glm::mat4& modelView, const glm::mat4& projection, bool reset /*= false*/)
 {
-  if(!m_dlssSupported && m_initialized)
+  if(m_state != DlssState::eAvailable)
     return;
   NVVK_DBG_SCOPE(cmd);  // <-- Helps to debug in NSight
   reset = reset || m_forceReset;
@@ -188,21 +220,29 @@ bool DlssDenoiser::onUi(Resources& resources)
 {
   bool changed = false;
 
-  if(!m_dlssSupported && m_initialized)
+  // Check if DLSS is unavailable (hardware missing or NGX init failed)
+  if(!resources.settings.dlssHardwareAvailable || m_state == DlssState::eUnavailable)
   {
-    ImGui::Text("DLSS is not available");
+    ImGui::BeginDisabled();
+    bool dummyEnable = false;
+    ImGui::Checkbox("Enable DLSS", &dummyEnable);
+    ImGui::EndDisabled();
+    ImGui::SameLine();
+
+    // Show appropriate reason
+    const char* reason = !resources.settings.dlssHardwareAvailable ? "(Hardware/extensions not available)" : "(NGX initialization failed)";
+    ImGui::TextDisabled("%s", reason);
     return changed;
   }
 
+  // Note: If eNotChecked, user can still enable - lazy init will happen on first render
   if(ImGui::Checkbox("Enable DLSS", &m_settings.enable))
   {
     m_forceReset = true;  // Force a reset when enabling/disabling DLSS
     changed      = true;
   }
-  if(!m_initialized)
-    return changed;
 
-  if(!m_settings.enable)
+  if(!m_settings.enable || m_state != DlssState::eAvailable)
     return changed;
 
   // Size mode selection
@@ -263,7 +303,7 @@ bool DlssDenoiser::onUi(Resources& resources)
 
 bool DlssDenoiser::needsSizeUpdate() const
 {
-  if(!m_dlssSupported && m_initialized)
+  if(m_state != DlssState::eAvailable)
     return false;
   return m_sizeModeChanged;
 }
