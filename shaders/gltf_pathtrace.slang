@@ -17,6 +17,11 @@
  * SPDX-License-Identifier: Apache-2.0
  */
 
+#ifndef AVAILABLE_SER
+#define AVAILABLE_SER 1
+#endif
+
+
 // NVSHADERS are under: https://github.com/nvpro-samples/nvpro_core2/tree/main/nvshaders
 #include "nvshaders/functions.h.slang"
 #include "nvshaders/random.h.slang"

@@ -59,7 +59,6 @@ void PathTracer::onAttach(Resources& resources, nvvk::ProfilerGpuTimer* profiler
   // Create pipeline cache for faster pipeline creation
   m_pipelineCache.init(m_device, "pipeline_cache.bin");
 
-  compileShader(resources, false);
 
   // Requesting ray tracing properties
   VkPhysicalDeviceProperties2 prop2{VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_PROPERTIES_2};
@@ -70,6 +69,9 @@ void PathTracer::onAttach(Resources& resources, nvvk::ProfilerGpuTimer* profiler
   m_supportSER =
       (bool)(m_reorderProperties.rayTracingInvocationReorderReorderingHint & VK_RAY_TRACING_INVOCATION_REORDER_MODE_REORDER_NV) ? 1 : 0;
   m_useSER = m_supportSER;
+
+  // If SER is not supported, force recompiling without SER
+  compileShader(resources, (m_supportSER == true) ? false : true);
 
   // #DLSS - Fast initialization: create GBuffers if hardware available
 #if defined(USE_DLSS)
@@ -107,7 +109,6 @@ void PathTracer::onDetach(Resources& resources)
   m_dlss->deinit(resources);
 #endif  //  USE_DLSS
   vkDestroyPipelineLayout(m_device, m_pipelineLayout, nullptr);
-  //vkDestroyShaderEXT(m_device, m_shader, nullptr);
   vkDestroyShaderModule(m_device, m_shaderModule, nullptr);
   vkDestroyPipeline(m_device, m_rtxPipeline, nullptr);
   vkDestroyPipeline(m_device, m_rqPipeline, nullptr);
@@ -719,6 +720,15 @@ void PathTracer::compileShader(Resources& resources, bool fromFile)
   if(fromFile)
   {
     SCOPED_TIMER("Slang compile from file");
+
+    resources.slangCompiler.clearMacros();
+    std::vector<std::pair<std::string, std::string>> macros = {
+        {"AVAILABLE_SER", std::to_string(m_supportSER)},
+        // {"USE_DLSS_TRANSP", std::to_string(m_dlss->useDlssTransparency())},
+    };
+    for(const auto& [k, v] : macros)
+      resources.slangCompiler.addMacro({k.c_str(), v.c_str()});
+
     if(resources.slangCompiler.compileFile("gltf_pathtrace.slang"))
     {
       shaderInfo.codeSize = resources.slangCompiler.getSpirvSize();

@@ -173,7 +173,7 @@ struct TraditionalRaytracer : IRaytracer
   void Trace(RayDesc ray, inout HitPayload payload, inout uint seed)
   {
     payload.seed = seed;
-    if(USE_SER == 1)
+    if(USE_SER == 1 && AVAILABLE_SER == 1)
     {
       HitObject hitObj = HitObject::TraceRay(topLevelAS, RAY_FLAG_CULL_BACK_FACING_TRIANGLES, 0xFF, 0, 0, 0, ray, payload);
 
@@ -227,7 +227,7 @@ struct TraditionalRaytracer : IRaytracer
     ShadowPayload shadowPayload = {};
     shadowPayload.seed          = seed;
 
-    if(USE_SER == 1)
+    if(USE_SER == 1 && AVAILABLE_SER == 1)
     {
       HitObject hitObj = HitObject::TraceRay(topLevelAS, RAY_FLAG_NONE, 0xFF, 1, 0, 1, ray, shadowPayload);
 
