@@ -53,6 +53,55 @@ enum class RenderingMode
   eRasterizer
 };
 
+enum class DisplayBuffer
+{
+  eRendered,         // Final rendered image
+  eAlbedo,           // DLSS Albedo
+  eSpecAlbedo,       // DLSS Specular Albedo
+  eNormalRoughness,  // DLSS Normal/Roughness
+  eMotionVectors,    // DLSS Motion
+  eDepth,            // DLSS Depth
+};
+
+// Utility functions for bidirectional mapping between DisplayBuffer and OutputImage enums
+constexpr inline shaderio::OutputImage displayBufferToOutputImage(DisplayBuffer buffer)
+{
+  switch(buffer)
+  {
+    case DisplayBuffer::eAlbedo:
+      return shaderio::eDlssAlbedo;
+    case DisplayBuffer::eSpecAlbedo:
+      return shaderio::eDlssSpecAlbedo;
+    case DisplayBuffer::eNormalRoughness:
+      return shaderio::eDlssNormalRoughness;
+    case DisplayBuffer::eMotionVectors:
+      return shaderio::eDlssMotion;
+    case DisplayBuffer::eDepth:
+      return shaderio::eDlssDepth;
+    default:
+      return shaderio::eResultImage;
+  }
+}
+
+constexpr inline DisplayBuffer outputImageToDisplayBuffer(shaderio::OutputImage image)
+{
+  switch(image)
+  {
+    case shaderio::eDlssAlbedo:
+      return DisplayBuffer::eAlbedo;
+    case shaderio::eDlssSpecAlbedo:
+      return DisplayBuffer::eSpecAlbedo;
+    case shaderio::eDlssNormalRoughness:
+      return DisplayBuffer::eNormalRoughness;
+    case shaderio::eDlssMotion:
+      return DisplayBuffer::eMotionVectors;
+    case shaderio::eDlssDepth:
+      return DisplayBuffer::eDepth;
+    default:
+      return DisplayBuffer::eRendered;
+  }
+}
+
 enum DirtyFlags
 {
   eVulkanScene,       // When the Vulkan geometry buffers need to be updated
@@ -84,6 +133,7 @@ struct Settings
   float                 infinitePlaneMetallic  = 0.0;                           // Default non-metallic
   float                 infinitePlaneRoughness = 0.5;                           // Default medium roughness
   bool                  dlssHardwareAvailable  = false;  // DLSS hardware/extensions available (set at startup)
+  DisplayBuffer         displayBuffer          = DisplayBuffer::eRendered;  // Which buffer to display in viewport
 };
 
 

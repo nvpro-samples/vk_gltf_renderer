@@ -93,6 +93,11 @@
 
 extern nvutils::ProfilerManager g_profilerManager;  // #PROFILER
 
+namespace {
+// Background clear color used when no scene is loaded or to show DLSS render resolution borders
+constexpr VkClearColorValue kBackgroundClearColor = {{0.17f, 0.21f, 0.25f, 1.f}};
+}  // namespace
+
 // The constructor registers the parameters that can be set from the command line
 GltfRenderer::GltfRenderer(nvutils::ParameterRegistry* paramReg)
 {
@@ -464,14 +469,43 @@ void GltfRenderer::tonemap(VkCommandBuffer cmd)
   NVVK_DBG_SCOPE(cmd);  // <-- Helps to debug in NSight
   auto timerSection = m_profilerGpuTimer.cmdFrameSection(cmd, __FUNCTION__);
 
-  // When debug method is not none, the tonemapper should do nothing to visualize the data
+  // Select which buffer to tonemap based on user selection
+  VkDescriptorImageInfo inputBuffer      = m_resources.gBuffers.getDescriptorImageInfo(Resources::eImgRendered);
+  VkExtent2D            gbufSize         = m_resources.gBuffers.getSize();
+  bool                  usingGuideBuffer = false;
+
+  // Check if we want to display a DLSS guide buffer (only for pathtracer with DLSS enabled)
+  if(m_resources.settings.renderSystem == RenderingMode::ePathtracer && m_resources.settings.displayBuffer != DisplayBuffer::eRendered)
+  {
+#if defined(USE_DLSS)
+    const DlssDenoiser* dlss = m_pathTracer.getDlssDenoiser();
+    if(dlss && dlss->isEnabled())
+    {
+      shaderio::OutputImage dlssBuffer = displayBufferToOutputImage(m_resources.settings.displayBuffer);
+      inputBuffer                      = dlss->getDescriptorImageInfo(dlssBuffer);
+      usingGuideBuffer                 = true;
+      gbufSize                         = dlss->getRenderSize();
+
+      // Clear output image since guide buffer may be smaller than display size
+      // Use distinct color to visually show the DLSS render resolution vs display resolution
+      VkImageSubresourceRange range = {.aspectMask = VK_IMAGE_ASPECT_COLOR_BIT, .levelCount = 1, .layerCount = 1};
+      vkCmdClearColorImage(cmd, m_resources.gBuffers.getColorImage(Resources::eImgTonemapped), VK_IMAGE_LAYOUT_GENERAL,
+                           &kBackgroundClearColor, 1, &range);
+      // Barrier: clear must complete before tonemapper compute shader runs
+      nvvk::cmdMemoryBarrier(cmd, VK_PIPELINE_STAGE_2_CLEAR_BIT, VK_PIPELINE_STAGE_2_COMPUTE_SHADER_BIT,
+                             VK_ACCESS_2_TRANSFER_WRITE_BIT, VK_ACCESS_2_SHADER_WRITE_BIT);
+    }
+#endif
+  }
+
+  // Disable tonemapping for debug buffers or guide buffers (display raw values)
   shaderio::TonemapperData tonemapperData = m_resources.tonemapperData;
-  if(m_resources.settings.debugMethod != shaderio::DebugMethod::eNone)
+  if(m_resources.settings.debugMethod != shaderio::DebugMethod::eNone || usingGuideBuffer)
   {
     tonemapperData.isActive = 0;
   }
-  m_resources.tonemapper.runCompute(cmd, m_resources.gBuffers.getSize(), tonemapperData,
-                                    m_resources.gBuffers.getDescriptorImageInfo(Resources::eImgRendered),
+
+  m_resources.tonemapper.runCompute(cmd, gbufSize, tonemapperData, inputBuffer,
                                     m_resources.gBuffers.getDescriptorImageInfo(Resources::eImgTonemapped));
 
   // Memory barrier to ensure compute shader writes are complete before fragment shader reads
@@ -678,10 +712,9 @@ void GltfRenderer::createVulkanScene()
 // Clear the G-Buffer
 void GltfRenderer::clearGbuffer(VkCommandBuffer cmd)
 {
-  const VkClearColorValue clearValue = {{0.17f, 0.21f, 0.25f, 1.f}};
-  VkImageSubresourceRange range      = {.aspectMask = VK_IMAGE_ASPECT_COLOR_BIT, .levelCount = 1, .layerCount = 1};
+  VkImageSubresourceRange range = {.aspectMask = VK_IMAGE_ASPECT_COLOR_BIT, .levelCount = 1, .layerCount = 1};
   vkCmdClearColorImage(cmd, m_resources.gBuffers.getColorImage(Resources::eImgTonemapped), VK_IMAGE_LAYOUT_GENERAL,
-                       &clearValue, 1, &range);
+                       &kBackgroundClearColor, 1, &range);
 
   // Ensure the clear operation completes before any subsequent reads from this image
   nvvk::cmdMemoryBarrier(cmd, VK_PIPELINE_STAGE_2_CLEAR_BIT, VK_PIPELINE_STAGE_2_FRAGMENT_SHADER_BIT,

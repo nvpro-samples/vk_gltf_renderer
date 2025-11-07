@@ -256,7 +256,6 @@ void GltfRenderer::renderUI()
       }
       ImGui::Separator();
 
-
       if(headerManager.beginHeader("Environment"))
       {
         if(PE::begin())

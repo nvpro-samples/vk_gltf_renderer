@@ -258,27 +258,59 @@ bool DlssDenoiser::onUi(Resources& resources)
   {
     changed = true;
   }
+  bool showGuideImages = true;
   if(PE::Combo("DLSS Size Mode", &currentSizeMode, sizeModes, IM_ARRAYSIZE(sizeModes)))
   {
     m_settings.sizeMode = static_cast<SizeMode>(currentSizeMode);
-    m_sizeModeChanged   = true;  // Mark that size mode has changed
-    changed             = true;  // Mark that changes were made
+    m_sizeModeChanged   = true;   // Mark that size mode has changed
+    changed             = true;   // Mark that changes were made
+    showGuideImages     = false;  // Hide guide images when size mode changes (avoid displaying deleted images)
   }
   PE::end();
 
   ImGui::Text("Current Resolution: %d x %d", m_renderingSize.width, m_renderingSize.height);
 
-
-  ImVec2 tumbnailSize = {100 * m_dlssGBuffers.getAspectRatio(), 100};
-  int    m_showBuffer = -1;
-  auto   showBuffer   = [&](const char* name, shaderio::OutputImage buffer) {
-    ImGui::Text("%s", name);
-    if(ImGui::ImageButton(name, ImTextureID(m_dlssGBuffers.getDescriptorSet(buffer)), tumbnailSize))
-      m_showBuffer = buffer;
-  };
-
-  if(ImGui::CollapsingHeader("Guide Images"))
+  if(ImGui::CollapsingHeader("Guide Images") && showGuideImages)
   {
+    ImGui::TextWrapped("Click on a thumbnail to view it in the viewport. Click again to toggle back to rendered image.");
+    ImGui::Spacing();
+
+    ImVec2 thumbnailSize = {100 * m_dlssGBuffers.getAspectRatio(), 100};
+
+    // Clickable thumbnail with toggle behavior
+    auto showBuffer = [&](const char* name, shaderio::OutputImage buffer) {
+      DisplayBuffer bufferType = outputImageToDisplayBuffer(buffer);
+      bool          isActive   = (resources.settings.displayBuffer == bufferType);
+
+      // Highlight active buffer with green border
+      if(isActive)
+      {
+        ImGui::PushStyleColor(ImGuiCol_Border, ImVec4(0.0f, 1.0f, 0.0f, 1.0f));
+        ImGui::PushStyleVar(ImGuiStyleVar_FrameBorderSize, 3.0f);
+      }
+
+      ImGui::Text("%s%s", name, isActive ? " (Active)" : "");
+      if(ImGui::ImageButton(name, ImTextureID(m_dlssGBuffers.getDescriptorSet(buffer)), thumbnailSize))
+      {
+        // Toggle: if already showing this buffer, go back to rendered; otherwise show this buffer
+        if(resources.settings.displayBuffer == bufferType)
+        {
+          resources.settings.displayBuffer = DisplayBuffer::eRendered;
+        }
+        else
+        {
+          resources.settings.displayBuffer = bufferType;
+        }
+        changed = true;
+      }
+
+      if(isActive)
+      {
+        ImGui::PopStyleVar();
+        ImGui::PopStyleColor();
+      }
+    };
+
     if(ImGui::BeginTable("thumbnails", 2))
     {
       ImGui::TableNextRow();

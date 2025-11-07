@@ -142,5 +142,7 @@ public:
   // #DLSS - Implementation of the DLSS denoiser
 #if defined(USE_DLSS)
   std::unique_ptr<DlssDenoiser> m_dlss;
+  DlssDenoiser*                 getDlssDenoiser() { return m_dlss.get(); }
+  const DlssDenoiser*           getDlssDenoiser() const { return m_dlss.get(); }
 #endif
 };
