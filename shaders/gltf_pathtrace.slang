@@ -33,11 +33,11 @@
 #include "nvshaders/gltf_vertex_access.h.slang"
 #include "nvshaders/hdr_env_sampling.h.slang"
 #include "nvshaders/light_contrib.h.slang"
+#include "nvshaders/normal_compress.h.slang"
 #include "nvshaders/pbr_ggx_microfacet.h.slang"
 #include "nvshaders/pbr_material_eval.h.slang"
 #include "nvshaders/ray_utils.h.slang"
 #include "nvshaders/sample_blur.h.slang"
-
 
 #include "shaderio.h"
 #include "get_hit.h.slang"
@@ -602,7 +602,7 @@ SampleResult pathTrace(IRaytracer raytracer, RayDesc ray, inout uint seed)
         float3 specularAlbedo = EnvBRDFApprox2(pbrMat.specularColor, pbrMat.roughness.x, dot(pbrMat.N, ray.Direction));
         dlss_specularAlbedo   = float16_t3(specularAlbedo);
         // Note: for transparency hack the other information are collected AFTER BSDF sampling to know if surface is transmissive
-        if(USE_DLSS_TRANSP == 0)
+        if(USE_DLSS_TRANSP == 0 || pushConst.useOptixDenoiser == 1)
         {
           dlss_normalRoughness = float16_t4(float16_t3(pbrMat.N), float16_t(pbrMat.roughness.x));
           dlss_hitPosition     = hit.pos;
@@ -703,7 +703,7 @@ SampleResult pathTrace(IRaytracer raytracer, RayDesc ray, inout uint seed)
           }
           // Transparency hack: collect data after knowing if surface is transmissive
           // Skip clear, smooth glass but keep rough/frosted transmissive materials
-          if(USE_DLSS_TRANSP == 1)
+          if(USE_DLSS_TRANSP == 1 && pushConst.useOptixDenoiser == 0)
           {
             // Only skip glass that's both highly transmissive AND smooth
             bool isClearGlass = (pbrMat.transmission > 0.3f) && (pbrMat.roughness.x < 0.4f);
@@ -884,6 +884,17 @@ void processPixel(IRaytracer raytracer, float2 samplePos, float2 imageSize)
     outImages[int(OutputImage::eDlssNormalRoughness)][int2(samplePos)] = sampleResult.dlssOutput.normalRoughness;
     outImages[int(OutputImage::eDlssAlbedo)][int2(samplePos)]          = sampleResult.dlssOutput.albedo;
     outImages[int(OutputImage::eDlssSpecAlbedo)][int2(samplePos)] = float4(sampleResult.dlssOutput.specularAlbedo.xyz, 1.0f);
+  }
+
+  if(pushConst.useOptixDenoiser == 1)
+  {
+    // Transform normal from world space to camera space for OptiX denoiser
+    // OptiX requires normals in camera space (right-handed, -Z forward, Y up, X right)
+    float3 worldNormal   = sampleResult.dlssOutput.normalRoughness.xyz;
+    float3 cameraNormal  = normalize(mul(float3x3(pushConst.frameInfo.viewMatrix), worldNormal));
+    uint   normalEncoded = compressUnitVec(cameraNormal);
+    outImages[int(OutputImage::eOptixAlbedoNormal)][int2(samplePos)] =
+        float4(sampleResult.dlssOutput.albedo.xyz, asfloat(normalEncoded));
   }
 }
 

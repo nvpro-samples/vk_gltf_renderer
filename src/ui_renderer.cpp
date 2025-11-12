@@ -42,7 +42,8 @@ void GltfRenderer::mouseClickedInViewport()
   if(!ImGui::IsWindowHovered(ImGuiFocusedFlags_RootWindow))
     return;
 
-  if(!m_resources.scene.valid())
+  // Do not pick if the scene is not valid or the renderer is busy
+  if(!m_resources.scene.valid() || m_busy.isBusy())
   {
     return;
   }
@@ -400,7 +401,7 @@ void GltfRenderer::renderUI()
           ImGui::LogText("Render Nodes: %zu\n", m_resources.scene.getRenderNodes().size());
           ImGui::LogText("Render Primitives: %zu\n", m_resources.scene.getNumRenderPrimitives());
           ImGui::LogText("Materials: %zu\n", tiny.materials.size());
-          ImGui::LogText("Triangles: %zu\n", m_resources.scene.getNumTriangles());
+          ImGui::LogText("Triangles: %d\n", m_resources.scene.getNumTriangles());
           ImGui::LogText("Lights: %zu\n", tiny.lights.size());
           ImGui::LogText("Textures: %zu\n", tiny.textures.size());
           ImGui::LogText("Images: %zu\n", tiny.images.size());

@@ -46,6 +46,8 @@
 #include <nvvkgltf/scene.hpp>
 #include <nvvkgltf/scene_rtx.hpp>
 #include <nvvkgltf/scene_vk.hpp>
+#include <nvapp/application.hpp>
+
 
 enum class RenderingMode
 {
@@ -61,6 +63,7 @@ enum class DisplayBuffer
   eNormalRoughness,  // DLSS Normal/Roughness
   eMotionVectors,    // DLSS Motion
   eDepth,            // DLSS Depth
+  eOptixDenoised,    // OptiX Denoised output
 };
 
 // Utility functions for bidirectional mapping between DisplayBuffer and OutputImage enums
@@ -78,6 +81,8 @@ constexpr inline shaderio::OutputImage displayBufferToOutputImage(DisplayBuffer 
       return shaderio::eDlssMotion;
     case DisplayBuffer::eDepth:
       return shaderio::eDlssDepth;
+    case DisplayBuffer::eOptixDenoised:
+      return shaderio::eResultImage;  // Special case: handled separately
     default:
       return shaderio::eResultImage;
   }
@@ -101,6 +106,9 @@ constexpr inline DisplayBuffer outputImageToDisplayBuffer(shaderio::OutputImage 
       return DisplayBuffer::eRendered;
   }
 }
+
+// Note: eOptixDenoised doesn't have a direct OutputImage equivalent
+// It's handled specially through OptiXDenoiser::getDescriptorImageInfo()
 
 enum DirtyFlags
 {
@@ -145,6 +153,8 @@ struct Resources
     eImgRendered,
     eImgSelection,
   };
+
+  nvapp::Application* app{nullptr};
 
   VkInstance              instance{};
   nvvk::ResourceAllocator allocator{};  // Vulkan Memory Allocator

@@ -306,7 +306,7 @@ void UiSceneGraph::renderNode(int nodeIndex)
   if(!visibility.visible)
   {
     ImGui::TableNextColumn();
-    ImGui::Text("%s",  ICON_MS_VISIBILITY_OFF);
+    ImGui::Text("%s", ICON_MS_VISIBILITY_OFF);
   }
   else
   {
@@ -680,10 +680,35 @@ void UiSceneGraph::renderMaterial(int materialIndex)
     materialSheen(material);
     materialSpecular(material);
     materialTransmission(material);
+    materialUnlit(material);
     materialVolume(material);
 
     PE::end();
   }
+}
+
+void UiSceneGraph::addButton(tinygltf::Material& material, const char* extensionName, std::function<void()> addCallback)
+{
+  ImGui::TableNextColumn();
+  ImGui::PushID(extensionName);
+  if(ImGui::Button("Add"))
+  {
+    addCallback();
+    m_changes.set(eMaterialDirty);
+  }
+  ImGui::PopID();
+}
+
+void UiSceneGraph::removeButton(tinygltf::Material& material, const char* extensionName)
+{
+  ImGui::TableNextColumn();
+  ImGui::PushID(extensionName);
+  if(ImGui::Button("Remove"))
+  {
+    material.extensions.erase(extensionName);
+    m_changes.set(eMaterialDirty);
+  }
+  ImGui::PopID();
 }
 
 
@@ -695,6 +720,7 @@ void UiSceneGraph::materialDiffuseTransmission(tinygltf::Material& material)
   {
     if(hasMaterialDiffuseTransmission)
     {
+      removeButton(material, KHR_MATERIALS_DIFFUSE_TRANSMISSION_EXTENSION_NAME);
       KHR_materials_diffuse_transmission diffuseTransmission = tinygltf::utils::getDiffuseTransmission(material);
       bool                               modif               = false;
       modif |= PE::DragFloat("Factor", &diffuseTransmission.diffuseTransmissionFactor, 0.01f, 0.0f, 1.0f);
@@ -709,11 +735,8 @@ void UiSceneGraph::materialDiffuseTransmission(tinygltf::Material& material)
   }
   if(!hasMaterialDiffuseTransmission)
   {
-    ImGui::TableNextColumn();
-    if(ImGui::Button("Add##Add_DiffuseTransmission"))
-    {
-      tinygltf::utils::setDiffuseTransmission(material, {});
-    }
+    addButton(material, KHR_MATERIALS_DIFFUSE_TRANSMISSION_EXTENSION_NAME,
+              [&]() { tinygltf::utils::setDiffuseTransmission(material, {}); });
   }
 }
 
@@ -725,6 +748,7 @@ void UiSceneGraph::materialDispersion(tinygltf::Material& material)
   {
     if(hasMaterialDispersion)
     {
+      removeButton(material, KHR_MATERIALS_DISPERSION_EXTENSION_NAME);
       KHR_materials_dispersion dispersion = tinygltf::utils::getDispersion(material);
       bool                     modif      = false;
       modif |= PE::DragFloat("Dispersion Factor", &dispersion.dispersion, 0.01f, 0.0f, 10.0f);
@@ -738,11 +762,7 @@ void UiSceneGraph::materialDispersion(tinygltf::Material& material)
   }
   if(!hasMaterialDispersion)
   {
-    ImGui::TableNextColumn();
-    if(ImGui::Button("Add##Add_Dispersion"))
-    {
-      tinygltf::utils::setDispersion(material, {});
-    }
+    addButton(material, KHR_MATERIALS_DISPERSION_EXTENSION_NAME, [&]() { tinygltf::utils::setDispersion(material, {}); });
   }
 }
 
@@ -753,6 +773,7 @@ void UiSceneGraph::materialIridescence(tinygltf::Material& material)
   {
     if(hasMaterialIridescence)
     {
+      removeButton(material, KHR_MATERIALS_IRIDESCENCE_EXTENSION_NAME);
       KHR_materials_iridescence iridescence = tinygltf::utils::getIridescence(material);
       bool                      modif       = false;
       modif |= PE::DragFloat("Iridescence Factor", &iridescence.iridescenceFactor, 0.01f, 0.0f, 10.0f);
@@ -769,11 +790,8 @@ void UiSceneGraph::materialIridescence(tinygltf::Material& material)
   }
   if(!hasMaterialIridescence)
   {
-    ImGui::TableNextColumn();
-    if(ImGui::Button("Add##Add_9"))
-    {
-      tinygltf::utils::setIridescence(material, {});
-    }
+    addButton(material, KHR_MATERIALS_IRIDESCENCE_EXTENSION_NAME,
+              [&]() { tinygltf::utils::setIridescence(material, {}); });
   }
 }
 
@@ -784,6 +802,7 @@ void UiSceneGraph::materialAnisotropy(tinygltf::Material& material)
   {
     if(hasMaterialAnisotropy)
     {
+      removeButton(material, KHR_MATERIALS_ANISOTROPY_EXTENSION_NAME);
       KHR_materials_anisotropy anisotropy = tinygltf::utils::getAnisotropy(material);
       bool                     modif      = false;
       modif |= PE::DragFloat("Anisotropy Strength", &anisotropy.anisotropyStrength, 0.01f, 0.0f, 1.0f);
@@ -798,11 +817,7 @@ void UiSceneGraph::materialAnisotropy(tinygltf::Material& material)
   }
   if(!hasMaterialAnisotropy)
   {
-    ImGui::TableNextColumn();
-    if(ImGui::Button("Add##Add_8"))
-    {
-      tinygltf::utils::setAnisotropy(material, {});
-    }
+    addButton(material, KHR_MATERIALS_ANISOTROPY_EXTENSION_NAME, [&]() { tinygltf::utils::setAnisotropy(material, {}); });
   }
 }
 
@@ -813,6 +828,7 @@ void UiSceneGraph::materialVolume(tinygltf::Material& material)
   {
     if(hasMaterialVolume)
     {
+      removeButton(material, KHR_MATERIALS_VOLUME_EXTENSION_NAME);
       KHR_materials_volume volume          = tinygltf::utils::getVolume(material);
       bool                 modif           = false;
       float                thicknessFactor = volume.thicknessFactor;
@@ -833,11 +849,7 @@ void UiSceneGraph::materialVolume(tinygltf::Material& material)
   }
   if(!hasMaterialVolume)
   {
-    ImGui::TableNextColumn();
-    if(ImGui::Button("Add##Add_7"))
-    {
-      tinygltf::utils::setVolume(material, {});
-    }
+    addButton(material, KHR_MATERIALS_VOLUME_EXTENSION_NAME, [&]() { tinygltf::utils::setVolume(material, {}); });
   }
 }
 
@@ -848,6 +860,7 @@ void UiSceneGraph::materialSpecular(tinygltf::Material& material)
   {
     if(hasMaterialSpecular)
     {
+      removeButton(material, KHR_MATERIALS_SPECULAR_EXTENSION_NAME);
       KHR_materials_specular specular = tinygltf::utils::getSpecular(material);
       bool                   modif    = false;
       modif |= PE::ColorEdit3("Specular Color", glm::value_ptr(specular.specularColorFactor));
@@ -862,11 +875,7 @@ void UiSceneGraph::materialSpecular(tinygltf::Material& material)
   }
   if(!hasMaterialSpecular)
   {
-    ImGui::TableNextColumn();
-    if(ImGui::Button("Add##Add_6"))
-    {
-      tinygltf::utils::setSpecular(material, {});
-    }
+    addButton(material, KHR_MATERIALS_SPECULAR_EXTENSION_NAME, [&]() { tinygltf::utils::setSpecular(material, {}); });
   }
 }
 
@@ -877,6 +886,7 @@ void UiSceneGraph::materialIor(tinygltf::Material& material)
   {
     if(hasMaterialIor)
     {
+      removeButton(material, KHR_MATERIALS_IOR_EXTENSION_NAME);
       KHR_materials_ior ior   = tinygltf::utils::getIor(material);
       bool              modif = false;
       modif |= PE::DragFloat("IOR", &ior.ior, 0.01f, 0.0f, 10.0f);
@@ -890,11 +900,7 @@ void UiSceneGraph::materialIor(tinygltf::Material& material)
   }
   if(!hasMaterialIor)
   {
-    ImGui::TableNextColumn();
-    if(ImGui::Button("Add##Add_5"))
-    {
-      tinygltf::utils::setIor(material, {});
-    }
+    addButton(material, KHR_MATERIALS_IOR_EXTENSION_NAME, [&]() { tinygltf::utils::setIor(material, {}); });
   }
 }
 
@@ -905,6 +911,7 @@ void UiSceneGraph::materialTransmission(tinygltf::Material& material)
   {
     if(hasMaterialTransmission)
     {
+      removeButton(material, KHR_MATERIALS_TRANSMISSION_EXTENSION_NAME);
       KHR_materials_transmission transmission       = tinygltf::utils::getTransmission(material);
       bool                       modif              = false;
       float                      transmissionFactor = transmission.factor;
@@ -921,11 +928,8 @@ void UiSceneGraph::materialTransmission(tinygltf::Material& material)
   }
   if(!hasMaterialTransmission)
   {
-    ImGui::TableNextColumn();
-    if(ImGui::Button("Add##Add_4"))
-    {
-      tinygltf::utils::setTransmission(material, {});
-    }
+    addButton(material, KHR_MATERIALS_TRANSMISSION_EXTENSION_NAME,
+              [&]() { tinygltf::utils::setTransmission(material, {}); });
   }
 }
 
@@ -936,6 +940,7 @@ void UiSceneGraph::materialSheen(tinygltf::Material& material)
   {
     if(hasMaterialSheen)
     {
+      removeButton(material, KHR_MATERIALS_SHEEN_EXTENSION_NAME);
       KHR_materials_sheen sheen = tinygltf::utils::getSheen(material);
       bool                modif = false;
       modif |= PE::ColorEdit3("Sheen Color", glm::value_ptr(sheen.sheenColorFactor));
@@ -950,11 +955,25 @@ void UiSceneGraph::materialSheen(tinygltf::Material& material)
   }
   if(!hasMaterialSheen)
   {
-    ImGui::TableNextColumn();
-    if(ImGui::Button("Add##Add_3"))
+    addButton(material, KHR_MATERIALS_SHEEN_EXTENSION_NAME, [&]() { tinygltf::utils::setSheen(material, {}); });
+  }
+}
+
+void UiSceneGraph::materialUnlit(tinygltf::Material& material)
+{
+  bool hasMaterialUnlit = tinygltf::utils::hasElementName(material.extensions, KHR_MATERIALS_UNLIT_EXTENSION_NAME);
+  if(PE::treeNode("Unlit"))
+  {
+    if(hasMaterialUnlit)
     {
-      tinygltf::utils::setSheen(material, {});
+      ImGui::TextWrapped("Material is unlit (no lighting applied)");
+      removeButton(material, KHR_MATERIALS_UNLIT_EXTENSION_NAME);
     }
+    PE::treePop();
+  }
+  if(!hasMaterialUnlit)
+  {
+    addButton(material, KHR_MATERIALS_UNLIT_EXTENSION_NAME, [&]() { tinygltf::utils::setUnlit(material, {}); });
   }
 }
 
@@ -965,6 +984,7 @@ void UiSceneGraph::materialClearcoat(tinygltf::Material& material)
   {
     if(hasMaterialClearcoat)
     {
+      removeButton(material, KHR_MATERIALS_CLEARCOAT_EXTENSION_NAME);
       KHR_materials_clearcoat clearcoat = tinygltf::utils::getClearcoat(material);
       bool                    modif     = false;
       modif |= PE::DragFloat("Clearcoat Factor", &clearcoat.factor, 0.01f, 0.0f, 1.0f);
@@ -979,11 +999,7 @@ void UiSceneGraph::materialClearcoat(tinygltf::Material& material)
   }
   if(!hasMaterialClearcoat)
   {
-    ImGui::TableNextColumn();
-    if(ImGui::Button("Add##Add_2"))
-    {
-      tinygltf::utils::setClearcoat(material, {});
-    }
+    addButton(material, KHR_MATERIALS_CLEARCOAT_EXTENSION_NAME, [&]() { tinygltf::utils::setClearcoat(material, {}); });
   }
 }
 
@@ -994,7 +1010,7 @@ void UiSceneGraph::materialEmissiveStrength(tinygltf::Material& material)
   {
     if(hasEmissiveStrength)
     {
-
+      removeButton(material, KHR_MATERIALS_EMISSIVE_STRENGTH_EXTENSION_NAME);
       KHR_materials_emissive_strength strenght = tinygltf::utils::getEmissiveStrength(material);
       if(PE::DragFloat("Emissive Strength", &strenght.emissiveStrength, logarithmicStep(strenght.emissiveStrength), 0.0f, FLT_MAX))
       {
@@ -1006,11 +1022,8 @@ void UiSceneGraph::materialEmissiveStrength(tinygltf::Material& material)
   }
   if(!hasEmissiveStrength)
   {
-    ImGui::TableNextColumn();
-    if(ImGui::Button("Add##Add_1"))
-    {
-      tinygltf::utils::setEmissiveStrength(material, {});
-    }
+    addButton(material, KHR_MATERIALS_EMISSIVE_STRENGTH_EXTENSION_NAME,
+              [&]() { tinygltf::utils::setEmissiveStrength(material, {}); });
   }
 }
 

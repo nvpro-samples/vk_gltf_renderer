@@ -107,7 +107,10 @@ bool Rasterizer::onUIRender(Resources& resources)
   bool changed = false;
   if(PE::begin())
   {
-    PE::Checkbox("Wireframe", &m_enableWireframe);
+    if(PE::Checkbox("Wireframe", &m_enableWireframe))
+    {
+      freeRecordCommandBuffer();
+    }
     PE::Checkbox("Use Recorded Cmd", &m_useRecordedCmd, "Use recorded command buffers for better performance");
     PE::end();
   }

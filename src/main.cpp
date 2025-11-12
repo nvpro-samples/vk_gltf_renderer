@@ -157,6 +157,25 @@ auto main(int argc, char** argv) -> int
     nvvk::addSurfaceExtensions(vkSetup.instanceExtensions, &vkSetup.deviceExtensions);
   }
 
+#ifdef USE_OPTIX_DENOISER
+  // Instance extensions
+  vkSetup.instanceExtensions.emplace_back(VK_KHR_EXTERNAL_MEMORY_CAPABILITIES_EXTENSION_NAME);
+  vkSetup.instanceExtensions.emplace_back(VK_KHR_EXTERNAL_SEMAPHORE_CAPABILITIES_EXTENSION_NAME);
+
+  // Device extensions
+  vkSetup.deviceExtensions.emplace_back(VK_KHR_CREATE_RENDERPASS_2_EXTENSION_NAME);
+  vkSetup.deviceExtensions.emplace_back(VK_KHR_GET_MEMORY_REQUIREMENTS_2_EXTENSION_NAME);
+  vkSetup.deviceExtensions.emplace_back(VK_KHR_EXTERNAL_MEMORY_EXTENSION_NAME);
+  vkSetup.deviceExtensions.emplace_back(VK_KHR_EXTERNAL_SEMAPHORE_EXTENSION_NAME);
+#ifdef WIN32
+  vkSetup.deviceExtensions.emplace_back(VK_KHR_EXTERNAL_SEMAPHORE_WIN32_EXTENSION_NAME);
+  vkSetup.deviceExtensions.emplace_back(VK_KHR_EXTERNAL_MEMORY_WIN32_EXTENSION_NAME);
+#else
+  vkSetup.deviceExtensions.emplace_back(VK_KHR_EXTERNAL_SEMAPHORE_FD_EXTENSION_NAME);
+  vkSetup.deviceExtensions.emplace_back(VK_KHR_EXTERNAL_MEMORY_FD_EXTENSION_NAME);
+#endif  // WIN32
+#endif  // USE_OPTIX_DENOISER
+
 
 #if defined(USE_NSIGHT_AFTERMATH)
   // Adding the Aftermath extension to the device and initialize the Aftermath
@@ -191,16 +210,25 @@ auto main(int argc, char** argv) -> int
     vkSetup.instanceExtensions.emplace_back(ext.extensionName);
   }
 
-  // Adding the extra device extensions required by DLSS (Using callback)
+  // After selecting the device, we also request extensions DLSS needs using
+  // nvvk::Context's callback.
+  // Note at this stage NGX can report that DLSS is not available, so we need
+  // to handle that.
+  static bool                               dlssQueryExtensionsOk = false;
   static std::vector<VkExtensionProperties> extraDeviceExtensions;
   vkSetup.postSelectPhysicalDeviceCallback = [](VkInstance instance, VkPhysicalDevice physicalDevice, nvvk::ContextInitInfo& vkSetup) {
-    DlssRayReconstruction::getRequiredDeviceExtensions({}, instance, physicalDevice, extraDeviceExtensions);
-    for(auto& ext : extraDeviceExtensions)
+    const NVSDK_NGX_Result result =
+        DlssRayReconstruction::getRequiredDeviceExtensions({}, instance, physicalDevice, extraDeviceExtensions);
+    if(NVSDK_NGX_Result_Success == result)
     {
-      vkSetup.deviceExtensions.push_back({.extensionName = ext.extensionName, .required = false, .specVersion = ext.specVersion});
+      dlssQueryExtensionsOk = true;
+      for(auto& ext : extraDeviceExtensions)
+      {
+        vkSetup.deviceExtensions.push_back({.extensionName = ext.extensionName, .required = false, .specVersion = ext.specVersion});
+      }
     }
 
-    return true;
+    return true;  // Continue with this device (even if DLSS is not available)
   };
 #endif
 
@@ -216,7 +244,7 @@ auto main(int argc, char** argv) -> int
   // Check that DLSS extensions are enabled
   bool dlssHardwareAvailable = false;  // Default: DLSS not available
 #if USE_DLSS
-  dlssHardwareAvailable = true;
+  dlssHardwareAvailable = dlssQueryExtensionsOk;
   for(auto& dlssExt : extraDeviceExtensions)
   {
     dlssHardwareAvailable &= vkContext.hasExtensionEnabled(dlssExt.extensionName);

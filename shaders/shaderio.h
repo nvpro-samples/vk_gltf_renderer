@@ -46,13 +46,14 @@ enum class EnvSystem
 // Output image types
 enum OutputImage
 {
-  eResultImage = 0,      // Output image (RGBA32)
-  eSelectImage,          // Selection image (R8)
-  eDlssAlbedo,           // Diffuse albedo (RGBA8)
-  eDlssSpecAlbedo,       // Specular albedo (RGBA32)
-  eDlssNormalRoughness,  // Normal and roughness (RGBA32)
-  eDlssMotion,           // Motion (RGBA32)
-  eDlssDepth,            // Depth (R32)
+  eResultImage = 0,        // Output image (RGBA32)
+  eSelectImage,            // Selection image (R8)
+  eDlssAlbedo = 2,         // Diffuse albedo (RGBA8)
+  eDlssSpecAlbedo,         // Specular albedo (RGBA32)
+  eDlssNormalRoughness,    // Normal and roughness (RGBA32)
+  eDlssMotion,             // Motion (RGBA32)
+  eDlssDepth,              // Depth (R32)
+  eOptixAlbedoNormal = 2,  // Albedo/encoded normal (RGBA32)
 };
 
 // Binding points for descriptors
@@ -65,6 +66,16 @@ enum BindingPoints
   eTexturesHdr,   // HDR textures (array of textures)
   eTexturesStorage,
 };
+
+enum OptixBindingPoints
+{
+  eInRgba = 0,      // Incoming image (RGBA32)
+  eInAlbedoNormal,  // Incoming albedo/normal (RGBA32)
+  eOutRgba,         // Outgoing image in buffer
+  eOutAlbedo,       // Outgoing albedo in buffer
+  eOutNormal,       // Outgoing normal in buffer
+};
+
 
 // Binding points for descriptors
 enum SilhouetteBindings
@@ -123,6 +134,7 @@ struct PathtracePushConstant
   float focalDistance         = 0.0f;  // Focal distance for depth of field
   float aperture              = 0.0f;  // Aperture for depth of field
   int   useDlss               = 0;     // Use DLSS (0: no, 1: yes)
+  int   useOptixDenoiser      = 0;     // Use the Optix Denoiser
   int   renderSelection       = 1;     // Padding to align the structure
   /// Infinite plane
   float2                 jitter;               // Jitter for the DLSS

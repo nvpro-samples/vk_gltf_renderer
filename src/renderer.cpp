@@ -140,6 +140,7 @@ void GltfRenderer::onAttach(nvapp::Application* app)
   m_app                = app;
   m_device             = app->getDevice();
   m_resources.instance = app->getInstance();
+  m_resources.app      = app;
 
   // ===== Memory Allocation & Buffer Management =====
   m_resources.allocator.init({
@@ -173,9 +174,9 @@ void GltfRenderer::onAttach(nvapp::Application* app)
   m_resources.gBuffers.init({.allocator = &m_resources.allocator,
                              .colorFormats =
                                  {
-                                     VK_FORMAT_R8G8B8A8_UNORM,       // Tonemapped
-                                     VK_FORMAT_R32G32B32A32_SFLOAT,  // Rendered image
-                                     VK_FORMAT_R8_UNORM,             // Selection (Silhouette)
+                                     VK_FORMAT_R8G8B8A8_UNORM,       // Tonemapped (eImgTonemapped)
+                                     VK_FORMAT_R32G32B32A32_SFLOAT,  // Rendered image (eImgRendered)
+                                     VK_FORMAT_R8_UNORM,             // Selection/Silhouette (eImgSelection)
                                  },
                              .depthFormat    = nvvk::findDepthFormat(app->getPhysicalDevice()),
                              .imageSampler   = linearSampler,
@@ -474,28 +475,44 @@ void GltfRenderer::tonemap(VkCommandBuffer cmd)
   VkExtent2D            gbufSize         = m_resources.gBuffers.getSize();
   bool                  usingGuideBuffer = false;
 
-  // Check if we want to display a DLSS guide buffer (only for pathtracer with DLSS enabled)
+  // Check if we want to display a DLSS guide buffer or OptiX denoised output (only for pathtracer)
   if(m_resources.settings.renderSystem == RenderingMode::ePathtracer && m_resources.settings.displayBuffer != DisplayBuffer::eRendered)
   {
-#if defined(USE_DLSS)
-    const DlssDenoiser* dlss = m_pathTracer.getDlssDenoiser();
-    if(dlss && dlss->isEnabled())
+    // Handle OptiX denoised output
+#if defined(USE_OPTIX_DENOISER)
+    if(m_resources.settings.displayBuffer == DisplayBuffer::eOptixDenoised)
     {
-      shaderio::OutputImage dlssBuffer = displayBufferToOutputImage(m_resources.settings.displayBuffer);
-      inputBuffer                      = dlss->getDescriptorImageInfo(dlssBuffer);
-      usingGuideBuffer                 = true;
-      gbufSize                         = dlss->getRenderSize();
-
-      // Clear output image since guide buffer may be smaller than display size
-      // Use distinct color to visually show the DLSS render resolution vs display resolution
-      VkImageSubresourceRange range = {.aspectMask = VK_IMAGE_ASPECT_COLOR_BIT, .levelCount = 1, .layerCount = 1};
-      vkCmdClearColorImage(cmd, m_resources.gBuffers.getColorImage(Resources::eImgTonemapped), VK_IMAGE_LAYOUT_GENERAL,
-                           &kBackgroundClearColor, 1, &range);
-      // Barrier: clear must complete before tonemapper compute shader runs
-      nvvk::cmdMemoryBarrier(cmd, VK_PIPELINE_STAGE_2_CLEAR_BIT, VK_PIPELINE_STAGE_2_COMPUTE_SHADER_BIT,
-                             VK_ACCESS_2_TRANSFER_WRITE_BIT, VK_ACCESS_2_SHADER_WRITE_BIT);
+      const OptiXDenoiser* optix = m_pathTracer.getOptiXDenoiser();
+      if(optix && optix->hasValidDenoisedOutput())
+      {
+        inputBuffer      = optix->getDescriptorImageInfo(OptiXDenoiser::eGBufferDenoised);
+        usingGuideBuffer = false;  // We want to tonemap the denoised output, not the guide buffer
+      }
     }
+    else
 #endif
+    {
+      // Handle DLSS guide buffers
+#if defined(USE_DLSS)
+      const DlssDenoiser* dlss = m_pathTracer.getDlssDenoiser();
+      if(dlss && dlss->isEnabled())
+      {
+        shaderio::OutputImage dlssBuffer = displayBufferToOutputImage(m_resources.settings.displayBuffer);
+        inputBuffer                      = dlss->getDescriptorImageInfo(dlssBuffer);
+        usingGuideBuffer                 = true;
+        gbufSize                         = dlss->getRenderSize();
+
+        // Clear output image since guide buffer may be smaller than display size
+        // Use distinct color to visually show the DLSS render resolution vs display resolution
+        VkImageSubresourceRange range = {.aspectMask = VK_IMAGE_ASPECT_COLOR_BIT, .levelCount = 1, .layerCount = 1};
+        vkCmdClearColorImage(cmd, m_resources.gBuffers.getColorImage(Resources::eImgTonemapped),
+                             VK_IMAGE_LAYOUT_GENERAL, &kBackgroundClearColor, 1, &range);
+        // Barrier: clear must complete before tonemapper compute shader runs
+        nvvk::cmdMemoryBarrier(cmd, VK_PIPELINE_STAGE_2_CLEAR_BIT, VK_PIPELINE_STAGE_2_COMPUTE_SHADER_BIT,
+                               VK_ACCESS_2_TRANSFER_WRITE_BIT, VK_ACCESS_2_SHADER_WRITE_BIT);
+      }
+#endif
+    }
   }
 
   // Disable tonemapping for debug buffers or guide buffers (display raw values)

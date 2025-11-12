@@ -17,8 +17,10 @@ message(STATUS "Processing: ${PROJECT_NAME}")
 # Adding all sources
 file(GLOB EXE_SOURCES "src/*.cpp" "src/*.hpp" "src/*.h" "*.md")
 list(FILTER EXE_SOURCES EXCLUDE REGEX "dlss*")
+list(FILTER EXE_SOURCES EXCLUDE REGEX "vk_cuda*")
+list(FILTER EXE_SOURCES EXCLUDE REGEX "optix_denoiser*")
 
-source_group("Source Files" FILES ${EXE_SOURCES})
+# source_group("Source Files" FILES ${EXE_SOURCES})
 
 # Add the executable
 add_executable(${PROJECT_NAME} ${EXE_SOURCES})
@@ -84,6 +86,46 @@ source_group("Shaders/Shared" FILES ${SHADER_SHARED_SLANG_FILES})
 target_sources(${PROJECT_NAME} PRIVATE ${GENERATED_SHADER_HEADERS} ${SHADER_H_FILES})
 
 
+#####################################################################################
+# Add OptiX header
+set(OptiX_VERSION 9.0.0)
+download_package(
+  NAME OptiX
+  URLS https://github.com/NVIDIA/optix-dev/archive/refs/tags/v${OptiX_VERSION}.zip
+  VERSION ${OptiX_VERSION}
+  LOCATION OptiX_SOURCE_DIR
+)
+message(STATUS "OptiX Version     : ${OptiX_VERSION}")
+message(STATUS "      Source Dir  : ${OptiX_SOURCE_DIR}")
+target_include_directories(${PROJECT_NAME} PRIVATE ${OptiX_SOURCE_DIR}/optix-dev-${OptiX_VERSION}/include)
+
+# Find CUDA for OptiX interop
+find_package(CUDAToolkit COMPONENTS CUDA::cudart)
+
+# Add OptiX denoiser option
+option(USE_OPTIX_DENOISER "Use OptiX denoiser as alternative to DLSS" ON)
+if(USE_OPTIX_DENOISER)
+  if(CUDAToolkit_FOUND)
+
+    # Add OptiX denoiser files
+    target_compile_definitions(${PROJECT_NAME} PRIVATE USE_OPTIX_DENOISER)
+    target_sources(${PROJECT_NAME} PRIVATE
+      ${CMAKE_CURRENT_SOURCE_DIR}/src/optix_denoiser.cpp 
+      ${CMAKE_CURRENT_SOURCE_DIR}/src/optix_denoiser.hpp
+      ${CMAKE_CURRENT_SOURCE_DIR}/src/vk_cuda.cpp 
+      ${CMAKE_CURRENT_SOURCE_DIR}/src/vk_cuda.hpp
+    )
+
+    # Add CUDA include directories and link libraries
+    target_include_directories(${PROJECT_NAME} PRIVATE ${CUDAToolkit_INCLUDE_DIRS})
+    target_link_libraries(${PROJECT_NAME} PRIVATE CUDA::cudart CUDA::cuda_driver)
+    target_compile_definitions(${PROJECT_NAME} PRIVATE CUDAToolkit_FOUND)
+    message(STATUS "CUDAToolkit found - OptiX denoiser enabled")
+  else()
+    message(WARNING "CUDAToolkit not found - OptiX denoiser will not work properly")
+  endif()
+
+endif()
 
 #####################################################################################
 # Adding DRACO if selected

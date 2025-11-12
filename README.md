@@ -27,7 +27,9 @@ This version brings significant improvements and modernization:
   - Hot-reloading support (F5)
   - Modern shader language features
 
-- **DLSS-RR Denoiser**: Added support for NVIDIA's DLSS Ray Reconstruction denoiser (optional, enable with `USE_DLSS`).
+- **AI-Accelerated Denoisers**: Added support for NVIDIA's AI denoisers:
+  - DLSS Ray Reconstruction (DLSS-RR) - optional, enable with `USE_DLSS`
+  - OptiX AI Denoiser - enabled by default when CUDA Toolkit is found (configure with `USE_OPTIX_DENOISER`)
 
 ## Key Features
 
@@ -60,6 +62,8 @@ cmake -B build -S . -DUSE_DLSS=ON -DUSE_DRACO=ON
 cmake --build build --config release
 ```
 
+Note: OptiX denoiser will be automatically enabled if CUDA Toolkit is detected.
+
 3. Run the application
 ```bash
 .\_bin\Release\vk_gltf_renderer.exe
@@ -77,9 +81,13 @@ cmake --install .
 
 To enable Draco mesh compression, you need to enable the option CMake. In the GUI interface, you will see the option `USE_DRACO`. If you are using the command line, you can add `-DUSE_DRACO=ON` to the cmake command. This will download the Draco library and it will be included in the project.
 
-### DLSS Ray Reconstruction Denoiser
+### AI-Accelerated Denoisers
 
-This release adds support for NVIDIA's [**DLSS Ray Reconstruction (DLSS-RR)**](https://developer.nvidia.com/rtx/dlss) denoiser. DLSS-RR provides state-of-the-art AI-based denoising for path-traced images, significantly improving image quality and temporal stability.
+This release adds support for NVIDIA's AI-based denoisers, providing state-of-the-art noise reduction for path-traced images with significantly improved image quality and temporal stability.
+
+#### DLSS Ray Reconstruction (DLSS-RR)
+
+[**DLSS Ray Reconstruction**](https://developer.nvidia.com/rtx/dlss) is NVIDIA's latest AI denoiser, offering exceptional quality and temporal stability for ray-traced content.
 
 **How to enable:**
 
@@ -91,7 +99,27 @@ cmake -DUSE_DLSS=ON ..
 
 This will automatically download and integrate the required DLSS SDK. The denoiser will then be available as an option in the renderer.
 
-> **Note:** DLSS-RR requires a compatible NVIDIA GPU and drivers.
+> **Note:** DLSS-RR requires a compatible NVIDIA GPU (RTX 20 series or newer) and drivers.
+
+#### OptiX AI Denoiser
+
+[**OptiX AI Denoiser**](https://developer.nvidia.com/optix-denoiser) provides high-quality AI-accelerated denoising using albedo and normal guide buffers to preserve fine details while removing Monte Carlo noise.
+
+**How to enable:**
+
+By default, OptiX denoiser is **enabled** if the CUDA Toolkit is found during CMake configuration. If you want to explicitly disable it, set the CMake option `USE_OPTIX_DENOISER=OFF`:
+
+```bash
+cmake -DUSE_OPTIX_DENOISER=OFF ..
+```
+
+The denoiser will automatically integrate using CUDA-Vulkan interoperability for efficient GPU processing when the CUDA Toolkit is available.
+
+> **Note:** OptiX denoiser requires:
+> - [CUDA Toolkit](https://developer.nvidia.com/cuda-downloads) (11.0 or later recommended)
+> - Vulkan external memory support
+>
+> OptiX headers are automatically downloaded during the CMake configuration, so no separate OptiX SDK installation is needed.
 
 
 ## glTF Core features
@@ -151,7 +179,7 @@ The options are:
 * Aperture: depth-of-field
 * Debug Method: shows information like base color, metallic, roughness, and some attributes
 * Choice between indirect and RTX pipeline.
-* Denoiser: A-trous denoiser 
+* Denoiser: Choose between DLSS-RR (if enabled), or OptiX AI Denoiser (if enabled) 
 
 
 ## Raster

@@ -46,6 +46,10 @@ PathTracer::PathTracer()
 #if defined(USE_DLSS)
   m_dlss = std::make_unique<DlssDenoiser>();
 #endif
+
+#if defined(USE_OPTIX_DENOISER)
+  m_optix = std::make_unique<OptiXDenoiser>();
+#endif
 }
 
 //--------------------------------------------------------------------------------------------------
@@ -77,6 +81,11 @@ void PathTracer::onAttach(Resources& resources, nvvk::ProfilerGpuTimer* profiler
 #if defined(USE_DLSS)
   m_dlss->init(resources);
 #endif
+
+  // #OPTIX - Create the OptiX denoiser
+#if defined(USE_OPTIX_DENOISER)
+  m_optix->init(resources);
+#endif
 }
 
 //--------------------------------------------------------------------------------------------------
@@ -97,6 +106,10 @@ void PathTracer::registerParameters(nvutils::ParameterRegistry* paramReg)
 #if defined(USE_DLSS)
   m_dlss->registerParameters(paramReg);
 #endif
+
+#if defined(USE_OPTIX_DENOISER)
+  m_optix->registerParameters(paramReg);
+#endif
 }
 
 //--------------------------------------------------------------------------------------------------
@@ -105,9 +118,13 @@ void PathTracer::onDetach(Resources& resources)
 {
   resources.allocator.destroyBuffer(m_sbtBuffer);
 
-#if USE_DLSS
+#if defined(USE_DLSS)
   m_dlss->deinit(resources);
-#endif  //  USE_DLSS
+#endif
+
+#if defined(USE_OPTIX_DENOISER)
+  m_optix->deinit(resources);
+#endif
   vkDestroyPipelineLayout(m_device, m_pipelineLayout, nullptr);
   vkDestroyShaderModule(m_device, m_shaderModule, nullptr);
   vkDestroyPipeline(m_device, m_rtxPipeline, nullptr);
@@ -120,6 +137,7 @@ void PathTracer::onDetach(Resources& resources)
 void PathTracer::onResize(VkCommandBuffer cmd, const VkExtent2D& size, Resources& resources)
 {
   updateDlssResources(cmd, resources);
+  updateOptiXResources(cmd, resources);
 }
 
 void PathTracer::updateDlssResources(VkCommandBuffer cmd, Resources& resources)
@@ -135,10 +153,20 @@ void PathTracer::updateDlssResources(VkCommandBuffer cmd, Resources& resources)
 #endif
 }
 
+void PathTracer::updateOptiXResources(VkCommandBuffer cmd, Resources& resources)
+{
+#if defined(USE_OPTIX_DENOISER)
+  NVVK_DBG_SCOPE(cmd);  // <-- Helps to debug in NSight
+  VkExtent2D size = resources.gBuffers.getSize();
+  m_optix->updateSize(cmd, size);
+#endif
+}
+
 bool PathTracer::onUIRender(Resources& resources)
 {
   // Setting the aperture max slider value, based on the scene size
-  float scaleFactor = std::log(m_sceneRadius);
+  float sceneRadius = resources.scene.getSceneBounds().radius();
+  float scaleFactor = std::log(sceneRadius);
   scaleFactor       = std::max(scaleFactor, 0.0f);   // Prevent negative values when the scene is small
   float apertureMax = 0.0001f + scaleFactor * 5.0f;  // Minimum max aperture is 0.0001
 
@@ -259,24 +287,33 @@ bool PathTracer::onUIRender(Resources& resources)
     PE::end();
   }
 
+  if(ImGui::CollapsingHeader("Denoisers", ImGuiTreeNodeFlags_DefaultOpen))
+  {
 // DLSS section
 #if defined(USE_DLSS)
-  bool oldTransp = m_dlss->useDlssTransparency();
-  changed |= m_dlss->onUi(resources);
-  if(oldTransp != m_dlss->useDlssTransparency())
-  {
-    // Need to recompile the shader using the specialization constant
-    vkDeviceWaitIdle(m_device);
-    vkDestroyPipeline(m_device, m_rtxPipeline, nullptr);
-    m_rtxPipeline = VK_NULL_HANDLE;
-    vkDestroyPipeline(m_device, m_rqPipeline, nullptr);
-    m_rqPipeline = VK_NULL_HANDLE;
-  }
+    bool oldTransp = m_dlss->useDlssTransparency();
+    changed |= m_dlss->onUi(resources);
+    if(oldTransp != m_dlss->useDlssTransparency())
+    {
+      // Need to recompile the shader using the specialization constant
+      vkDeviceWaitIdle(m_device);
+      vkDestroyPipeline(m_device, m_rtxPipeline, nullptr);
+      m_rtxPipeline = VK_NULL_HANDLE;
+      vkDestroyPipeline(m_device, m_rqPipeline, nullptr);
+      m_rqPipeline = VK_NULL_HANDLE;
+    }
 #else
-  ImGui::TextDisabled("DLSS is not enabled.");
-  nvsamples::HelpMarker("Define USE_DLSS in CMake to enable DLSS support.");
+    ImGui::TextDisabled("DLSS is not enabled.");
+    nvsamples::HelpMarker("Define USE_DLSS in CMake to enable DLSS support.");
 #endif
 
+#if defined(USE_OPTIX_DENOISER)
+    changed |= m_optix->onUi(resources);
+#else
+    ImGui::TextDisabled("OptiX Denoiser is not enabled.");
+    nvsamples::HelpMarker("Define USE_OPTIX_DENOISER in CMake to enable OptiX denoiser support.");
+#endif
+  }
   return changed;
 }
 
@@ -286,183 +323,61 @@ void PathTracer::onRender(VkCommandBuffer cmd, Resources& resources)
 {
   NVVK_DBG_SCOPE(cmd);  // <-- Helps to debug in NSight
 
-  m_sceneRadius = resources.scene.getSceneBounds().radius();
-
-  // Handle frame reset detection (needed for both adaptive and non-adaptive modes)
+  // Reset display buffer to rendered on first frame
   if(resources.frameCount == 0)
   {
-    m_totalSamplesAccumulated = 0;  // Reset sample counter when scene/camera changes
+    resources.settings.displayBuffer = DisplayBuffer::eRendered;
   }
 
-  // Handle adaptive sampling
+  // Handle adaptive sampling (SPP adjustment)
   updateAdaptiveSampling(resources);
 
-
-  // Update the push constant: the camera information, sky parameters and the scene to render
-  if(m_autoFocus)
-  {
-    m_pushConst.focalDistance = glm::length(resources.cameraManip->getEye() - resources.cameraManip->getCenter());
-  }
-
-  // Current frame count, can be overridden by DLSS
-  int frameCount = resources.frameCount;
-
-#if defined(USE_DLSS)
-  // Lazy initialize DLSS NGX on first use (2-5 second delay occurs here, once)
-  static uint32_t haltonIndex = 0;
-  m_pushConst.useDlss         = m_dlss->isEnabled();
-  if(m_pushConst.useDlss)
-  {
-    // When DLSS is enabled, force numSamples to 1
-    m_pushConst.numSamples = 1;
-    frameCount             = ++haltonIndex;  // Override frame count with Halton index
-
-    // Lazy NGX initialization (2-5s, once) OR size update triggers resource setup
-    if(m_dlss->tryInitializeNGX(resources) || m_dlss->needsSizeUpdate())
-      updateDlssResources(cmd, resources);
-  }
-  m_pushConst.jitter = shaderio::dlssJitter(frameCount);
-#endif
-  static int lastRenderedObject = -1;
-  m_pushConst.renderSelection   = resources.selectedObject != lastRenderedObject || resources.frameCount == 0;
-  lastRenderedObject            = resources.selectedObject;
-  m_pushConst.frameCount        = frameCount;
-  m_pushConst.totalSamples      = m_totalSamplesAccumulated;
-  m_pushConst.frameInfo         = (shaderio::SceneFrameInfo*)resources.bFrameInfo.address;
-  m_pushConst.skyParams         = (shaderio::SkyPhysicalParameters*)resources.bSkyParams.address;
-  m_pushConst.gltfScene         = (shaderio::GltfScene*)resources.sceneVk.sceneDesc().address;
-  m_pushConst.mouseCoord        = nvapp::ElementDbgPrintf::getMouseCoord();  // Use for debugging: printf in shader
-  vkCmdPushConstants(cmd, m_pipelineLayout, VK_SHADER_STAGE_ALL, 0, sizeof(shaderio::PathtracePushConstant), &m_pushConst);
-
-  // Track total samples accumulated
-  m_totalSamplesAccumulated += m_pushConst.numSamples;
+  // Setting up the push constant
+  setupPushConstant(cmd, resources);
 
   // Make sure buffer is ready to be used
   nvvk::cmdMemoryBarrier(cmd, VK_PIPELINE_STAGE_2_TRANSFER_BIT, VK_PIPELINE_STAGE_2_COMPUTE_SHADER_BIT);
 
-  // Trace rays
+  // Finding the rendering size
   VkExtent2D renderingSize = resources.gBuffers.getSize();
 #if USE_DLSS
-  if(m_dlss->isEnabled())
+  // When DLSS is effectively enabled, use DLSS render size
+  if(getEffectiveDlssEnabled(resources))
   {
     renderingSize = m_dlss->getRenderSize();
   }
 #endif
 
-
+  // Tracing the rays: Ray Query or Ray Tracing
   if(m_renderTechnique == RenderTechnique::RayQuery)
   {
-    auto timerSection = m_profiler->cmdFrameSection(cmd, "Path Trace (RQ)");
-
-    // Create pipeline if it doesn't exist
-    if(m_rqPipeline == VK_NULL_HANDLE)
-    {
-      createRqPipeline(resources);
-    }
-
-    // Bind the shader to use
-    VkShaderStageFlagBits stage = VK_SHADER_STAGE_COMPUTE_BIT;
-    //vkCmdBindShadersEXT(cmd, 1, &stage, &m_shader);
-    vkCmdBindPipeline(cmd, VK_PIPELINE_BIND_POINT_COMPUTE, m_rqPipeline);
-
-
-    // Bind the descriptor set: TLAS, output image, textures, etc. (Set: 0)
-    vkCmdBindDescriptorSets(cmd, VK_PIPELINE_BIND_POINT_COMPUTE, m_pipelineLayout, 0, 1, &resources.descriptorSet, 0, nullptr);
-
-    // Set the Descriptor for HDR (Set: 2)
-    VkDescriptorSet hdrDescSet = resources.hdrIbl.getDescriptorSet();
-    vkCmdBindDescriptorSets(cmd, VK_PIPELINE_BIND_POINT_COMPUTE, m_pipelineLayout, 2, 1, &hdrDescSet, 0, nullptr);
-
-    pushDescriptorSet(cmd, resources, VK_PIPELINE_BIND_POINT_COMPUTE);
-
-    // Dispatch the compute shader
-    VkExtent2D numGroups = nvvk::getGroupCounts(renderingSize, WORKGROUP_SIZE);
-    vkCmdDispatch(cmd, numGroups.width, numGroups.height, 1);
+    renderRayQuery(cmd, renderingSize, resources);
   }
-  else  // RayTracing
+  else if(m_renderTechnique == RenderTechnique::RayTracing)
   {
-    auto timerSection = m_profiler->cmdFrameSection(cmd, "Path Trace (RTX)");
-
-    // Create pipeline if it doesn't exist
-    if(m_rtxPipeline == VK_NULL_HANDLE)
-    {
-      createRtxPipeline(resources);
-    }
-
-    // Bind the ray tracing pipeline
-    vkCmdBindPipeline(cmd, VK_PIPELINE_BIND_POINT_RAY_TRACING_KHR, m_rtxPipeline);
-
-    // Bind the descriptor set: TLAS, output image, textures, etc. (Set: 0)
-    vkCmdBindDescriptorSets(cmd, VK_PIPELINE_BIND_POINT_RAY_TRACING_KHR, m_pipelineLayout, 0, 1, &resources.descriptorSet, 0, nullptr);
-
-    // Set the Descriptor for HDR (Set: 2)
-    VkDescriptorSet hdrDescSet = resources.hdrIbl.getDescriptorSet();
-    vkCmdBindDescriptorSets(cmd, VK_PIPELINE_BIND_POINT_RAY_TRACING_KHR, m_pipelineLayout, 2, 1, &hdrDescSet, 0, nullptr);
-
-    pushDescriptorSet(cmd, resources, VK_PIPELINE_BIND_POINT_RAY_TRACING_KHR);
-
-
-    vkCmdTraceRaysKHR(cmd, &m_sbtRegions.raygen, &m_sbtRegions.miss, &m_sbtRegions.hit, &m_sbtRegions.callable,
-                      renderingSize.width, renderingSize.height, 1);
+    renderRayTrace(cmd, renderingSize, resources);
   }
 
   // Making sure the rendered image is ready to be used by tonemapper
   nvvk::cmdMemoryBarrier(cmd, VK_PIPELINE_STAGE_2_COMPUTE_SHADER_BIT, VK_PIPELINE_STAGE_2_COMPUTE_SHADER_BIT);
 
 #if defined(USE_DLSS)
-  if(m_dlss->isEnabled())
+  // If DLSS is effectively enabled for this frame, perform denoising
+  if(getEffectiveDlssEnabled(resources))
   {
-    auto timerSection = m_profiler->cmdFrameSection(cmd, "DLSS");
-
-    // #DLSS - Denoising
-    const glm::mat4& view   = resources.cameraManip->getViewMatrix();
-    const glm::mat4& proj   = resources.cameraManip->getPerspectiveMatrix();
-    glm::vec2        jitter = m_pushConst.jitter;
-
-    m_dlss->denoise(cmd, jitter, view, proj, false);
-
-    // Memory barrier to ensure DLSS operations are complete before blit operations
-    nvvk::cmdMemoryBarrier(cmd, VK_PIPELINE_STAGE_2_ALL_GRAPHICS_BIT, VK_PIPELINE_STAGE_2_BLIT_BIT,
-                           VK_ACCESS_2_SHADER_WRITE_BIT | VK_ACCESS_2_COLOR_ATTACHMENT_WRITE_BIT, VK_ACCESS_2_TRANSFER_READ_BIT);
-
-    {
-      // Blit the selection image from the DLSS GBuffer (different resolution) to the Renderer GBuffer Selection
-      VkOffset3D  minCorner = {0, 0, 0};
-      VkImageBlit blitRegions{
-          .srcSubresource = {.aspectMask = VK_IMAGE_ASPECT_COLOR_BIT, .layerCount = 1},
-          .srcOffsets = {minCorner, {int(m_dlss->getGBuffers().getSize().width), int(m_dlss->getGBuffers().getSize().height), 1}},
-          .dstSubresource = {.aspectMask = VK_IMAGE_ASPECT_COLOR_BIT, .layerCount = 1},
-          .dstOffsets = {minCorner, {int(resources.gBuffers.getSize().width), int(resources.gBuffers.getSize().height), 1}},
-      };
-      vkCmdBlitImage(cmd, m_dlss->getGBuffers().getColorImage(shaderio::OutputImage::eSelectImage),
-                     VK_IMAGE_LAYOUT_GENERAL, resources.gBuffers.getColorImage(Resources::eImgSelection),
-                     VK_IMAGE_LAYOUT_GENERAL, 1, &blitRegions, VK_FILTER_LINEAR);
-
-      // Ensure the blit operation completes before any subsequent reads from this image
-      nvvk::cmdMemoryBarrier(cmd, VK_PIPELINE_STAGE_2_BLIT_BIT, VK_PIPELINE_STAGE_2_COMPUTE_SHADER_BIT,
-                             VK_ACCESS_2_TRANSFER_WRITE_BIT, VK_ACCESS_2_SHADER_READ_BIT);
-    }
+    denoiseDlss(cmd, resources);
   }
 #endif
 
-  // Update rolling average throughput calculation using wall-clock time
+#if defined(USE_OPTIX_DENOISER)
+  // Update OptiX auto-denoiser (only when effectively enabled)
+  if(getEffectiveOptixEnabled(resources))
   {
-    // Time elapsed for this frame (wall-clock time from user perspective)
-    float wallClockFrameTime = ImGui::GetIO().DeltaTime;
-
-    // Total number of pixels in the image
-    VkExtent2D imageSize   = resources.gBuffers.getSize();
-    uint64_t   totalPixels = static_cast<uint64_t>(imageSize.width) * static_cast<uint64_t>(imageSize.height);
-
-    // Calculate mega-sample-pixels per second of wall-clock time
-    // This tells the user how much rendering work is being done per real-world second
-    const float MEGA_SCALE_FACTOR = 1000000.0f;  // Convert to mega-sample-pixels
-    float       megaSamplePixelsPerSecond =
-        (static_cast<float>(m_pushConst.numSamples) * static_cast<float>(totalPixels) / MEGA_SCALE_FACTOR) / wallClockFrameTime;
-
-    // Update rolling average with wall-clock throughput for this frame
-    m_throughputRollingAvg.addValue(megaSamplePixelsPerSecond);
+    m_optix->updateDenoiser(resources);
   }
+#endif
+
+  updateStatistics(resources);
 }
 
 //--------------------------------------------------------------------------------------------------
@@ -473,13 +388,16 @@ void PathTracer::pushDescriptorSet(VkCommandBuffer cmd, Resources& resources, Vk
   nvvk::WriteSetContainer write{};
   write.append(resources.descriptorBinding[1].getWriteSet(shaderio::BindingPoints::eTlas), resources.sceneRtx.tlas());
 
-  // Normal rendering, two output images
-  std::vector<VkDescriptorImageInfo> outputImages = {resources.gBuffers.getDescriptorImageInfo(Resources::eImgRendered),
-                                                     resources.gBuffers.getDescriptorImageInfo(Resources::eImgSelection)};
-#if USE_DLSS
-  if(m_dlss->isEnabled())
+  // Normal rendering: basic output images
+  std::vector<VkDescriptorImageInfo> outputImages = {
+      resources.gBuffers.getDescriptorImageInfo(Resources::eImgRendered),   // eResultImage
+      resources.gBuffers.getDescriptorImageInfo(Resources::eImgSelection),  // eSelectImage
+  };
+
+#if defined(USE_DLSS)
+  if(getEffectiveDlssEnabled(resources))
   {
-    // With DLSS, we have 7 output images
+    // With DLSS active, we have 7 output images
     using namespace shaderio;
     outputImages.resize(7);
     outputImages[eResultImage]         = m_dlss->getGBuffers().getDescriptorImageInfo(eResultImage);
@@ -491,6 +409,17 @@ void PathTracer::pushDescriptorSet(VkCommandBuffer cmd, Resources& resources, Vk
     outputImages[eDlssDepth]           = m_dlss->getGBuffers().getDescriptorImageInfo(eDlssDepth);
   }
 #endif
+
+#if defined(USE_OPTIX_DENOISER)
+  if(getEffectiveOptixEnabled(resources))
+  {
+    // With OptiX active, add the albedo/normal output image
+    using namespace shaderio;
+    outputImages.resize(3);  // Adding the extra buffer to store albedo+normal
+    outputImages[eOptixAlbedoNormal] = m_optix->getDescriptorImageInfo(OptiXDenoiser::eGBufferAlbedoNormal);
+  }
+#endif
+
 
   VkWriteDescriptorSet allTextures = resources.descriptorBinding[1].getWriteSet(shaderio::BindingPoints::eOutImages);
   allTextures.descriptorCount      = uint32_t(outputImages.size());
@@ -812,4 +741,226 @@ void PathTracer::updateAdaptiveSampling(Resources& resources)
     // Clamp to valid range
     m_pushConst.numSamples = std::clamp(m_pushConst.numSamples, MIN_SAMPLES_PER_PIXEL, MAX_SAMPLES_PER_PIXEL);
   }
+}
+
+
+void PathTracer::updateStatistics(Resources& resources)
+{
+
+
+  // Update rolling average throughput calculation using wall-clock time
+  {
+    // Time elapsed for this frame (wall-clock time from user perspective)
+    float wallClockFrameTime = ImGui::GetIO().DeltaTime;
+
+    // Total number of pixels in the image
+    VkExtent2D imageSize   = resources.gBuffers.getSize();
+    uint64_t   totalPixels = static_cast<uint64_t>(imageSize.width) * static_cast<uint64_t>(imageSize.height);
+
+    // Calculate mega-sample-pixels per second of wall-clock time
+    // This tells the user how much rendering work is being done per real-world second
+    const float MEGA_SCALE_FACTOR = 1000000.0f;  // Convert to mega-sample-pixels
+    float       megaSamplePixelsPerSecond =
+        (static_cast<float>(m_pushConst.numSamples) * static_cast<float>(totalPixels) / MEGA_SCALE_FACTOR) / wallClockFrameTime;
+
+    // Update rolling average with wall-clock throughput for this frame
+    m_throughputRollingAvg.addValue(megaSamplePixelsPerSecond);
+  }
+
+  // Track total samples accumulated
+  m_totalSamplesAccumulated += m_pushConst.numSamples;
+}
+
+void PathTracer::renderRayQuery(VkCommandBuffer cmd, VkExtent2D renderingSize, Resources& resources)
+{
+  auto timerSection = m_profiler->cmdFrameSection(cmd, "Path Trace (RQ)");
+
+  // Create pipeline if it doesn't exist
+  if(m_rqPipeline == VK_NULL_HANDLE)
+  {
+    createRqPipeline(resources);
+  }
+
+  // Bind the shader to use
+  VkShaderStageFlagBits stage = VK_SHADER_STAGE_COMPUTE_BIT;
+  //vkCmdBindShadersEXT(cmd, 1, &stage, &m_shader);
+  vkCmdBindPipeline(cmd, VK_PIPELINE_BIND_POINT_COMPUTE, m_rqPipeline);
+
+
+  // Bind the descriptor set: TLAS, output image, textures, etc. (Set: 0)
+  vkCmdBindDescriptorSets(cmd, VK_PIPELINE_BIND_POINT_COMPUTE, m_pipelineLayout, 0, 1, &resources.descriptorSet, 0, nullptr);
+
+  // Set the Descriptor for HDR (Set: 2)
+  VkDescriptorSet hdrDescSet = resources.hdrIbl.getDescriptorSet();
+  vkCmdBindDescriptorSets(cmd, VK_PIPELINE_BIND_POINT_COMPUTE, m_pipelineLayout, 2, 1, &hdrDescSet, 0, nullptr);
+
+  pushDescriptorSet(cmd, resources, VK_PIPELINE_BIND_POINT_COMPUTE);
+
+  // Dispatch the compute shader
+  VkExtent2D numGroups = nvvk::getGroupCounts(renderingSize, WORKGROUP_SIZE);
+  vkCmdDispatch(cmd, numGroups.width, numGroups.height, 1);
+}
+
+void PathTracer::renderRayTrace(VkCommandBuffer cmd, VkExtent2D& renderingSize, Resources& resources)
+{
+  auto timerSection = m_profiler->cmdFrameSection(cmd, "Path Trace (RTX)");
+
+  // Create pipeline if it doesn't exist
+  if(m_rtxPipeline == VK_NULL_HANDLE)
+  {
+    createRtxPipeline(resources);
+  }
+
+  // Bind the ray tracing pipeline
+  vkCmdBindPipeline(cmd, VK_PIPELINE_BIND_POINT_RAY_TRACING_KHR, m_rtxPipeline);
+
+  // Bind the descriptor set: TLAS, output image, textures, etc. (Set: 0)
+  vkCmdBindDescriptorSets(cmd, VK_PIPELINE_BIND_POINT_RAY_TRACING_KHR, m_pipelineLayout, 0, 1, &resources.descriptorSet, 0, nullptr);
+
+  // Set the Descriptor for HDR (Set: 2)
+  VkDescriptorSet hdrDescSet = resources.hdrIbl.getDescriptorSet();
+  vkCmdBindDescriptorSets(cmd, VK_PIPELINE_BIND_POINT_RAY_TRACING_KHR, m_pipelineLayout, 2, 1, &hdrDescSet, 0, nullptr);
+
+  pushDescriptorSet(cmd, resources, VK_PIPELINE_BIND_POINT_RAY_TRACING_KHR);
+
+
+  vkCmdTraceRaysKHR(cmd, &m_sbtRegions.raygen, &m_sbtRegions.miss, &m_sbtRegions.hit, &m_sbtRegions.callable,
+                    renderingSize.width, renderingSize.height, 1);
+}
+
+void PathTracer::denoiseDlss(VkCommandBuffer cmd, Resources& resources)
+{
+#if defined(USE_DLSS)
+  auto timerSection = m_profiler->cmdFrameSection(cmd, "DLSS");
+
+  // #DLSS - Denoising
+  const glm::mat4& view   = resources.cameraManip->getViewMatrix();
+  const glm::mat4& proj   = resources.cameraManip->getPerspectiveMatrix();
+  glm::vec2        jitter = m_pushConst.jitter;
+
+  m_dlss->denoise(cmd, jitter, view, proj, false);
+
+  // Memory barrier to ensure DLSS operations are complete before blit operations
+  nvvk::cmdMemoryBarrier(cmd, VK_PIPELINE_STAGE_2_ALL_GRAPHICS_BIT, VK_PIPELINE_STAGE_2_BLIT_BIT,
+                         VK_ACCESS_2_SHADER_WRITE_BIT | VK_ACCESS_2_COLOR_ATTACHMENT_WRITE_BIT, VK_ACCESS_2_TRANSFER_READ_BIT);
+
+  {
+    // Blit the selection image from the DLSS GBuffer (different resolution) to the Renderer GBuffer Selection
+    VkOffset3D  minCorner = {0, 0, 0};
+    VkImageBlit blitRegions{
+        .srcSubresource = {.aspectMask = VK_IMAGE_ASPECT_COLOR_BIT, .layerCount = 1},
+        .srcOffsets = {minCorner, {int(m_dlss->getGBuffers().getSize().width), int(m_dlss->getGBuffers().getSize().height), 1}},
+        .dstSubresource = {.aspectMask = VK_IMAGE_ASPECT_COLOR_BIT, .layerCount = 1},
+        .dstOffsets = {minCorner, {int(resources.gBuffers.getSize().width), int(resources.gBuffers.getSize().height), 1}},
+    };
+    vkCmdBlitImage(cmd, m_dlss->getGBuffers().getColorImage(shaderio::OutputImage::eSelectImage),
+                   VK_IMAGE_LAYOUT_GENERAL, resources.gBuffers.getColorImage(Resources::eImgSelection),
+                   VK_IMAGE_LAYOUT_GENERAL, 1, &blitRegions, VK_FILTER_LINEAR);
+
+    // Ensure the blit operation completes before any subsequent reads from this image
+    nvvk::cmdMemoryBarrier(cmd, VK_PIPELINE_STAGE_2_BLIT_BIT, VK_PIPELINE_STAGE_2_COMPUTE_SHADER_BIT,
+                           VK_ACCESS_2_TRANSFER_WRITE_BIT, VK_ACCESS_2_SHADER_READ_BIT);
+  }
+#endif
+}
+
+void PathTracer::setupPushConstant(VkCommandBuffer cmd, Resources& resources)
+{
+  // Current frame count, can be overridden by DLSS
+  int frameCount = resources.frameCount;
+
+  // Handle frame reset detection (needed for both adaptive and non-adaptive modes)
+  if(resources.frameCount == 0)
+  {
+    m_totalSamplesAccumulated = 0;  // Reset sample counter when scene/camera changes
+  }
+
+  // Adjust focal distance if auto-focus is enabled
+  if(m_autoFocus)
+  {
+    m_pushConst.focalDistance = glm::length(resources.cameraManip->getEye() - resources.cameraManip->getCenter());
+  }
+
+#if defined(USE_DLSS)
+  // Lazy initialize DLSS NGX on first use (2-5 second delay occurs here, once)
+  static uint32_t haltonIndex = 0;
+
+  // Set useDlss based on EFFECTIVE state (false when both enabled and frameCount > 0)
+  m_pushConst.useDlss = getEffectiveDlssEnabled(resources);
+
+  if(m_pushConst.useDlss)
+  {
+    // When DLSS is enabled, force numSamples to 1
+    m_pushConst.numSamples = 1;
+    frameCount             = ++haltonIndex;  // Override frame count with Halton index
+
+    // Lazy NGX initialization (2-5s, once) OR size update triggers resource setup
+    if(m_dlss->tryInitializeNGX(resources) || m_dlss->needsSizeUpdate())
+      updateDlssResources(cmd, resources);
+  }
+  m_pushConst.jitter = shaderio::dlssJitter(frameCount);
+#endif
+
+#if defined(USE_OPTIX_DENOISER)
+  // Set useOptixDenoiser based on EFFECTIVE state (false when both enabled and frameCount == 0)
+  m_pushConst.useOptixDenoiser = getEffectiveOptixEnabled(resources);
+#endif
+  static int lastRenderedObject = -1;
+  m_pushConst.renderSelection   = resources.selectedObject != lastRenderedObject || resources.frameCount == 0;
+  lastRenderedObject            = resources.selectedObject;
+  m_pushConst.frameCount        = frameCount;
+  m_pushConst.totalSamples      = m_totalSamplesAccumulated;
+  m_pushConst.frameInfo         = (shaderio::SceneFrameInfo*)resources.bFrameInfo.address;
+  m_pushConst.skyParams         = (shaderio::SkyPhysicalParameters*)resources.bSkyParams.address;
+  m_pushConst.gltfScene         = (shaderio::GltfScene*)resources.sceneVk.sceneDesc().address;
+  m_pushConst.mouseCoord        = nvapp::ElementDbgPrintf::getMouseCoord();  // Use for debugging: printf in shader
+  vkCmdPushConstants(cmd, m_pipelineLayout, VK_SHADER_STAGE_ALL, 0, sizeof(shaderio::PathtracePushConstant), &m_pushConst);
+}
+
+//--------------------------------------------------------------------------------------------------
+// Determine if DLSS should actively denoise this frame
+// - if DLSS is enabled, return true
+// - if Optix is also enabled, only return true on frame 0
+bool PathTracer::getEffectiveDlssEnabled(const Resources& resources) const
+{
+#if defined(USE_DLSS)
+  bool dlssEnabled = m_dlss->isEnabled();
+#if defined(USE_OPTIX_DENOISER)
+  bool optixEnabled = m_optix->isEnabled();
+
+  // When both enabled, DLSS only runs on frame 0
+  if(dlssEnabled && optixEnabled)
+  {
+    return resources.frameCount == 0;
+  }
+#endif
+
+  // Normal behavior when OptiX is off
+  return dlssEnabled;
+#else
+  return false;
+#endif
+}
+
+//--------------------------------------------------------------------------------------------------
+// Determine if OptiX should actively denoise this frame
+bool PathTracer::getEffectiveOptixEnabled(const Resources& resources) const
+{
+#if defined(USE_OPTIX_DENOISER)
+  bool optixEnabled = m_optix->isEnabled();
+#if defined(USE_DLSS)
+  bool dlssEnabled = m_dlss->isEnabled();
+
+  // When both enabled, OptiX only runs on frame 1+
+  if(dlssEnabled && optixEnabled)
+  {
+    return resources.frameCount > 0;
+  }
+#endif
+
+  // Normal behavior when DLSS is off
+  return optixEnabled;
+#else
+  return false;
+#endif
 }

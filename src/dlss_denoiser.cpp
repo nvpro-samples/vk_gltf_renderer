@@ -225,7 +225,7 @@ bool DlssDenoiser::onUi(Resources& resources)
   {
     ImGui::BeginDisabled();
     bool dummyEnable = false;
-    ImGui::Checkbox("Enable DLSS", &dummyEnable);
+    ImGui::Checkbox("DLSS-RR", &dummyEnable);
     ImGui::EndDisabled();
     ImGui::SameLine();
 
@@ -236,11 +236,12 @@ bool DlssDenoiser::onUi(Resources& resources)
   }
 
   // Note: If eNotChecked, user can still enable - lazy init will happen on first render
-  if(ImGui::Checkbox("Enable DLSS", &m_settings.enable))
+  if(ImGui::Checkbox("DLSS-RR", &m_settings.enable))
   {
     m_forceReset = true;  // Force a reset when enabling/disabling DLSS
     changed      = true;
   }
+  nvgui::tooltip("DLSS-RR (Ray Reconstruction) is an NVIDIA RTX technology that uses an AI neural network to replace traditional denoisers.");
 
   if(!m_settings.enable || m_state != DlssState::eAvailable)
     return changed;

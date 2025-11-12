@@ -35,6 +35,11 @@
 #include "dlss_denoiser.hpp"
 #endif
 
+// #OPTIX
+#if defined(USE_OPTIX_DENOISER)
+#include "optix_denoiser.hpp"
+#endif
+
 
 class PathTracer : public BaseRenderer
 {
@@ -56,6 +61,7 @@ public:
   void onRender(VkCommandBuffer cmd, Resources& resources) override;
 
   void updateDlssResources(VkCommandBuffer cmd, Resources& resources);
+  void updateOptiXResources(VkCommandBuffer cmd, Resources& resources);
   void pushDescriptorSet(VkCommandBuffer cmd, Resources& resources, VkPipelineBindPoint bindPoint) const;
   void createPipeline(Resources& resources) override;
   void createRqPipeline(Resources& resources);
@@ -68,10 +74,9 @@ public:
 
   VkDevice                        m_device{};  // Vulkan device
   VkPipelineLayout                m_pipelineLayout{};
-  VkPipeline                      m_rtxPipeline{};  // Ray tracing pipeline
-  VkPipeline                      m_rqPipeline{};   // Ray tracing pipeline
-  shaderio::PathtracePushConstant m_pushConst{};    // Information sent to the shader
-  float                           m_sceneRadius{1.0f};
+  VkPipeline                      m_rtxPipeline{};    // Ray tracing pipeline
+  VkPipeline                      m_rqPipeline{};     // Ray tracing pipeline
+  shaderio::PathtracePushConstant m_pushConst{};      // Information sent to the shader
   bool                            m_autoFocus{true};  // Enable auto-focus
   VkShaderModule                  m_shaderModule{};   // Shader module for RTX
 
@@ -145,4 +150,31 @@ public:
   DlssDenoiser*                 getDlssDenoiser() { return m_dlss.get(); }
   const DlssDenoiser*           getDlssDenoiser() const { return m_dlss.get(); }
 #endif
+
+  // #OPTIX - Implementation of the OptiX denoiser
+#if defined(USE_OPTIX_DENOISER)
+  std::unique_ptr<OptiXDenoiser> m_optix;
+  OptiXDenoiser*                 getOptiXDenoiser() { return m_optix.get(); }
+  const OptiXDenoiser*           getOptiXDenoiser() const { return m_optix.get(); }
+#endif
+
+
+private:
+  void updateStatistics(Resources& resources);
+  void renderRayQuery(VkCommandBuffer cmd, VkExtent2D renderingSize, Resources& resources);
+
+
+  void renderRayTrace(VkCommandBuffer cmd, VkExtent2D& renderingSize, Resources& resources);
+
+
+  void denoiseDlss(VkCommandBuffer cmd, Resources& resources);
+
+
+  void setupPushConstant(VkCommandBuffer cmd, Resources& resources);
+
+  // Determine if DLSS should actively denoise this frame
+  bool getEffectiveDlssEnabled(const Resources& resources) const;
+
+  // Determine if OptiX should actively denoise this frame
+  bool getEffectiveOptixEnabled(const Resources& resources) const;
 };

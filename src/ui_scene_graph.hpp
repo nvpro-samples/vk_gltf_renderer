@@ -116,6 +116,8 @@ private:
   void renderCamera(int cameraIndex);
   void renderMaterial(int materialIndex);
 
+  void addButton(tinygltf::Material& material, const char* extensionName, std::function<void()> addCallback);
+  void removeButton(tinygltf::Material& material, const char* extensionName);
   void materialAnisotropy(tinygltf::Material& material);
   void materialClearcoat(tinygltf::Material& material);
   void materialDiffuseTransmission(tinygltf::Material& material);
@@ -126,6 +128,7 @@ private:
   void materialSheen(tinygltf::Material& material);
   void materialSpecular(tinygltf::Material& material);
   void materialTransmission(tinygltf::Material& material);
+  void materialUnlit(tinygltf::Material& material);
   void materialVolume(tinygltf::Material& material);
 
   void renderNodeDetails(int nodeIndex);
