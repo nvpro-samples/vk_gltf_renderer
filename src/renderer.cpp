@@ -423,7 +423,7 @@ void GltfRenderer::onFileDrop(const std::filesystem::path& filename)
 
     m_cmdBufferQueue = {};  // Clear the command buffer queue
     cleanupScene();         // Cleanup current scene
-    m_rasterizer.freeRecordCommandBuffer();
+    m_rasterizer.freeRecordCommandBuffer(m_resources);
 
     std::thread([=, this]() {
       m_busy.start("Loading");

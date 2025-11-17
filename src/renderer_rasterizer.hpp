@@ -44,7 +44,7 @@ public:
   void pushDescriptorSet(VkCommandBuffer cmd, Resources& resources);
   void compileShader(Resources& resources, bool fromFile = true) override;
   void createPipeline(Resources& resources) override;
-  void freeRecordCommandBuffer();
+  void freeRecordCommandBuffer(Resources& resources);
 
   // Register command line parameters
   void registerParameters(nvutils::ParameterRegistry* paramReg);

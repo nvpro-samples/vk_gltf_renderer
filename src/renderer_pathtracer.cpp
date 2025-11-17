@@ -324,7 +324,7 @@ void PathTracer::onRender(VkCommandBuffer cmd, Resources& resources)
   NVVK_DBG_SCOPE(cmd);  // <-- Helps to debug in NSight
 
   // Reset display buffer to rendered on first frame
-  if(resources.frameCount == 0)
+  if((resources.frameCount == 0) && (resources.settings.displayBuffer == DisplayBuffer::eOptixDenoised))
   {
     resources.settings.displayBuffer = DisplayBuffer::eRendered;
   }

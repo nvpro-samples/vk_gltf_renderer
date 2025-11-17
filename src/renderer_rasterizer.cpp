@@ -94,7 +94,7 @@ void Rasterizer::onDetach(Resources& resources)
 // Updates the renderer's state for the new viewport dimensions
 void Rasterizer::onResize(VkCommandBuffer cmd, const VkExtent2D& size, Resources& resources)
 {
-  freeRecordCommandBuffer();
+  freeRecordCommandBuffer(resources);
 }
 
 //--------------------------------------------------------------------------------------------------
@@ -109,13 +109,14 @@ bool Rasterizer::onUIRender(Resources& resources)
   {
     if(PE::Checkbox("Wireframe", &m_enableWireframe))
     {
-      freeRecordCommandBuffer();
+      freeRecordCommandBuffer(resources);
+      changed = true;
     }
     PE::Checkbox("Use Recorded Cmd", &m_useRecordedCmd, "Use recorded command buffers for better performance");
     PE::end();
   }
 
-  return false;
+  return changed;
 }
 
 //--------------------------------------------------------------------------------------------------
@@ -502,8 +503,11 @@ void Rasterizer::createRecordCommandBuffer()
 //--------------------------------------------------------------------------------------------------
 // Freeing the raster recoded command buffer
 //
-void Rasterizer::freeRecordCommandBuffer()
+void Rasterizer::freeRecordCommandBuffer(Resources& resources)
 {
+  if(m_recordedSceneCmd == VK_NULL_HANDLE)
+    return;
+  vkQueueWaitIdle(resources.app->getQueue(0).queue);
   vkFreeCommandBuffers(m_device, m_commandPool, 1, &m_recordedSceneCmd);
   m_recordedSceneCmd = VK_NULL_HANDLE;
 }
