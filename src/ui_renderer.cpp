@@ -447,6 +447,9 @@ void GltfRenderer::renderUI()
   {
     m_busy.show();
   }
+
+  // Display memory statistics window
+  renderMemoryStatistics();
 }
 
 void GltfRenderer::renderMenu()
@@ -529,6 +532,8 @@ void GltfRenderer::renderMenu()
     ImGui::Separator();
     ImGui::MenuItem(ICON_MS_BOTTOM_PANEL_OPEN " V-Sync", "Ctrl+Shift+V", &v_sync);
     ImGui::MenuItem(ICON_MS_VIEW_IN_AR " 3D-Axis", nullptr, &m_resources.settings.showAxis);
+    ImGui::Separator();
+    ImGui::MenuItem(ICON_MS_MONITORING " Memory Usage", nullptr, &m_resources.settings.showMemStats);
     ImGui::EndMenu();
   }
 
@@ -671,7 +676,7 @@ void GltfRenderer::registerRecentFilesHandler()
   // mandatory to work, see ImGui::DockContextInitialize as an example
   auto readOpen = [](ImGuiContext*, ImGuiSettingsHandler*, const char* name) -> void* {
     if(strcmp(name, "Data") != 0)
-      return NULL;
+      return nullptr;
     return (void*)1;
   };
 
@@ -856,4 +861,135 @@ void GltfRenderer::setGltfCameraFromView(int cameraIndex)
   extras["camera::center"] = tinygltf::utils::convertToTinygltfValue(3, glm::value_ptr(cameraState.ctr));
   extras["camera::up"]     = tinygltf::utils::convertToTinygltfValue(3, glm::value_ptr(cameraState.up));
   node.extras              = tinygltf::Value(extras);
+}
+
+//--------------------------------------------------------------------------------------------------
+// Display GPU memory statistics in an ImGui window
+//
+void GltfRenderer::renderMemoryStatistics()
+{
+  using namespace nvvkgltf;
+
+  if(!m_resources.settings.showMemStats)
+    return;
+
+  if(!ImGui::Begin("Memory Statistics", &m_resources.settings.showMemStats))
+  {
+    ImGui::End();
+    return;
+  }
+
+  // Helper function to format bytes
+  auto formatBytes = [](uint64_t bytes) -> std::string {
+    if(bytes >= 1024ULL * 1024ULL * 1024ULL)
+      return fmt::format("{:.2f} GB", bytes / (1024.0 * 1024.0 * 1024.0));
+    if(bytes >= 1024ULL * 1024ULL)
+      return fmt::format("{:.2f} MB", bytes / (1024.0 * 1024.0));
+    if(bytes >= 1024ULL)
+      return fmt::format("{:.2f} KB", bytes / 1024.0);
+    return fmt::format("{} B", bytes);
+  };
+
+  // Get memory trackers from scene
+  const auto& vkTracker  = m_resources.sceneVk.getMemoryTracker();
+  const auto& rtxTracker = m_resources.sceneRtx.getMemoryTracker();
+
+  // Create sortable table with memory statistics
+  ImGuiTableFlags tableFlags = ImGuiTableFlags_Borders | ImGuiTableFlags_RowBg | ImGuiTableFlags_SizingFixedFit | ImGuiTableFlags_Sortable;
+  if(ImGui::BeginTable("MemoryStatsTable", 3, tableFlags))
+  {
+    // Setup sortable columns
+    ImGui::TableSetupColumn("Category", ImGuiTableColumnFlags_DefaultSort | ImGuiTableColumnFlags_WidthFixed, 120.0f);
+    ImGui::TableSetupColumn("Current", ImGuiTableColumnFlags_WidthFixed, 80.0f);
+    ImGui::TableSetupColumn("Count", ImGuiTableColumnFlags_WidthFixed, 50.0f);
+    ImGui::TableHeadersRow();
+
+    // Get sort specifications
+    const ImGuiTableColumnSortSpecs& spec      = ImGui::TableGetSortSpecs()->Specs[0];
+    const CategorySortBy             sortBy    = CategorySortBy(spec.ColumnIndex);
+    const bool                       ascending = (spec.SortDirection == ImGuiSortDirection_Ascending);
+
+    // --- Scene (SceneVk) Section ---
+    ImGui::TableNextRow();
+    ImGui::TableNextColumn();
+    ImGui::TextColored(ImVec4(0.5f, 0.8f, 1.0f, 1.0f), "SCENE");
+    ImGui::TableNextColumn();
+    ImGui::TableNextColumn();
+
+    // Display SceneVk categories with sorting
+    for(const auto& categoryName : vkTracker.getActiveCategories(sortBy, ascending))
+    {
+      GpuMemoryStats stats = vkTracker.getStats(categoryName);
+
+      ImGui::TableNextRow();
+      ImGui::TableNextColumn();
+      ImGui::Text("  %s", categoryName.c_str());
+      ImGui::TableNextColumn();
+      ImGui::Text("%s", formatBytes(stats.currentBytes).c_str());
+      ImGui::TableNextColumn();
+      ImGui::Text("%u", stats.currentCount);
+    }
+
+    // Scene subtotal
+    auto totalVk = vkTracker.getTotalStats();
+    if(totalVk.currentBytes > 0)
+    {
+      ImGui::TableNextRow();
+      ImGui::TableNextColumn();
+      ImGui::TextColored(ImVec4(0.7f, 0.9f, 1.0f, 1.0f), "  Scene Subtotal");
+      ImGui::TableNextColumn();
+      ImGui::TextColored(ImVec4(0.7f, 0.9f, 1.0f, 1.0f), "%s", formatBytes(totalVk.currentBytes).c_str());
+      ImGui::TableNextColumn();
+      ImGui::TextColored(ImVec4(0.7f, 0.9f, 1.0f, 1.0f), "%u", totalVk.currentCount);
+    }
+
+    // --- RTX (SceneRtx) Section ---
+    ImGui::TableNextRow();
+    ImGui::TableNextColumn();
+    ImGui::TextColored(ImVec4(1.0f, 0.5f, 0.5f, 1.0f), "RTX (Acceleration)");
+    ImGui::TableNextColumn();
+    ImGui::TableNextColumn();
+
+    // Display SceneRtx categories with sorting
+    for(const auto& categoryName : rtxTracker.getActiveCategories(sortBy, ascending))
+    {
+      GpuMemoryStats stats = rtxTracker.getStats(categoryName);
+
+      ImGui::TableNextRow();
+      ImGui::TableNextColumn();
+      ImGui::Text("  %s", categoryName.c_str());
+      ImGui::TableNextColumn();
+      ImGui::Text("%s", formatBytes(stats.currentBytes).c_str());
+      ImGui::TableNextColumn();
+      ImGui::Text("%u", stats.currentCount);
+    }
+
+    // RTX subtotal
+    auto totalRtx = rtxTracker.getTotalStats();
+    if(totalRtx.currentBytes > 0)
+    {
+      ImGui::TableNextRow();
+      ImGui::TableNextColumn();
+      ImGui::TextColored(ImVec4(1.0f, 0.7f, 0.7f, 1.0f), "  RTX Subtotal");
+      ImGui::TableNextColumn();
+      ImGui::TextColored(ImVec4(1.0f, 0.7f, 0.7f, 1.0f), "%s", formatBytes(totalRtx.currentBytes).c_str());
+      ImGui::TableNextColumn();
+      ImGui::TextColored(ImVec4(1.0f, 0.7f, 0.7f, 1.0f), "%u", totalRtx.currentCount);
+    }
+
+    // --- Combined Total ---
+    ImGui::TableNextRow();
+    ImGui::TableNextColumn();
+    ImGui::TextColored(ImVec4(1.0f, 1.0f, 0.0f, 1.0f), "TOTAL");
+    ImGui::TableNextColumn();
+    auto combinedBytes = totalVk.currentBytes + totalRtx.currentBytes;
+    auto combinedCount = totalVk.currentCount + totalRtx.currentCount;
+    ImGui::TextColored(ImVec4(1.0f, 1.0f, 0.0f, 1.0f), "%s", formatBytes(combinedBytes).c_str());
+    ImGui::TableNextColumn();
+    ImGui::TextColored(ImVec4(1.0f, 1.0f, 0.0f, 1.0f), "%u", combinedCount);
+
+    ImGui::EndTable();
+  }
+
+  ImGui::End();
 }

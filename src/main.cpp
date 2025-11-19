@@ -188,7 +188,6 @@ auto main(int argc, char** argv) -> int
 
   nvvk::ValidationSettings validation{};
   validation.setPreset(nvvk::ValidationSettings::LayerPresets::eStandard);
-  validation.printf_to_stdout = VK_TRUE;
 
   // Optimize VVL for fast pipeline creation while keeping critical validation
   if(vkSetup.enableValidationLayers)
@@ -286,6 +285,8 @@ auto main(int argc, char** argv) -> int
     ImGui::DockBuilderDockWindow("NVML Monitor", monitorID);
     ImGuiID profilerID = ImGui::DockBuilderSplitNode(logID, ImGuiDir_Right, 0.33F, nullptr, &logID);
     ImGui::DockBuilderDockWindow("Profiler", profilerID);
+    ImGuiID memStatsID = ImGui::DockBuilderSplitNode(logID, ImGuiDir_Right, 0.33F, nullptr, &logID);
+    ImGui::DockBuilderDockWindow("Memory Statistics", memStatsID);
   };
 
   // Create the application

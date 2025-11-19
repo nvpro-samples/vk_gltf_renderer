@@ -25,13 +25,14 @@
 // Hit state information
 struct HitState
 {
-  float3 pos;
-  float3 nrm;
-  float4 color;
-  float3 geonrm;
-  float2 uv[2];
-  float3 tangent;
-  float3 bitangent;
+  float3 pos;        // World-space hit position
+  float3 nrm;        // Shading normal (interpolated and transformed)
+  float4 color;      // Vertex color
+  float3 geonrm;     // Geometric normal (face normal, for back-face detection)
+  float3 shadowPos;  // Shadow position
+  float2 uv[2];      // UV0 and UV1
+  float3 tangent;    // Tangent
+  float3 bitangent;  // Bitangent
 };
 
 //-----------------------------------------------------------------------
@@ -41,7 +42,7 @@ HitState getHitState(GltfRenderPrimitive renderPrim,  //
                      float4x3            worldToObject,
                      float4x3            objectToWorld,
                      int                 triangleID,
-                     float3              worldRayOrigin)
+                     float3              worldRayDirection)
 {
   HitState hit;
 
@@ -55,18 +56,27 @@ HitState getHitState(GltfRenderPrimitive renderPrim,  //
   const float3 position = pos0 * barycentrics.x + pos1 * barycentrics.y + pos2 * barycentrics.z;
   hit.pos               = float3(mul(float4(position, 1.0), objectToWorld).xyz);
 
+  // Geometric Normal
+  const float3 geoNormal = normalize(cross(pos1 - pos0, pos2 - pos0));
+  hit.geonrm             = normalize(float3(mul(worldToObject, geoNormal).xyz));
+
   // Normal
-  const float3 geoNormal      = normalize(cross(pos1 - pos0, pos2 - pos0));
-  float3       worldGeoNormal = normalize(float3(mul(worldToObject, geoNormal).xyz));
-  float3       normal         = geoNormal;
-  float3       worldNormal    = worldGeoNormal;
+  float3 nrm0   = geoNormal;
+  float3 nrm1   = geoNormal;
+  float3 nrm2   = geoNormal;
+  float3 normal = geoNormal;
   if(hasVertexNormal(renderPrim))
   {
-    normal      = getInterpolatedVertexNormal(renderPrim, triangleIndex, barycentrics);
-    worldNormal = normalize(float3(mul(worldToObject, normal).xyz));
+    nrm0   = getVertexNormal(renderPrim, triangleIndex.x);
+    nrm1   = getVertexNormal(renderPrim, triangleIndex.y);
+    nrm2   = getVertexNormal(renderPrim, triangleIndex.z);
+    normal = nrm0 * barycentrics.x + nrm1 * barycentrics.y + nrm2 * barycentrics.z;
   }
-  hit.geonrm = worldGeoNormal;
-  hit.nrm    = worldNormal;
+  hit.nrm = normalize(float3(mul(worldToObject, normal).xyz));
+
+  // Hacking the shadow terminator
+  float3 shadowPos = pointOffset(position, pos0, pos1, pos2, nrm0, nrm1, nrm2, barycentrics);
+  hit.shadowPos    = float3(mul(float4(shadowPos, 1.0), objectToWorld));
 
   // TexCoord
   hit.uv[0] = getInterpolatedVertexTexCoord0(renderPrim, triangleIndex, barycentrics);
@@ -90,39 +100,32 @@ HitState getHitState(GltfRenderPrimitive renderPrim,  //
     tng[1]   = t;
     tng[2]   = t;
   }
-  hit.tangent = normalize(mixBary(tng[0].xyz, tng[1].xyz, tng[2].xyz, barycentrics));
-  hit.tangent = float3(mul(float4(hit.tangent, 0.0), objectToWorld));
+  hit.tangent   = normalize(mixBary(tng[0].xyz, tng[1].xyz, tng[2].xyz, barycentrics));
+  hit.tangent   = float3(mul(float4(hit.tangent, 0.0), objectToWorld));
   hit.tangent   = normalize(hit.tangent - hit.nrm * dot(hit.nrm, hit.tangent));
   hit.bitangent = cross(hit.nrm, hit.tangent) * tng[0].w;
 
-  // Adjusting normal
-  const float3 V = (worldRayOrigin - hit.pos);
-  if(dot(hit.geonrm, V) < 0)  // Flip if back facing
+  // Ensure geometric normal faces towards the ray origin (front-facing)
+  if(dot(hit.geonrm, worldRayDirection) > 0.0f)
   {
-    hit.geonrm = -hit.geonrm;
+    hit.geonrm = -hit.geonrm;  // Flip if back-facing
   }
 
-  // If backface
-  if(dot(hit.geonrm, hit.nrm) < 0)  // Make Normal and GeoNormal on the same side
+  // Ensure shading normal and geometric normal are on the same side
+  // This prevents lighting artifacts on back-facing surfaces
+  if(dot(hit.geonrm, hit.nrm) < 0)
   {
-    hit.nrm       = -hit.nrm;
+    hit.nrm       = -hit.nrm;  // Flip shading normal to match geometric normal
     hit.tangent   = -hit.tangent;
     hit.bitangent = -hit.bitangent;
   }
 
-  // handle low tessellated meshes with smooth normals
-  float3 k2 = reflect(-V, hit.nrm);
-  if(dot(hit.geonrm, k2) < 0.0f)
+  // For low-tessellated geometry, prevent internal reflection artifacts
+  float3 r = reflect(normalize(worldRayDirection), hit.nrm);
+  if(dot(r, hit.geonrm) < 0)
   {
     hit.nrm = hit.geonrm;
   }
-
-  // For low tessalated, avoid internal reflection
-  // float3 r = reflect(normalize(worldRayDirection), hit.nrm);
-  // if(dot(r, hit.geonrm) < 0)
-  // {
-  //   hit.nrm = hit.geonrm;
-  // }
 
   return hit;
 }

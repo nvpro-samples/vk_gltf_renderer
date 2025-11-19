@@ -105,6 +105,7 @@ GltfRenderer::GltfRenderer(nvutils::ParameterRegistry* paramReg)
   paramReg->add({"envSystem", "Environment: [Sky:0, HDR:1]"}, (int*)&m_resources.settings.envSystem);
   paramReg->add({"renderSystem", "Renderer [Path tracer:0, Rasterizer:1]"}, (int*)&m_resources.settings.renderSystem);
   paramReg->add({"showAxis", "Show Axis"}, &m_resources.settings.showAxis);
+  paramReg->add({"showMemStats", "Show Axis"}, &m_resources.settings.showMemStats);
   paramReg->add({"hdrEnvIntensity", "HDR Environment Intensity"}, &m_resources.settings.hdrEnvIntensity);
   paramReg->add({"hdrEnvRotation", "HDR Environment Rotation"}, &m_resources.settings.hdrEnvRotation);
   paramReg->add({"hdrBlur", "HDR Environment Blur"}, &m_resources.settings.hdrBlur);
@@ -141,6 +142,19 @@ void GltfRenderer::onAttach(nvapp::Application* app)
   m_device             = app->getDevice();
   m_resources.instance = app->getInstance();
   m_resources.app      = app;
+
+  // ===== Settings Handler (ImGui persistant) =====
+  m_settingsHandler.setHandlerName("GltfRenderer");
+  m_settingsHandler.setSetting("maxFrames", &m_resources.settings.maxFrames);
+  m_settingsHandler.setSetting("showAxis", &m_resources.settings.showAxis);
+  m_settingsHandler.setSetting("showMemStats", &m_resources.settings.showMemStats);
+  m_settingsHandler.setSetting("envSystem", (int*)&m_resources.settings.envSystem);
+  m_settingsHandler.setSetting("renderSystem", (int*)&m_resources.settings.renderSystem);
+  m_settingsHandler.setSetting("useSolidBackground", &m_resources.settings.useSolidBackground);
+  m_settingsHandler.setSetting("solidBackgroundColor", &m_resources.settings.solidBackgroundColor);
+  m_pathTracer.setSettingsHandler(&m_settingsHandler);
+  m_rasterizer.setSettingsHandler(&m_settingsHandler);
+  m_settingsHandler.addImGuiHandler();
 
   // ===== Memory Allocation & Buffer Management =====
   m_resources.allocator.init({
@@ -655,6 +669,11 @@ void GltfRenderer::cleanupScene()
   m_resources.sceneRtx.destroy();
   m_uiSceneGraph.setModel(nullptr);
   m_resources.selectedObject = -1;
+
+  // Reset memory statistics for the new scene
+  // Keeps lifetime allocation/deallocation counts but resets current and peak values
+  m_resources.sceneVk.getMemoryTracker().reset();
+  m_resources.sceneRtx.getMemoryTracker().reset();
 }
 
 //--------------------------------------------------------------------------------------------------
@@ -706,6 +725,9 @@ void GltfRenderer::createVulkanScene()
       }
 
     } while(!finished);
+
+    // Track all BLAS allocations now that they're all built
+    m_resources.sceneRtx.trackBlasMemory();
 
     // Queue TLAS building for after all BLAS work completes
     // TLAS is the top-level structure referencing all bottom-level acceleration structures

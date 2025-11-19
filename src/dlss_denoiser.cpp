@@ -31,6 +31,13 @@ void DlssDenoiser::registerParameters(nvutils::ParameterRegistry* paramReg)
 }
 
 //--------------------------------------------------------------------------------------------------
+// Set the settings handler
+void DlssDenoiser::setSettingsHandler(nvgui::SettingsHandler* settingsHandler)
+{
+  settingsHandler->setSetting("dlssEnable", &m_settings.enable);
+}
+
+//--------------------------------------------------------------------------------------------------
 // Initialization, not actual creation - called at PathTracer startup
 // See also tryInitializeNGX() for expensive NGX init
 void DlssDenoiser::init(Resources& resources)

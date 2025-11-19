@@ -102,6 +102,7 @@ private:
   /// UI
   void          renderUI();
   void          renderMenu();
+  void          renderMemoryStatistics();
   void          addToRecentFiles(const std::filesystem::path& filePath, int historySize = 20);
   void          removeFromRecentFiles(const std::filesystem::path& filePath);
   void          mouseClickedInViewport();
@@ -156,4 +157,6 @@ private:
   glm::mat4 m_prevMVP{1.f};  // Previous MVP matrix for motion vectors
 
   VkCommandPool m_transientCmdPool{};  // Command pool for transient command buffers
+
+  nvgui::SettingsHandler m_settingsHandler;  // Settings handler for ImGui.ini
 };

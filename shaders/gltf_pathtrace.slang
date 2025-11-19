@@ -448,6 +448,7 @@ bool checkInfinitePlaneIntersection(RayDesc ray, inout HitPayload payload, inout
   // Update hit information
   payload.hitT  = intersectionDist;  // Update hit distance
   hit.pos       = ray.Origin + ray.Direction * payload.hitT;
+  hit.shadowPos = hit.pos;
   hit.nrm       = normal;           // Plane normal pointing up
   hit.geonrm    = normal;           // Geometric normal is the same as the plane normal
   hit.tangent   = float3(1, 0, 0);  // Arbitrary tangent
@@ -491,8 +492,8 @@ SampleResult pathTrace(IRaytracer raytracer, RayDesc ray, inout uint seed)
     float3 contribution = float3(0);  // Direct lighting contribution
 
     // Shadow ray data (minimal extraction to reduce live state)
-    float3 shadowRayBasePos;
-    float3 shadowRayNormal;
+    float3 shadowRayPos;
+    float3 shadowRayShadingNormal;
     float3 shadowRayDir;
     float  shadowRayDist;
 
@@ -620,7 +621,6 @@ SampleResult pathTrace(IRaytracer raytracer, RayDesc ray, inout uint seed)
       {
         radiance.xyz = debugValue(pbrMat, hit, frameInfo.debugMethod);
         break;
-        // return sampleResult;
       }
 
 
@@ -646,7 +646,7 @@ SampleResult pathTrace(IRaytracer raytracer, RayDesc ray, inout uint seed)
       sampleLights(hit.pos, pbrMat.N, ray.Direction, seed, directLight);
 
       // Do not next event estimation (but delay the adding of contribution)
-      nextEventValid = (dot(directLight.direction, hit.geonrm) > 0.0f || pbrMat.diffuseTransmissionFactor > 0.0f)
+      nextEventValid = (dot(directLight.direction, hit.nrm) > 0.0f || pbrMat.diffuseTransmissionFactor > 0.0f)
                        && directLight.pdf != 0.0f;
 
       // Evaluate BSDF for Light
@@ -658,6 +658,7 @@ SampleResult pathTrace(IRaytracer raytracer, RayDesc ray, inout uint seed)
         evalData.k2 = directLight.direction;
         evalData.xi = float3(rand(seed), rand(seed), rand(seed));
         bsdfEvaluate(evalData, pbrMat);
+        // bsdfEvaluateSimple(evalData, pbrMat);
 
         // If the PDF is greater than 0, then we can sample the BSDF
         if(evalData.pdf > 0.0)
@@ -679,6 +680,7 @@ SampleResult pathTrace(IRaytracer raytracer, RayDesc ray, inout uint seed)
         sampleData.k1 = -ray.Direction;                              // outgoing direction
         sampleData.xi = float3(rand(seed), rand(seed), rand(seed));  // random number
         bsdfSample(sampleData, pbrMat);
+        // bsdfSampleSimple(sampleData, pbrMat);
 
         // Update the throughput
         throughput *= sampleData.bsdf_over_pdf;
@@ -727,20 +729,23 @@ SampleResult pathTrace(IRaytracer raytracer, RayDesc ray, inout uint seed)
       }
 
       // Extract minimal shadow ray data before scope closes (to free hit/directLight structures)
-      shadowRayBasePos = hit.pos;
-      shadowRayNormal  = hit.geonrm;
-      shadowRayDir     = directLight.direction;
-      shadowRayDist    = directLight.distance;
+      shadowRayPos           = hit.shadowPos;
+      shadowRayShadingNormal = hit.nrm;
+      shadowRayDir           = directLight.direction;
+      shadowRayDist          = directLight.distance;
     }
 
     // We are adding the contribution to the radiance only if the ray is not occluded by an object.
     if(nextEventValid)
     {
-      // shadow origin is the hit position offset by a small amount in the direction of the light
-      float3 shadowRayOrigin =
-          offsetRay(shadowRayBasePos, (dot(shadowRayDir, shadowRayNormal) > 0.0f) ? shadowRayNormal : -shadowRayNormal);
-      RayDesc shadowRay    = RayDesc(shadowRayOrigin, 0, shadowRayDir, shadowRayDist);
-      float3  shadowFactor = raytracer.TraceShadow(shadowRay, seed);
+      // Shadow origin uses the corrected shadow position with shading normal for shadow terminator fix
+      // The shadowPos already contains the correction from pointOffset ("Hacking the shadow terminator")
+      RayDesc shadowRay;
+      shadowRay.Origin    = offsetRay(shadowRayPos, shadowRayShadingNormal);
+      shadowRay.Direction = shadowRayDir;
+      shadowRay.TMin      = 0.0;
+      shadowRay.TMax      = shadowRayDist;
+      float3 shadowFactor = raytracer.TraceShadow(shadowRay, seed);
       radiance += contribution * shadowFactor;
     }
 
@@ -947,7 +952,7 @@ void rchitMain(inout HitPayload payload, in BuiltInTriangleIntersectionAttribute
   // Retrieve the Primitive mesh buffer information
   GltfRenderPrimitive renderPrim = pushConst.gltfScene->renderPrimitives[renderPrimID];
 
-  HitState hit = getHitState(renderPrim, barycentrics, worldToObject, objectToWorld, primitiveID, worldRayOrigin);
+  HitState hit = getHitState(renderPrim, barycentrics, worldToObject, objectToWorld, primitiveID, WorldRayDirection());
 
   payload.hitT     = hitT;
   payload.rprimID  = renderPrimID;

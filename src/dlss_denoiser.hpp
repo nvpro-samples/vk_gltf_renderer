@@ -105,6 +105,7 @@ public:
   const nvvk::GBuffer& getGBuffers() { return m_dlssGBuffers; }
 
   void registerParameters(nvutils::ParameterRegistry* paramReg);
+  void setSettingsHandler(nvgui::SettingsHandler* settingsHandler);
 
   bool useDlssTransparency() const { return m_useDlssTransp; }
 

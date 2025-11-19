@@ -166,11 +166,12 @@ PixelOutput fragmentMain(VertexOutput input, uint primitiveID: SV_PrimitiveID, f
   GltfRenderNode    renderNode = pushConst.gltfScene->renderNodes[pushConst.renderNodeID];  // Buffer of render nodes
   GltfRenderPrimitive renderPrimitive = pushConst.gltfScene->renderPrimitives[pushConst.renderPrimID];  // Buffer of meshes
 
-  float3 worldRayOrigin =
+  float3 cameraPos =
       float3(pushConst.frameInfo.viewInv[3].x, pushConst.frameInfo.viewInv[3].y, pushConst.frameInfo.viewInv[3].z);
+  float3 worldRayDirection = normalize(input.worldPos - cameraPos);
 
   HitState hit = getHitState(renderPrimitive, baryWeights, float4x3(renderNode.worldToObject),
-                             float4x3(renderNode.objectToWorld), primitiveID, worldRayOrigin);
+                             float4x3(renderNode.objectToWorld), primitiveID, worldRayDirection);
 
   // Evaluate the material at the hit point
   MeshState   mesh   = MeshState(hit.nrm, hit.tangent, hit.bitangent, hit.geonrm, hit.uv, false);
@@ -198,7 +199,6 @@ PixelOutput fragmentMain(VertexOutput input, uint primitiveID: SV_PrimitiveID, f
       discard;
   }
 
-  const float3 worldRayDirection = normalize(hit.pos - worldRayOrigin);
   const float3 toEye             = -worldRayDirection;
 
   // Result

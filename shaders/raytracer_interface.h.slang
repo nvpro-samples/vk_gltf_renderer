@@ -108,7 +108,7 @@ struct RayQueryRaytracer : IRaytracer
       // Barycentric coordinate on the triangle
       const float3 barycentrics = float3(1.0 - bary.x - bary.y, bary.x, bary.y);
 
-      HitState hit = getHitState(renderPrim, barycentrics, worldToObject, objectToWorld, triID, worldRayOrigin);
+      HitState hit = getHitState(renderPrim, barycentrics, worldToObject, objectToWorld, triID, ray.Direction);
 
       payload.hitT     = hitT;
       payload.rprimID  = renderPrimID;
@@ -207,7 +207,7 @@ struct TraditionalRaytracer : IRaytracer
       // Retrieve the Primitive mesh buffer information
       GltfRenderPrimitive renderPrim = pushConst.gltfScene->renderPrimitives[renderPrimID];
 
-      HitState hit = getHitState(renderPrim, barycentrics, worldToObject, objectToWorld, primitiveID, worldRayOrigin);
+      HitState hit = getHitState(renderPrim, barycentrics, worldToObject, objectToWorld, primitiveID, ray.Direction);
 
       payload.hitT     = hitT;
       payload.rprimID  = renderPrimID;

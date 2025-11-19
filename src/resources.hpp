@@ -128,6 +128,7 @@ struct Settings
   shaderio::DebugMethod debugMethod            = shaderio::DebugMethod::eNone;  // Debug method for the rasterizer
   shaderio::EnvSystem   envSystem              = shaderio::EnvSystem::eSky;     // Environment system: Sky or HDR
   bool                  showAxis               = true;                          // Show the axis (bottom left)
+  bool                  showMemStats           = false;                         // Show memory statistics window
   float                 hdrEnvIntensity        = 1.0f;                          // Intensity of the environment (HDR)
   float                 hdrEnvRotation         = 0.0f;                          // Rotation of the environment (HDR)
   float                 hdrBlur                = 0.0f;                          // Blur of the environment (HDR)

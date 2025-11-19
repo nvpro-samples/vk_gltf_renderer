@@ -598,6 +598,13 @@ void OptiXDenoiser::registerParameters(nvutils::ParameterRegistry* paramReg)
   paramReg->add({"optixAutoDenoiseInterval", "OptiX Denoiser: Auto-denoise interval (frames)"}, &m_settings.autoDenoiseInterval);
 }
 
+void OptiXDenoiser::setSettingsHandler(nvgui::SettingsHandler* settingsHandler)
+{
+  settingsHandler->setSetting("optixEnable", &m_settings.enable);
+  settingsHandler->setSetting("optixAutoDenoiseEnabled", &m_settings.autoDenoiseEnabled);
+  settingsHandler->setSetting("optixAutoDenoiseInterval", &m_settings.autoDenoiseInterval);
+}
+
 void OptiXDenoiser::updateDenoiser(Resources& resources)
 {
   if(!m_settings.enable)

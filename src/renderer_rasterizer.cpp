@@ -77,6 +77,14 @@ void Rasterizer::registerParameters(nvutils::ParameterRegistry* paramReg)
 }
 
 //--------------------------------------------------------------------------------------------------
+// Set the settings handler
+void Rasterizer::setSettingsHandler(nvgui::SettingsHandler* settingsHandler)
+{
+  // settingsHandler->setSetting("rasterWireframe", &m_enableWireframe);
+  // settingsHandler->setSetting("rasterUseRecordedCmd", &m_useRecordedCmd);
+}
+
+//--------------------------------------------------------------------------------------------------
 // Clean up rasterizer resources
 // Destroys pipeline layout and shaders, and deinitializes the sky physical model
 void Rasterizer::onDetach(Resources& resources)

@@ -113,6 +113,24 @@ void PathTracer::registerParameters(nvutils::ParameterRegistry* paramReg)
 }
 
 //--------------------------------------------------------------------------------------------------
+// Set the settings handler
+void PathTracer::setSettingsHandler(nvgui::SettingsHandler* settingsHandler)
+{
+  settingsHandler->setSetting("ptTechnique", (int*)&m_renderTechnique);
+  settingsHandler->setSetting("ptAdaptiveSampling", &m_adaptiveSampling);
+  settingsHandler->setSetting("ptPerformanceTarget", (int*)&m_performanceTarget);
+  settingsHandler->setSetting("ptMaxDepth", &m_pushConst.maxDepth);
+
+#if defined(USE_DLSS)
+  m_dlss->setSettingsHandler(settingsHandler);
+#endif
+
+#if defined(USE_OPTIX_DENOISER)
+  m_optix->setSettingsHandler(settingsHandler);
+#endif
+}
+
+//--------------------------------------------------------------------------------------------------
 // Destroy the resources
 void PathTracer::onDetach(Resources& resources)
 {

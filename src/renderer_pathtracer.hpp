@@ -71,6 +71,7 @@ public:
 
   // Register command line parameters
   void registerParameters(nvutils::ParameterRegistry* paramReg);
+  void setSettingsHandler(nvgui::SettingsHandler* settingsHandler);
 
   VkDevice                        m_device{};  // Vulkan device
   VkPipelineLayout                m_pipelineLayout{};

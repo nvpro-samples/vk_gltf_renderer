@@ -128,6 +128,7 @@ public:
 
   // Register parameters for UI
   void registerParameters(nvutils::ParameterRegistry* paramReg);
+  void setSettingsHandler(nvgui::SettingsHandler* settingsHandler);
 
   // Checks if the OptiX denoiser and necessary hardware is available and ready
   bool isAvailable() const { return m_availability == Availability::eAvailable; }

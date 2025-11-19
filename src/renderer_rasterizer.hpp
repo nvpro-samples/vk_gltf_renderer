@@ -48,6 +48,7 @@ public:
 
   // Register command line parameters
   void registerParameters(nvutils::ParameterRegistry* paramReg);
+  void setSettingsHandler(nvgui::SettingsHandler* settingsHandler);
 
 private:
   void renderNodes(VkCommandBuffer cmd, Resources& resources, const std::vector<uint32_t>& nodeIDs);
