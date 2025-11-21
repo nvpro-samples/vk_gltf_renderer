@@ -137,6 +137,7 @@ struct Settings
   glm::vec3             solidBackgroundColor   = {0.0f, 0.0f, 0.0f};            // Solid background color
   int                   maxFrames              = {200};                         // Maximum number of frames to render
   bool                  useInfinitePlane       = false;                         // Use infinite plane
+  bool                  isShadowCatcher        = true;                          // Infinite place only catch shadow
   float                 infinitePlaneDistance  = 0;                             // Distance/height of the infinite plane
   glm::vec3             infinitePlaneBaseColor = glm::vec3(0.5, 0.5, 0.5);      // Default gray color
   float                 infinitePlaneMetallic  = 0.0;                           // Default non-metallic

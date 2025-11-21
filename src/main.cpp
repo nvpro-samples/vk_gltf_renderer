@@ -68,6 +68,9 @@ auto main(int argc, char** argv) -> int
   nvutils::Logger&             logger   = nvutils::Logger::getInstance();
   nvutils::Logger::LogLevel    logLevel = nvutils::Logger::LogLevel::eINFO;
   nvutils::Logger::ShowFlags   logShow  = nvutils::Logger::ShowBits::eSHOW_NONE;
+#if NDEBUG
+  logger.breakOnError(false);
+#endif
 
   // Global variables
   std::filesystem::path sceneFilename{};  // "shader_ball.gltf"};  // Default scene

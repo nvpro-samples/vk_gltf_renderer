@@ -94,7 +94,10 @@ void PathTracer::registerParameters(nvutils::ParameterRegistry* paramReg)
 {
   // PathTracer-specific command line parameters
   paramReg->add({"ptMaxDepth", "PathTracer: Maximum ray depth"}, &m_pushConst.maxDepth);
-  paramReg->add({"ptSamples", "PathTracer: Samples per pixel"}, &m_pushConst.numSamples);
+  paramReg->add({.name            = "ptSamples",
+                 .help            = "PathTracer: Samples per pixel",
+                 .callbackSuccess = [this](const nvutils::ParameterBase* const) { m_adaptiveSampling = false; }},
+                &m_pushConst.numSamples);
   paramReg->add({"ptFireflyClamp", "PathTracer: Firefly clamp threshold"}, &m_pushConst.fireflyClampThreshold);
   paramReg->add({"ptAperture", "PathTracer: Camera aperture"}, &m_pushConst.aperture);
   paramReg->add({"ptFocalDistance", "PathTracer: Focal distance"}, &m_pushConst.focalDistance);
@@ -290,6 +293,7 @@ bool PathTracer::onUIRender(Resources& resources)
     changed |= PE::Checkbox("Infinite Plane", (bool*)&resources.settings.useInfinitePlane);
     if(resources.settings.useInfinitePlane)
     {
+      changed |= PE::Checkbox("Shadow Catcher", (bool*)&resources.settings.isShadowCatcher);
       const float extentY = resources.scene.valid() ? resources.scene.getSceneBounds().extents().y : 10.0f;
       if(PE::treeNode("Infinite Plane Settings"))
       {

@@ -1,9 +1,9 @@
-# Vulkan glTF Scene Renderer
+﻿# Vulkan glTF Scene Renderer
 
+|glTF Renderer|
+|-------------|
+|![](doc/gltf_renderer.jpg)|
 
-|Pathtracer | Raster|
-|:------------: | :------------: |
-|![](doc/pathtrace.png) |![](doc/raster.png)|
 
 ## Overview
 
@@ -40,6 +40,7 @@ This version brings significant improvements and modernization:
 - Advanced tone mapping
 - Camera control system
 - Extensive debug visualization options
+- AI denoisers
 
 ## Dependencies
 
@@ -47,6 +48,11 @@ This version brings significant improvements and modernization:
  - [Nvpro-Core2](https://github.com/nvpro-samples/nvpro_core2.git) framework
  - [Slang](https://github.com/shader-slang/slang) shading language (included with nvpro_core2)
 
+ ### Optional Dependencies
+ - [NVIDIA DLSS SDK](https://developer.nvidia.com/rtx/dlss) (automatically downloaded if `USE_DLSS` is enabled)
+ - [CUDA Toolkit](https://developer.nvidia.com/cuda-toolkit) (required for OptiX denoiser)]
+ - [Draco Compression](https://github.com/google/draco) (Downloaded automatically if `USE_DRACO` is enabled))
+ 
 ## Build Instructions
 
 1. Clone the repositories
@@ -62,7 +68,6 @@ cmake -B build -S . -DUSE_DLSS=ON -DUSE_DRACO=ON
 cmake --build build --config release
 ```
 
-Note: OptiX denoiser will be automatically enabled if CUDA Toolkit is detected.
 
 3. Run the application
 ```bash
@@ -75,6 +80,15 @@ cmake --install .
 ```
 
 > **NOTE**: In Debug mode, validation layers are enabled by default. In Release mode, they are disabled for better performance. You can turn validation off to start the application faster, e.g., `vk_gltf_renderer --vvl 0`.
+
+The application supports extensive command-line options for automation and testing. It can run in headless mode (without UI) and save rendered images to disk, making it useful for benchmarking and batch rendering workflows.
+
+Example of headless rendering:
+```bash
+ ./vk_gltf_renderer.exe --headless shader_ball.gltf daytime.hdr --envSystem 1 --frames 1000
+```
+
+
 
 
 ### Draco Compression
@@ -124,79 +138,105 @@ The denoiser will automatically integrate using CUDA-Vulkan interoperability for
 
 ## glTF Core features
 
-- [x] glTF 2.0 (.gltf/.glb)
-- [x] images (HDR, PNG, JPEG, ...)
-- [x] buffers (geometry, animation, skinning, ...)
-- [x] textures (base color, normal, metallic, roughness, ...)
-- [x] materials (PBR, ...)
-- [x] animations
-- [x] skins
-- [x] morphs
-- [x] cameras
-- [x] lights
-- [x] nodes
-- [x] scenes
-- [x] samplers
-- [x] textures
-- [x] extensions
+- ✅ glTF 2.0 (.gltf/.glb)
+- ✅ images (HDR, PNG, JPEG, ...)
+- ✅ buffers (geometry, animation, skinning, ...)
+- ✅ textures (base color, normal, metallic, roughness, ...)
+- ✅ materials (PBR, ...)
+- ✅ animations
+- ✅ skins
+- ✅ morphs
+- ✅ cameras
+- ✅ lights
+- ✅ nodes
+- ✅ scenes
+- ✅ samplers
+- ✅ textures
+- ✅ extensions
 
 ## GLTF Extensions
  Here are the list of extensions that are supported by this application
 
-- [ ] KHR_animation_pointer
-- [x] KHR_draco_mesh_compression
-- [x] KHR_lights_punctual
-- [x] KHR_materials_anisotropy
-- [x] KHR_materials_clearcoat
-- [x] KHR_materials_diffuse_transmission
-- [x] KHR_materials_dispersion
-- [x] KHR_materials_emissive_strength
-- [x] KHR_materials_ior
-- [x] KHR_materials_iridescence
-- [x] KHR_materials_sheen
-- [x] KHR_materials_specular
-- [x] KHR_materials_transmission
-- [x] KHR_materials_unlit
-- [x] KHR_materials_variants
-- [x] KHR_materials_volume
-- [ ] KHR_mesh_quantization
-- [x] KHR_texture_basisu
-- [x] KHR_texture_transform
-- [ ] KHR_xmp_json_ld
-- [x] EXT_mesh_gpu_instancing
-- [x] KHR_node_visibility
+- ✅ KHR_draco_mesh_compression
+- ✅ KHR_lights_punctual
+- ✅ KHR_materials_anisotropy
+- ✅ KHR_materials_clearcoat
+- ✅ KHR_materials_diffuse_transmission
+- ✅ KHR_materials_dispersion
+- ✅ KHR_materials_emissive_strength
+- ✅ KHR_materials_ior
+- ✅ KHR_materials_iridescence
+- ✅ KHR_materials_sheen
+- ✅ KHR_materials_specular
+- ✅ KHR_materials_transmission
+- ✅ KHR_materials_unlit
+- ✅ KHR_materials_variants
+- ✅ KHR_materials_volume
+- ✅ KHR_texture_basisu
+- ✅ KHR_texture_transform
+- ✅ EXT_mesh_gpu_instancing
+- ✅ KHR_node_visibility
 
-## Pathtracer
+## Renderer
+
+There are two renderers: a rudimentary rasterizer and a full featured path tracer.
+
+![](doc/renderers.jpg)
+
+Debug method allow to visualize specific components, like: base color, normal, tangents, texture coordinates, etc.
+
+
+
+
+### Pathtracer
 
 Implements a path tracer with global illumination. 
 
 
-![](doc/pathtracer_settings.png)
+![](doc/pathtracer_settings.jpg)
 
-The options are:
-* Max Depth : number of bounces the path can do
-* Max Samples: how many samples per pixel at each frame iteration
+* Renderting Technique: choice between Ray Tracing and Ray Query (Compute)
+* Use SER: enabling Shader Execution Reorder for Ray Tracing.
+* FireFly Clamp: removes high intensity pixels
+* Max Iterations: maximum rendering frames
+* Samples: number of samples per pixel in a single frame
+* Auto SPP: increase automatically the SSP to reach the FPS 
 * Aperture: depth-of-field
-* Debug Method: shows information like base color, metallic, roughness, and some attributes
-* Choice between indirect and RTX pipeline.
-* Denoiser: Choose between DLSS-RR (if enabled), or OptiX AI Denoiser (if enabled) 
+* Auto Focus: uses the interest position to compute the focal distance
+* Infinite Plane: adds an infinite plane to the scene.
+
+#### Denoisers
+
+![](doc/denoisers.jpg)
+
+There are two denoisers: DLSS-RR, which provides real-time denoising, and the OptiX denoiser, which reduces residual Monte Carlo noise. 
+
+##### DLSS-RR
+
+When activated, you can select the rendering resolution and view guide buffers. Clicking on a guide buffer toggles its display in the main viewport.
+
+![](doc/dlss.jpg)
+
+
+##### OptiX
+
+Denoising can be performed manually by clicking the `Denoise` button, or automatically at a defined interval. The denoised image is visible when `Denoise Result` is active, indicated by a green outline.
+
+![](doc/optix.jpg)
 
 
 ## Raster
+![](doc/raster_settings.jpg)
 
-Utilizes shared Vulkan resources with the path tracer, including:
+The raster renderer does not implement the full glTF PBR model; instead, it serves as a proof of concept to demonstrate data sharing with the path tracer. It utilizes the same Vulkan resources as the path tracer, including:
 
 - Scene geometry
 - Material data
 - Textures
 - Shading functions
 
-The options are:
-* Show wireframe: display wireframe on top of the geometry
-* Super-Sampling: render the image 2x and blit it with linear filter.
-* Debug Method: shows information like base color, metallic, roughness, and some attributes
 
-![](doc/raster_settings.png)
+
 
 Example with wireframe option turned on
 
@@ -265,9 +305,9 @@ Background can be also solid color and if saved as PNG, the alpha channel is tak
 
 ## Tonemapper
 
-We could not get good results without a tone mapper. This is done with a compute shader and different settings can be made.
+A tone mapper is essential for achieving visually pleasing results. Tone mapping is performed with a compute shader, and various settings are available to adjust the output.
 
-![](doc/tonemapper.png)
+![](doc/tonemapper.jpg)
 
 Multiple tonemapper are supported:
 * [Filmic](http://filmicworlds.com/blog/filmic-tonemapping-operators/)
@@ -282,37 +322,52 @@ Multiple tonemapper are supported:
 
 The camera navigation follows the [Softimage](https://en.wikipedia.org/wiki/Softimage_(company)) default behavior. This means, the camera is always looking at a point of interest and orbit around it.
 
-Here are the default navigations:
+### Navigation
 
 ![](doc/cam_info.png)
 
-The camera information can be fine tune by editing its values.
-
+### Overview
 ![](doc/cam_1.png)
 
-Note: **copy** will copy in text the camera in the clipboard, and pressing the **paste** button will parse the clipboard to set the camera. 
 
-Ex: `{0.47115, 0.32620, 0.52345}, {-0.02504, -0.12452, 0.03690}, {0.00000, 1.00000, 0.00000}`
-
-### Save and Restore Cameras
-
-It is also possible to save and restore multiple cameras in the second tab. Press the `+` button to save a camera, the middle button to delete it. By pressing one of the saved cameras, its position, interests, orientation and FOV will be changed smoothly. 
-
-**Note**: If the glTF scene contains multiple cameras, they will be showing here. 
+### Copy / Restore / Save
 
 ![](doc/cam_2.png)
 
-### Other modes 
+- Click the home icon to restore the camera to its original position.
+- Click the camera+ icon to save a camera; saved cameras are shown below as #1, #2, etc.
+- Click the copy icon to store the camera information in the clipboard.
+- Click the paste icon to set the camera from information on the clipboard.
+- Click a camera number to retrieve that saved camera.
 
-Other navigation modes also exist, like fly, where the `w`, `a`, `s`, `d` keys also moves the camera. 
+
+### Navigation modes 
 
 ![](doc/cam_3.png)
+
+- Orbit: rotates around a point of interest. Double-clicking on an object will re-center the interest point to the clicked position.
+- Fly: allows free movement of the camera, and the `w`, `a`, `s`, `d` keys move the camera accordingly.
+- Walk: similar to Fly mode, but restricts movement to the horizontal (X-Z) plane.
+
 
 ## Depth-of-Field
 
 Depth of field works only for ray tracing and settings can be found under the `RendererPathtracer>Depth-of-Field`
 
 ![](doc/dof_1.jpg) ![](doc/dof_2.jpg)
+
+
+## Configuration
+
+### Settings File
+
+The application creates a `vk_gltf_renderer.ini` file next to the executable, which stores:
+- UI layout and window positions
+- User interface preferences (e.g., axis visibility, grid display)
+- Selected renderer type (raster or path tracer)
+- Last used settings and options
+
+If you encounter issues with the UI or want to reset all settings to defaults, it is safe to delete this file. The application will recreate it with default values on the next launch.
 
 
 ----
@@ -439,7 +494,11 @@ The Nvml is a tool that allows to see the status of the GPU. It is possible to s
 
 ### Tangent Space
 
-There is a tangent space tool that allows to fix or to recreate the tangent space of the model. This is useful when the normal map is not looking right or there are errors with the tangents in the scene.
+There is a tangent space tool that lets you repair or regenerate the model's tangent space. This is useful if normal maps look incorrect or there are tangent-related errors in the scene.
+
+- The Simple option uses UV coordinates and implements the method described in https://foundationsofgameenginedev.com/FGED2-sample.pdf
+- The MikkTSpace option is more advanced and implements the algorithm from http://www.mikktspace.com/
+
 
 ## Utilities
 

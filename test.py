@@ -12,7 +12,7 @@ logger = logging.getLogger(__name__)
 
 # Predefined executables and their arguments
 EXECUTABLES_WITH_ARGS = [
-    ("vk_gltf_renderer", ["--headless", "shader_ball.gltf", "env3.hdr", "--envSystem", "1", "--frames", "10"]),
+    ("vk_gltf_renderer", ["--headless", "shader_ball.gltf", "daytime.hdr", "--envSystem", "1", "--frames", "10", "--ptSamples", "50"]),
 
 ]
 

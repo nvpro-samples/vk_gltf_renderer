@@ -144,17 +144,21 @@ void GltfRenderer::onAttach(nvapp::Application* app)
   m_resources.app      = app;
 
   // ===== Settings Handler (ImGui persistant) =====
-  m_settingsHandler.setHandlerName("GltfRenderer");
-  m_settingsHandler.setSetting("maxFrames", &m_resources.settings.maxFrames);
-  m_settingsHandler.setSetting("showAxis", &m_resources.settings.showAxis);
-  m_settingsHandler.setSetting("showMemStats", &m_resources.settings.showMemStats);
-  m_settingsHandler.setSetting("envSystem", (int*)&m_resources.settings.envSystem);
-  m_settingsHandler.setSetting("renderSystem", (int*)&m_resources.settings.renderSystem);
-  m_settingsHandler.setSetting("useSolidBackground", &m_resources.settings.useSolidBackground);
-  m_settingsHandler.setSetting("solidBackgroundColor", &m_resources.settings.solidBackgroundColor);
-  m_pathTracer.setSettingsHandler(&m_settingsHandler);
-  m_rasterizer.setSettingsHandler(&m_settingsHandler);
-  m_settingsHandler.addImGuiHandler();
+  if(!m_app->isHeadless())
+  {
+    // Read/store the information in the settings file, only if not headless
+    m_settingsHandler.setHandlerName("GltfRenderer");
+    m_settingsHandler.setSetting("maxFrames", &m_resources.settings.maxFrames);
+    m_settingsHandler.setSetting("showAxis", &m_resources.settings.showAxis);
+    m_settingsHandler.setSetting("showMemStats", &m_resources.settings.showMemStats);
+    m_settingsHandler.setSetting("envSystem", (int*)&m_resources.settings.envSystem);
+    m_settingsHandler.setSetting("renderSystem", (int*)&m_resources.settings.renderSystem);
+    m_settingsHandler.setSetting("useSolidBackground", &m_resources.settings.useSolidBackground);
+    m_settingsHandler.setSetting("solidBackgroundColor", &m_resources.settings.solidBackgroundColor);
+    m_pathTracer.setSettingsHandler(&m_settingsHandler);
+    m_rasterizer.setSettingsHandler(&m_settingsHandler);
+    m_settingsHandler.addImGuiHandler();
+  }
 
   // ===== Memory Allocation & Buffer Management =====
   m_resources.allocator.init({
@@ -320,9 +324,12 @@ void GltfRenderer::onRender(VkCommandBuffer cmd)
   }
 
   // Process queued command buffers in FIFO order
-  if(processQueuedCommandBuffers())
+  while(processQueuedCommandBuffers())
   {
-    return;  // Give back control to the UI
+    // In headless, process all command buffers, don't give back control to the UI
+    // so everything is ready for the first frame
+    if(!m_app->isHeadless())
+      return;  // Give back control to the UI if not headless
   }
 
   // Empty scene, clear the G-Buffer
@@ -352,20 +359,20 @@ void GltfRenderer::onRender(VkCommandBuffer cmd)
 
     // Update the scene frame information uniform buffer
     shaderio::SceneFrameInfo finfo{
-        .viewMatrix             = m_cameraManip->getViewMatrix(),
-        .projInv                = glm::inverse(m_cameraManip->getPerspectiveMatrix()),
-        .viewInv                = glm::inverse(m_cameraManip->getViewMatrix()),
-        .viewProjMatrix         = m_cameraManip->getPerspectiveMatrix() * m_cameraManip->getViewMatrix(),
-        .prevMVP                = m_prevMVP,
-        .envRotation            = m_resources.settings.hdrEnvRotation,
-        .envBlur                = m_resources.settings.hdrBlur,
-        .envIntensity           = m_resources.settings.hdrEnvIntensity,
-        .useSolidBackground     = m_resources.settings.useSolidBackground ? 1 : 0,
-        .backgroundColor        = m_resources.settings.solidBackgroundColor,
-        .environmentType        = (int)m_resources.settings.envSystem,
-        .selectedRenderNode     = m_resources.selectedObject,
-        .debugMethod            = m_resources.settings.debugMethod,
-        .useInfinitePlane       = m_resources.settings.useInfinitePlane ? 1 : 0,
+        .viewMatrix         = m_cameraManip->getViewMatrix(),
+        .projInv            = glm::inverse(m_cameraManip->getPerspectiveMatrix()),
+        .viewInv            = glm::inverse(m_cameraManip->getViewMatrix()),
+        .viewProjMatrix     = m_cameraManip->getPerspectiveMatrix() * m_cameraManip->getViewMatrix(),
+        .prevMVP            = m_prevMVP,
+        .envRotation        = m_resources.settings.hdrEnvRotation,
+        .envBlur            = m_resources.settings.hdrBlur,
+        .envIntensity       = m_resources.settings.hdrEnvIntensity,
+        .useSolidBackground = m_resources.settings.useSolidBackground ? 1 : 0,
+        .backgroundColor    = m_resources.settings.solidBackgroundColor,
+        .environmentType    = (int)m_resources.settings.envSystem,
+        .selectedRenderNode = m_resources.selectedObject,
+        .debugMethod        = m_resources.settings.debugMethod,
+        .useInfinitePlane = m_resources.settings.useInfinitePlane ? (m_resources.settings.isShadowCatcher ? 2 : 1) : 0,
         .infinitePlaneDistance  = m_resources.settings.infinitePlaneDistance,
         .infinitePlaneBaseColor = m_resources.settings.infinitePlaneBaseColor,
         .infinitePlaneMetallic  = m_resources.settings.infinitePlaneMetallic,

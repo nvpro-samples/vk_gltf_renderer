@@ -65,10 +65,14 @@
 
 // clang-format on
 
-
+// This is a debug flag to enable/disable debug output
+// For example, to use print statements in the shader, set this to true.
+// Add printf and enable the Validation layer debug output.
 static bool doDebug = false;
 
+//-----------------------------------------------------------------------
 // Direct light structure
+//-----------------------------------------------------------------------
 struct DirectLight
 {
   float3 direction;        // Direction to the light
@@ -77,9 +81,57 @@ struct DirectLight
   float  pdf;              // Probability of sampling this light
 };
 
-static const float MIN_TRANSMISSION = 0.01;  // Minimum transmission factor to continue tracing
+//-----------------------------------------------------------------------
+// Minimum transmission factor to continue tracing
+//-----------------------------------------------------------------------
+#define MIN_TRANSMISSION 0.01
 
+//-----------------------------------------------------------------------
+// Standard deviation of the Gaussian filter used for antialiasing,
+// in units of pixels.
+// This value of 1 / sqrt(8 ln(2)) makes it so that a Gaussian centered
+// on a pixel is at exactly 1/2 its maximum at the midpoints between
+// orthogonally adjacent pixels, and 1/4 its maximum at the "corners"
+// of pixels. It also empirically looks nice: larger values are
+// too blurry, and smaller values make thin lines look jagged.
+//-----------------------------------------------------------------------
+#define ANTIALIASING_STANDARD_DEVIATION 0.4246609F
+
+//-----------------------------------------------------------------------
+// The safeOffsetRay function shifts a point on a surface so that a ray
+// bouncing off the surface is no longer treated as intersecting the surface
+// from which it originated when tMin = 0.0.
+//
+// This uses the technique by Carsten Wächter and Nikolaus Binder
+// from "A Fast and Robust Method for Avoiding Self-Intersection" in Ray
+// Tracing Gems (2019).
+// The offset direction is typically the surface normal or its negation,
+// depending on whether the ray exits or enters the surface.
+float3 safeOffsetRay(float3 worldPosition, float3 offsetDirection)
+{
+  // Convert the offset direction to an integer offset.
+  const float scaleValue = 256.0f;
+  const int3  scaleInt   = int3(scaleValue * offsetDirection);
+
+  // Offset each component of worldPosition using its binary representation.
+  // Handle the sign bits correctly.
+  const float3 offsetPosition = float3(  //
+      asfloat(asint(worldPosition.x) + ((worldPosition.x < 0) ? -scaleInt.x : scaleInt.x)),
+      asfloat(asint(worldPosition.y) + ((worldPosition.y < 0) ? -scaleInt.y : scaleInt.y)),
+      asfloat(asint(worldPosition.z) + ((worldPosition.z < 0) ? -scaleInt.z : scaleInt.z)));
+
+  // Use a floating-point offset instead for points near (0,0,0), the origin.
+  const float origin     = 1.0f / 32.0f;
+  const float floatScale = 1.0f / 65536.0f;
+  return float3(  //
+      abs(worldPosition.x) < origin ? worldPosition.x + floatScale * offsetDirection.x : offsetPosition.x,
+      abs(worldPosition.y) < origin ? worldPosition.y + floatScale * offsetDirection.y : offsetPosition.y,
+      abs(worldPosition.z) < origin ? worldPosition.z + floatScale * offsetDirection.z : offsetPosition.z);
+}
+
+//-----------------------------------------------------------------------
 // #DLSS - Information for the DLSS
+//-----------------------------------------------------------------------
 struct DlssOutput
 {
   float16_t4 albedo          = float16_t4(0);
@@ -88,6 +140,10 @@ struct DlssOutput
   float3     hitPosition     = 1e34f;
 };
 
+//-----------------------------------------------------------------------
+// This is the result of sampling a pixel
+// It returns the radiance and the DLSS output
+//-----------------------------------------------------------------------
 struct SampleResult
 {
   float4     radiance   = float4(0, 0, 0, 0);
@@ -108,16 +164,9 @@ float2 sampleGaussian(float2 u)
 }
 
 //-----------------------------------------------------------------------
-// Standard deviation of the Gaussian filter used for antialiasing,
-// in units of pixels.
-// This value of 1 / sqrt(8 ln(2)) makes it so that a Gaussian centered
-// on a pixel is at exactly 1/2 its maximum at the midpoints between
-// orthogonally adjacent pixels, and 1/4 its maximum at the "corners"
-// of pixels. It also empirically looks nice: larger values are
-// too blurry, and smaller values make thin lines look jagged.
+// Get a ray from a sample position and offset
+// Return the ray description
 //-----------------------------------------------------------------------
-#define ANTIALIASING_STANDARD_DEVIATION 0.4246609F
-
 RayDesc getRay(float2 samplePos, float2 offset, float2 imageSize, float4x4 projMatrixI, float4x4 viewMatrixI)
 {
   const float2 clipCoords = (samplePos + offset) / imageSize * 2.0 - 1.0;
@@ -235,10 +284,103 @@ void sampleLights(in float3 pos, float3 normal, in float3 worldRayDirection, ino
   return;
 }
 
+//-----------------------------------------------------------------------
+// Evaluates the environment (sky or HDR) in a given direction
+// Returns the radiance and PDF for Multiple Importance Sampling (MIS)
+// This function is used both for environment hits and shadow catcher compositing
+//-----------------------------------------------------------------------
+void sampleEnvironment(float3 direction, SceneFrameInfo* frameInfo, out float3 envColor, out float envPdf)
+{
+  if(frameInfo->environmentType == EnvSystem::eSky)
+  {
+    envColor = evalPhysicalSky(*pushConst.skyParams, direction);
+    envPdf   = samplePhysicalSkyPDF(*pushConst.skyParams, direction);
+  }
+  else
+  {
+    float3 dir = rotate(direction, float3(0, 1, 0), -frameInfo.envRotation);
+    float2 uv  = getSphericalUv(dir);
+    float4 env = texturesHdr[HDR_IMAGE_INDEX].SampleLevel(uv, 0);
+    envColor   = env.rgb * frameInfo.envIntensity;
+    envPdf     = env.w;
+  }
+}
+
+//-----------------------------------------------------------------------
+// Shadow Catcher: Creates an invisible plane that only shows shadows
+// Returns true to continue path tracing (shadowed area), false to break (fully lit)
+//-----------------------------------------------------------------------
+bool handleShadowCatcher(IRaytracer     raytracer,
+                         HitState       hit,
+                         PbrMaterial    pbrMat,
+                         inout RayDesc  ray,
+                         inout float3   radiance,
+                         inout float3   throughput,
+                         inout float    lastSamplePdf,
+                         inout uint     seed,
+                         SceneFrameInfo* frameInfo)
+{
+  // Step 1: Sample direct lighting and check for shadows
+  DirectLight directLight;
+  sampleLights(hit.pos, pbrMat.N, ray.Direction, seed, directLight);
+
+  float3 shadowFactor = float3(1, 1, 1);  // Default: fully lit (no shadow)
+  if(dot(directLight.direction, hit.nrm) > 0.0f && directLight.pdf != 0.0f)
+  {
+    // Trace shadow ray toward the light source
+    RayDesc shadowRay;
+    shadowRay.Origin    = hit.pos;
+    shadowRay.Direction = directLight.direction;
+    shadowRay.TMin      = 0.0;
+    shadowRay.TMax      = INFINITE;
+    shadowFactor        = raytracer.TraceShadow(shadowRay, seed);
+  }
+
+  // Step 2: Sample environment color in the view ray direction
+  // This is what we'll see where the plane is not in shadow
+  float3 envColor;
+  float  envPdf;
+  sampleEnvironment(ray.Direction, frameInfo, envColor, envPdf);
+
+  // Step 3: Handle fully lit areas (no objects casting shadows)
+  // In this case, the plane is "invisible" - just return the environment
+  if(all(shadowFactor == float3(1, 1, 1)))
+  {
+    // Apply Multiple Importance Sampling (MIS) weight
+    float misWeight = (lastSamplePdf == DIRAC) ? 1.0 : (lastSamplePdf / (lastSamplePdf + envPdf));
+    radiance += throughput * misWeight * envColor;
+    return false;  // Signal to break - plane is invisible here
+  }
+
+  // Add direct contribution: environment modulated by shadow (darker in shadow)
+  radiance += envColor * shadowFactor;
+
+  // Step 4: Handle shadowed areas - sample BSDF for indirect lighting
+  // This bounce back the ray into the scene to gather indirect lighting
+  BsdfSampleData sampleData;
+  sampleData.k1 = -ray.Direction;
+  sampleData.xi = float3(rand(seed), rand(seed), rand(seed));
+  bsdfSampleSimple(sampleData, pbrMat);
+
+  // Check for absorption
+  if(sampleData.event_type == BSDF_EVENT_ABSORB)
+  {
+    return false;  // Signal to break - path terminated
+  }
+
+  // Continue path tracing to accumulate indirect lighting (sky bounce)
+  float3 offsetDir = dot(sampleData.k2, hit.geonrm) > 0 ? hit.geonrm : -hit.geonrm;
+  ray.Origin    = safeOffsetRay(hit.pos, offsetDir);
+  ray.Direction = sampleData.k2;
+  throughput *= sampleData.bsdf_over_pdf;
+  lastSamplePdf = sampleData.pdf;
+
+  return true;  // Signal to continue - keep tracing for indirect lighting
+}
 
 //----------------------------------------------------------
 // Testing if the hit is opaque or alpha-transparent
-// Return true is opaque
+// Return 1.0 if it is opaque
 //----------------------------------------------------------
 float getOpacity(GltfRenderNode renderNode, GltfRenderPrimitive renderPrim, int triangleID, float3 barycentrics)
 {
@@ -289,6 +431,10 @@ float getOpacity(GltfRenderNode renderNode, GltfRenderPrimitive renderPrim, int 
   return baseColorAlpha;
 }
 
+//-----------------------------------------------------------------------
+// Calculate the transmission of a ray through a surface
+// Return the transmission color
+//-----------------------------------------------------------------------
 float3 getShadowTransmission(GltfRenderNode      renderNode,
                              GltfRenderPrimitive renderPrim,
                              int                 triangleID,
@@ -382,6 +528,7 @@ float3 getShadowTransmission(GltfRenderNode      renderNode,
 
 //-----------------------------------------------------------------------
 // Shoot a ray and store 1 if the ray hits the selected object
+//-----------------------------------------------------------------------
 void selectObject(float2 samplePos, float2 imageSize)
 {
   // Subpixel jitter: send the ray through a different position inside the pixel each time, to provide antialiasing.
@@ -423,7 +570,7 @@ void selectObject(float2 samplePos, float2 imageSize)
 //-----------------------------------------------------------------------
 bool checkInfinitePlaneIntersection(RayDesc ray, inout HitPayload payload, inout HitState hit, SceneFrameInfo* frameInfo)
 {
-  if(frameInfo.useInfinitePlane != 1)
+  if(frameInfo.useInfinitePlane == 0)
     return false;
 
   // Plane definition
@@ -460,13 +607,17 @@ bool checkInfinitePlaneIntersection(RayDesc ray, inout HitPayload payload, inout
 //-----------------------------------------------------------------------
 // Path tracing
 //
-// This function:
-// 1. Traces rays through a scene, bouncing them off surfaces according to their material
-//    properties (like reflection, transmission, etc.) up to a maximum depth
-// 2. At each intersection, it calculates direct lighting contribution from light sources
-//    (currently only sky/sun) and samples the BSDF to determine the next ray direction
-// 3. Accumulates radiance along the path while applying Russian Roulette for optimization,
-//    handling both surface and volumetric effects, and returns the final color contribution for that ray path
+// This function implements unbiased Monte Carlo path tracing:
+// 1. Traces rays through the scene, bouncing off surfaces according to their material
+//    properties (reflection, refraction, transmission, etc.) up to a maximum depth
+// 2. At each intersection, calculates direct lighting via Next Event Estimation (NEE)
+//    by sampling lights and evaluating the BSDF
+// 3. Samples the BSDF to determine the next ray direction for indirect lighting
+// 4. Applies Russian Roulette path termination to improve efficiency
+// 5. Handles special features:
+//    - Shadow catcher: invisible plane that shows only shadows for compositing
+//    - Volumetric effects: transmission, attenuation, and scattering
+//    - Alpha transparency: stochastic alpha testing for correct compositing
 //
 SampleResult pathTrace(IRaytracer raytracer, RayDesc ray, inout uint seed)
 {
@@ -492,10 +643,9 @@ SampleResult pathTrace(IRaytracer raytracer, RayDesc ray, inout uint seed)
     float3 contribution = float3(0);  // Direct lighting contribution
 
     // Shadow ray data (minimal extraction to reduce live state)
-    float3 shadowRayPos;
-    float3 shadowRayShadingNormal;
-    float3 shadowRayDir;
-    float  shadowRayDist;
+    float16_t3 shadowRayPos;
+    float16_t3 shadowRayDir;
+    float16_t  shadowRayDist;
 
     {
       //DirectLight directLight;
@@ -540,23 +690,10 @@ SampleResult pathTrace(IRaytracer raytracer, RayDesc ray, inout uint seed)
           }
         }
 
-        // Add sky or HDR texture
+        // Add sky or HDR texture using refactored helper
         float3 envColor;
         float  envPdf;
-        if(frameInfo->environmentType == EnvSystem::eSky)
-        {
-          envColor = evalPhysicalSky(*pushConst.skyParams, ray.Direction);
-          envPdf   = samplePhysicalSkyPDF(*pushConst.skyParams, ray.Direction);
-        }
-        else
-        {
-          // Adding HDR lookup
-          float3 dir = rotate(ray.Direction, float3(0, 1, 0), -frameInfo.envRotation);
-          float2 uv  = getSphericalUv(dir);  // See sampling.glsl
-          float4 env = texturesHdr[HDR_IMAGE_INDEX].SampleLevel(uv, 0);
-          envColor   = env.rgb * frameInfo.envIntensity;
-          envPdf     = env.w;
-        }
+        sampleEnvironment(ray.Direction, frameInfo, envColor, envPdf);
 
         // We may hit the environment twice: once via sampleLights() and once when hitting the sky while probing
         // for more indirect hits. This is the counter part of the MIS weighting in sampleLights()
@@ -566,15 +703,25 @@ SampleResult pathTrace(IRaytracer raytracer, RayDesc ray, inout uint seed)
         break;
       }
 
+      GltfShadeMaterial material;  // The orginal glTF material
+      PbrMaterial       pbrMat;    // The evalualted PBR material
 
-      PbrMaterial       pbrMat;
-      GltfShadeMaterial material;
+      // If the ray hits the infinite plane
       if(hitInfinitePlane)
       {
         // Evaluate the material at the hit point
         pbrMat   = defaultPbrMaterial(frameInfo.infinitePlaneBaseColor, frameInfo.infinitePlaneMetallic,
                                       frameInfo.infinitePlaneRoughness, hit.nrm, hit.nrm);
         material = defaultGltfMaterial();
+
+        // Shadow catcher: invisible plane that shows only shadows for compositing
+        if(frameInfo.useInfinitePlane == 2)
+        {
+          bool continuePath = handleShadowCatcher(raytracer, hit, pbrMat, ray, radiance, throughput, lastSamplePdf, seed, frameInfo);
+          if(!continuePath)
+            break;
+          continue;
+        }
       }
       else
       {
@@ -694,7 +841,7 @@ SampleResult pathTrace(IRaytracer raytracer, RayDesc ray, inout uint seed)
           bool isTransmission = (sampleData.event_type & BSDF_EVENT_TRANSMISSION) != 0;
 
           float3 offsetDir = dot(ray.Direction, hit.geonrm) > 0 ? hit.geonrm : -hit.geonrm;
-          ray.Origin       = offsetRay(hit.pos, offsetDir);
+          ray.Origin       = safeOffsetRay(hit.pos, offsetDir);
 
           // Flip the information if we are inside the object, but only if it is a solid object
           // The doubleSided flag is used to know if the object is solid or thin-walled.
@@ -729,19 +876,18 @@ SampleResult pathTrace(IRaytracer raytracer, RayDesc ray, inout uint seed)
       }
 
       // Extract minimal shadow ray data before scope closes (to free hit/directLight structures)
-      shadowRayPos           = hit.shadowPos;
-      shadowRayShadingNormal = hit.nrm;
-      shadowRayDir           = directLight.direction;
-      shadowRayDist          = directLight.distance;
+      float3 shadowOffsetDir = dot(directLight.direction, hit.geonrm) > 0 ? hit.geonrm : -hit.geonrm;
+      // The shadowPos already contains the correction from pointOffset ("Hacking the shadow terminator"), but offset for planar surfaces
+      shadowRayPos  = float16_t3(safeOffsetRay(hit.shadowPos, shadowOffsetDir));
+      shadowRayDir  = float16_t3(directLight.direction);
+      shadowRayDist = float16_t(directLight.distance);
     }
 
     // We are adding the contribution to the radiance only if the ray is not occluded by an object.
     if(nextEventValid)
     {
-      // Shadow origin uses the corrected shadow position with shading normal for shadow terminator fix
-      // The shadowPos already contains the correction from pointOffset ("Hacking the shadow terminator")
       RayDesc shadowRay;
-      shadowRay.Origin    = offsetRay(shadowRayPos, shadowRayShadingNormal);
+      shadowRay.Origin    = shadowRayPos;
       shadowRay.Direction = shadowRayDir;
       shadowRay.TMin      = 0.0;
       shadowRay.TMax      = shadowRayDist;
@@ -770,6 +916,8 @@ SampleResult pathTrace(IRaytracer raytracer, RayDesc ray, inout uint seed)
 
 //-----------------------------------------------------------------------
 // Sampling the pixel
+// This function samples a pixel (trace a path of rays through the scene)
+// and returns the result
 //-----------------------------------------------------------------------
 SampleResult samplePixel(IRaytracer raytracer,
                          inout uint seed,
@@ -796,7 +944,6 @@ SampleResult samplePixel(IRaytracer raytracer,
   ray.Origin += randomAperturePos;
   ray.Direction = finalRayDir;
 
-
   SampleResult sampleResult = pathTrace(raytracer, ray, seed);
 
   // Removing fireflies
@@ -812,14 +959,18 @@ SampleResult samplePixel(IRaytracer raytracer,
 
 //-----------------------------------------------------------------------
 // Common function for both compute and ray generation shaders
+// This is the main function that is called for each pixel
 //-----------------------------------------------------------------------
 void processPixel(IRaytracer raytracer, float2 samplePos, float2 imageSize)
 {
+  // Check if the sample position is within the image bounds
   if(samplePos.x >= imageSize.x || samplePos.y >= imageSize.y)
     return;
 
+  // Check if the sample position is the mouse coordinate
   if(samplePos.x == pushConst.mouseCoord.x && samplePos.y == pushConst.mouseCoord.y)
   {
+    // Set the debug flag to true (used for printing debug information)
     doDebug = true;
   }
 
@@ -837,7 +988,10 @@ void processPixel(IRaytracer raytracer, float2 samplePos, float2 imageSize)
   // pixel each time, to provide antialiasing.
   float2 subpixelJitter = float2(0.5f, 0.5f);
   if(pushConst.frameCount > 0)
+  {
+    // Add the jitter to the subpixel jitter
     subpixelJitter += ANTIALIASING_STANDARD_DEVIATION * sampleGaussian(float2(rand(seed), rand(seed)));
+  }
 
   // #DLSS - use the DLSS jitter and frame index (not resetting to zero)
   if(pushConst.useDlss == 1)
@@ -848,22 +1002,22 @@ void processPixel(IRaytracer raytracer, float2 samplePos, float2 imageSize)
   // Sampling n times the pixel
   SampleResult sampleResult = samplePixel(raytracer, seed, samplePos, subpixelJitter, imageSize, pushConst.frameInfo.projInv,
                                           pushConst.frameInfo.viewInv, pushConst.focalDistance, pushConst.aperture);
-  float4 pixel_color = sampleResult.radiance;
+  float4 pixelColor = sampleResult.radiance;
   for(int s = 1; s < pushConst.numSamples; s++)
   {
     subpixelJitter = float2(rand(seed), rand(seed));
     sampleResult   = samplePixel(raytracer, seed, samplePos, subpixelJitter, imageSize, pushConst.frameInfo.projInv,
                                  pushConst.frameInfo.viewInv, pushConst.focalDistance, pushConst.aperture);
-    pixel_color += sampleResult.radiance;
+    pixelColor += sampleResult.radiance;
   }
-  pixel_color /= pushConst.numSamples;
+  pixelColor /= pushConst.numSamples;
 
   bool first_frame = (pushConst.frameCount == 0);
 
   // Saving result
   if(first_frame || (pushConst.useDlss == 1))
   {  // First frame, replace the value in the buffer
-    outImages[int(OutputImage::eResultImage)][int2(samplePos)] = pixel_color;
+    outImages[int(OutputImage::eResultImage)][int2(samplePos)] = pixelColor;
   }
   else
   {
@@ -871,7 +1025,7 @@ void processPixel(IRaytracer raytracer, float2 samplePos, float2 imageSize)
     float  totalSamplesAfter = float(pushConst.totalSamples + pushConst.numSamples);
     float4 old_color         = outImages[0][int2(samplePos)];
     outImages[int(OutputImage::eResultImage)][int2(samplePos)] =
-        (old_color * pushConst.totalSamples + pixel_color * pushConst.numSamples) / totalSamplesAfter;
+        (old_color * pushConst.totalSamples + pixelColor * pushConst.numSamples) / totalSamplesAfter;
   }
 
   // #DLSS - Storing the GBuffer for the DLSS denoiser
