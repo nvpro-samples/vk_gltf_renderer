@@ -84,7 +84,7 @@ public:
   // Set the event callback to handle UI events
   void setEventCallback(const EventCallback& callback) { m_eventCallback = callback; }
 
-  void render();  // Render the scene graph and details
+  void render(bool* showSceneGraph = nullptr, bool* showProperties = nullptr);  // Render the scene graph and details
 
   bool hasTransformChanged() { return m_changes.test(eNodeTransformDirty); }
   bool hasMaterialChanged() { return m_changes.test(eMaterialDirty); }
@@ -141,8 +141,8 @@ private:
 
   void preprocessOpenNodes();
   bool markOpenNodes(int nodeIndex, int targetNodeIndex, std::unordered_set<int>& openNodes);
-  void renderSceneGraph();
-  void renderDetails();
+  void renderSceneGraph(bool* showSceneGraph);
+  void renderDetails(bool* showProperties);
 
   // Helper functions to get available materials for a node
   std::vector<int>                         getMaterialsForNode(int nodeIndex) const;

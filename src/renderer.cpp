@@ -151,6 +151,13 @@ void GltfRenderer::onAttach(nvapp::Application* app)
     m_settingsHandler.setSetting("maxFrames", &m_resources.settings.maxFrames);
     m_settingsHandler.setSetting("showAxis", &m_resources.settings.showAxis);
     m_settingsHandler.setSetting("showMemStats", &m_resources.settings.showMemStats);
+    m_settingsHandler.setSetting("showCameraWindow", &m_resources.settings.showCameraWindow);
+    m_settingsHandler.setSetting("showSceneGraphWindow", &m_resources.settings.showSceneGraphWindow);
+    m_settingsHandler.setSetting("showSettingsWindow", &m_resources.settings.showSettingsWindow);
+    m_settingsHandler.setSetting("showPropertiesWindow", &m_resources.settings.showPropertiesWindow);
+    m_settingsHandler.setSetting("showEnvironmentWindow", &m_resources.settings.showEnvironmentWindow);
+    m_settingsHandler.setSetting("showTonemapperWindow", &m_resources.settings.showTonemapperWindow);
+    m_settingsHandler.setSetting("showStatisticsWindow", &m_resources.settings.showStatisticsWindow);
     m_settingsHandler.setSetting("envSystem", (int*)&m_resources.settings.envSystem);
     m_settingsHandler.setSetting("renderSystem", (int*)&m_resources.settings.renderSystem);
     m_settingsHandler.setSetting("useSolidBackground", &m_resources.settings.useSolidBackground);

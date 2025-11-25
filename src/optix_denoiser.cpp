@@ -72,14 +72,14 @@ void OptiXDenoiser::init(Resources& resources)
 
   // Create GBuffers for denoiser output and guides
   resources.samplerPool.acquireSampler(m_linearSampler);
-  m_outputImage.init({.allocator = &resources.allocator,
-                      .colorFormats =
-                          {
-                              VK_FORMAT_R32G32B32A32_SFLOAT,  // Output denoised image (index 0)
-                              VK_FORMAT_R32G32B32A32_SFLOAT,  // OptiX Albedo+Normal (index 1)
-                          },
-                      .imageSampler   = m_linearSampler,
-                      .descriptorPool = resources.descriptorPool});
+  m_inputOutputGbuffers.init({.allocator = &resources.allocator,
+                              .colorFormats =
+                                  {
+                                      VK_FORMAT_R32G32B32A32_SFLOAT,  // Output denoised image (index 0)
+                                      VK_FORMAT_R32G32B32A32_SFLOAT,  // OptiX Albedo+Normal (index 1)
+                                  },
+                              .imageSampler   = m_linearSampler,
+                              .descriptorPool = resources.descriptorPool});
 
 
   // Create export allocator for Vulkan-CUDA interop
@@ -229,45 +229,64 @@ bool OptiXDenoiser::createSharedBuffers()
   }
 
   // Setup denoiser with maximum scratch size (for both intensity and denoising operations)
-  OPTIX_CHECK(optixDenoiserSetup(m_denoiser, nullptr, m_outputSize.width, m_outputSize.height, m_stateBuffer.ptr,
+  OPTIX_CHECK(optixDenoiserSetup(m_denoiser, m_cudaStream, m_outputSize.width, m_outputSize.height, m_stateBuffer.ptr,
                                  m_stateBuffer.size, m_scratchBuffer.ptr, m_scratchBuffer.size));
 
-  // CRITICAL: Wait for the setup to complete - it's asynchronous!
-  CUDA_CHECK_BOOL(cudaStreamSynchronize(nullptr));
+  // Wait for the setup to complete - it's asynchronous!
+  CUDA_CHECK_BOOL(cudaStreamSynchronize(m_cudaStream));
 
   return true;
 }
 
+//---------------------------------------------------------
+// Called by the application when the window size changes
 void OptiXDenoiser::updateSize(VkCommandBuffer cmd, VkExtent2D size)
 {
-  if(m_outputSize.width != size.width || m_outputSize.height != size.height)
+  if(m_settings.enable)
   {
-    m_outputSize = size;
+    // If the denoiser is active, it needs the guide buffer albedo/normal to be updated
+    // Also update the output buffer
+    m_inputOutputGbuffers.update(cmd, size);
+    NVVK_DBG_NAME_STR(m_inputOutputGbuffers.getColorImage(), "Optix::m_outputImage");
+  }
 
-    if(isAvailable())
+  // If the buffer size has changed, we will need to rebuild the OptiX buffers before denoising.
+  if(m_bufferSize.width != size.width || m_bufferSize.height != size.height)
+  {
+    m_bufferSize         = size;
+    m_needRebuitlBuffers = true;
+  }
+}
+
+//---------------------------------------------------------
+// Called when the buffer size has changed, we will need to rebuild the OptiX buffers before denoising.
+void OptiXDenoiser::rebuiltBuffers()
+{
+  m_needRebuitlBuffers = false;
+  m_outputSize         = m_bufferSize;
+
+  if(isAvailable())
+  {
+    // Compute denoiser memory requirements BEFORE creating buffers
+    // The buffer allocation sizes depend on m_denoiserSizes
+    if(m_denoiser)
     {
-      // Recreate buffers with new size
-      cleanupBuffers();
-      if(!createSharedBuffers())
+      OptixResult res = optixDenoiserComputeMemoryResources(m_denoiser, m_outputSize.width, m_outputSize.height, &m_denoiserSizes);
+      if(res != OPTIX_SUCCESS)
       {
-        LOGE("Failed to recreate shared buffers for new size\n");
+        LOGE("optixDenoiserComputeMemoryResources failed with code %d\n", res);
         m_availability = Availability::eUnavailable;
         return;
       }
-      m_outputImage.update(cmd, size);
-      NVVK_DBG_NAME_STR(m_outputImage.getColorImage(), "Optix::m_outputImage");
+    }
 
-      // Update denoiser memory requirements for new size
-      if(m_denoiser)
-      {
-        OptixResult res = optixDenoiserComputeMemoryResources(m_denoiser, size.width, size.height, &m_denoiserSizes);
-        if(res != OPTIX_SUCCESS)
-        {
-          LOGE("optixDenoiserComputeMemoryResources failed with code %d\n", res);
-          m_availability = Availability::eUnavailable;
-          return;
-        }
-      }
+    // Recreate buffers with new size (uses updated m_denoiserSizes)
+    cleanupBuffers();
+    if(!createSharedBuffers())
+    {
+      LOGE("Failed to recreate shared buffers for new size\n");
+      m_availability = Availability::eUnavailable;
+      return;
     }
   }
 }
@@ -290,6 +309,19 @@ bool OptiXDenoiser::denoiseOneShot(Resources& resources)
     vkQueueWaitIdle(resources.app->getQueue(0).queue);
   }
 
+  // If the OptiX buffers need to be rebuilt, do it now.
+  if(m_needRebuitlBuffers)
+  {
+    rebuiltBuffers();
+
+    // Check if rebuild was successful - rebuiltBuffers() may set m_availability to eUnavailable on failure
+    if(!isEnabled())
+    {
+      LOGE("OptiX buffer rebuild failed, cannot denoise\n");
+      return false;
+    }
+  }
+
   // Prepare denoising inputs
   {
     SCOPED_TIMER("OptiX: prepareDenoisingInputs");
@@ -298,14 +330,13 @@ bool OptiXDenoiser::denoiseOneShot(Resources& resources)
 
     DenoisingInputs inputs = {
         .renderedImage     = resources.gBuffers.getDescriptorImageInfo(Resources::eImgRendered),
-        .albedoNormalImage = m_outputImage.getDescriptorImageInfo(eGBufferAlbedoNormal),
+        .albedoNormalImage = m_inputOutputGbuffers.getDescriptorImageInfo(eGBufferAlbedoNormal),
     };
 
     if(!prepareDenoisingInputs(cmd, inputs))
     {
       return false;
     }
-
     resources.app->submitAndWaitTempCmdBuffer(cmd);
   }
 
@@ -325,7 +356,7 @@ bool OptiXDenoiser::denoiseOneShot(Resources& resources)
 
     VkCommandBuffer cmd = resources.app->createTempCmdBuffer();
 
-    DenoisingOutputs outputs = {.outputImage = m_outputImage.getColorImage(eGBufferDenoised)};
+    DenoisingOutputs outputs = {.outputImage = m_inputOutputGbuffers.getColorImage(eGBufferDenoised)};
 
     if(!finalizeDenoisedOutput(cmd, outputs))
     {
@@ -481,7 +512,8 @@ void OptiXDenoiser::createComputePipeline()
   // Shader descriptor set layout (following Tonemapper::init pattern)
   using namespace shaderio;
   m_bindings.addBinding(OptixBindingPoints::eInRgba, VK_DESCRIPTOR_TYPE_SAMPLED_IMAGE, 1, VK_SHADER_STAGE_COMPUTE_BIT);  // inResultImage
-  m_bindings.addBinding(OptixBindingPoints::eInAlbedoNormal, VK_DESCRIPTOR_TYPE_SAMPLED_IMAGE, 1, VK_SHADER_STAGE_COMPUTE_BIT);  // inAlbedoNormalImage
+  m_bindings.addBinding(OptixBindingPoints::eInAlbedoNormal, VK_DESCRIPTOR_TYPE_SAMPLED_IMAGE, 1,
+                        VK_SHADER_STAGE_COMPUTE_BIT);  // inAlbedoNormalImage
   m_bindings.addBinding(OptixBindingPoints::eOutRgba, VK_DESCRIPTOR_TYPE_STORAGE_BUFFER, 1, VK_SHADER_STAGE_COMPUTE_BIT);  // outRgbBuffer
   m_bindings.addBinding(OptixBindingPoints::eOutAlbedo, VK_DESCRIPTOR_TYPE_STORAGE_BUFFER, 1, VK_SHADER_STAGE_COMPUTE_BIT);  // outAlbedoBuffer
   m_bindings.addBinding(OptixBindingPoints::eOutNormal, VK_DESCRIPTOR_TYPE_STORAGE_BUFFER, 1, VK_SHADER_STAGE_COMPUTE_BIT);  // outNormalBuffer
@@ -529,7 +561,7 @@ void OptiXDenoiser::createComputePipeline()
 
 VkDescriptorImageInfo OptiXDenoiser::getDescriptorImageInfo(GBufferIndex index) const
 {
-  return m_outputImage.getDescriptorImageInfo(index);
+  return m_inputOutputGbuffers.getDescriptorImageInfo(index);
 }
 
 void OptiXDenoiser::cleanupOptiX()
@@ -567,7 +599,7 @@ void OptiXDenoiser::cleanupOptiX()
 
   m_allocExport.deinit();
 
-  m_outputImage.deinit();
+  m_inputOutputGbuffers.deinit();
 
   m_availability = Availability::eNotChecked;
 }
@@ -664,10 +696,19 @@ bool OptiXDenoiser::onUi(Resources& resources)
     return changed;
   }
 
-  // if(ImGui::CollapsingHeader("OptiX Denoiser", ImGuiTreeNodeFlags_DefaultOpen))
   {
+    bool wasEnabled = m_settings.enable;
     changed |= ImGui::Checkbox("OptiX Denoiser", &m_settings.enable);
 
+    // When enabling the denoiser, ensure buffers are properly sized
+    if(m_settings.enable && !wasEnabled)
+    {
+      VkCommandBuffer cmd = resources.app->createTempCmdBuffer();
+      updateSize(cmd, resources.gBuffers.getSize());
+      resources.app->submitAndWaitTempCmdBuffer(cmd);
+    }
+
+    // If the denoiser is disabled switch the display to the standard rendered output.
     if(!m_settings.enable && (resources.settings.displayBuffer == DisplayBuffer::eOptixDenoised))
     {
       resources.settings.displayBuffer = DisplayBuffer::eRendered;
@@ -725,7 +766,7 @@ bool OptiXDenoiser::onUi(Resources& resources)
         }
 
         ImGui::Text("Denoised Result%s", isActive ? " (Active)" : "");
-        if(ImGui::ImageButton("OptiXDenoised", ImTextureID(m_outputImage.getDescriptorSet(eGBufferDenoised)), thumbnailSize))
+        if(ImGui::ImageButton("OptiXDenoised", ImTextureID(m_inputOutputGbuffers.getDescriptorSet(eGBufferDenoised)), thumbnailSize))
         {
           // Toggle back to rendered image
           resources.settings.displayBuffer = isActive ? DisplayBuffer::eRendered : DisplayBuffer::eOptixDenoised;

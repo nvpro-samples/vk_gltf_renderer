@@ -192,6 +192,11 @@ private:
   OptixDeviceContext m_optixContext = nullptr;
   OptixDenoiser      m_denoiser     = nullptr;
 
+  // Buffers
+  bool       m_needRebuitlBuffers = true;
+  VkExtent2D m_bufferSize{};
+  void       rebuiltBuffers();
+
   // OptiX denoiser state
   OptixDenoiserSizes   m_denoiserSizes{};
   OptixDenoiserParams  m_denoiserParams{};
@@ -226,7 +231,7 @@ private:
   const nvvk::GBuffer* m_inputGBuffers = nullptr;
 
   // Output image
-  nvvk::GBuffer m_outputImage;  // See GBufferIndex
+  nvvk::GBuffer m_inputOutputGbuffers;  // See GBufferIndex
   VkSampler     m_linearSampler{};
 
 

@@ -280,6 +280,10 @@ auto main(int argc, char** argv) -> int
 
     ImGuiID propID = ImGui::DockBuilderSplitNode(settingID, ImGuiDir_Down, 0.35F, nullptr, &settingID);
     ImGui::DockBuilderDockWindow("Properties", propID);
+    ImGuiID tonemapID = ImGui::DockBuilderSplitNode(settingID, ImGuiDir_Down, 0.35F, nullptr, &settingID);
+    ImGui::DockBuilderDockWindow("Tonemapper", tonemapID);
+    ImGuiID environmentID = ImGui::DockBuilderSplitNode(settingID, ImGuiDir_Down, 0.35F, nullptr, &settingID);
+    ImGui::DockBuilderDockWindow("Environment", environmentID);
 
     // bottom panel container
     ImGuiID logID = ImGui::DockBuilderSplitNode(viewportID, ImGuiDir_Down, 0.35F, nullptr, &viewportID);

@@ -129,6 +129,13 @@ struct Settings
   shaderio::EnvSystem   envSystem              = shaderio::EnvSystem::eSky;     // Environment system: Sky or HDR
   bool                  showAxis               = true;                          // Show the axis (bottom left)
   bool                  showMemStats           = false;                         // Show memory statistics window
+  bool                  showCameraWindow       = true;                          // Show Camera window
+  bool                  showSceneGraphWindow   = true;                          // Show Scene Graph window
+  bool                  showSettingsWindow     = true;                          // Show Settings window
+  bool                  showPropertiesWindow   = true;                          // Show Properties window
+  bool                  showEnvironmentWindow  = true;                          // Show Environment window
+  bool                  showTonemapperWindow   = true;                          // Show Tonemapper window
+  bool                  showStatisticsWindow   = false;                         // Show Statistics window
   float                 hdrEnvIntensity        = 1.0f;                          // Intensity of the environment (HDR)
   float                 hdrEnvRotation         = 0.0f;                          // Rotation of the environment (HDR)
   float                 hdrBlur                = 0.0f;                          // Blur of the environment (HDR)

@@ -56,19 +56,22 @@ static const double f64_zero = 0., f64_one = 1., f64_ten = 10., f64_179 = 179., 
 // - Display the node details (transform)
 //   OR Display the material details
 //
-void UiSceneGraph::render()
+void UiSceneGraph::render(bool* showSceneGraph, bool* showProperties)
 {
-  renderSceneGraph();
-  renderDetails();
+  renderSceneGraph(showSceneGraph);
+  renderDetails(showProperties);
 }
 
-void UiSceneGraph::renderSceneGraph()
+void UiSceneGraph::renderSceneGraph(bool* showSceneGraph)
 {
+  if(showSceneGraph && !*showSceneGraph)
+    return;
+
   static const float     textBaseWidth = ImGui::CalcTextSize("A").x;
   static ImGuiTableFlags s_tableFlags =
       ImGuiTableFlags_ScrollY | ImGuiTableFlags_RowBg | ImGuiTableFlags_BordersOuter | ImGuiTableFlags_BordersV;
 
-  if(ImGui::Begin("Scene Graph"))
+  if(ImGui::Begin("Scene Graph", showSceneGraph))
   {
     if(m_model == nullptr)
     {
@@ -112,9 +115,12 @@ void UiSceneGraph::renderSceneGraph()
 
 //--------------------------------------------------------------------------------------------------
 // This function renders the details of the selected node, light, camera, or material
-void UiSceneGraph::renderDetails()
+void UiSceneGraph::renderDetails(bool* showProperties)
 {
-  if(ImGui::Begin("Properties"))
+  if(showProperties && !*showProperties)
+    return;
+
+  if(ImGui::Begin("Properties", showProperties))
   {
     if(m_model == nullptr)
     {

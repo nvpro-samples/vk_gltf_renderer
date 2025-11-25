@@ -31,6 +31,8 @@ This version brings significant improvements and modernization:
   - DLSS Ray Reconstruction (DLSS-RR) - optional, enable with `USE_DLSS`
   - OptiX AI Denoiser - enabled by default when CUDA Toolkit is found (configure with `USE_OPTIX_DENOISER`)
 
+- **Shadow Catcher**: Enhanced infinite plane with physically accurate shadow catching capabilities that subtracts light from the environment and adds reflections where appropriate. The plane surface can be adjusted to mimic the original surface properties: color, roughness, and metallic.
+
 ## Key Features
 
 - glTF 2.0 (.gltf/.glb) scene loading
@@ -203,7 +205,7 @@ Implements a path tracer with global illumination.
 * Auto SPP: increase automatically the SSP to reach the FPS 
 * Aperture: depth-of-field
 * Auto Focus: uses the interest position to compute the focal distance
-* Infinite Plane: adds an infinite plane to the scene.
+* Infinite Plane: adds an infinite plane to the scene with optional shadow catcher mode. When shadow catcher is enabled, the plane subtracts light from the environment and adds reflections where appropriate, creating physically accurate shadows and reflections. The plane surface properties (color, roughness, and metallic) can be adjusted to mimic the original surface.
 
 #### Denoisers
 

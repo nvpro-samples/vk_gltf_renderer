@@ -167,18 +167,21 @@ void GltfRenderer::loadHdrFileDialog()
 
 void GltfRenderer::renderUI()
 {
-  static int frameCount    = 0;
-  auto&      headerManager = CollapsingHeaderManager::getInstance();
+  static int frameCount = 0;
 
   namespace PE = nvgui::PropertyEditor;
   {  // Setting menu
     bool changed{false};
 
-    if(ImGui::Begin("Camera"))
+    if(m_resources.settings.showCameraWindow)
     {
-      nvgui::CameraWidget(m_cameraManip);
+      if(ImGui::Begin("Camera", &m_resources.settings.showCameraWindow))
+      {
+        nvgui::tooltip("Press F1 to toggle this window");
+        nvgui::CameraWidget(m_cameraManip);
+      }
+      ImGui::End();  // End Camera
     }
-    ImGui::End();  // End Camera
 
     // Scene Graph UI
     {
@@ -216,207 +219,104 @@ void GltfRenderer::renderUI()
         }
       });
 
-      m_uiSceneGraph.render();
+      m_uiSceneGraph.render(&m_resources.settings.showSceneGraphWindow, &m_resources.settings.showPropertiesWindow);
     }
 
-    if(frameCount < 2)  // This is a hack to make the settings window focus on the first frame
+    if(m_resources.settings.showSettingsWindow)
     {
-      ImGui::SetNextWindowFocus();
-      frameCount++;
-    }
-
-    if(ImGui::Begin("Settings"))
-    {
-      // Add renderer selection at the top level of the Settings panel for better visibility
-      if(PE::begin())
+      if(frameCount < 2)  // This is a hack to make the settings window focus on the first frame
       {
-        static const char* rendererItems[] = {"Path Tracer", "Rasterizer"};
-        int                currentItem     = static_cast<int>(m_resources.settings.renderSystem);
-        if(PE::Combo("Active Renderer", &currentItem, rendererItems, IM_ARRAYSIZE(rendererItems)))
-        {
-          m_resources.settings.renderSystem = static_cast<RenderingMode>(currentItem);
-          changed                           = true;  // Reset frame counter when switching renderers
-        }
-        changed |= PE::Combo("Debug Method", reinterpret_cast<int32_t*>(&m_resources.settings.debugMethod),
-                             "None\0BaseColor\0Metallic\0Roughness\0Normal\0Tangent\0Bitangent\0Emissive\0Opacity\0TexCoord0\0TexCoord1\0\0");
-        PE::end();
-        if(m_resources.settings.renderSystem == RenderingMode::ePathtracer)
-        {
-          if(headerManager.beginHeader("Path Tracer"))
-          {
-            changed |= m_pathTracer.onUIRender(m_resources);
-          }
-        }
-        else  // Rasterizer
-        {
-          if(headerManager.beginHeader("Rasterizer"))
-          {
-            changed |= m_rasterizer.onUIRender(m_resources);
-          }
-        }
+        ImGui::SetNextWindowFocus();
+        frameCount++;
       }
-      ImGui::Separator();
 
-      if(headerManager.beginHeader("Environment"))
+      if(ImGui::Begin("Settings", &m_resources.settings.showSettingsWindow))
       {
+        nvgui::tooltip("Press F3 to toggle this window");
+        // Add renderer selection at the top level of the Settings panel for better visibility
         if(PE::begin())
         {
-          if(PE::Combo("Environment Type", (int*)&m_resources.settings.envSystem, "Sky\0HDR\0\0"))  // 0: Sky, 1: HDR
+          static const char* rendererItems[] = {"Path Tracer", "Rasterizer"};
+          int                currentItem     = static_cast<int>(m_resources.settings.renderSystem);
+          if(PE::Combo("Active Renderer", &currentItem, rendererItems, IM_ARRAYSIZE(rendererItems)))
           {
-            m_pathTracer.m_pushConst.fireflyClampThreshold =
-                (m_resources.settings.envSystem == shaderio::EnvSystem::eSky) ? 10.0f : m_resources.hdrIbl.getIntegral();
-            changed |= true;
+            m_resources.settings.renderSystem = static_cast<RenderingMode>(currentItem);
+            changed                           = true;  // Reset frame counter when switching renderers
           }
-          changed |= PE::Checkbox("Solid Color", &m_resources.settings.useSolidBackground);
-          if(m_resources.settings.useSolidBackground)
-          {
-            changed |= PE::ColorEdit3("Background Color", glm::value_ptr(m_resources.settings.solidBackgroundColor));
-          }
+          changed |= PE::Combo("Debug Method", reinterpret_cast<int32_t*>(&m_resources.settings.debugMethod),
+                               "None\0BaseColor\0Metallic\0Roughness\0Normal\0Tangent\0Bitangent\0Emissive\0Opacity\0TexCoord0\0TexCoord1\0\0");
           PE::end();
-        }
-
-        if(m_resources.settings.envSystem == shaderio::EnvSystem::eHdr)
-        {
-          if(PE::begin("HDR"))
+          if(m_resources.settings.renderSystem == RenderingMode::ePathtracer)
           {
-            if(PE::entry("", [&] { return ImGui::SmallButton("load"); }, "Load HDR Image"))
+            if(ImGui::CollapsingHeader("Path Tracer", ImGuiTreeNodeFlags_DefaultOpen))
             {
-              loadHdrFileDialog();
-              changed = true;
-            }
-            changed |= PE::SliderFloat("Intensity", &m_resources.settings.hdrEnvIntensity, 0, 100, "%.3f",
-                                       ImGuiSliderFlags_Logarithmic, "HDR intensity");
-            changed |= PE::SliderAngle("Rotation", &m_resources.settings.hdrEnvRotation, -360, 360, "%.0f deg", 0,
-                                       "Rotating the environment");
-            changed |= PE::SliderFloat("Blur", &m_resources.settings.hdrBlur, 0, 1, "%.3f", 0, "Blur the environment");
-            PE::end();
-          }
-        }
-        else
-        {
-          changed |= nvgui::skyPhysicalParameterUI(m_resources.skyParams);
-        }
-      }
-
-      if(headerManager.beginHeader("Tonemapper"))
-      {
-        nvgui::tonemapperWidget(m_resources.tonemapperData);
-      }
-
-      // Multiple scenes
-      if(m_resources.scene.getModel().scenes.size() > 1)
-      {
-        if(headerManager.beginHeader("Multiple Scenes"))
-        {
-          ImGui::PushID("Scenes");
-          for(size_t i = 0; i < m_resources.scene.getModel().scenes.size(); i++)
-          {
-            if(ImGui::RadioButton(m_resources.scene.getModel().scenes[i].name.c_str(), m_resources.scene.getCurrentScene() == i))
-            {
-              m_resources.scene.setCurrentScene(int(i));
-              vkDeviceWaitIdle(m_device);
-              createVulkanScene();
-              updateTextures();
-              changed = true;
+              changed |= m_pathTracer.onUIRender(m_resources);
             }
           }
-          ImGui::PopID();
-        }
-      }
-
-      // Variant selection
-      if(m_resources.scene.getVariants().size() > 0)
-      {
-        if(headerManager.beginHeader("Variants"))
-        {
-          ImGui::PushID("Variants");
-          for(size_t i = 0; i < m_resources.scene.getVariants().size(); i++)
+          else  // Rasterizer
           {
-            if(ImGui::Selectable(m_resources.scene.getVariants()[i].c_str(), m_resources.scene.getCurrentVariant() == i))
+            if(ImGui::CollapsingHeader("Rasterizer", ImGuiTreeNodeFlags_DefaultOpen))
             {
-              m_resources.scene.setCurrentVariant(int(i));
-              m_resources.dirtyFlags.set(DirtyFlags::eVulkanScene);
-              changed = true;
+              changed |= m_rasterizer.onUIRender(m_resources);
             }
           }
-          ImGui::PopID();
+        }
+        ImGui::Separator();
+
+        // Multiple scenes
+        if(m_resources.scene.getModel().scenes.size() > 1)
+        {
+          if(ImGui::CollapsingHeader("Multiple Scenes"))
+          {
+            ImGui::PushID("Scenes");
+            for(size_t i = 0; i < m_resources.scene.getModel().scenes.size(); i++)
+            {
+              if(ImGui::RadioButton(m_resources.scene.getModel().scenes[i].name.c_str(), m_resources.scene.getCurrentScene() == i))
+              {
+                m_resources.scene.setCurrentScene(int(i));
+                vkDeviceWaitIdle(m_device);
+                createVulkanScene();
+                updateTextures();
+                changed = true;
+              }
+            }
+            ImGui::PopID();
+          }
+        }
+
+        // Variant selection
+        if(m_resources.scene.getVariants().size() > 0)
+        {
+          if(ImGui::CollapsingHeader("Variants"))
+          {
+            ImGui::PushID("Variants");
+            for(size_t i = 0; i < m_resources.scene.getVariants().size(); i++)
+            {
+              if(ImGui::Selectable(m_resources.scene.getVariants()[i].c_str(), m_resources.scene.getCurrentVariant() == i))
+              {
+                m_resources.scene.setCurrentVariant(int(i));
+                m_resources.dirtyFlags.set(DirtyFlags::eVulkanScene);
+                changed = true;
+              }
+            }
+            ImGui::PopID();
+          }
+        }
+
+        // Animation
+        if(m_resources.scene.hasAnimation())
+        {
+          if(ImGui::CollapsingHeader("Animation"))
+          {
+            m_animControl.onUI(&m_resources.scene);
+          }
         }
       }
+      ImGui::End();  // End Settings
 
-      // Animation
-      if(m_resources.scene.hasAnimation())
-      {
-        if(headerManager.beginHeader("Animation"))
-        {
-          m_animControl.onUI(&m_resources.scene);
-        }
-      }
-
-      if(m_resources.scene.valid() && headerManager.beginHeader("Statistics"))
-      {
-        const tinygltf::Model& tiny = m_resources.scene.getModel();
-
-        // Create a table for better organization
-        if(ImGui::BeginTable("Statistics", 2, ImGuiTableFlags_Borders | ImGuiTableFlags_RowBg))
-        {
-          ImGui::TableSetupColumn("Property", ImGuiTableColumnFlags_WidthStretch);
-          ImGui::TableSetupColumn("Value", ImGuiTableColumnFlags_WidthFixed, 80.0f);
-          ImGui::TableHeadersRow();
-
-          // Lambda function to add table rows
-          auto addStatRow = [](const char* icon, const char* label, size_t value) {
-            ImGui::TableNextRow();
-            ImGui::TableSetColumnIndex(0);
-            ImGui::Text("%s %s", icon, label);
-            ImGui::TableSetColumnIndex(1);
-            ImGui::Text("%zu", value);
-          };
-
-          // Scene Structure
-          addStatRow(ICON_MS_LAYERS, "Nodes", tiny.nodes.size());
-          addStatRow(ICON_MS_VIEW_LIST, "Render Nodes", m_resources.scene.getRenderNodes().size());
-          addStatRow(ICON_MS_EXTENSION, "Render Primitives", m_resources.scene.getNumRenderPrimitives());
-
-          // Materials & Geometry
-          addStatRow(ICON_MS_BRUSH, "Materials", tiny.materials.size());
-          addStatRow(ICON_MS_SIGNAL_CELLULAR_NULL, "Triangles", m_resources.scene.getNumTriangles());
-
-          // Lighting & Assets
-          addStatRow(ICON_MS_LIGHTBULB, "Lights", tiny.lights.size());
-          addStatRow(ICON_MS_IMAGE_INSET, "Textures", tiny.textures.size());
-          addStatRow(ICON_MS_IMAGE, "Images", tiny.images.size());
-
-          ImGui::EndTable();
-        }
-
-        // Copy to clipboard button with proper spacing
-        ImGui::Spacing();
-
-        if(ImGui::Button(ICON_MS_CONTENT_COPY " Copy to Clipboard"))
-        {
-          ImGui::LogToClipboard();
-          // Log all statistics to clipboard
-          ImGui::LogText("Scene Statistics:\n");
-          ImGui::LogText("Nodes: %zu\n", tiny.nodes.size());
-          ImGui::LogText("Render Nodes: %zu\n", m_resources.scene.getRenderNodes().size());
-          ImGui::LogText("Render Primitives: %zu\n", m_resources.scene.getNumRenderPrimitives());
-          ImGui::LogText("Materials: %zu\n", tiny.materials.size());
-          ImGui::LogText("Triangles: %d\n", m_resources.scene.getNumTriangles());
-          ImGui::LogText("Lights: %zu\n", tiny.lights.size());
-          ImGui::LogText("Textures: %zu\n", tiny.textures.size());
-          ImGui::LogText("Images: %zu\n", tiny.images.size());
-          ImGui::LogFinish();
-        }
-        if(ImGui::IsItemHovered())
-        {
-          ImGui::SetTooltip("Copy statistics to clipboard");
-        }
-      }
+      if(changed)
+        resetFrame();
     }
-    ImGui::End();  // End Settings
-
-    if(changed)
-      resetFrame();
   }
 
 
@@ -450,11 +350,53 @@ void GltfRenderer::renderUI()
 
   // Display memory statistics window
   renderMemoryStatistics();
+
+  // Display environment, tonemapper, and statistics windows
+  renderEnvironmentWindow();
+  renderTonemapperWindow();
+  renderStatisticsWindow();
 }
 
 void GltfRenderer::renderMenu()
 {
   bool v_sync = m_app->isVsync();
+
+  // Window toggle information structure for DRY approach
+  struct WindowToggleInfo
+  {
+    const char* icon;
+    const char* name;
+    const char* shortcut;
+    ImGuiKey    key;
+    bool        useShift;
+    bool*       visible;
+    const char* tooltip;
+  };
+
+  // Define all window toggles with their shortcuts
+  static const std::array<WindowToggleInfo, 6> windowToggles = {{
+      {ICON_MS_PHOTO_CAMERA, "Camera", "F1", ImGuiKey_F1, false, &m_resources.settings.showCameraWindow, "Camera"},
+      {ICON_MS_ACCOUNT_TREE, "Scene Graph", "F2", ImGuiKey_F2, false, &m_resources.settings.showSceneGraphWindow, "Scene Graph"},
+      {ICON_MS_SETTINGS, "Settings", "F3", ImGuiKey_F3, false, &m_resources.settings.showSettingsWindow, "Settings"},
+      {ICON_MS_LIST_ALT, "Properties", "F4", ImGuiKey_F4, false, &m_resources.settings.showPropertiesWindow, "Properties"},
+      {ICON_MS_PUBLIC, "Environment", "F5", ImGuiKey_F5, false, &m_resources.settings.showEnvironmentWindow, "Environment"},
+      {ICON_MS_TONALITY, "Tonemapper", "F6", ImGuiKey_F6, false, &m_resources.settings.showTonemapperWindow, "Tonemapper"},
+  }};
+
+  // Check window toggle shortcuts
+  for(const auto& toggle : windowToggles)
+  {
+    if(toggle.useShift)
+    {
+      if(ImGui::IsKeyChordPressed(ImGuiMod_Shift | toggle.key))
+        *toggle.visible = !*toggle.visible;
+    }
+    else
+    {
+      if(ImGui::IsKeyPressed(toggle.key))
+        *toggle.visible = !*toggle.visible;
+    }
+  }
 
   auto getSaveImage = [&]() {
     std::filesystem::path filename =
@@ -479,7 +421,7 @@ void GltfRenderer::renderMenu()
   bool fitScene       = ImGui::IsKeyChordPressed(ImGuiMod_Ctrl | ImGuiMod_Shift | ImGuiKey_F);
   bool fitObject      = ImGui::IsKeyChordPressed(ImGuiMod_Ctrl | ImGuiKey_F);
   bool toggleVsyc     = ImGui::IsKeyChordPressed(ImGuiMod_Ctrl | ImGuiMod_Shift | ImGuiKey_V);
-  bool reloadShader   = ImGui::IsKeyPressed(ImGuiKey_F5);
+  bool reloadShader   = ImGui::IsKeyChordPressed(ImGuiMod_Ctrl | ImGuiMod_Shift | ImGuiKey_R);
 
   if(toggleVsyc)
   {
@@ -532,6 +474,19 @@ void GltfRenderer::renderMenu()
     ImGui::Separator();
     ImGui::MenuItem(ICON_MS_BOTTOM_PANEL_OPEN " V-Sync", "Ctrl+Shift+V", &v_sync);
     ImGui::MenuItem(ICON_MS_VIEW_IN_AR " 3D-Axis", nullptr, &m_resources.settings.showAxis);
+    ImGui::EndMenu();
+  }
+
+  if(ImGui::BeginMenu("Windows"))
+  {
+    // Add menu items for windows with toolbar icons and shortcuts
+    for(const auto& toggle : windowToggles)
+    {
+      std::string label = std::string(toggle.icon) + " " + toggle.name;
+      ImGui::MenuItem(label.c_str(), toggle.shortcut, toggle.visible);
+    }
+    // Windows without toolbar shortcuts
+    ImGui::MenuItem(ICON_MS_ANALYTICS " Statistics", nullptr, &m_resources.settings.showStatisticsWindow);
     ImGui::Separator();
     ImGui::MenuItem(ICON_MS_MONITORING " Memory Usage", nullptr, &m_resources.settings.showMemStats);
     ImGui::EndMenu();
@@ -539,7 +494,7 @@ void GltfRenderer::renderMenu()
 
   if(ImGui::BeginMenu("Tools"))
   {
-    reloadShader |= ImGui::MenuItem(ICON_MS_REFRESH " Reload Shaders", "F5");
+    reloadShader |= ImGui::MenuItem(ICON_MS_REFRESH " Reload Shaders", "Ctrl+Shift+R");
     ImGui::Separator();
     ImGui::BeginDisabled(!validScene);  // Disable menu item if no scene is loaded)
 
@@ -559,6 +514,49 @@ void GltfRenderer::renderMenu()
     ImGui::EndDisabled();
 
     ImGui::EndMenu();
+  }
+
+  // Add toolbar icons for window toggles
+  {
+    float buttonSize = ImGui::GetFrameHeight();
+
+    // Position icons on the right side
+    ImGui::SameLine(ImGui::GetContentRegionAvail().x);
+
+    // Add vertical separator
+    ImGui::SeparatorEx(ImGuiSeparatorFlags_Vertical);
+    ImGui::SameLine();
+
+    // Create toggle buttons for each window using the window info array
+    for(size_t i = 0; i < windowToggles.size(); ++i)
+    {
+      const auto& toggle = windowToggles[i];
+
+      // Set button color based on window visibility state
+      ImVec4 buttonColor =
+          *toggle.visible ? ImGui::GetStyle().Colors[ImGuiCol_ButtonActive] : ImGui::GetStyle().Colors[ImGuiCol_ChildBg];
+      ImGui::PushStyleColor(ImGuiCol_Button, buttonColor);
+
+      if(ImGui::Button(toggle.icon, ImVec2(buttonSize, buttonSize)))
+      {
+        *toggle.visible = !*toggle.visible;
+      }
+
+      ImGui::PopStyleColor();
+
+      // Show tooltip with window name and shortcut
+      if(ImGui::IsItemHovered())
+      {
+        std::string tooltipText = std::string("Toggle ") + toggle.tooltip + " Window (" + toggle.shortcut + ")";
+        ImGui::SetTooltip("%s", tooltipText.c_str());
+      }
+
+      // Add next button
+      if(i < windowToggles.size() - 1)
+      {
+        ImGui::SameLine();
+      }
+    }
   }
 
   if(newScene)
@@ -989,6 +987,167 @@ void GltfRenderer::renderMemoryStatistics()
     ImGui::TextColored(ImVec4(1.0f, 1.0f, 0.0f, 1.0f), "%u", combinedCount);
 
     ImGui::EndTable();
+  }
+
+  ImGui::End();
+}
+
+//--------------------------------------------------------------------------------------------------
+// Environment window - controls for environment settings (HDR, Sky, Solid Color)
+//
+void GltfRenderer::renderEnvironmentWindow()
+{
+  if(!m_resources.settings.showEnvironmentWindow)
+    return;
+
+  if(!ImGui::Begin("Environment", &m_resources.settings.showEnvironmentWindow))
+  {
+    ImGui::End();
+    return;
+  }
+  nvgui::tooltip("Press F5 to toggle this window");
+  bool changed = false;
+  namespace PE = nvgui::PropertyEditor;
+
+  if(PE::begin())
+  {
+    if(PE::Combo("Environment Type", (int*)&m_resources.settings.envSystem, "Sky\0HDR\0\0"))  // 0: Sky, 1: HDR
+    {
+      m_pathTracer.m_pushConst.fireflyClampThreshold =
+          (m_resources.settings.envSystem == shaderio::EnvSystem::eSky) ? 10.0f : m_resources.hdrIbl.getIntegral();
+      changed |= true;
+    }
+    changed |= PE::Checkbox("Solid Color", &m_resources.settings.useSolidBackground);
+    if(m_resources.settings.useSolidBackground)
+    {
+      changed |= PE::ColorEdit3("Background Color", glm::value_ptr(m_resources.settings.solidBackgroundColor));
+    }
+    PE::end();
+  }
+
+  if(m_resources.settings.envSystem == shaderio::EnvSystem::eHdr)
+  {
+    if(PE::begin("HDR"))
+    {
+      if(PE::entry("", [&] { return ImGui::SmallButton("load"); }, "Load HDR Image"))
+      {
+        loadHdrFileDialog();
+        changed = true;
+      }
+      changed |= PE::SliderFloat("Intensity", &m_resources.settings.hdrEnvIntensity, 0, 100, "%.3f",
+                                 ImGuiSliderFlags_Logarithmic, "HDR intensity");
+      changed |= PE::SliderAngle("Rotation", &m_resources.settings.hdrEnvRotation, -360, 360, "%.0f deg", 0, "Rotating the environment");
+      changed |= PE::SliderFloat("Blur", &m_resources.settings.hdrBlur, 0, 1, "%.3f", 0, "Blur the environment");
+      PE::end();
+    }
+  }
+  else
+  {
+    changed |= nvgui::skyPhysicalParameterUI(m_resources.skyParams);
+  }
+
+  if(changed)
+    resetFrame();
+
+  ImGui::End();
+}
+
+//--------------------------------------------------------------------------------------------------
+// Tonemapper window - controls for tone mapping settings
+//
+void GltfRenderer::renderTonemapperWindow()
+{
+  if(!m_resources.settings.showTonemapperWindow)
+    return;
+
+  if(!ImGui::Begin("Tonemapper", &m_resources.settings.showTonemapperWindow))
+  {
+    ImGui::End();
+    return;
+  }
+  nvgui::tooltip("Press F6 to toggle this window");
+  nvgui::tonemapperWidget(m_resources.tonemapperData);
+
+  ImGui::End();
+}
+
+//--------------------------------------------------------------------------------------------------
+// Statistics window - displays scene statistics
+//
+void GltfRenderer::renderStatisticsWindow()
+{
+  if(!m_resources.settings.showStatisticsWindow)
+    return;
+
+  if(!ImGui::Begin("Statistics", &m_resources.settings.showStatisticsWindow))
+  {
+    ImGui::End();
+    return;
+  }
+
+  if(!m_resources.scene.valid())
+  {
+    ImGui::TextDisabled("No scene loaded");
+    ImGui::End();
+    return;
+  }
+
+  const tinygltf::Model& tiny = m_resources.scene.getModel();
+
+  // Create a table for better organization
+  if(ImGui::BeginTable("StatisticsTable", 2, ImGuiTableFlags_Borders | ImGuiTableFlags_RowBg))
+  {
+    ImGui::TableSetupColumn("Property", ImGuiTableColumnFlags_WidthStretch);
+    ImGui::TableSetupColumn("Value", ImGuiTableColumnFlags_WidthFixed, 80.0f);
+    ImGui::TableHeadersRow();
+
+    // Lambda function to add table rows
+    auto addStatRow = [](const char* icon, const char* label, size_t value) {
+      ImGui::TableNextRow();
+      ImGui::TableSetColumnIndex(0);
+      ImGui::Text("%s %s", icon, label);
+      ImGui::TableSetColumnIndex(1);
+      ImGui::Text("%zu", value);
+    };
+
+    // Scene Structure
+    addStatRow(ICON_MS_LAYERS, "Nodes", tiny.nodes.size());
+    addStatRow(ICON_MS_VIEW_LIST, "Render Nodes", m_resources.scene.getRenderNodes().size());
+    addStatRow(ICON_MS_EXTENSION, "Render Primitives", m_resources.scene.getNumRenderPrimitives());
+
+    // Materials & Geometry
+    addStatRow(ICON_MS_BRUSH, "Materials", tiny.materials.size());
+    addStatRow(ICON_MS_SIGNAL_CELLULAR_NULL, "Triangles", m_resources.scene.getNumTriangles());
+
+    // Lighting & Assets
+    addStatRow(ICON_MS_LIGHTBULB, "Lights", tiny.lights.size());
+    addStatRow(ICON_MS_IMAGE_INSET, "Textures", tiny.textures.size());
+    addStatRow(ICON_MS_IMAGE, "Images", tiny.images.size());
+
+    ImGui::EndTable();
+  }
+
+  // Copy to clipboard button with proper spacing
+  ImGui::Spacing();
+
+  if(ImGui::Button(ICON_MS_CONTENT_COPY " Copy to Clipboard"))
+  {
+    ImGui::LogToClipboard();
+    // Log all statistics to clipboard
+    ImGui::LogText("Scene Statistics:\n");
+    ImGui::LogText("Nodes: %zu\n", tiny.nodes.size());
+    ImGui::LogText("Render Nodes: %zu\n", m_resources.scene.getRenderNodes().size());
+    ImGui::LogText("Render Primitives: %zu\n", m_resources.scene.getNumRenderPrimitives());
+    ImGui::LogText("Materials: %zu\n", tiny.materials.size());
+    ImGui::LogText("Triangles: %d\n", m_resources.scene.getNumTriangles());
+    ImGui::LogText("Lights: %zu\n", tiny.lights.size());
+    ImGui::LogText("Textures: %zu\n", tiny.textures.size());
+    ImGui::LogText("Images: %zu\n", tiny.images.size());
+    ImGui::LogFinish();
+  }
+  if(ImGui::IsItemHovered())
+  {
+    ImGui::SetTooltip("Copy statistics to clipboard");
   }
 
   ImGui::End();

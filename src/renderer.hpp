@@ -103,6 +103,9 @@ private:
   void          renderUI();
   void          renderMenu();
   void          renderMemoryStatistics();
+  void          renderEnvironmentWindow();
+  void          renderTonemapperWindow();
+  void          renderStatisticsWindow();
   void          addToRecentFiles(const std::filesystem::path& filePath, int historySize = 20);
   void          removeFromRecentFiles(const std::filesystem::path& filePath);
   void          mouseClickedInViewport();
