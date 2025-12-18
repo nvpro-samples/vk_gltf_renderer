@@ -1105,6 +1105,7 @@ bool GltfRenderer::updateSceneChanges(VkCommandBuffer cmd, bool didAnimate)
     m_resources.sceneVk.updateRenderNodesBuffer(cmd, m_resources.staging, m_resources.scene);
     m_resources.sceneVk.updateRenderPrimitivesBuffer(cmd, m_resources.staging, m_resources.scene);
     m_resources.sceneVk.updateRenderLightsBuffer(cmd, m_resources.staging, m_resources.scene);
+    m_resources.sceneVk.updateVertexBuffers(cmd, m_resources.staging, m_resources.scene);
     m_resources.dirtyFlags.reset(DirtyFlags::eVulkanScene);
     changed = true;
   }
