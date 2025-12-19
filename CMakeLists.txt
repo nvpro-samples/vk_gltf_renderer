@@ -11,8 +11,18 @@ find_package(NvproCore2 REQUIRED)
 
 # Get the name of the current directory
 get_filename_component(PROJECT_NAME ${CMAKE_CURRENT_SOURCE_DIR} NAME)
-project(${PROJECT_NAME})
+project(${PROJECT_NAME} VERSION 2.0 LANGUAGES C CXX)
 message(STATUS "Processing: ${PROJECT_NAME}")
+
+# Generate version header with build date
+string(TIMESTAMP BUILD_DATE "%y%m%d")
+set(APP_VERSION_STRING "v${PROJECT_VERSION_MAJOR}.${PROJECT_VERSION_MINOR}.${BUILD_DATE}")
+configure_file(
+  "${CMAKE_CURRENT_SOURCE_DIR}/src/version.hpp.in"
+  "${CMAKE_BINARY_DIR}/${PROJECT_NAME}/version.hpp"
+  @ONLY
+)
+message(STATUS "Application version: ${APP_VERSION_STRING}")
 
 # Adding all sources
 file(GLOB EXE_SOURCES "src/*.cpp" "src/*.hpp" "src/*.h" "*.md")

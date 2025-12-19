@@ -1,4 +1,4 @@
-﻿# Vulkan glTF Scene Renderer
+# Vulkan glTF Scene Renderer
 
 |glTF Renderer|
 |-------------|
@@ -174,10 +174,13 @@ The denoiser will automatically integrate using CUDA-Vulkan interoperability for
 - ✅ KHR_materials_unlit
 - ✅ KHR_materials_variants
 - ✅ KHR_materials_volume
+- ✅ KHR_mesh_quantization
+- ✅ KHR_node_visibility
 - ✅ KHR_texture_basisu
 - ✅ KHR_texture_transform
 - ✅ EXT_mesh_gpu_instancing
-- ✅ KHR_node_visibility
+- ✅ EXT_meshopt_compression
+- ✅ MSFT_texture_dds
 
 ## Renderer
 

@@ -33,6 +33,7 @@
 #include "create_tangent.hpp"
 #include "ui_mouse_state.hpp"
 #include "ui_collapsing_header_manager.h"
+#include "version.hpp"
 
 void GltfRenderer::mouseClickedInViewport()
 {
@@ -168,9 +169,9 @@ void GltfRenderer::windowTitle()
     {
       filename = "No Scene";
     }
-    std::string text =
-        fmt::format("{} - {}x{} | {:.0f} FPS / {:.3f}ms | Frame {}", nvutils::utf8FromPath(filename), size.width,
-                    size.height, ImGui::GetIO().Framerate, 1000.F / ImGui::GetIO().Framerate, m_resources.frameCount);
+    std::string text = fmt::format("{} {} - {}x{} | {:.0f} FPS / {:.3f}ms | Frame {}", nvutils::utf8FromPath(filename),
+                                   APP_VERSION_STRING, size.width, size.height, ImGui::GetIO().Framerate,
+                                   1000.F / ImGui::GetIO().Framerate, m_resources.frameCount);
 
     glfwSetWindowTitle(m_app->getWindowHandle(), text.c_str());
     dirty_timer = 0;
