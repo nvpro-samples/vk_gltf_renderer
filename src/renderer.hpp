@@ -93,6 +93,7 @@ private:
   void silhouette(VkCommandBuffer cmd);
   void tonemap(VkCommandBuffer cmd);
   void updateNodeToRenderNodeMap();
+  int  getRenderNodeForPrimitive(int nodeIndex, int primitiveIndex) const;
   bool updateTextures();
   void updateHdrImages();
 
@@ -146,7 +147,15 @@ private:
   AnimationControl m_animControl;  // Animation control (UI)
   Silhouette       m_silhouette;   // Silhouette renderer
 
-  std::unordered_map<int, int> m_nodeToRenderNodeMap;  // Maps node IDs to render node indices
+  // Hash function for pair<int,int> keys
+  struct PairHash
+  {
+    size_t operator()(const std::pair<int, int>& p) const
+    {
+      return std::hash<int>()(p.first) ^ (std::hash<int>()(p.second) << 16);
+    }
+  };
+  std::unordered_map<std::pair<int, int>, int, PairHash> m_nodePrimToRenderNodeMap;  // Maps (nodeID, primIndex) to RenderNode index
 
   // Command buffer queue for deferred submission
   struct CommandBufferInfo

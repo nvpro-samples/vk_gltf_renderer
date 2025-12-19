@@ -199,7 +199,7 @@ struct Resources
 
 
   int frameCount{0};
-  int selectedObject{-1};  // Selected object in the scene
+  int selectedRenderNode{-1};  // Selected RenderNode index (corresponds to a primitive)
 
   Settings settings;
 

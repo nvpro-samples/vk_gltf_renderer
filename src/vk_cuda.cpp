@@ -26,6 +26,10 @@
 #include "nvvk/check_error.hpp"
 #include "nvvk/debug_util.hpp"
 
+#ifdef WIN32
+#include <delayimp.h>
+#endif
+
 /***********************************************************************
 
   This file is contains many functions to share resources between
@@ -37,6 +41,43 @@
 
 ***********************************************************************/
 
+//--------------------------------------------------------------------------------------------------
+// Check if CUDA runtime is available (DLL can be loaded)
+// This safely handles the delay-load case where cudart64_XX.dll may not be present
+//
+bool vkcuda::isCudaRuntimeAvailable()
+{
+  static bool s_checked   = false;
+  static bool s_available = false;
+
+  if(s_checked)
+    return s_available;
+
+  s_checked = true;
+
+#ifdef WIN32
+  // On Windows, use SEH to catch the delay-load exception if the DLL is not found
+  __try
+  {
+    int         deviceCount = 0;
+    cudaError_t err         = cudaGetDeviceCount(&deviceCount);
+    s_available             = (err == cudaSuccess || err == cudaErrorNoDevice);
+  }
+  __except(GetExceptionCode() == VcppException(ERROR_SEVERITY_ERROR, ERROR_MOD_NOT_FOUND) ? EXCEPTION_EXECUTE_HANDLER : EXCEPTION_CONTINUE_SEARCH)
+  {
+    // Delay-load failed - DLL not found
+    LOGW("CUDA runtime DLL not found. OptiX denoiser will be unavailable.\n");
+    s_available = false;
+  }
+#else
+  // On Linux, delay-load is not typically used, so just try to call CUDA
+  int         deviceCount = 0;
+  cudaError_t err         = cudaGetDeviceCount(&deviceCount);
+  s_available             = (err == cudaSuccess || err == cudaErrorNoDevice);
+#endif
+
+  return s_available;
+}
 
 VkExternalSemaphoreHandleTypeFlagBits vkcuda::getSemaphoreExportHandleType()
 {

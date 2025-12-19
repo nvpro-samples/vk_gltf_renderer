@@ -121,6 +121,15 @@ if(USE_OPTIX_DENOISER)
     target_link_libraries(${PROJECT_NAME} PRIVATE CUDA::cudart CUDA::cuda_driver)
     target_compile_definitions(${PROJECT_NAME} PRIVATE CUDAToolkit_FOUND)
     message(STATUS "CUDAToolkit found - OptiX denoiser enabled")
+
+    # Windows: Delay-load CUDA runtime DLL so the application can start without it
+    # The DLL will only be loaded when OptiX denoiser is actually used
+    if(WIN32)
+      target_link_libraries(${PROJECT_NAME} PRIVATE delayimp.lib)
+      target_link_options(${PROJECT_NAME} PRIVATE "/DELAYLOAD:cudart64_${CUDAToolkit_VERSION_MAJOR}.dll")
+      message(STATUS "CUDA delay-load enabled for cudart64_${CUDAToolkit_VERSION_MAJOR}.dll")
+    endif()
+
   else()
     message(WARNING "CUDAToolkit not found - OptiX denoiser will not work properly")
   endif()

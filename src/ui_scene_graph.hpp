@@ -50,6 +50,8 @@ public:
   // Callback types for camera operations
   using CameraApplyCallback       = std::function<void(int cameraIndex)>;
   using CameraSetFromViewCallback = std::function<void(int cameraIndex)>;
+  // Callback to look up RenderNode index from node and primitive index
+  using RenderNodeLookupCallback = std::function<int(int nodeIndex, int primitiveIndex)>;
 
   // Event types for better decoupling
   enum class EventType
@@ -57,13 +59,15 @@ public:
     CameraApply,        // Emitted when "Apply to Current View" is clicked
     CameraSetFromView,  // Emitted when "Set from Current View" is clicked
     NodeSelected,       // Emitted when a node is selected in the scene graph
+    PrimitiveSelected,  // Emitted when a primitive is selected (via picking or UI)
     MaterialSelected    // Emitted when a material is selected
   };
 
   struct Event
   {
     EventType type;
-    int       data;  // camera index, node index, material index, etc.
+    int       data;             // camera index, node index, material index, etc.
+    int       renderNodeIndex;  // For PrimitiveSelected: the RenderNode index
   };
 
   using EventCallback = std::function<void(const Event&)>;
@@ -72,17 +76,22 @@ public:
 
   void setModel(tinygltf::Model* model)
   {
-    m_model                 = model;
-    m_selectedIndex         = -1;
-    m_selectedMaterialIndex = -1;
-    m_meshToNodeMapDirty    = true;  // Mark cache as dirty when model changes
-    m_lightToNodeMapDirty   = true;
-    m_cameraToNodeMapDirty  = true;
+    m_model                   = model;
+    m_selectedIndex           = -1;
+    m_selectedRenderNodeIndex = -1;
+    m_selectedPrimitiveIndex  = -1;
+    m_selectedMaterialIndex   = -1;
+    m_meshToNodeMapDirty      = true;  // Mark cache as dirty when model changes
+    m_lightToNodeMapDirty     = true;
+    m_cameraToNodeMapDirty    = true;
   }
   void setBbox(nvutils::Bbox bbox) { m_bbox = bbox; }  // Use for translation of model
 
   // Set the event callback to handle UI events
   void setEventCallback(const EventCallback& callback) { m_eventCallback = callback; }
+
+  // Set the render node lookup callback (for mapping node+primitive to RenderNode index)
+  void setRenderNodeLookup(const RenderNodeLookupCallback& callback) { m_renderNodeLookup = callback; }
 
   void render(bool* showSceneGraph = nullptr, bool* showProperties = nullptr);  // Render the scene graph and details
 
@@ -96,8 +105,11 @@ public:
   bool hasAnyChanges() { return m_changes.any(); }
   void resetChanges() { m_changes.reset(); }
   void selectNode(int nodeIndex);
+  void selectPrimitive(int renderNodeIndex, int nodeIndex, int primitiveIndex);
   void selectMaterial(int materialIndex, int nodeIndex = -1);
   int  selectedNode() const { return m_selectedIndex; }
+  int  selectedRenderNode() const { return m_selectedRenderNodeIndex; }
+  int  selectedPrimitiveIndex() const { return m_selectedPrimitiveIndex; }
   int  selectedMaterial() const { return m_selectedMaterialIndex; }
   int  selectedNodeForMaterial() const { return m_selectedNodeForMaterial; }
 
@@ -111,7 +123,7 @@ public:
 private:
   void renderNode(int nodeIndex);
   void renderMesh(int meshIndex);
-  void renderPrimitive(const tinygltf::Primitive& primitive, int primID, int nodeIndex);
+  void renderPrimitive(const tinygltf::Primitive& primitive, int primID, int nodeIndex, int renderNodeIndex);
   void renderLight(int lightIndex);
   void renderCamera(int cameraIndex);
   void renderMaterial(int materialIndex);
@@ -168,6 +180,8 @@ private:
   };
   SelectType      m_selectType              = eNode;
   int             m_selectedIndex           = -1;
+  int             m_selectedRenderNodeIndex = -1;  // Selected RenderNode index (for primitive selection)
+  int             m_selectedPrimitiveIndex  = -1;  // Selected primitive index within the mesh
   int             m_selectedMaterialIndex   = -1;  // Currently selected material
   int             m_selectedNodeForMaterial = -1;  // Node context for the selected material
   std::bitset<32> m_changes;
@@ -194,5 +208,6 @@ private:
   };
   bool m_doScroll = false;
 
-  EventCallback m_eventCallback;
+  EventCallback            m_eventCallback;
+  RenderNodeLookupCallback m_renderNodeLookup;
 };

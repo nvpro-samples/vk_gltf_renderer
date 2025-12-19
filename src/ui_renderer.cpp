@@ -69,17 +69,42 @@ void GltfRenderer::mouseClickedInViewport()
     m_app->submitAndWaitTempCmdBuffer(cmd);
     nvvk::RayPicker::PickResult pickResult = m_rayPicker.getResult();
 
-    // Set or de-select the selected object
+    // Set or de-select the selected object (primitive-level selection)
     if(s_mouseClickState.isMouseSingleClicked(ImGuiMouseButton_Left))
     {
-      m_resources.selectedObject = pickResult.instanceID;
-      int nodeID                 = -1;
       if(pickResult.instanceID > -1)
       {
-        const nvvkgltf::RenderNode& renderNode = m_resources.scene.getRenderNodes()[pickResult.instanceID];
-        nodeID                                 = renderNode.refNodeID;
+        // Toggle: deselect if clicking the same primitive
+        if(m_resources.selectedRenderNode == pickResult.instanceID)
+        {
+          m_resources.selectedRenderNode = -1;
+          m_uiSceneGraph.selectPrimitive(-1, -1, -1);
+        }
+        else
+        {
+          m_resources.selectedRenderNode         = pickResult.instanceID;
+          const nvvkgltf::RenderNode& renderNode = m_resources.scene.getRenderNodes()[pickResult.instanceID];
+          int                         nodeID     = renderNode.refNodeID;
+
+          // Find the primitive index within the node's mesh
+          int primIndex = 0;
+          for(auto& [key, value] : m_nodePrimToRenderNodeMap)
+          {
+            if(value == pickResult.instanceID)
+            {
+              primIndex = key.second;
+              break;
+            }
+          }
+          m_uiSceneGraph.selectPrimitive(pickResult.instanceID, nodeID, primIndex);
+        }
       }
-      m_uiSceneGraph.selectNode(nodeID);
+      else
+      {
+        // Clicked on background - deselect
+        m_resources.selectedRenderNode = -1;
+        m_uiSceneGraph.selectPrimitive(-1, -1, -1);
+      }
     }
 
     // Environment was picked (no hit)
@@ -104,8 +129,6 @@ void GltfRenderer::mouseClickedInViewport()
       LOGI(" - GLTF: NodeID: %d, MeshID: %d, TriangleId: %d\n", renderNode.refNodeID, node.mesh, pickResult.primitiveID);
       LOGI(" - Render: RenderNode: %d, RenderPrim: %d\n", pickResult.instanceID, pickResult.instanceCustomIndex);
       LOGI("{%3.2f, %3.2f, %3.2f}, Dist: %3.2f\n", worldPos.x, worldPos.y, worldPos.z, pickResult.hitT);
-
-      m_uiSceneGraph.selectNode(renderNode.refNodeID);
     }
   }
 }
@@ -185,8 +208,6 @@ void GltfRenderer::renderUI()
 
     // Scene Graph UI
     {
-      int selectedNode = m_uiSceneGraph.selectedNode();
-
       // Use event-based approach for maximum decoupling
       // The scene graph UI emits events instead of calling renderer methods directly
       // This eliminates the circular dependency and makes the code more modular
@@ -200,23 +221,22 @@ void GltfRenderer::renderUI()
             setGltfCameraFromView(event.data);
             break;
           case UiSceneGraph::EventType::NodeSelected:
-            // Update the selected render node index when a node is selected
-            {
-              auto it = m_nodeToRenderNodeMap.find(event.data);
-              if(it != m_nodeToRenderNodeMap.end())
-              {
-                m_resources.selectedObject = it->second;
-              }
-              else
-              {
-                m_resources.selectedObject = -1;  // No matching render node
-              }
-            }
+            // Update the selected render node index when a node is selected (first primitive)
+            m_resources.selectedRenderNode = event.renderNodeIndex;
+            break;
+          case UiSceneGraph::EventType::PrimitiveSelected:
+            // Update the selected render node directly from the RenderNode index
+            m_resources.selectedRenderNode = event.renderNodeIndex;
             break;
           case UiSceneGraph::EventType::MaterialSelected:
             // [TODO] Handle material selection
             break;
         }
+      });
+
+      // Set up render node lookup callback for primitive selection in UI
+      m_uiSceneGraph.setRenderNodeLookup([this](int nodeIndex, int primitiveIndex) -> int {
+        return getRenderNodeForPrimitive(nodeIndex, primitiveIndex);
       });
 
       m_uiSceneGraph.render(&m_resources.settings.showSceneGraphWindow, &m_resources.settings.showPropertiesWindow);
@@ -459,15 +479,15 @@ void GltfRenderer::renderMenu()
   // De-selecting the object
   if(ImGui::IsKeyPressed(ImGuiKey_Escape))
   {
-    m_resources.selectedObject = -1;
-    m_uiSceneGraph.selectNode(-1);
+    m_resources.selectedRenderNode = -1;
+    m_uiSceneGraph.selectPrimitive(-1, -1, -1);
   }
 
   if(ImGui::BeginMenu("View"))
   {
     ImGui::BeginDisabled(!validScene);  // Disable menu item if no scene is loaded)
     fitScene |= ImGui::MenuItem(ICON_MS_ZOOM_OUT " Fit Scene", "Ctrl+Shift+F");
-    ImGui::BeginDisabled(m_resources.selectedObject < 0);  // Disable menu item if no object is selected
+    ImGui::BeginDisabled(m_resources.selectedRenderNode < 0);  // Disable menu item if no object is selected
     fitObject |= ImGui::MenuItem(ICON_MS_ZOOM_IN " Fit Object", "Ctrl+F");
     ImGui::EndDisabled();
     ImGui::EndDisabled();
@@ -564,7 +584,7 @@ void GltfRenderer::renderMenu()
     vkQueueWaitIdle(m_app->getQueue(0).queue);
     cleanupScene();
     m_resources.dirtyFlags.set(DirtyFlags::eVulkanScene);
-    m_uiSceneGraph.selectNode(-1);
+    m_uiSceneGraph.selectPrimitive(-1, -1, -1);
   }
 
   if(reloadShader)
@@ -620,9 +640,10 @@ void GltfRenderer::renderMenu()
     }
   }
 
-  if(validScene && (fitScene || (fitObject && m_resources.selectedObject > -1)))
+  if(validScene && (fitScene || (fitObject && m_resources.selectedRenderNode > -1)))
   {
-    nvutils::Bbox bbox = fitScene ? m_resources.scene.getSceneBounds() : GltfRenderer::getRenderNodeBbox(m_resources.selectedObject);
+    nvutils::Bbox bbox =
+        fitScene ? m_resources.scene.getSceneBounds() : GltfRenderer::getRenderNodeBbox(m_resources.selectedRenderNode);
     m_cameraManip->fit(bbox.min(), bbox.max(), false, true, m_cameraManip->getAspectRatio());
   }
 

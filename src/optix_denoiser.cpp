@@ -70,6 +70,13 @@ void OptiXDenoiser::init(Resources& resources)
   VkPhysicalDevice physicalDevice = resources.allocator.getPhysicalDevice();
   m_device                        = resources.allocator.getDevice();
 
+  // Check if CUDA runtime is available (handles delay-load failure gracefully)
+  if(!vkcuda::isCudaRuntimeAvailable())
+  {
+    LOGW("CUDA runtime not available. OptiX denoiser disabled.\n");
+    return;
+  }
+
   // Create GBuffers for denoiser output and guides
   resources.samplerPool.acquireSampler(m_linearSampler);
   m_inputOutputGbuffers.init({.allocator = &resources.allocator,
@@ -607,6 +614,11 @@ void OptiXDenoiser::cleanupOptiX()
 
 void OptiXDenoiser::cleanupBuffers()
 {
+  if(!vkcuda::isCudaRuntimeAvailable())
+  {
+    return;
+  }
+
   // Cleanup shared Vulkan-CUDA buffers
   vkcuda::destroyCudaBuffer(m_rgbBuffer.cudaBuffer);
   vkcuda::destroyCudaBuffer(m_albedoBuffer.cudaBuffer);

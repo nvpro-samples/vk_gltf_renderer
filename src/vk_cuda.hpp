@@ -231,6 +231,11 @@ inline void clearCudaMemoryObjectManager()
 
 // -- Initialization --
 
+// Check if CUDA runtime is available (DLL can be loaded)
+// This safely handles the delay-load case where cudart64_XX.dll may not be present
+// Returns true if CUDA runtime is available, false otherwise
+bool isCudaRuntimeAvailable();
+
 // Setting the CUDA device to match the Vulkan physical device
 // This function will set the CUDA device to the first device that matches the Vulkan physical device.
 cudaError_t setCudaDevice(VkPhysicalDevice physicalDevice);

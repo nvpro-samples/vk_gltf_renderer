@@ -928,8 +928,8 @@ void PathTracer::setupPushConstant(VkCommandBuffer cmd, Resources& resources)
   m_pushConst.useOptixDenoiser = getEffectiveOptixEnabled(resources);
 #endif
   static int lastRenderedObject = -1;
-  m_pushConst.renderSelection   = resources.selectedObject != lastRenderedObject || resources.frameCount == 0;
-  lastRenderedObject            = resources.selectedObject;
+  m_pushConst.renderSelection   = resources.selectedRenderNode != lastRenderedObject || resources.frameCount == 0;
+  lastRenderedObject            = resources.selectedRenderNode;
   m_pushConst.frameCount        = frameCount;
   m_pushConst.totalSamples      = m_totalSamplesAccumulated;
   m_pushConst.frameInfo         = (shaderio::SceneFrameInfo*)resources.bFrameInfo.address;

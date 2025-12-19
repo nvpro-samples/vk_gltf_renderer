@@ -196,18 +196,28 @@ void UiSceneGraph::renderDetails(bool* showProperties)
 
 //--------------------------------------------------------------------------------------------------
 // This function is called when a node is selected
-// It will open all the parents of the selected node
+// It will open all the parents of the selected node and select the first primitive
 //
 void UiSceneGraph::selectNode(int nodeIndex)
 {
-  m_selectType = eNode;
+  m_selectType    = eNode;
+  m_selectedIndex = nodeIndex;
 
-  // Emit node selection event
+  // Look up the first RenderNode for this node (primitive index 0)
+  int renderNodeIndex = -1;
+  if(nodeIndex >= 0 && m_renderNodeLookup)
+  {
+    renderNodeIndex = m_renderNodeLookup(nodeIndex, 0);
+  }
+  m_selectedRenderNodeIndex = renderNodeIndex;
+  m_selectedPrimitiveIndex  = (renderNodeIndex >= 0) ? 0 : -1;
+
+  // Emit node selection event with the first RenderNode index
   if(m_eventCallback)
   {
-    m_eventCallback({EventType::NodeSelected, nodeIndex});
+    m_eventCallback({EventType::NodeSelected, nodeIndex, renderNodeIndex});
   }
-  m_selectedIndex = nodeIndex;
+
   m_openNodes.clear();
   if(nodeIndex >= 0)
   {
@@ -223,6 +233,51 @@ void UiSceneGraph::selectNode(int nodeIndex)
     {
       m_selectedMaterialIndex   = -1;
       m_selectedNodeForMaterial = -1;
+    }
+  }
+  else
+  {
+    m_selectedMaterialIndex   = -1;
+    m_selectedNodeForMaterial = -1;
+  }
+  m_doScroll = true;
+}
+
+//--------------------------------------------------------------------------------------------------
+// This function is called when a primitive is selected (via picking or UI)
+// It stores the RenderNode index for proper silhouette/framing and selects the parent node
+//
+void UiSceneGraph::selectPrimitive(int renderNodeIndex, int nodeIndex, int primitiveIndex)
+{
+  m_selectType              = eNode;
+  m_selectedRenderNodeIndex = renderNodeIndex;
+  m_selectedPrimitiveIndex  = primitiveIndex;
+  m_selectedIndex           = nodeIndex;
+
+  // Emit primitive selection event with the RenderNode index
+  if(m_eventCallback)
+  {
+    m_eventCallback({EventType::PrimitiveSelected, nodeIndex, renderNodeIndex});
+  }
+
+  m_openNodes.clear();
+  if(nodeIndex >= 0)
+  {
+    preprocessOpenNodes();
+    // Select the material for this specific primitive
+    if(primitiveIndex >= 0 && m_model)
+    {
+      const tinygltf::Node& node = m_model->nodes[nodeIndex];
+      if(node.mesh >= 0)
+      {
+        const tinygltf::Mesh& mesh = m_model->meshes[node.mesh];
+        if(primitiveIndex < static_cast<int>(mesh.primitives.size()))
+        {
+          int materialID            = std::max(0, mesh.primitives[primitiveIndex].material);
+          m_selectedMaterialIndex   = materialID;
+          m_selectedNodeForMaterial = nodeIndex;
+        }
+      }
     }
   }
   else
@@ -253,7 +308,7 @@ void UiSceneGraph::selectMaterial(int materialIndex, int nodeIndex)
   // Emit material selection event
   if(m_eventCallback)
   {
-    m_eventCallback({EventType::MaterialSelected, materialIndex});
+    m_eventCallback({EventType::MaterialSelected, materialIndex, -1});
   }
 }
 
@@ -270,14 +325,15 @@ void UiSceneGraph::renderNode(int nodeIndex)
 
   ImGuiTreeNodeFlags flags = s_treeNodeFlags;
 
-  // Ensure the selected node is visible
-  if(m_openNodes.find(nodeIndex) != m_openNodes.end())
+  // Ensure the selected node is visible (open parent nodes in the path)
+  // Also open the selected node itself if it contains the selected primitive
+  if(m_openNodes.find(nodeIndex) != m_openNodes.end() || (m_selectedIndex == nodeIndex && m_selectedRenderNodeIndex >= 0))
   {
     ImGui::SetNextItemOpen(true);
   }
 
-  // Highlight the selected node
-  if((m_selectType == eNode) && (m_selectedIndex == nodeIndex))
+  // Highlight the selected node only if no primitive is selected under it
+  if((m_selectType == eNode) && (m_selectedIndex == nodeIndex) && (m_selectedRenderNodeIndex < 0))
   {
     flags |= ImGuiTreeNodeFlags_Selected;
     if(m_doScroll)
@@ -374,9 +430,10 @@ void UiSceneGraph::renderMesh(int meshIndex)
   // Get the node index that contains this mesh
   int nodeIndex = getNodeForMesh(meshIndex);
 
-  // Create a selectable mesh item
+  // Create a selectable mesh item (only highlight if no primitive is selected)
   std::string meshLabel = "Mesh: " + mesh.name;
-  if(ImGui::Selectable(meshLabel.c_str(), (m_selectedIndex == nodeIndex) && (m_selectType == eNode)))
+  bool meshSelected     = (m_selectedIndex == nodeIndex) && (m_selectType == eNode) && (m_selectedRenderNodeIndex < 0);
+  if(ImGui::Selectable(meshLabel.c_str(), meshSelected))
   {
     // Select the parent node and its first material
     if(nodeIndex >= 0)
@@ -389,32 +446,55 @@ void UiSceneGraph::renderMesh(int meshIndex)
   ImGui::Text("Mesh %d", meshIndex);
   ImGui::TableNextColumn();
 
+  // Force open the Primitives tree if a primitive in this mesh is selected
+  if(m_selectedIndex == nodeIndex && m_selectedRenderNodeIndex >= 0)
+  {
+    ImGui::SetNextItemOpen(true);
+  }
+
   // Render primitives as a tree node
   if(ImGui::TreeNodeEx("Primitives", s_treeNodeFlags, "Primitives (%zu)", mesh.primitives.size()))
   {
     int primID{};
     for(const auto& primitive : mesh.primitives)
     {
-      renderPrimitive(primitive, primID++, nodeIndex);
+      // Look up the RenderNode index for this primitive using the callback
+      int renderNodeIndex = m_renderNodeLookup(nodeIndex, primID);
+      renderPrimitive(primitive, primID++, nodeIndex, renderNodeIndex);
     }
     ImGui::TreePop();
   }
 }
 
-void UiSceneGraph::renderPrimitive(const tinygltf::Primitive& primitive, int primID, int nodeIndex)
+void UiSceneGraph::renderPrimitive(const tinygltf::Primitive& primitive, int primID, int nodeIndex, int renderNodeIndex)
 {
   ImGui::TableNextRow();
   ImGui::TableNextColumn();
+
   const int         materialID = std::clamp(primitive.material, 0, static_cast<int>(m_model->materials.size() - 1));
   const std::string primName   = "Prim " + std::to_string(primID);
+  const bool        isSelected = (m_selectedRenderNodeIndex == renderNodeIndex) && (renderNodeIndex >= 0);
 
-  // Check if this primitive's material is currently selected
-  bool isSelected = (m_selectedMaterialIndex == materialID) && (m_selectedNodeForMaterial == nodeIndex);
+  // Scroll to the selected primitive
+  if(isSelected && m_doScroll)
+  {
+    ImGui::SetScrollHereY();
+    m_doScroll = false;
+  }
 
   if(ImGui::Selectable(primName.c_str(), isSelected))
   {
-    selectMaterial(materialID, nodeIndex);
+    // Toggle: deselect if clicking the same primitive, otherwise select
+    if(isSelected)
+    {
+      selectPrimitive(-1, -1, -1);
+    }
+    else
+    {
+      selectPrimitive(renderNodeIndex, nodeIndex, primID);
+    }
   }
+
   ImGui::TableNextColumn();
   ImGui::Text("Primitive");
   ImGui::TableNextColumn();
@@ -1359,7 +1439,7 @@ void UiSceneGraph::renderCameraDetailsWithEvents(int cameraIndex)
     {
       if(m_eventCallback)
       {
-        m_eventCallback({EventType::CameraApply, cameraIndex});
+        m_eventCallback({EventType::CameraApply, cameraIndex, -1});
       }
       m_changes.set(eCameraApplyToView);
     }
@@ -1369,7 +1449,7 @@ void UiSceneGraph::renderCameraDetailsWithEvents(int cameraIndex)
     {
       if(m_eventCallback)
       {
-        m_eventCallback({EventType::CameraSetFromView, cameraIndex});
+        m_eventCallback({EventType::CameraSetFromView, cameraIndex, -1});
       }
       m_changes.set(eCameraDirty);
     }

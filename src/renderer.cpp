@@ -377,7 +377,7 @@ void GltfRenderer::onRender(VkCommandBuffer cmd)
         .useSolidBackground = m_resources.settings.useSolidBackground ? 1 : 0,
         .backgroundColor    = m_resources.settings.solidBackgroundColor,
         .environmentType    = (int)m_resources.settings.envSystem,
-        .selectedRenderNode = m_resources.selectedObject,
+        .selectedRenderNode = m_resources.selectedRenderNode,
         .debugMethod        = m_resources.settings.debugMethod,
         .useInfinitePlane = m_resources.settings.useInfinitePlane ? (m_resources.settings.isShadowCatcher ? 2 : 1) : 0,
         .infinitePlaneDistance  = m_resources.settings.infinitePlaneDistance,
@@ -562,7 +562,7 @@ void GltfRenderer::tonemap(VkCommandBuffer cmd)
 void GltfRenderer::silhouette(VkCommandBuffer cmd)
 {
   // Adding the silhouette pass after all rendering passes
-  if(m_resources.selectedObject > -1)
+  if(m_resources.selectedRenderNode > -1)
   {
     NVVK_DBG_SCOPE(cmd);  // <-- Helps to debug in NSight
     auto timerSection = m_profilerGpuTimer.cmdFrameSection(cmd, __FUNCTION__);
@@ -682,7 +682,7 @@ void GltfRenderer::cleanupScene()
   m_resources.sceneVk.destroy();
   m_resources.sceneRtx.destroy();
   m_uiSceneGraph.setModel(nullptr);
-  m_resources.selectedObject = -1;
+  m_resources.selectedRenderNode = -1;
 
   // Reset memory statistics for the new scene
   // Keeps lifetime allocation/deallocation counts but resets current and peak values
@@ -1146,12 +1146,38 @@ bool GltfRenderer::updateSceneChanges(VkCommandBuffer cmd, bool didAnimate)
 // Called during scene creation and whenever the scene structure changes.
 void GltfRenderer::updateNodeToRenderNodeMap()
 {
-  m_nodeToRenderNodeMap.clear();
-  auto& renderNodes = m_resources.scene.getRenderNodes();
+  m_nodePrimToRenderNodeMap.clear();
+
+  auto&                        renderNodes = m_resources.scene.getRenderNodes();
+  std::unordered_map<int, int> nodeCurrentPrimIndex;  // Track which primitive index we're at for each node
+
   for(size_t i = 0; i < renderNodes.size(); i++)
   {
-    m_nodeToRenderNodeMap[renderNodes[i].refNodeID] = static_cast<int>(i);
+    int nodeID = renderNodes[i].refNodeID;
+
+    // Initialize primitive index counter for this node if not present
+    if(nodeCurrentPrimIndex.find(nodeID) == nodeCurrentPrimIndex.end())
+    {
+      nodeCurrentPrimIndex[nodeID] = 0;
+    }
+
+    // Map (nodeID, primitiveIndex) -> RenderNode index
+    int primIndex                                  = nodeCurrentPrimIndex[nodeID]++;
+    m_nodePrimToRenderNodeMap[{nodeID, primIndex}] = static_cast<int>(i);
   }
+}
+
+//--------------------------------------------------------------------------------------------------
+// Get the RenderNode index for a specific primitive within a node
+// Returns -1 if not found
+int GltfRenderer::getRenderNodeForPrimitive(int nodeIndex, int primitiveIndex) const
+{
+  auto it = m_nodePrimToRenderNodeMap.find({nodeIndex, primitiveIndex});
+  if(it != m_nodePrimToRenderNodeMap.end())
+  {
+    return it->second;
+  }
+  return -1;
 }
 
 
