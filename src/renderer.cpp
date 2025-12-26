@@ -684,10 +684,45 @@ void GltfRenderer::cleanupScene()
   m_uiSceneGraph.setModel(nullptr);
   m_resources.selectedRenderNode = -1;
 
+  // Reset animation control to avoid out-of-bounds access when loading a scene with fewer animations
+  m_animControl.currentAnimation = 0;
+
   // Reset memory statistics for the new scene
   // Keeps lifetime allocation/deallocation counts but resets current and peak values
   m_resources.sceneVk.getMemoryTracker().reset();
   m_resources.sceneRtx.getMemoryTracker().reset();
+}
+
+//--------------------------------------------------------------------------------------------------
+// Rebuild the Vulkan scene after modifying the glTF model in-place.
+// Use this when you've modified model geometry (vertices, indices, accessors) and need to
+// recreate all GPU resources. The model data itself is preserved.
+//
+// Example use cases:
+// - After MikkTSpace tangent generation with vertex splitting
+// - After mesh optimization that changes vertex/index counts
+// - After any operation that modifies buffer data or accessor indices
+//
+void GltfRenderer::rebuildSceneFromModel()
+{
+  vkDeviceWaitIdle(m_device);
+
+  // Destroy GPU resources (but preserve the model data in m_resources.scene)
+  m_resources.sceneRtx.destroy();
+  m_resources.sceneVk.destroy();
+
+  // Re-parse the scene to update RenderPrimitives with new accessor counts
+  m_resources.scene.setCurrentScene(m_resources.scene.getCurrentScene());
+
+  // Recreate GPU resources from the modified model
+  createVulkanScene();
+
+  // Update UI with the modified model
+  m_uiSceneGraph.setModel(&m_resources.scene.getModel());
+  m_uiSceneGraph.setBbox(m_resources.scene.getSceneBounds());
+
+  // Refresh texture descriptors
+  updateTextures();
 }
 
 //--------------------------------------------------------------------------------------------------
@@ -1103,9 +1138,10 @@ bool GltfRenderer::updateSceneChanges(VkCommandBuffer cmd, bool didAnimate)
   {
     m_resources.scene.updateRenderNodes();
     m_resources.sceneVk.updateRenderNodesBuffer(cmd, m_resources.staging, m_resources.scene);
-    m_resources.sceneVk.updateRenderPrimitivesBuffer(cmd, m_resources.staging, m_resources.scene);
     m_resources.sceneVk.updateRenderLightsBuffer(cmd, m_resources.staging, m_resources.scene);
+    // Update vertex buffers first (e.g. new tangent data), then apply skinning
     m_resources.sceneVk.updateVertexBuffers(cmd, m_resources.staging, m_resources.scene);
+    m_resources.sceneVk.updateRenderPrimitivesBuffer(cmd, m_resources.staging, m_resources.scene);
     m_resources.dirtyFlags.reset(DirtyFlags::eVulkanScene);
     changed = true;
   }

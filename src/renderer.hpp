@@ -83,7 +83,8 @@ private:
   bool processQueuedCommandBuffers();
 
   void clearGbuffer(VkCommandBuffer cmd);
-  void cleanupScene();  // Helper to cleanup current scene
+  void cleanupScene();           // Helper to cleanup current scene
+  void rebuildSceneFromModel();  // Rebuild Vulkan scene after modifying the glTF model in-place
   void compileShaders();
   void createDescriptorSets();
   void createResourceBuffers();

@@ -527,10 +527,14 @@ void GltfRenderer::renderMenu()
     ImGui::SetItemTooltip("This recreate tangents using UV gradient method");
     if(ImGui::MenuItem(ICON_MS_BUILD " Recreate Tangents - MikkTSpace"))
     {
-      recomputeTangents(m_resources.scene.getModel(), true, true);
-      m_resources.dirtyFlags.set(DirtyFlags::eVulkanScene);
+      bool buffersChanged = recomputeTangents(m_resources.scene.getModel(), true, true);
+
+      if(buffersChanged)
+        rebuildSceneFromModel();  // Geometry changed - full rebuild needed
+      else
+        m_resources.dirtyFlags.set(DirtyFlags::eVulkanScene);  // Just update existing buffers
     }
-    ImGui::SetItemTooltip("This recreate tangents using MikkTSpace");
+    ImGui::SetItemTooltip("Recreate tangents using MikkTSpace (may split vertices at UV seams)");
 
     ImGui::EndDisabled();
 

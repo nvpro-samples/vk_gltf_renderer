@@ -175,6 +175,13 @@ void Rasterizer::onRender(VkCommandBuffer cmd, Resources& resources)
 
   nvvk::cmdImageMemoryBarrier(cmd, {resources.gBuffers.getColorImage(Resources::eImgRendered), VK_IMAGE_LAYOUT_GENERAL,
                                     VK_IMAGE_LAYOUT_COLOR_ATTACHMENT_OPTIMAL});
+  nvvk::cmdImageMemoryBarrier(cmd, {resources.gBuffers.getColorImage(Resources::eImgSelection), VK_IMAGE_LAYOUT_GENERAL,
+                                    VK_IMAGE_LAYOUT_COLOR_ATTACHMENT_OPTIMAL});
+  nvvk::cmdImageMemoryBarrier(cmd, {resources.gBuffers.getDepthImage(),
+                                    VK_IMAGE_LAYOUT_UNDEFINED,
+                                    VK_IMAGE_LAYOUT_DEPTH_ATTACHMENT_OPTIMAL,
+                                    {VK_IMAGE_ASPECT_DEPTH_BIT, 0, VK_REMAINING_MIP_LEVELS, 0, VK_REMAINING_ARRAY_LAYERS}});
+
 
   // Setting up the push constant
   m_pushConst.frameInfo  = (shaderio::SceneFrameInfo*)resources.bFrameInfo.address;
@@ -216,6 +223,12 @@ void Rasterizer::onRender(VkCommandBuffer cmd, Resources& resources)
 
   nvvk::cmdImageMemoryBarrier(cmd, {resources.gBuffers.getColorImage(Resources::eImgRendered),
                                     VK_IMAGE_LAYOUT_COLOR_ATTACHMENT_OPTIMAL, VK_IMAGE_LAYOUT_GENERAL});
+  nvvk::cmdImageMemoryBarrier(cmd, {resources.gBuffers.getColorImage(Resources::eImgSelection),
+                                    VK_IMAGE_LAYOUT_COLOR_ATTACHMENT_OPTIMAL, VK_IMAGE_LAYOUT_GENERAL});
+  nvvk::cmdImageMemoryBarrier(cmd, {resources.gBuffers.getDepthImage(),
+                                    VK_IMAGE_LAYOUT_DEPTH_ATTACHMENT_OPTIMAL,
+                                    VK_IMAGE_LAYOUT_GENERAL,
+                                    {VK_IMAGE_ASPECT_DEPTH_BIT, 0, VK_REMAINING_MIP_LEVELS, 0, VK_REMAINING_ARRAY_LAYERS}});
 }
 
 //--------------------------------------------------------------------------------------------------
