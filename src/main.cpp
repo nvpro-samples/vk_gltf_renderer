@@ -1,5 +1,5 @@
 /*
- * Copyright (c) 2023-2025, NVIDIA CORPORATION.  All rights reserved.
+ * Copyright (c) 2023-2026, NVIDIA CORPORATION.  All rights reserved.
  *
  * Licensed under the Apache License, Version 2.0 (the "License");
  * you may not use this file except in compliance with the License.
@@ -13,7 +13,7 @@
  * See the License for the specific language governing permissions and
  * limitations under the License.
  *
- * SPDX-FileCopyrightText: Copyright (c) 2023-2025, NVIDIA CORPORATION.
+ * SPDX-FileCopyrightText: Copyright (c) 2023-2026, NVIDIA CORPORATION.
  * SPDX-License-Identifier: Apache-2.0
  */
 
@@ -30,10 +30,8 @@
 #include <nvapp/elem_logger.hpp>
 #include <nvapp/elem_profiler.hpp>
 #include <nvgpu_monitor/elem_gpu_monitor.hpp>
-#include <nvgui/camera.hpp>
 #include <nvutils/file_operations.hpp>
 #include <nvutils/parameter_parser.hpp>
-#include <nvvk/check_error.hpp>
 #include <nvvk/context.hpp>
 #include <nvvk/validation_settings.hpp>
 
@@ -74,8 +72,8 @@ auto main(int argc, char** argv) -> int
 #endif
 
   // Global variables
-  std::filesystem::path sceneFilename{};  // "shader_ball.gltf"};  // Default scene
-  std::filesystem::path hdrFilename{};    // "env3.hdr"};         // Default HDR
+  std::filesystem::path sceneFilename{};             // "shader_ball.gltf"};  // Default scene
+  std::filesystem::path hdrFilename{"std_env.hdr"};  // Default HDR
 
   // Application defaults overrides
   appInfo.preferredVsyncOffMode = VK_PRESENT_MODE_MAILBOX_KHR;

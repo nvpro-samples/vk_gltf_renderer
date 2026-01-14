@@ -1,5 +1,5 @@
 /*
- * Copyright (c) 2024-2025, NVIDIA CORPORATION.  All rights reserved.
+ * Copyright (c) 2024-2026, NVIDIA CORPORATION.  All rights reserved.
  *
  * Licensed under the Apache License, Version 2.0 (the "License");
  * you may not use this file except in compliance with the License.
@@ -13,7 +13,7 @@
  * See the License for the specific language governing permissions and
  * limitations under the License.
  *
- * SPDX-FileCopyrightText: Copyright (c) 2024-2025, NVIDIA CORPORATION.
+ * SPDX-FileCopyrightText: Copyright (c) 2024-2026, NVIDIA CORPORATION.
  * SPDX-License-Identifier: Apache-2.0
  */
 
@@ -142,6 +142,7 @@ private:
   void materialTransmission(tinygltf::Material& material);
   void materialUnlit(tinygltf::Material& material);
   void materialVolume(tinygltf::Material& material);
+  void materialVolumeScatter(tinygltf::Material& material);
 
   void renderNodeDetails(int nodeIndex);
   void renderLightDetails(int lightIndex);
@@ -155,6 +156,7 @@ private:
   bool markOpenNodes(int nodeIndex, int targetNodeIndex, std::unordered_set<int>& openNodes);
   void renderSceneGraph(bool* showSceneGraph);
   void renderDetails(bool* showProperties);
+  void renderAssetInfo();  // Display glTF asset info (version, generator, copyright)
 
   // Helper functions to get available materials for a node
   std::vector<int>                         getMaterialsForNode(int nodeIndex) const;

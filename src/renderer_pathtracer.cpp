@@ -1,5 +1,5 @@
 /*
- * Copyright (c) 2023-2025, NVIDIA CORPORATION.  All rights reserved.
+ * Copyright (c) 2023-2026, NVIDIA CORPORATION.  All rights reserved.
  *
  * Licensed under the Apache License, Version 2.0 (the "License");
  * you may not use this file except in compliance with the License.
@@ -13,13 +13,12 @@
  * See the License for the specific language governing permissions and
  * limitations under the License.
  *
- * SPDX-FileCopyrightText: Copyright (c) 2023-2025, NVIDIA CORPORATION.
+ * SPDX-FileCopyrightText: Copyright (c) 2023-2026, NVIDIA CORPORATION.
  * SPDX-License-Identifier: Apache-2.0
  */
 
 
 #include <nvapp/elem_dbgprintf.hpp>
-#include <nvutils/camera_manipulator.hpp>
 #include <nvvk/check_error.hpp>
 #include <nvvk/compute_pipeline.hpp>
 #include <nvvk/debug_util.hpp>
@@ -29,7 +28,6 @@
 #include <nvgui/tooltip.hpp>
 
 #include "renderer_pathtracer.hpp"
-#include "utils.hpp"
 
 // Pre-compiled shaders
 #include "_autogen/gltf_pathtrace.slang.h"
@@ -70,8 +68,9 @@ void PathTracer::onAttach(Resources& resources, nvvk::ProfilerGpuTimer* profiler
   m_rtPipelineProperties.pNext = &m_reorderProperties;
   vkGetPhysicalDeviceProperties2(resources.allocator.getPhysicalDevice(), &prop2);
 
-  m_supportSER =
-      (bool)(m_reorderProperties.rayTracingInvocationReorderReorderingHint & VK_RAY_TRACING_INVOCATION_REORDER_MODE_REORDER_NV) ? 1 : 0;
+  m_supportSER = (bool)(m_reorderProperties.rayTracingInvocationReorderReorderingHint & VK_RAY_TRACING_INVOCATION_REORDER_MODE_REORDER_NV) ?
+                     true :
+                     false;
   m_useSER = m_supportSER;
 
   // If SER is not supported, force recompiling without SER
@@ -155,7 +154,7 @@ void PathTracer::onDetach(Resources& resources)
 
 //--------------------------------------------------------------------------------------------------
 // Resize the G-Buffer and the renderers
-void PathTracer::onResize(VkCommandBuffer cmd, const VkExtent2D& size, Resources& resources)
+void PathTracer::onResize(VkCommandBuffer cmd, const VkExtent2D& /*size*/, Resources& resources)
 {
   updateDlssResources(cmd, resources);
   updateOptiXResources(cmd, resources);
@@ -186,7 +185,7 @@ void PathTracer::updateOptiXResources(VkCommandBuffer cmd, Resources& resources)
 bool PathTracer::onUIRender(Resources& resources)
 {
   // Setting the aperture max slider value, based on the scene size
-  float sceneRadius = resources.scene.getSceneBounds().radius();
+  float sceneRadius = resources.scene.valid() ? resources.scene.getSceneBounds().radius() : 1.0f;
   float scaleFactor = std::log(sceneRadius);
   scaleFactor       = std::max(scaleFactor, 0.0f);   // Prevent negative values when the scene is small
   float apertureMax = 0.0001f + scaleFactor * 5.0f;  // Minimum max aperture is 0.0001
@@ -265,7 +264,7 @@ bool PathTracer::onUIRender(Resources& resources)
     }
     // Performance info - always visible
     ImGui::TextDisabled("Samples: %d/%d (%.1fx)", m_totalSamplesAccumulated, resources.frameCount + 1,
-                        m_totalSamplesAccumulated / float(resources.frameCount + 1));
+                        float(m_totalSamplesAccumulated) / float(resources.frameCount + 1));
 
     ImGui::TextDisabled("Throughput: %.2f MSPP/s", m_throughputRollingAvg.getAverage());
     nvgui::tooltip("Mega-sample-pixels per second (rolling average over last %zu frames)", m_throughputRollingAvg.SAMPLE_COUNT);
@@ -473,7 +472,7 @@ void PathTracer::createPipeline(Resources& resources)
 
 //--------------------------------------------------------------------------------------------------
 // Create the compute pipeline
-void PathTracer::createRqPipeline(Resources& resources)
+void PathTracer::createRqPipeline(Resources& /*resources*/)
 {
   SCOPED_TIMER(__FUNCTION__);
 

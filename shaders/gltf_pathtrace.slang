@@ -1,5 +1,5 @@
 /*
- * Copyright (c) 2023-2025, NVIDIA CORPORATION.  All rights reserved.
+ * Copyright (c) 2023-2026, NVIDIA CORPORATION.  All rights reserved.
  *
  * Licensed under the Apache License, Version 2.0 (the "License");
  * you may not use this file except in compliance with the License.
@@ -13,7 +13,7 @@
  * See the License for the specific language governing permissions and
  * limitations under the License.
  *
- * SPDX-FileCopyrightText: Copyright (c) 2023-2025, NVIDIA CORPORATION.
+ * SPDX-FileCopyrightText: Copyright (c) 2023-2026, NVIDIA CORPORATION.
  * SPDX-License-Identifier: Apache-2.0
  */
 
@@ -82,6 +82,15 @@ struct DirectLight
 };
 
 //-----------------------------------------------------------------------
+// Lighting technique selection probabilities for MIS
+//-----------------------------------------------------------------------
+struct LightingTechniqueProbabilities
+{
+  float lightWeight;  // Normalized probability of sampling punctual lights
+  float envWeight;    // Normalized probability of sampling environment
+};
+
+//-----------------------------------------------------------------------
 // Minimum transmission factor to continue tracing
 //-----------------------------------------------------------------------
 #define MIN_TRANSMISSION 0.01
@@ -96,6 +105,13 @@ struct DirectLight
 // too blurry, and smaller values make thin lines look jagged.
 //-----------------------------------------------------------------------
 #define ANTIALIASING_STANDARD_DEVIATION 0.4246609F
+
+//-----------------------------------------------------------------------
+// Minimum path depth before Russian Roulette path termination begins.
+// Ensures the first N bounces (capturing ~95% of visible energy in typical
+// scenes) are always traced before probabilistic termination.
+//-----------------------------------------------------------------------
+#define RR_MIN_DEPTH 3
 
 //-----------------------------------------------------------------------
 // The safeOffsetRay function shifts a point on a surface so that a ray
@@ -183,65 +199,95 @@ RayDesc getRay(float2 samplePos, float2 offset, float2 imageSize, float4x4 projM
 
 
 //-----------------------------------------------------------------------
-// This should sample any lights in the scene, but we only have the sun
+// Computes normalized selection probabilities for direct lighting techniques (MIS).
+// Returns probabilities for sampling punctual lights vs environment lighting.
+// Ensures consistent MIS weights between Next Event Estimation (NEE) and BSDF sampling.
+//
+// The function checks:
+// - Whether punctual lights exist (numLights > 0)
+// - Whether environment lighting is enabled (sky type or envIntensity > 0)
+//
+// Returns normalized weights that sum to 1.0, or both 0.0 if no lighting is available.
+// TODO: adjust based on scene characteristics (light intensity vs environment intensity)
+//-----------------------------------------------------------------------
+LightingTechniqueProbabilities getDirectLightingTechniqueProbabilities()
+{
+  LightingTechniqueProbabilities probs;
+
+  // Initial selection probabilities (unnormalized)
+  float lightWeight = (pushConst.gltfScene.numLights > 0) ? 0.5f : 0.0f;
+  float envWeight =
+      ((pushConst.frameInfo.environmentType == EnvSystem::eSky) || pushConst.frameInfo.envIntensity.x > 0.0f) ? 0.5f : 0.0f;
+
+  // Normalize weights so they sum to 1.0
+  float totalWeight = lightWeight + envWeight;
+  if(totalWeight > 0.0f)
+  {
+    lightWeight /= totalWeight;
+    envWeight /= totalWeight;
+  }
+
+  probs.lightWeight = lightWeight;
+  probs.envWeight   = envWeight;
+  return probs;
+}
+
+//-----------------------------------------------------------------------
+// Sample lights using one-sample model MIS between punctual lights and environment.
+// See section 9.2.4 of https://graphics.stanford.edu/papers/veach_thesis/thesis.pdf
+//
+// Key insight: Punctual lights (Point, Spot, Directional) are delta distributions.
+// Environment sampling has zero probability of hitting the exact delta direction,
+// so MIS weight = 1.0 for both strategies when delta lights are involved.
+//-----------------------------------------------------------------------
 void sampleLights(in float3 pos, float3 normal, in float3 worldRayDirection, inout uint seed, out DirectLight directLight)
 {
-
-  float3 radiance             = float3(0.);
-  directLight.pdf             = 0.0;
+  float3 radiance             = float3(0.0f);
+  directLight.pdf             = 0.0f;
   directLight.distance        = INFINITE;
-  directLight.radianceOverPdf = float3(0.0);
-  float envPdf                = 0.0;
+  directLight.radianceOverPdf = float3(0.0f);
+  float envPdf                = 0.0f;
 
-  // We use the one-sample model to perform multiple importance sampling
-  // between point lights and environment lights.
-  // See section 9.2.4 of https://graphics.stanford.edu/papers/veach_thesis/thesis.pdf .
+  // Get normalized selection probabilities for MIS
+  LightingTechniqueProbabilities probs       = getDirectLightingTechniqueProbabilities();
+  float                          lightWeight = probs.lightWeight;
+  float                          envWeight   = probs.envWeight;
 
-  // Probability we'll select each sampling scheme (TODO: adjust these based on
-  // scene characteristics: light intensity vs environment intensity)
-  float lightWeight = (pushConst.gltfScene.numLights > 0) ? 0.5 : 0.0;
-  float envWeight =
-      ((pushConst.frameInfo->environmentType == EnvSystem::eSky) || pushConst.frameInfo.envIntensity.x > 0.0) ? 0.5 : 0.0;
-
-  // Normalize weights
-  float totalWeight = lightWeight + envWeight;
-  if(totalWeight == 0.0f)
+  // Early exit if no lighting is available
+  if(lightWeight == 0.0f && envWeight == 0.0f)
   {
     return;  // No lights to sample
   }
 
-  lightWeight /= totalWeight;
-  envWeight /= totalWeight;
-
   // Decide whether to sample the light or the environment.
-  bool sampleLights = (rand(seed) <= lightWeight);
+  bool sampleLight = (rand(seed) < lightWeight);
 
-  // We'll choose a direction from one technique, but for MIS we need the
-  // PDFs of each technique in the direction we chose. That's why we always get
-  // the light PDF (which is constant), but only sample a light if
-  // `sampleLights` is true.
-
-  // Lights
-  if(lightWeight > 0)
+  // === LIGHT SAMPLING ===
+  if(sampleLight)
   {
-    directLight.pdf = 1.0 / pushConst.gltfScene.numLights;
-    if(sampleLights)  // Use this technique for MIS?
-    {
-      int lightIndex = min(int(rand(seed) * pushConst.gltfScene.numLights), pushConst.gltfScene.numLights - 1);
-      GltfLight light = pushConst.gltfScene.lights[lightIndex];  // RenderLightBuf(sceneDesc.lightAddress)._[lightIndex];
-      LightContrib contrib  = singleLightContribution(light, pos, normal, float2(rand(seed), rand(seed)));
-      directLight.direction = -contrib.incidentVector;
-      radiance              = contrib.intensity / (directLight.pdf * lightWeight);
-      directLight.distance  = contrib.distance;
-    }
+    // Selection probability for Monte Carlo normalization (1/N lights)
+    float selectionPdf = 1.0 / pushConst.gltfScene.numLights;
+
+    int          lightIndex = min(int(rand(seed) * pushConst.gltfScene.numLights), pushConst.gltfScene.numLights - 1);
+    GltfLight    light      = pushConst.gltfScene.lights[lightIndex];
+    LightContrib contrib    = singleLightContribution(light, pos, normal, float2(rand(seed), rand(seed)));
+
+    directLight.direction = -contrib.incidentVector;
+    directLight.distance  = contrib.distance;
+    radiance              = contrib.intensity / (selectionPdf * lightWeight);
+
+    // Use PDF from singleLightContribution (DIRAC for punctual, 1/solidAngle for area)
+    // Multiply by selectionPdf to account for light selection probability
+    directLight.pdf = (contrib.pdf == DIRAC) ? DIRAC : selectionPdf * contrib.pdf;
   }
 
-  // Environment
-  if(envWeight > 0)
+  // === ENVIRONMENT SAMPLING ===
+  // Skip envPdf query if we sampled a punctual light (DIRAC) - it won't be used in MIS calculation
+  if(envWeight > 0 && directLight.pdf != DIRAC)
   {
     if(pushConst.frameInfo->environmentType == EnvSystem::eSky)
     {
-      if(!sampleLights)  // Use this technique for MIS?
+      if(!sampleLight)  // Use this technique?
       {
         float2            random_sample = float2(rand(seed), rand(seed));
         SkySamplingResult skySample     = samplePhysicalSky(*pushConst.skyParams, random_sample);
@@ -251,12 +297,13 @@ void sampleLights(in float3 pos, float3 normal, in float3 worldRayDirection, ino
       }
       else
       {
+        // Query env PDF at light direction for area light MIS
         envPdf = samplePhysicalSkyPDF(*pushConst.skyParams, directLight.direction);
       }
     }
     else
     {
-      if(!sampleLights)  // Use this technique for MIS?
+      if(!sampleLight)  // Use this technique?
       {
         float3 rand_val = float3(rand(seed), rand(seed), rand(seed));
         float4 radiance_pdf = environmentSample(texturesHdr[HDR_IMAGE_INDEX], envSamplingData, rand_val, directLight.direction);
@@ -266,6 +313,7 @@ void sampleLights(in float3 pos, float3 normal, in float3 worldRayDirection, ino
       }
       else
       {
+        // Query env PDF at light direction for area light MIS
         float3 dir          = rotate(directLight.direction, float3(0, 1, 0), -pushConst.frameInfo->envRotation);
         float2 uv           = getSphericalUv(dir);
         float4 radiance_pdf = texturesHdr[HDR_IMAGE_INDEX].SampleLevel(uv, 0);
@@ -274,14 +322,24 @@ void sampleLights(in float3 pos, float3 normal, in float3 worldRayDirection, ino
     }
   }
 
-  // MIS weight calculation
-  float misWeight = (sampleLights ? directLight.pdf : envPdf) / (directLight.pdf + envPdf);
-  radiance *= misWeight;
-  // Update the total PDF
-  directLight.pdf = lightWeight * directLight.pdf + envWeight * envPdf;
+  // One-sample MIS: randomly pick light or env, weight by balance heuristic (Veach thesis 9.2.4).
+  // When sampling a light, we query envPdf so both PDFs contribute to the weight.
+  // When sampling the environment, we don't query light PDFs (would require looping over all lights).
+  // This means MIS weights won't sum to 1 if lights overlap bright env regions (Veach 9.2.1.1),
+  // but that's an acceptable tradeoff for this rare edge case.
+  float misWeight = 1.0f;
+  if(directLight.pdf != DIRAC)
+  {
+    float pdfSum = lightWeight * directLight.pdf + envWeight * envPdf;
+    if(pdfSum > 0.0)
+      misWeight = (sampleLight ? lightWeight * directLight.pdf : envWeight * envPdf) / pdfSum;
 
-  directLight.radianceOverPdf = radiance;  // Radiance over PDF
-  return;
+    // Output combined PDF for downstream MIS with BSDF in pathTrace()
+    directLight.pdf = pdfSum;
+  }
+  radiance *= misWeight;
+
+  directLight.radianceOverPdf = radiance;
 }
 
 //-----------------------------------------------------------------------
@@ -307,17 +365,38 @@ void sampleEnvironment(float3 direction, SceneFrameInfo* frameInfo, out float3 e
 }
 
 //-----------------------------------------------------------------------
+// Computes Multiple Importance Sampling (MIS) weight for BSDF samples that hit the environment.
+// Balances BSDF sampling (lastSamplePdf) against Next Event Estimation (NEE)
+// which could have sampled the same direction via sampleLights().
+//
+// For delta BSDF events (specular), weight = 1.0 (NEE can't generate exact direction)
+// For continuous BSDF, accounts for NEE's selection probability (envWeight)
+//-----------------------------------------------------------------------
+float computeEnvHitMisWeight(float lastSamplePdf, float envPdf)
+{
+  if(lastSamplePdf == DIRAC)
+    return 1.0f;
+
+  // Get the normalized probability that NEE would sample the environment
+  // This ensures consistent MIS weights with sampleLights()
+  LightingTechniqueProbabilities probs     = getDirectLightingTechniqueProbabilities();
+  float                          envWeight = probs.envWeight;
+
+  return lastSamplePdf / (lastSamplePdf + envWeight * envPdf);
+}
+
+//-----------------------------------------------------------------------
 // Shadow Catcher: Creates an invisible plane that only shows shadows
 // Returns true to continue path tracing (shadowed area), false to break (fully lit)
 //-----------------------------------------------------------------------
-bool handleShadowCatcher(IRaytracer     raytracer,
-                         HitState       hit,
-                         PbrMaterial    pbrMat,
-                         inout RayDesc  ray,
-                         inout float3   radiance,
-                         inout float3   throughput,
-                         inout float    lastSamplePdf,
-                         inout uint     seed,
+bool handleShadowCatcher(IRaytracer      raytracer,
+                         HitState        hit,
+                         PbrMaterial     pbrMat,
+                         inout RayDesc   ray,
+                         inout float3    radiance,
+                         inout float3    throughput,
+                         inout float     lastSamplePdf,
+                         inout uint      seed,
                          SceneFrameInfo* frameInfo)
 {
   // Step 1: Sample direct lighting and check for shadows
@@ -346,8 +425,8 @@ bool handleShadowCatcher(IRaytracer     raytracer,
   // In this case, the plane is "invisible" - just return the environment
   if(all(shadowFactor == float3(1, 1, 1)))
   {
-    // Apply Multiple Importance Sampling (MIS) weight
-    float misWeight = (lastSamplePdf == DIRAC) ? 1.0 : (lastSamplePdf / (lastSamplePdf + envPdf));
+    // Apply MIS weight for BSDF sample hitting environment
+    float misWeight = computeEnvHitMisWeight(lastSamplePdf, envPdf);
     radiance += throughput * misWeight * envColor;
     return false;  // Signal to break - plane is invisible here
   }
@@ -370,8 +449,8 @@ bool handleShadowCatcher(IRaytracer     raytracer,
 
   // Continue path tracing to accumulate indirect lighting (sky bounce)
   float3 offsetDir = dot(sampleData.k2, hit.geonrm) > 0 ? hit.geonrm : -hit.geonrm;
-  ray.Origin    = safeOffsetRay(hit.pos, offsetDir);
-  ray.Direction = sampleData.k2;
+  ray.Origin       = safeOffsetRay(hit.pos, offsetDir);
+  ray.Direction    = sampleData.k2;
   throughput *= sampleData.bsdf_over_pdf;
   lastSamplePdf = sampleData.pdf;
 
@@ -481,19 +560,30 @@ float3 getShadowTransmission(GltfRenderNode      renderNode,
   // Apply material color tint to transmission
   currentTransmission *= mat.pbrBaseColorFactor.rgb;
 
-  // Volume attenuation (Beer's law)
+  // Volume attenuation (Beer's law) and scattering (KHR_materials_volume + KHR_materials_volume_scatter)
   if(mat.thicknessFactor > 0.0)
   {
     if(isInside)
     {
-      // Calculate per-channel attenuation with improved color preservation
-      float3 absorbance = -log(max(mat.attenuationColor, float3(0.001))) / max(mat.attenuationDistance, 0.001);
-      float3 attenuation;
-      attenuation.r = exp(-hitT * absorbance.r);
-      attenuation.g = exp(-hitT * absorbance.g);
-      attenuation.b = exp(-hitT * absorbance.b);
+      // Absorption coefficient: σ_a
+      float3 absCoeff = -log(max(mat.attenuationColor, float3(0.001))) / max(mat.attenuationDistance, 0.001);
 
-      currentTransmission *= attenuation;
+      // Scattering coefficient: σ_s
+      float3 scatterCoeff = absCoeff * multiToSingleScatterAlbedo(mat.multiscatterColor);
+
+      // Extinction: σ_t = σ_a + σ_s
+      float3 extinction = absCoeff + scatterCoeff;
+      currentTransmission *= exp(-hitT * extinction);
+
+      // Scattering shadow penalty (heuristic for light redirected away from direct path)
+      float maxScatter = max(scatterCoeff.x, max(scatterCoeff.y, scatterCoeff.z));
+      if(maxScatter > 0.001f)
+      {
+        float maxExtinction  = max(extinction.x, max(extinction.y, extinction.z));
+        float opticalDepth   = hitT * maxExtinction;
+        float scatterPenalty = exp(-opticalDepth);
+        currentTransmission *= scatterPenalty;
+      }
     }
     isInside = !isInside;
   }
@@ -524,6 +614,63 @@ float3 getShadowTransmission(GltfRenderNode      renderNode,
   currentTransmission *= transmissionAttenuation;
 
   return currentTransmission;
+}
+
+//-----------------------------------------------------------------------
+// Volume Scattering (KHR_materials_volume_scatter)
+//
+// Handles volumetric scattering inside transmissive materials using:
+// - Delta tracking to sample scatter distance
+// - Henyey-Greenstein phase function for scatter direction
+//
+// Returns true if a scatter event occurred (caller should continue loop).
+// Returns false if no scatter (absorption applied, continue to surface).
+//-----------------------------------------------------------------------
+bool handleVolumeScatter(PbrMaterial pbrMat, float hitDistance, inout RayDesc ray, inout float3 throughput, inout float lastSamplePdf, inout uint seed)
+{
+  float3 absCoeff     = absorptionCoefficient(pbrMat);
+  float3 scatterCoeff = pbrMat.scatterCoefficient;
+
+  // Extinction coefficient: σ_t = σ_a + σ_s
+  float3 extinction = absCoeff + scatterCoeff;
+
+  // Check if volume has scattering enabled
+  float maxScatter = max(scatterCoeff.x, max(scatterCoeff.y, scatterCoeff.z));
+  if(maxScatter > 0.001f)
+  {
+    float maxExtinction = max(extinction.x, max(extinction.y, extinction.z));
+
+    // Sample distance to next scatter event using delta tracking
+    float scatterDist = -log(max(rand(seed), 1e-10f)) / maxExtinction;
+
+    if(scatterDist < hitDistance)
+    {
+      // Scatter event happens before reaching the surface
+
+      // Apply transmittance (Beer's law) up to scatter point
+      throughput *= exp(-scatterDist * extinction);
+
+      // Apply single-scatter albedo: probability of scattering vs absorption
+      // albedo = σ_s / σ_t (what fraction of extinction is scattering)
+      throughput *= scatterCoeff / max(extinction, float3(0.001f));
+
+      // Move ray to scatter point
+      ray.Origin = ray.Origin + ray.Direction * scatterDist;
+
+      // Sample new direction using Henyey-Greenstein phase function
+      float3 wi     = ray.Direction;
+      ray.Direction = sampleHenyeyGreenstein(float2(rand(seed), rand(seed)), pbrMat.scatterAnisotropy, wi);
+
+      // Update PDF for MIS with environment lighting
+      lastSamplePdf = henyeyGreensteinPdf(dot(wi, ray.Direction), pbrMat.scatterAnisotropy);
+
+      return true;  // Scatter occurred - caller should continue loop
+    }
+  }
+
+  // No scatter event - apply full extinction for path through volume
+  throughput *= exp(-hitDistance * extinction);
+  return false;  // No scatter - continue to surface interaction
 }
 
 //-----------------------------------------------------------------------
@@ -639,8 +786,11 @@ SampleResult pathTrace(IRaytracer raytracer, RayDesc ray, inout uint seed)
   // Path tracing loop, until the ray hits the environment or the maximum depth is reached or the ray is absorbed
   for(int depth = 0; depth < pushConst.maxDepth; depth++)
   {
-    bool   nextEventValid;
-    float3 contribution = float3(0);  // Direct lighting contribution
+    // Ensure ray direction is normalized
+    ray.Direction = normalize(ray.Direction);
+
+    bool   nextEventValid = false;      // If the next event is valid, then we can sample the BSDF for the light
+    float3 contribution   = float3(0);  // Direct lighting contribution
 
     // Shadow ray data (minimal extraction to reduce live state)
     float16_t3 shadowRayPos;
@@ -697,7 +847,7 @@ SampleResult pathTrace(IRaytracer raytracer, RayDesc ray, inout uint seed)
 
         // We may hit the environment twice: once via sampleLights() and once when hitting the sky while probing
         // for more indirect hits. This is the counter part of the MIS weighting in sampleLights()
-        float misWeight = (lastSamplePdf == DIRAC) ? 1.0 : (lastSamplePdf / (lastSamplePdf + envPdf));
+        float misWeight = computeEnvHitMisWeight(lastSamplePdf, envPdf);
         radiance += throughput * misWeight * envColor;
 
         break;
@@ -781,11 +931,14 @@ SampleResult pathTrace(IRaytracer raytracer, RayDesc ray, inout uint seed)
         break;
       }
 
-      // Apply volume attenuation
+      // Apply volume effects: scattering and/or absorption (KHR_materials_volume + KHR_materials_volume_scatter)
       if(isInside && !pbrMat.isThinWalled)
       {
-        const float3 abs_coeff = absorptionCoefficient(pbrMat);
-        throughput *= exp(-payload.hitT * abs_coeff);
+        if(handleVolumeScatter(pbrMat, payload.hitT, ray, throughput, lastSamplePdf, seed))
+        {
+          continue;  // Scatter event occurred - skip surface interaction
+        }
+        // If no scatter, absorption was applied inside handleVolumeScatter
       }
 
       // Light contribution; can be environment or punctual lights
@@ -896,10 +1049,13 @@ SampleResult pathTrace(IRaytracer raytracer, RayDesc ray, inout uint seed)
     }
 
     // Russian-Roulette (minimizing live state)
-    float rrPcont = min(max(throughput.x, max(throughput.y, throughput.z)) + 0.001F, 0.95F);
-    if(rand(seed) >= rrPcont)
-      break;                // paths with low throughput that won't contribute
-    throughput /= rrPcont;  // boost the energy of the non-terminated paths
+    if(depth >= RR_MIN_DEPTH)
+    {
+      float rrPcont = min(max(throughput.x, max(throughput.y, throughput.z)) + 0.001F, 0.95F);
+      if(rand(seed) >= rrPcont)
+        break;                // paths with low throughput that won't contribute
+      throughput /= rrPcont;  // boost the energy of the non-terminated paths
+    }
   }
 
   // Returning the sample result; radiance + DLSS data

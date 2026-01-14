@@ -1,5 +1,5 @@
 /*
- * Copyright (c) 2023-2025, NVIDIA CORPORATION.  All rights reserved.
+ * Copyright (c) 2023-2026, NVIDIA CORPORATION.  All rights reserved.
  *
  * Licensed under the Apache License, Version 2.0 (the "License");
  * you may not use this file except in compliance with the License.
@@ -13,7 +13,7 @@
  * See the License for the specific language governing permissions and
  * limitations under the License.
  *
- * SPDX-FileCopyrightText: Copyright (c) 2023-2025, NVIDIA CORPORATION.
+ * SPDX-FileCopyrightText: Copyright (c) 2023-2026, NVIDIA CORPORATION.
  * SPDX-License-Identifier: Apache-2.0
  */
 
@@ -51,8 +51,7 @@
 
 #include <thread>
 #include <vulkan/vulkan_core.h>
-#include <glm/glm.hpp>
-#include <fmt/format.h>
+
 
 #include "GLFW/glfw3.h"
 #undef APIENTRY
@@ -69,24 +68,16 @@
 
 //
 #include <nvaftermath/aftermath.hpp>
-#include <nvapp/elem_dbgprintf.hpp>
-#include <nvgui/axis.hpp>
-#include <nvgui/file_dialog.hpp>
-#include <nvgui/tonemapper.hpp>
 #include <nvutils/profiler.hpp>
 #include <nvutils/timers.hpp>
 #include <nvvk/check_error.hpp>
 #include <nvvk/commands.hpp>
 #include <nvvk/debug_util.hpp>
 #include <nvvk/formats.hpp>
-#include <nvvk/helpers.hpp>
 #include <nvvk/mipmaps.hpp>
 #include <nvvkgltf/camera_utils.hpp>
 
-#include "create_tangent.hpp"
 #include "renderer.hpp"
-#include "ui_collapsing_header_manager.h"
-#include "ui_mouse_state.hpp"
 #include "utils.hpp"
 #include "tinyobjloader/tiny_obj_loader.h"
 #include "nvvkgltf/converter.hpp"
@@ -115,7 +106,7 @@ GltfRenderer::GltfRenderer(nvutils::ParameterRegistry* paramReg)
   paramReg->addVector({"solidBackgroundColor", "Solid Background Color"}, &m_resources.settings.solidBackgroundColor);
   paramReg->add({"maxFrames", "Maximum number of iterations"}, &m_resources.settings.maxFrames);
 
-  paramReg->add({"tmMethod", "Tonemapper method: [Filmic:0, Uncharted:1, Clip:2, ACES:3, Agx:4, KhronosPBR:5]"},
+  paramReg->add({"tmMethod", "Tonemapper method: [Filmic:0, Uncharted:1, Clip:2, ACES:3, AgX:4, KhronosPBR:5]"},
                 &m_resources.tonemapperData.method);
   paramReg->add({"tmExposure", "Tonemapper exposure"}, &m_resources.tonemapperData.exposure);
   paramReg->add({"tmGamma", "Tonemapper brightness"}, &m_resources.tonemapperData.brightness);
@@ -349,11 +340,13 @@ void GltfRenderer::onRender(VkCommandBuffer cmd)
   // Start the profiler section for the GPU timer
   auto timerSection = m_profilerGpuTimer.cmdFrameSection(cmd, __FUNCTION__);
 
-  // Update the animation
-  bool didAnimate = updateAnimation(cmd);
+  // Update the animation (returns AnimationUpdateFlags bitmask)
+  int  animResult    = updateAnimation(cmd);
+  bool didAnimate    = (animResult & eAnimOccurred) != 0;
+  bool lightsUpdated = (animResult & eAnimLightsUpdated) != 0;
 
   // Check for changes
-  bool changed      = updateSceneChanges(cmd, didAnimate);
+  bool changed      = updateSceneChanges(cmd, didAnimate, lightsUpdated);
   bool frameChanged = updateFrameCounter();  // Check if the frame counter has changed
 
   if(changed || frameChanged)
@@ -696,33 +689,47 @@ void GltfRenderer::cleanupScene()
 //--------------------------------------------------------------------------------------------------
 // Rebuild the Vulkan scene after modifying the glTF model in-place.
 // Use this when you've modified model geometry (vertices, indices, accessors) and need to
-// recreate all GPU resources. The model data itself is preserved.
+// recreate GPU resources. The model data itself is preserved.
 //
 // Example use cases:
 // - After MikkTSpace tangent generation with vertex splitting
 // - After mesh optimization that changes vertex/index counts
 // - After any operation that modifies buffer data or accessor indices
 //
+// Note: This preserves textures since they don't change during geometry modifications.
+//
 void GltfRenderer::rebuildSceneFromModel()
 {
   vkDeviceWaitIdle(m_device);
 
-  // Destroy GPU resources (but preserve the model data in m_resources.scene)
+  // Destroy only geometry resources (preserve textures - they didn't change)
   m_resources.sceneRtx.destroy();
-  m_resources.sceneVk.destroy();
+  m_resources.sceneVk.destroyGeometry();
 
   // Re-parse the scene to update RenderPrimitives with new accessor counts
   m_resources.scene.setCurrentScene(m_resources.scene.getCurrentScene());
 
-  // Recreate GPU resources from the modified model
-  createVulkanScene();
+  // Recreate only geometry resources
+  {
+    VkCommandBuffer cmd{};
+    nvvk::beginSingleTimeCommands(cmd, m_device, m_transientCmdPool);
+    m_resources.sceneVk.createGeometry(cmd, m_resources.staging, m_resources.scene);
+    m_resources.staging.cmdUploadAppended(cmd);
+    {
+      std::lock_guard<std::mutex> lock(m_cmdBufferQueueMutex);
+      m_cmdBufferQueue.push({cmd, false});
+    }
+  }
+
+  // Rebuild acceleration structures and node mapping
+  buildAccelerationStructures();
+  updateNodeToRenderNodeMap();
 
   // Update UI with the modified model
   m_uiSceneGraph.setModel(&m_resources.scene.getModel());
   m_uiSceneGraph.setBbox(m_resources.scene.getSceneBounds());
 
-  // Refresh texture descriptors
-  updateTextures();
+  // Note: No updateTextures() needed - textures were preserved
 }
 
 //--------------------------------------------------------------------------------------------------
@@ -731,13 +738,6 @@ void GltfRenderer::rebuildSceneFromModel()
 // The function is called when the scene is loaded
 void GltfRenderer::createVulkanScene()
 {
-  VkBuildAccelerationStructureFlagsKHR flags = VK_BUILD_ACCELERATION_STRUCTURE_PREFER_FAST_TRACE_BIT_KHR
-                                               | VK_BUILD_ACCELERATION_STRUCTURE_ALLOW_COMPACTION_BIT_KHR;
-  if(m_resources.scene.hasAnimation())
-  {
-    flags |= VK_BUILD_ACCELERATION_STRUCTURE_ALLOW_UPDATE_BIT_KHR;  // Allow update
-  }
-
   {
     // Create and queue command buffer for scene data upload (vertices, indices, materials, etc.)
     // This work happens asynchronously via the command buffer queue
@@ -751,6 +751,21 @@ void GltfRenderer::createVulkanScene()
       m_cmdBufferQueue.push({cmd, false});  // Not a BLAS build command
     }
   }
+
+  buildAccelerationStructures();
+  updateNodeToRenderNodeMap();
+}
+
+//--------------------------------------------------------------------------------------------------
+// Build BLAS and TLAS acceleration structures for ray tracing
+// Used by both createVulkanScene() and rebuildSceneFromModel()
+//
+void GltfRenderer::buildAccelerationStructures()
+{
+  VkBuildAccelerationStructureFlagsKHR flags = VK_BUILD_ACCELERATION_STRUCTURE_PREFER_FAST_TRACE_BIT_KHR
+                                               | VK_BUILD_ACCELERATION_STRUCTURE_ALLOW_COMPACTION_BIT_KHR;
+  if(m_resources.scene.hasAnimation())
+    flags |= VK_BUILD_ACCELERATION_STRUCTURE_ALLOW_UPDATE_BIT_KHR;
 
   // Create the bottom-level acceleration structure descriptors (no building yet)
   m_resources.sceneRtx.createBottomLevelAccelerationStructure(m_resources.scene, m_resources.sceneVk, flags);
@@ -791,9 +806,6 @@ void GltfRenderer::createVulkanScene()
       }
     }
   }
-
-  // Build mapping for faster node lookups
-  updateNodeToRenderNodeMap();
 }
 
 //--------------------------------------------------------------------------------------------------
@@ -1089,8 +1101,11 @@ void GltfRenderer::destroyResources()
 
 //--------------------------------------------------------------------------------------------------
 // Update the animation
-bool GltfRenderer::updateAnimation(VkCommandBuffer cmd)
+// Returns AnimationUpdateFlags bitmask indicating what was updated
+int GltfRenderer::updateAnimation(VkCommandBuffer cmd)
 {
+  int result = eAnimNone;
+
   if(m_resources.scene.hasAnimation() && m_animControl.doAnimation())
   {
     NVVK_DBG_SCOPE(cmd);  // <-- Helps to debug in NSight
@@ -1108,11 +1123,32 @@ bool GltfRenderer::updateAnimation(VkCommandBuffer cmd)
     m_resources.scene.updateAnimation(m_animControl.currentAnimation);
     m_resources.scene.updateRenderNodes();
 
+    // KHR_animation_pointer: Check if any materials/lights were animated and need GPU update
+    auto& animPointer = m_resources.scene.getAnimationPointer();
+    if(animPointer.hasDirty())
+    {
+      // Materials were animated - need to re-upload to GPU
+      if(!animPointer.getDirtyMaterials().empty())
+      {
+        m_resources.sceneVk.updateMaterialBuffer(cmd, m_resources.staging, m_resources.scene);
+      }
+
+      // Lights were animated - need to re-upload to GPU
+      if(!animPointer.getDirtyLights().empty())
+      {
+        m_resources.sceneVk.updateRenderLightsBuffer(cmd, m_resources.staging, m_resources.scene);
+        result |= eAnimLightsUpdated;  // Mark that lights were updated
+      }
+
+      // Clear dirty flags after upload
+      animPointer.clearDirty();
+    }
+
     m_animControl.clearStates();
 
-    return true;
+    result |= eAnimOccurred;  // Mark that animation occurred
   }
-  return false;
+  return result;
 }
 
 //--------------------------------------------------------------------------------------------------
@@ -1123,7 +1159,7 @@ bool GltfRenderer::updateAnimation(VkCommandBuffer cmd)
 // 3. Vulkan buffers and acceleration structures remain in sync with scene state
 // 4. Frame counter is reset when needed to restart progressive rendering
 // Returns true if any changes were made that require re-rendering
-bool GltfRenderer::updateSceneChanges(VkCommandBuffer cmd, bool didAnimate)
+bool GltfRenderer::updateSceneChanges(VkCommandBuffer cmd, bool didAnimate, bool lightsAlreadyUpdated)
 {
   bool changed = m_uiSceneGraph.hasAnyChanges();
   if(m_uiSceneGraph.hasMaterialChanged())
@@ -1133,26 +1169,36 @@ bool GltfRenderer::updateSceneChanges(VkCommandBuffer cmd, bool didAnimate)
   if(m_uiSceneGraph.hasLightChanged())
   {
     m_resources.sceneVk.updateRenderLightsBuffer(cmd, m_resources.staging, m_resources.scene);
+    lightsAlreadyUpdated = true;  // Mark as updated to avoid duplicate update below
   }
   if(m_resources.dirtyFlags.test(DirtyFlags::eVulkanScene))
   {
     m_resources.scene.updateRenderNodes();
     m_resources.sceneVk.updateRenderNodesBuffer(cmd, m_resources.staging, m_resources.scene);
-    m_resources.sceneVk.updateRenderLightsBuffer(cmd, m_resources.staging, m_resources.scene);
+    if(!lightsAlreadyUpdated)  // Only update if not already done
+    {
+      m_resources.sceneVk.updateRenderLightsBuffer(cmd, m_resources.staging, m_resources.scene);
+      lightsAlreadyUpdated = true;
+    }
     // Update vertex buffers first (e.g. new tangent data), then apply skinning
     m_resources.sceneVk.updateVertexBuffers(cmd, m_resources.staging, m_resources.scene);
     m_resources.sceneVk.updateRenderPrimitivesBuffer(cmd, m_resources.staging, m_resources.scene);
     m_resources.dirtyFlags.reset(DirtyFlags::eVulkanScene);
     changed = true;
   }
+  bool stagingFlushed = false;
   if(m_uiSceneGraph.hasTransformChanged() || didAnimate)
   {
     m_resources.scene.updateRenderNodes();
     m_resources.sceneVk.updateRenderNodesBuffer(cmd, m_resources.staging, m_resources.scene);
     m_resources.sceneVk.updateRenderPrimitivesBuffer(cmd, m_resources.staging, m_resources.scene);
-    m_resources.sceneVk.updateRenderLightsBuffer(cmd, m_resources.staging, m_resources.scene);
+    if(!lightsAlreadyUpdated)  // Only update if not already done (avoids duplicate on animation pointer light updates)
+    {
+      m_resources.sceneVk.updateRenderLightsBuffer(cmd, m_resources.staging, m_resources.scene);
+    }
     // Make sure the staging buffers are uploaded before the acceleration structures are updated
     m_resources.staging.cmdUploadAppended(cmd);
+    stagingFlushed = true;
     // Ensure all buffer copy operations complete before acceleration structure build begins
     nvvk::cmdMemoryBarrier(cmd, VK_PIPELINE_STAGE_2_COPY_BIT, VK_PIPELINE_STAGE_2_ACCELERATION_STRUCTURE_BUILD_BIT_KHR,
                            VK_ACCESS_2_TRANSFER_WRITE_BIT, VK_ACCESS_2_SHADER_READ_BIT);
@@ -1166,7 +1212,10 @@ bool GltfRenderer::updateSceneChanges(VkCommandBuffer cmd, bool didAnimate)
   }
   if(changed || didAnimate)
   {
-    m_resources.staging.cmdUploadAppended(cmd);
+    if(!stagingFlushed)
+    {
+      m_resources.staging.cmdUploadAppended(cmd);
+    }
     resetFrame();
   }
   m_uiSceneGraph.resetChanges();

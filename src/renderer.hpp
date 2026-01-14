@@ -1,5 +1,5 @@
 /*
- * Copyright (c) 2023-2025, NVIDIA CORPORATION.  All rights reserved.
+ * Copyright (c) 2023-2026, NVIDIA CORPORATION.  All rights reserved.
  *
  * Licensed under the Apache License, Version 2.0 (the "License");
  * you may not use this file except in compliance with the License.
@@ -13,7 +13,7 @@
  * See the License for the specific language governing permissions and
  * limitations under the License.
  *
- * SPDX-FileCopyrightText: Copyright (c) 2023-2025, NVIDIA CORPORATION.
+ * SPDX-FileCopyrightText: Copyright (c) 2023-2026, NVIDIA CORPORATION.
  * SPDX-License-Identifier: Apache-2.0
  */
 
@@ -56,6 +56,13 @@
 
 class GltfRenderer : public nvapp::IAppElement
 {
+  // Animation update result flags
+  enum AnimationUpdateFlags : int
+  {
+    eAnimNone          = 0,
+    eAnimOccurred      = 1 << 0,  // Animation was processed this frame
+    eAnimLightsUpdated = 1 << 1,  // Light buffer was updated by animation pointer
+  };
 
 public:
   GltfRenderer(nvutils::ParameterRegistry* parameterReg);
@@ -78,7 +85,7 @@ private:
   void onUIRender() override;
 
   bool save(const std::filesystem::path& filename);
-  bool updateAnimation(VkCommandBuffer cmd);
+  int  updateAnimation(VkCommandBuffer cmd);  // Returns AnimationUpdateFlags bitmask
   bool updateFrameCounter();
   bool processQueuedCommandBuffers();
 
@@ -89,6 +96,7 @@ private:
   void createDescriptorSets();
   void createResourceBuffers();
   void createVulkanScene();
+  void buildAccelerationStructures();  // Helper for BLAS/TLAS building
   void destroyResources();
   void resetFrame();
   void silhouette(VkCommandBuffer cmd);
@@ -98,7 +106,7 @@ private:
   bool updateTextures();
   void updateHdrImages();
 
-  bool updateSceneChanges(VkCommandBuffer cmd, bool didAnimate);
+  bool updateSceneChanges(VkCommandBuffer cmd, bool didAnimate, bool lightsAlreadyUpdated);
 
   /////
   /// UI

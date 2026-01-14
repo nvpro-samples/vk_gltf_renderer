@@ -1,5 +1,5 @@
 /*
- * Copyright (c) 2024-2025, NVIDIA CORPORATION.  All rights reserved.
+ * Copyright (c) 2024-2026, NVIDIA CORPORATION.  All rights reserved.
  *
  * Licensed under the Apache License, Version 2.0 (the "License");
  * you may not use this file except in compliance with the License.
@@ -13,7 +13,7 @@
  * See the License for the specific language governing permissions and
  * limitations under the License.
  *
- * SPDX-FileCopyrightText: Copyright (c) 2024-2025, NVIDIA CORPORATION.
+ * SPDX-FileCopyrightText: Copyright (c) 2024-2026, NVIDIA CORPORATION.
  * SPDX-License-Identifier: Apache-2.0
  */
 
@@ -50,7 +50,6 @@
 //////////////////////////////////////////////////////////////////////////
 
 #include <mikktspace.h>
-#include <mutex>
 #include <tinygltf/tiny_gltf.h>
 #include <vector>
 #include <glm/gtx/norm.hpp>
@@ -61,6 +60,9 @@
 #include <nvutils/timers.hpp>
 #include <nvutils/logger.hpp>
 #include <nvvkgltf/tinygltf_utils.hpp>
+
+#include "compact_model.hpp"
+
 
 //==================================================================================================
 // DATA STRUCTURES
@@ -292,17 +294,6 @@ static void readVertices(const tinygltf::Model& model, const tinygltf::Primitive
   }
 }
 
-//==================================================================================================
-// SIMPLE TANGENT GENERATION (UV Gradient Method)
-//==================================================================================================
-
-static void createTangentsSimple(tinygltf::Model& model, tinygltf::Primitive& prim)
-{
-  if(prim.attributes.find("TANGENT") == prim.attributes.end())
-    tinygltf::utils::createTangentAttribute(model, prim);
-
-  tinygltf::utils::simpleCreateTangents(model, prim);
-}
 
 //==================================================================================================
 // MIKKTSPACE TANGENT GENERATION
@@ -391,10 +382,6 @@ static bool createTangentsMikkTSpace(tinygltf::Model& model, tinygltf::Primitive
 
   if(!needsSplitting)
   {
-    // Ensure tangent attribute exists
-    if(prim.attributes.find("TANGENT") == prim.attributes.end())
-      tinygltf::utils::createTangentAttribute(model, prim);
-
     // Write tangents directly to existing buffer
     auto tangentSpan = tinygltf::utils::getAttributeData3<glm::vec4>(model, prim, "TANGENT", nullptr);
     if(tangentSpan.empty())
@@ -443,7 +430,7 @@ static bool createTangentsMikkTSpace(tinygltf::Model& model, tinygltf::Primitive
 
     // Group face-vertices by compatible tangents
     // Each group shares a single new vertex
-    std::vector<std::pair<uint32_t, std::vector<uint32_t>>> groups;  // {newVertexIdx, [fvIndices]}
+    std::vector<std::pair<uint32_t, std::vector<uint32_t>>> tangentGroups;  // {splitVertexIdx, compatibleFvIndices}
 
     for(uint32_t fvIdx : fvList)
     {
@@ -451,11 +438,11 @@ static bool createTangentsMikkTSpace(tinygltf::Model& model, tinygltf::Primitive
 
       // Find a compatible group
       bool found = false;
-      for(auto& group : groups)
+      for(auto& tangentGroup : tangentGroups)
       {
-        if(areTangentsCompatible(newVertexData[group.first].tangent, tangent))
+        if(areTangentsCompatible(newVertexData[tangentGroup.first].tangent, tangent))
         {
-          group.second.push_back(fvIdx);
+          tangentGroup.second.push_back(fvIdx);
           found = true;
           break;
         }
@@ -466,16 +453,16 @@ static bool createTangentsMikkTSpace(tinygltf::Model& model, tinygltf::Primitive
         // Create new vertex for this tangent
         uint32_t newIdx = static_cast<uint32_t>(newVertexData.size());
         newVertexData.push_back({static_cast<uint32_t>(origV), tangent});
-        groups.push_back({newIdx, {fvIdx}});
+        tangentGroups.push_back({newIdx, {fvIdx}});
       }
     }
 
     // Assign new vertex indices to face-vertices
-    for(const auto& group : groups)
+    for(const auto& tangentGroup : tangentGroups)
     {
-      for(uint32_t fvIdx : group.second)
+      for(uint32_t fvIdx : tangentGroup.second)
       {
-        fvToNewVertex[fvIdx] = group.first;
+        fvToNewVertex[fvIdx] = tangentGroup.first;
       }
     }
   }
@@ -536,7 +523,7 @@ static bool createTangentsMikkTSpace(tinygltf::Model& model, tinygltf::Primitive
   // 1. The new vertex count may differ from the original
   // 2. Other primitives may share the same buffer views
   // The old data becomes orphaned but this is acceptable for runtime tangent generation.
-  // For minimal file size, save and reload the model after tangent generation.
+  // TinyGLTF does not compact orphaned data when saving.
 
   tinygltf::Buffer& buf = model.buffers[0];
 
@@ -627,41 +614,14 @@ static std::vector<tinygltf::Primitive*> collectPrimitivesForTangents(tinygltf::
       bool hasTangent = prim.attributes.find("TANGENT") != prim.attributes.end();
       if(!hasTangent && !forceCreation)
         continue;
+      if(forceCreation && !hasTangent)
+        tinygltf::utils::createTangentAttribute(model, prim);
+
 
       result.push_back(&prim);
     }
   }
   return result;
-}
-
-// Estimate buffer growth for primitives that may need splitting
-// Returns estimated additional bytes needed (conservative upper bound)
-static size_t estimateBufferGrowth(const tinygltf::Model& model, const std::vector<tinygltf::Primitive*>& primitives)
-{
-  size_t estimate = 0;
-  for(const auto* prim : primitives)
-  {
-    // Worst case: every face-vertex becomes unique (fully unindexed)
-    size_t indexCount = prim->indices >= 0 ? model.accessors[prim->indices].count : 0;
-    if(indexCount == 0)
-      continue;
-
-    // Estimate bytes: position(12) + normal(12) + tangent(16) + uv0(8) + indices(4) = 52 bytes per vertex
-    // Plus optional: uv1(8) + color(16) + weights(16) + joints(8) = 48 bytes
-    size_t bytesPerVertex = 52;
-    if(prim->attributes.count("TEXCOORD_1"))
-      bytesPerVertex += 8;
-    if(prim->attributes.count("COLOR_0"))
-      bytesPerVertex += 16;
-    if(prim->attributes.count("WEIGHTS_0"))
-      bytesPerVertex += 16;
-    if(prim->attributes.count("JOINTS_0"))
-      bytesPerVertex += 8;
-
-    estimate += indexCount * bytesPerVertex;
-    estimate += 64;  // Alignment padding per primitive
-  }
-  return estimate;
 }
 
 bool recomputeTangents(tinygltf::Model& model, bool forceCreation, bool mikktspace)
@@ -672,26 +632,28 @@ bool recomputeTangents(tinygltf::Model& model, bool forceCreation, bool mikktspa
   if(primitives.empty())
     return false;
 
-  // Pre-allocate buffer to avoid multiple reallocations during MikkTSpace processing
-  if(mikktspace && !model.buffers.empty())
-  {
-    size_t estimatedGrowth = estimateBufferGrowth(model, primitives);
-    model.buffers[0].data.reserve(model.buffers[0].data.size() + estimatedGrowth);
-  }
-
   bool anySplitting = false;
-  for(auto* prim : primitives)
+  if(mikktspace)
   {
-    if(mikktspace)
+    // MikkTSpace: sequential because split modifies shared buffer
+    for(auto* prim : primitives)
+    {
       anySplitting |= createTangentsMikkTSpace(model, *prim);
-    else
-      createTangentsSimple(model, *prim);
-  }
+    }
 
-  // Shrink buffer to actual size (release unused reserved memory)
-  if(mikktspace && !model.buffers.empty())
-  {
+    // Compact model if any splitting occurred
+    if(anySplitting)
+      compactModel(model);
+
+    // Shrink buffer to actual size (release unused reserved memory)
     model.buffers[0].data.shrink_to_fit();
+  }
+  else
+  {
+    // Simple method: fully parallel
+    nvutils::parallel_batches<1>(primitives.size(), [&](uint64_t primID) {
+      tinygltf::utils::simpleCreateTangents(model, *primitives[primID]);
+    });
   }
 
   return anySplitting;

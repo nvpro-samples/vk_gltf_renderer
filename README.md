@@ -42,7 +42,14 @@ This version brings significant improvements and modernization:
 - Advanced tone mapping
 - Camera control system
 - Extensive debug visualization options
-- AI denoisers
+- AI denoisers (DLSS-RR, OptiX)
+
+### UI Highlights
+- Drag & drop for glTF/GLB scenes and HDR environments
+- Material variants, animation controls, multi-scene support
+- Camera presets with save/restore
+- Debug channels, GPU profiler, real-time statistics
+- Command-line interface for headless/batch rendering
 
 ## Dependencies
 
@@ -80,9 +87,6 @@ cmake --build build --config release
 ``` bash
 cmake --install .
 ```
-
-> **NOTE**: In Debug mode, validation layers are enabled by default. In Release mode, they are disabled for better performance. You can turn validation off to start the application faster, e.g., `vk_gltf_renderer --vvl 0`.
-
 The application supports extensive command-line options for automation and testing. It can run in headless mode (without UI) and save rendered images to disk, making it useful for benchmarking and batch rendering workflows.
 
 Example of headless rendering:
@@ -159,6 +163,7 @@ The denoiser will automatically integrate using CUDA-Vulkan interoperability for
 ## GLTF Extensions
  Here are the list of extensions that are supported by this application
 
+- ✅ KHR_animation_pointer
 - ✅ KHR_draco_mesh_compression
 - ✅ KHR_lights_punctual
 - ✅ KHR_materials_anisotropy
@@ -168,16 +173,19 @@ The denoiser will automatically integrate using CUDA-Vulkan interoperability for
 - ✅ KHR_materials_emissive_strength
 - ✅ KHR_materials_ior
 - ✅ KHR_materials_iridescence
+- ✅ KHR_materials_pbrSpecularGlossiness
 - ✅ KHR_materials_sheen
 - ✅ KHR_materials_specular
 - ✅ KHR_materials_transmission
 - ✅ KHR_materials_unlit
 - ✅ KHR_materials_variants
 - ✅ KHR_materials_volume
+- ✅ KHR_materials_volume_scatter
 - ✅ KHR_mesh_quantization
 - ✅ KHR_node_visibility
 - ✅ KHR_texture_basisu
 - ✅ KHR_texture_transform
+- ✅ KHR_xmp_json_ld
 - ✅ EXT_mesh_gpu_instancing
 - ✅ EXT_meshopt_compression
 - ✅ MSFT_texture_dds
@@ -266,6 +274,8 @@ Example with wireframe option turned on
 | Sheen | ![](doc/SheenChair.jpg) ![](doc/SheenCloth.jpg) ![](doc/SheenTestGrid.jpg) ![](doc/CompareSheen.jpg) |
 | Transmission | ![](doc/TransmissionRoughnessTest.jpg) ![](doc/TransmissionTest.jpg) ![](doc/TransmissionThinwallTestGrid.jpg) ![](doc/CompareTransmission.jpg) <br> ![](doc/CompareVolume.jpg) ![](doc/GlassBrokenWindow.jpg) ![](doc/MosquitoInAmber.jpg) |
 | Variant | ![](doc/MaterialsVariantsShoe_1.jpg) ![](doc/MaterialsVariantsShoe_2.jpg) ![](doc/MaterialsVariantsShoe_3.jpg) |
+| Volume | ![Volume rendering example](doc/volume.png) |
+| Volume Scatter | ![Volume scattering rendering example](doc/volume_scatter.png) |
 | Others | ![](doc/BoxVertexColors.jpg) ![](doc/Duck.jpg) ![](doc/MandarinOrange.jpg) ![](doc/SpecularTest.jpg) ![](doc/OrientationTest.jpg) ![](doc/NegativeScaleTest.jpg) ![](doc/NormalTangentTest.jpg) ![](doc/TextureCoordinateTest.jpg) ![](doc/NormalTangentMirrorTest.jpg)  ![](doc/BarramundiFish.jpg) ![](doc/CarbonFibre.jpg) ![](doc/cornellBox.jpg) ![](doc/GlamVelvetSofa_1.jpg)  ![](doc/LightsPunctualLamp.jpg) ![](doc/MultiUVTest.jpg) ![](doc/SimpleInstancing.jpg) ![](doc/SpecGlossVsMetalRough.jpg) ![](doc/CompareBaseColor.jpg) ![](doc/CompareMetallic.jpg) ![](doc/CompareSpecular.jpg) |
 
 

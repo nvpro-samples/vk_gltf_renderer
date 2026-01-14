@@ -1,5 +1,5 @@
 /*
- * Copyright (c) 2024-2025, NVIDIA CORPORATION.  All rights reserved.
+ * Copyright (c) 2024-2026, NVIDIA CORPORATION.  All rights reserved.
  *
  * Licensed under the Apache License, Version 2.0 (the "License");
  * you may not use this file except in compliance with the License.
@@ -13,12 +13,14 @@
  * See the License for the specific language governing permissions and
  * limitations under the License.
  *
- * SPDX-FileCopyrightText: Copyright (c) 2024-2025, NVIDIA CORPORATION.
+ * SPDX-FileCopyrightText: Copyright (c) 2024-2026, NVIDIA CORPORATION.
  * SPDX-License-Identifier: Apache-2.0
  */
 
 #include <algorithm>
 #include <functional>
+
+#include "ui_xmp.hpp"
 #include <glm/glm.hpp>
 
 namespace glm {
@@ -79,6 +81,10 @@ void UiSceneGraph::renderSceneGraph(bool* showSceneGraph)
       return;
     }
 
+    // Display asset info and XMP metadata at top (collapsible)
+    renderAssetInfo();
+    ui_xmp::renderMetadataPanel(m_model);
+
     if(ImGui::BeginTable("SceneGraphTable", 3, s_tableFlags))
     {
       ImGui::TableSetupScrollFreeze(1, 1);
@@ -111,6 +117,30 @@ void UiSceneGraph::renderSceneGraph(bool* showSceneGraph)
     }
   }
   ImGui::End();
+}
+
+//--------------------------------------------------------------------------------------------------
+// Display glTF asset information (version, generator, copyright)
+void UiSceneGraph::renderAssetInfo()
+{
+  if(!m_model)
+    return;
+
+  const auto& asset = m_model->asset;
+
+  if(ImGui::CollapsingHeader("Asset Info"))
+  {
+    if(!asset.version.empty())
+      ImGui::Text("glTF Version: %s", asset.version.c_str());
+    if(!asset.generator.empty())
+      ImGui::TextWrapped("Generator: %s", asset.generator.c_str());
+    if(!asset.copyright.empty())
+      ImGui::TextWrapped("Copyright: %s", asset.copyright.c_str());
+    if(!asset.minVersion.empty())
+      ImGui::Text("Min Version: %s", asset.minVersion.c_str());
+
+    ui_xmp::renderInfoButton(m_model, asset.extensions, "asset_xmp_popup");
+  }
 }
 
 //--------------------------------------------------------------------------------------------------
@@ -365,15 +395,14 @@ void UiSceneGraph::renderNode(int nodeIndex)
   ImGui::TableNextColumn();
   ImGui::Text("Node %d", nodeIndex);
 
+  ImGui::TableNextColumn();
   if(!visibility.visible)
   {
-    ImGui::TableNextColumn();
     ImGui::Text("%s", ICON_MS_VISIBILITY_OFF);
   }
-  else
-  {
-    ImGui::TableNextColumn();
-  }
+  // Show XMP info button if node has XMP metadata
+  const std::string popupId = "node_xmp_" + std::to_string(nodeIndex);
+  ui_xmp::renderInfoButton(m_model, node.extensions, popupId.c_str());
 
   // Render the mesh, children, light, and camera if the node is open
   if(nodeOpen)
@@ -445,6 +474,9 @@ void UiSceneGraph::renderMesh(int meshIndex)
   ImGui::TableNextColumn();
   ImGui::Text("Mesh %d", meshIndex);
   ImGui::TableNextColumn();
+  // Show XMP info button if mesh has XMP metadata
+  const std::string popupId = "mesh_xmp_" + std::to_string(meshIndex);
+  ui_xmp::renderInfoButton(m_model, mesh.extensions, popupId.c_str());
 
   // Force open the Primitives tree if a primitive in this mesh is selected
   if(m_selectedIndex == nodeIndex && m_selectedRenderNodeIndex >= 0)
@@ -721,6 +753,9 @@ void UiSceneGraph::renderMaterial(int materialIndex)
   tinygltf::Material& material = m_model->materials[materialIndex];
 
   ImGui::Text("Material: %s", material.name.c_str());
+  // Show XMP info button if material has XMP metadata
+  const std::string popupId = "mat_xmp_" + std::to_string(materialIndex);
+  ui_xmp::renderInfoButton(m_model, material.extensions, popupId.c_str());
 
   // Example: Basic PBR properties
   if(PE::begin())
@@ -768,6 +803,7 @@ void UiSceneGraph::renderMaterial(int materialIndex)
     materialTransmission(material);
     materialUnlit(material);
     materialVolume(material);
+    materialVolumeScatter(material);
 
     PE::end();
   }
@@ -920,8 +956,18 @@ void UiSceneGraph::materialVolume(tinygltf::Material& material)
       float                thicknessFactor = volume.thicknessFactor;
       modif |= PE::DragFloat("Thickness", &volume.thicknessFactor, 0.01f, 0.0f, 1.0f);
       modif |= PE::ColorEdit3("Attenuation Color", glm::value_ptr(volume.attenuationColor));
-      modif |= PE::DragFloat("Attenuation", &volume.attenuationDistance);
-      volume.attenuationDistance = std::max(0.0F, volume.attenuationDistance);
+      bool isInfinite = (volume.attenuationDistance >= FLT_MAX);
+      if(PE::Checkbox("Infinite Attenuation", &isInfinite, "No light absorption (infinite distance)"))
+      {
+        volume.attenuationDistance = isInfinite ? FLT_MAX : 1.0f;  // Default to 1.0 when toggling off infinite
+        modif                      = true;
+      }
+      if(!isInfinite)
+      {
+        modif |= PE::DragFloat("Attenuation Distance", &volume.attenuationDistance,
+                               logarithmicStep(volume.attenuationDistance), 0.0, FLT_MAX, "%.3f", ImGuiSliderFlags_None,
+                               "Distance light travels before absorption (smaller = more opaque)");
+      }
       if(modif)
       {
         tinygltf::utils::setVolume(material, volume);
@@ -936,6 +982,33 @@ void UiSceneGraph::materialVolume(tinygltf::Material& material)
   if(!hasMaterialVolume)
   {
     addButton(material, KHR_MATERIALS_VOLUME_EXTENSION_NAME, [&]() { tinygltf::utils::setVolume(material, {}); });
+  }
+}
+
+void UiSceneGraph::materialVolumeScatter(tinygltf::Material& material)
+{
+  bool hasMaterialVolumeScatter = tinygltf::utils::hasElementName(material.extensions, KHR_MATERIALS_VOLUME_SCATTER_EXTENSION_NAME);
+  if(PE::treeNode("Volume Scatter"))
+  {
+    if(hasMaterialVolumeScatter)
+    {
+      removeButton(material, KHR_MATERIALS_VOLUME_SCATTER_EXTENSION_NAME);
+      KHR_materials_volume_scatter volumeScatter = tinygltf::utils::getVolumeScatter(material);
+      bool                         modif         = false;
+      modif |= PE::ColorEdit3("Multiscatter Color", glm::value_ptr(volumeScatter.multiscatterColor));
+      modif |= PE::SliderFloat("Scatter Anisotropy", &volumeScatter.scatterAnisotropy, -1.0f, 1.0f);
+      if(modif)
+      {
+        tinygltf::utils::setVolumeScatter(material, volumeScatter);
+        m_changes.set(eMaterialDirty);
+      }
+    }
+    PE::treePop();
+  }
+  if(!hasMaterialVolumeScatter)
+  {
+    addButton(material, KHR_MATERIALS_VOLUME_SCATTER_EXTENSION_NAME,
+              [&]() { tinygltf::utils::setVolumeScatter(material, {}); });
   }
 }
 

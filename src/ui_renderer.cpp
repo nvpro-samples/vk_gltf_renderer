@@ -1,5 +1,5 @@
 /*
- * Copyright (c) 2023-2025, NVIDIA CORPORATION.  All rights reserved.
+ * Copyright (c) 2023-2026, NVIDIA CORPORATION.  All rights reserved.
  *
  * Licensed under the Apache License, Version 2.0 (the "License");
  * you may not use this file except in compliance with the License.
@@ -13,7 +13,7 @@
  * See the License for the specific language governing permissions and
  * limitations under the License.
  *
- * SPDX-FileCopyrightText: Copyright (c) 2023-2025, NVIDIA CORPORATION.
+ * SPDX-FileCopyrightText: Copyright (c) 2023-2026, NVIDIA CORPORATION.
  * SPDX-License-Identifier: Apache-2.0
  */
 
@@ -28,9 +28,12 @@
 #include <nvgui/tonemapper.hpp>
 #include <nvgui/file_dialog.hpp>
 #include <nvgui/axis.hpp>
+#include <nvvkgltf/tinygltf_utils.hpp>
 
 #include "renderer.hpp"
+#include "compact_model.hpp"
 #include "create_tangent.hpp"
+#include "scoped_banner.hpp"
 #include "ui_mouse_state.hpp"
 #include "ui_collapsing_header_manager.h"
 #include "version.hpp"
@@ -437,7 +440,7 @@ void GltfRenderer::renderMenu()
   bool loadHdrFile    = ImGui::IsKeyChordPressed(ImGuiMod_Ctrl | ImGuiMod_Shift | ImGuiKey_O);
   bool saveFile       = ImGui::IsKeyChordPressed(ImGuiMod_Ctrl | ImGuiKey_S);
   bool saveScreenFile = ImGui::IsKeyChordPressed(ImGuiMod_Ctrl | ImGuiMod_Shift | ImGuiMod_Alt | ImGuiKey_S);
-  bool saveImageFile  = ImGui::IsKeyChordPressed(ImGuiMod_Ctrl | ImGuiMod_Shift | ImGuiKey_S);
+  bool saveImageFile  = !saveScreenFile && ImGui::IsKeyChordPressed(ImGuiMod_Ctrl | ImGuiMod_Shift | ImGuiKey_S);
   bool closeApp       = ImGui::IsKeyChordPressed(ImGuiMod_Ctrl | ImGuiKey_Q);
   bool fitScene       = ImGui::IsKeyChordPressed(ImGuiMod_Ctrl | ImGuiMod_Shift | ImGuiKey_F);
   bool fitObject      = ImGui::IsKeyChordPressed(ImGuiMod_Ctrl | ImGuiKey_F);
@@ -521,16 +524,22 @@ void GltfRenderer::renderMenu()
 
     if(ImGui::MenuItem(ICON_MS_BUILD " Recreate Tangents - Simple"))
     {
+      SCOPED_BANNER("Recreate Tangents - Simple");
       recomputeTangents(m_resources.scene.getModel(), true, false);
       m_resources.dirtyFlags.set(DirtyFlags::eVulkanScene);
     }
     ImGui::SetItemTooltip("This recreate tangents using UV gradient method");
     if(ImGui::MenuItem(ICON_MS_BUILD " Recreate Tangents - MikkTSpace"))
     {
-      bool buffersChanged = recomputeTangents(m_resources.scene.getModel(), true, true);
-
+      bool buffersChanged = false;
+      {
+        SCOPED_BANNER("Recreate Tangents - MikkTSpace");
+        buffersChanged = recomputeTangents(m_resources.scene.getModel(), true, true);
+      }
       if(buffersChanged)
+      {
         rebuildSceneFromModel();  // Geometry changed - full rebuild needed
+      }
       else
         m_resources.dirtyFlags.set(DirtyFlags::eVulkanScene);  // Just update existing buffers
     }
@@ -594,6 +603,8 @@ void GltfRenderer::renderMenu()
 
   if(reloadShader)
   {
+    SCOPED_BANNER("Reload Sahders");
+
     vkQueueWaitIdle(m_app->getQueue(0).queue);
     compileShaders();
     resetFrame();
