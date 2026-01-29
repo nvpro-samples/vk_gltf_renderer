@@ -442,11 +442,64 @@ The GLTF scene is loaded using tinygltf and then converted to a Vulkan version. 
 
 The scene is composed of nodes, where each node can have children and each node can have a mesh. The mesh is composed of primitives, where each primitive has a material. The material is composed of textures and parameters. However, none of this is directly used in the rendering, as we are using a simplified version of the scene.
 
-![](doc/scene_graph.png)
+````mermaid
+---
+config:
+  layout: elk
+  theme: neutral
+---
+flowchart TB
+ subgraph RenderNodes["RenderNodes"]
+        rn0["rn0"]
+        rn1["rn1"]
+        rn2["rn2"]
+        rn3["rn3"]
+        rn4["rn4"]
+  end
+ subgraph s1["RenderPrimitives"]
+        n1["rp0"]
+        n2["rp1"]
+  end
+ subgraph s2["RenderMaterials"]
+        n3["m1"]
+        n4["m2"]
+        n5["m3"]
+  end
+    sceneRoot["sceneRoot"] --> node0["node0"]
+    node0 --> node1["node1"] & node2["node2"] & node3["node3"]
+    node3 --> mesh1["mesh1"]
+    mesh0["mesh0"] --> prim0["prim0"] & prim1["prim1"]
+    mesh1 --> prim2["prim1'"]
+    node1 --> mesh0
+    node2 --> mesh0
+    prim0 --> rn0 & rn2 & n1 & n3
+    prim1 --> rn1 & rn3 & n2 & n4
+    prim2 --> rn4 & n2 & n5
+
+    style node0 fill:#BBDEFB
+    style node1 fill:#BBDEFB
+    style node2 fill:#BBDEFB
+    style node3 fill:#BBDEFB
+    style prim0 fill:#C8E6C9
+    style prim1 fill:#C8E6C9
+    style prim2 fill:#C8E6C9
+    style RenderNodes fill:#BBDEFB
+    style s1 fill:#C8E6C9
+    style s2 fill:#E1BEE7
+ ```` 
+
+ > RN0 == n0 --> n1 --> prim0 </br>
+ > RN1 == n0 --> n1 --> prim1 </br>
+ > RN2 == n0 --> n2 --> prim0 </br>
+ > RN3 == n0 --> n2 --> prim1 </br>
+ > RN4 == n0 --> n3 --> prim1'</br>
+
 
 Once the scene has been loaded, we proceed to parse it in order to collect the RenderNodes and RenderPrimitives. The RenderNode represents the flattened version of the tree of nodes, where the world transformation matrix and the material are stored. The RenderPrimitive, in contrast, represents the unique version of the primitive, where the index and vertex buffers are stored.
 
 RenderNodes represent the elements to be rendered, while RenderPrimitives serve as references to the data utilized for rendering.
+
+As shown in the graph above, render node 0 (`rn0`) has the path Node0->1, while the same primitive also appears along a different path, Node0->2, resulting in two render nodes with different world matrices. Since they reference the same primitive, only a single BLAS is created for both. Similarly, `prim'1` and `prim1` share accessors, so they are grouped as a single BLAS.
 
 ### Animation
 

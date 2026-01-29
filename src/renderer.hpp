@@ -21,7 +21,6 @@
 
 #include <memory>
 #include <string>
-#include <unordered_map>
 #include <queue>
 #include <mutex>
 
@@ -56,14 +55,6 @@
 
 class GltfRenderer : public nvapp::IAppElement
 {
-  // Animation update result flags
-  enum AnimationUpdateFlags : int
-  {
-    eAnimNone          = 0,
-    eAnimOccurred      = 1 << 0,  // Animation was processed this frame
-    eAnimLightsUpdated = 1 << 1,  // Light buffer was updated by animation pointer
-  };
-
 public:
   GltfRenderer(nvutils::ParameterRegistry* parameterReg);
   ~GltfRenderer() override = default;
@@ -85,7 +76,6 @@ private:
   void onUIRender() override;
 
   bool save(const std::filesystem::path& filename);
-  int  updateAnimation(VkCommandBuffer cmd);  // Returns AnimationUpdateFlags bitmask
   bool updateFrameCounter();
   bool processQueuedCommandBuffers();
 
@@ -101,12 +91,11 @@ private:
   void resetFrame();
   void silhouette(VkCommandBuffer cmd);
   void tonemap(VkCommandBuffer cmd);
-  void updateNodeToRenderNodeMap();
-  int  getRenderNodeForPrimitive(int nodeIndex, int primitiveIndex) const;
   bool updateTextures();
   void updateHdrImages();
 
-  bool updateSceneChanges(VkCommandBuffer cmd, bool didAnimate, bool lightsAlreadyUpdated);
+  bool updateSceneChanges(VkCommandBuffer cmd);
+  bool updateAnimation(VkCommandBuffer cmd);
 
   /////
   /// UI
@@ -155,16 +144,6 @@ private:
   BusyWindow       m_busy;
   AnimationControl m_animControl;  // Animation control (UI)
   Silhouette       m_silhouette;   // Silhouette renderer
-
-  // Hash function for pair<int,int> keys
-  struct PairHash
-  {
-    size_t operator()(const std::pair<int, int>& p) const
-    {
-      return std::hash<int>()(p.first) ^ (std::hash<int>()(p.second) << 16);
-    }
-  };
-  std::unordered_map<std::pair<int, int>, int, PairHash> m_nodePrimToRenderNodeMap;  // Maps (nodeID, primIndex) to RenderNode index
 
   // Command buffer queue for deferred submission
   struct CommandBufferInfo

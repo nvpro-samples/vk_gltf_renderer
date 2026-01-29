@@ -1,5 +1,5 @@
 /*
- * Copyright (c) 2023-2025, NVIDIA CORPORATION.  All rights reserved.
+ * Copyright (c) 2023-2026, NVIDIA CORPORATION.  All rights reserved.
  *
  * Licensed under the Apache License, Version 2.0 (the "License");
  * you may not use this file except in compliance with the License.
@@ -13,7 +13,7 @@
  * See the License for the specific language governing permissions and
  * limitations under the License.
  *
- * SPDX-FileCopyrightText: Copyright (c) 2023-2025, NVIDIA CORPORATION.
+ * SPDX-FileCopyrightText: Copyright (c) 2023-2026, NVIDIA CORPORATION.
  * SPDX-License-Identifier: Apache-2.0
  */
 
@@ -121,6 +121,7 @@ struct SceneFrameInfo
   float3      infinitePlaneBaseColor = float3(0.5, 0.5, 0.5);  // Default gray color
   float       infinitePlaneMetallic  = 0.0;                    // Default non-metallic
   float       infinitePlaneRoughness = 0.5;                    // Default medium roughness
+  float       shadowCatcherDarkenAmount = 0.0;                 // Non-physical shadow darkening (precomputed from darkness slider)
 };
 
 // Push constant

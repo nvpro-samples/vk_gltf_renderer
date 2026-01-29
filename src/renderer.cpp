@@ -50,6 +50,7 @@
 #define IMGUI_DEFINE_MATH_OPERATORS
 
 #include <thread>
+#include <unordered_set>
 #include <vulkan/vulkan_core.h>
 
 
@@ -223,7 +224,8 @@ void GltfRenderer::onAttach(nvapp::Application* app)
   {
     SCOPED_TIMER("Profiler");
     m_profilerTimeline = g_profilerManager.createTimeline({.name = "Primary Timeline"});
-    m_profilerGpuTimer.init(m_profilerTimeline, m_app->getDevice(), m_app->getPhysicalDevice(), m_app->getQueue(0).familyIndex, false);
+    m_profilerGpuTimer.init(m_profilerTimeline, m_app->getDevice(), m_app->getPhysicalDevice(),
+                            int32_t(m_app->getQueue(0).familyIndex), false);
   }
 
 
@@ -340,13 +342,14 @@ void GltfRenderer::onRender(VkCommandBuffer cmd)
   // Start the profiler section for the GPU timer
   auto timerSection = m_profilerGpuTimer.cmdFrameSection(cmd, __FUNCTION__);
 
-  // Update the animation (returns AnimationUpdateFlags bitmask)
-  int  animResult    = updateAnimation(cmd);
-  bool didAnimate    = (animResult & eAnimOccurred) != 0;
-  bool lightsUpdated = (animResult & eAnimLightsUpdated) != 0;
-
   // Check for changes
-  bool changed      = updateSceneChanges(cmd, didAnimate, lightsUpdated);
+  bool changed{false};
+  changed |= updateAnimation(cmd);  // Update the animation
+  changed |= updateSceneChanges(cmd);
+  if(changed)
+  {
+    resetFrame();
+  }
   bool frameChanged = updateFrameCounter();  // Check if the frame counter has changed
 
   if(changed || frameChanged)
@@ -377,6 +380,7 @@ void GltfRenderer::onRender(VkCommandBuffer cmd)
         .infinitePlaneBaseColor = m_resources.settings.infinitePlaneBaseColor,
         .infinitePlaneMetallic  = m_resources.settings.infinitePlaneMetallic,
         .infinitePlaneRoughness = m_resources.settings.infinitePlaneRoughness,
+        .shadowCatcherDarkenAmount = 1.0f - exp2f(-std::max(m_resources.settings.shadowCatcherDarkness, 0.0f)),
     };
     // Update the camera information
     m_prevMVP = finfo.viewProjMatrix;
@@ -721,9 +725,8 @@ void GltfRenderer::rebuildSceneFromModel()
     }
   }
 
-  // Rebuild acceleration structures and node mapping
+  // Rebuild acceleration structures
   buildAccelerationStructures();
-  updateNodeToRenderNodeMap();
 
   // Update UI with the modified model
   m_uiSceneGraph.setModel(&m_resources.scene.getModel());
@@ -753,7 +756,6 @@ void GltfRenderer::createVulkanScene()
   }
 
   buildAccelerationStructures();
-  updateNodeToRenderNodeMap();
 }
 
 //--------------------------------------------------------------------------------------------------
@@ -1100,17 +1102,29 @@ void GltfRenderer::destroyResources()
 
 
 //--------------------------------------------------------------------------------------------------
-// Update the animation
-// Returns AnimationUpdateFlags bitmask indicating what was updated
-int GltfRenderer::updateAnimation(VkCommandBuffer cmd)
+// Update the scene animation
+// - If there is an animation in the scene, and animation is enabled, update the animation
+// - Update the relevant buffers and acceleration structures
+// - Reset the frame counter to restart progressive rendering
+//
+bool GltfRenderer::updateAnimation(VkCommandBuffer cmd)
 {
-  int result = eAnimNone;
+  nvvkgltf::Scene& scn = m_resources.scene;
 
-  if(m_resources.scene.hasAnimation() && m_animControl.doAnimation())
+
+  if(scn.hasAnimation() && m_animControl.doAnimation())
   {
+    auto timerSection = m_profilerGpuTimer.cmdFrameSection(cmd, "Update animation");
+
     NVVK_DBG_SCOPE(cmd);  // <-- Helps to debug in NSight
+    nvvkgltf::SceneVk&  scnVk  = m_resources.sceneVk;
+    nvvkgltf::SceneRtx& scnRtx = m_resources.sceneRtx;
+
+    bool hasMorphOrSkin = !scn.getMorphPrimitives().empty() || !scn.getSkinNodes().empty();
+
+    // Find the current animation and update its time
     float                    deltaTime = m_animControl.deltaTime();
-    nvvkgltf::AnimationInfo& animInfo  = m_resources.scene.getAnimationInfo(m_animControl.currentAnimation);
+    nvvkgltf::AnimationInfo& animInfo  = scn.getAnimationInfo(m_animControl.currentAnimation);
     if(m_animControl.isReset())
     {
       animInfo.reset();
@@ -1120,24 +1134,23 @@ int GltfRenderer::updateAnimation(VkCommandBuffer cmd)
       animInfo.incrementTime(deltaTime);
     }
 
-    m_resources.scene.updateAnimation(m_animControl.currentAnimation);
-    m_resources.scene.updateRenderNodes();
+    // Update the element values: transformation, weights and return the list of nodes affected
+    std::unordered_set<int> dirtyNodeIds = scn.updateAnimation(m_animControl.currentAnimation);
 
     // KHR_animation_pointer: Check if any materials/lights were animated and need GPU update
-    auto& animPointer = m_resources.scene.getAnimationPointer();
+    auto& animPointer = scn.getAnimationPointer();
     if(animPointer.hasDirty())
     {
-      // Materials were animated - need to re-upload to GPU
+      // Materials were animated - surgical update only dirty materials
       if(!animPointer.getDirtyMaterials().empty())
       {
-        m_resources.sceneVk.updateMaterialBuffer(cmd, m_resources.staging, m_resources.scene);
+        scnVk.updateMaterialBuffer(m_resources.staging, scn, animPointer.getDirtyMaterials());
       }
 
-      // Lights were animated - need to re-upload to GPU
+      // Lights were animated - surgical update only dirty lights
       if(!animPointer.getDirtyLights().empty())
       {
-        m_resources.sceneVk.updateRenderLightsBuffer(cmd, m_resources.staging, m_resources.scene);
-        result |= eAnimLightsUpdated;  // Mark that lights were updated
+        scnVk.updateRenderLightsBuffer(m_resources.staging, scn, animPointer.getDirtyLights());
       }
 
       // Clear dirty flags after upload
@@ -1146,9 +1159,47 @@ int GltfRenderer::updateAnimation(VkCommandBuffer cmd)
 
     m_animControl.clearStates();
 
-    result |= eAnimOccurred;  // Mark that animation occurred
+    // Update the world matrices of the scene nodes
+    scn.updateNodeWorldMatrices(dirtyNodeIds);
+
+    // Surgical update: only update dirty renderNodes
+    std::unordered_set<int> dirtyRenderNodes;
+    bool updateAllRenderNodes = scn.collectRenderNodeIndices(dirtyNodeIds, dirtyRenderNodes, true, 0.5f);
+    if(updateAllRenderNodes)
+      dirtyRenderNodes.clear();  // empty = full update
+
+    // Update to the GPU the matrices of the rendernodes that changed
+    scnVk.updateRenderNodesBuffer(m_resources.staging, scn, dirtyRenderNodes);
+
+
+    // Update the morph and skinning related buffers
+    if(hasMorphOrSkin)
+    {
+      auto timerSection = m_profilerGpuTimer.cmdFrameSection(cmd, "Morph or Skin");
+      scnVk.updateRenderPrimitivesBuffer(cmd, m_resources.staging, scn);
+    }
+
+    // Make sure the staging buffers are uploaded before the acceleration structures are updated
+    m_resources.staging.cmdUploadAppended(cmd);
+
+    // Ensure all buffer copy operations complete before acceleration structure build begins
+    nvvk::cmdMemoryBarrier(cmd, VK_PIPELINE_STAGE_2_COPY_BIT, VK_PIPELINE_STAGE_2_ACCELERATION_STRUCTURE_BUILD_BIT_KHR,
+                           VK_ACCESS_2_TRANSFER_WRITE_BIT, VK_ACCESS_2_SHADER_READ_BIT);
+
+    // Update the bottom-level acceleration structures if morphing or skinning is used
+    {
+      auto timerSection = m_profilerGpuTimer.cmdFrameSection(cmd, "AS update");
+      if(hasMorphOrSkin)
+        scnRtx.updateBottomLevelAS(cmd, scn);
+
+      // Update the top-level acceleration structure
+      scnRtx.updateTopLevelAS(cmd, m_resources.staging, scn, dirtyRenderNodes);
+    }
+
+    return true;
   }
-  return result;
+
+  return false;
 }
 
 //--------------------------------------------------------------------------------------------------
@@ -1159,110 +1210,105 @@ int GltfRenderer::updateAnimation(VkCommandBuffer cmd)
 // 3. Vulkan buffers and acceleration structures remain in sync with scene state
 // 4. Frame counter is reset when needed to restart progressive rendering
 // Returns true if any changes were made that require re-rendering
-bool GltfRenderer::updateSceneChanges(VkCommandBuffer cmd, bool didAnimate, bool lightsAlreadyUpdated)
+bool GltfRenderer::updateSceneChanges(VkCommandBuffer cmd)
 {
-  bool changed = m_uiSceneGraph.hasAnyChanges();
+  auto timerSection = m_profilerGpuTimer.cmdFrameSection(cmd, __FUNCTION__);
+
+  bool changed             = false;
+  changed                  = m_uiSceneGraph.hasAnyChanges();  // Will update command buffer for any changes
+  bool stagingUploadIssued = false;
+
+  // Update the materials
   if(m_uiSceneGraph.hasMaterialChanged())
   {
-    m_resources.sceneVk.updateMaterialBuffer(cmd, m_resources.staging, m_resources.scene);
+    m_resources.sceneVk.updateMaterialBuffer(m_resources.staging, m_resources.scene, m_uiSceneGraph.getDirtyMaterials());
   }
+
+  // When alpha or double side change, the TLAS `VK_GEOMETRY_INSTANCE_*` flag change
+  if(m_uiSceneGraph.hasMaterialInstanceFlagChanges())
+  {
+    const auto& dirtyRenderNodes = m_resources.scene.getMaterialRenderNodes(m_uiSceneGraph.getMaterialInstanceFlagsChanged());
+    m_resources.sceneRtx.updateTopLevelAS(cmd, m_resources.staging, m_resources.scene, dirtyRenderNodes);
+  }
+
+  // Update the lights
   if(m_uiSceneGraph.hasLightChanged())
   {
-    m_resources.sceneVk.updateRenderLightsBuffer(cmd, m_resources.staging, m_resources.scene);
-    lightsAlreadyUpdated = true;  // Mark as updated to avoid duplicate update below
+    m_resources.sceneVk.updateRenderLightsBuffer(m_resources.staging, m_resources.scene, m_uiSceneGraph.getDirtyLights());
   }
-  if(m_resources.dirtyFlags.test(DirtyFlags::eVulkanScene))
+
+  // Update the render nodes for the material variants
+  if(m_resources.dirtyMaterialVariants.size() > 0)
   {
-    m_resources.scene.updateRenderNodes();
-    m_resources.sceneVk.updateRenderNodesBuffer(cmd, m_resources.staging, m_resources.scene);
-    if(!lightsAlreadyUpdated)  // Only update if not already done
-    {
-      m_resources.sceneVk.updateRenderLightsBuffer(cmd, m_resources.staging, m_resources.scene);
-      lightsAlreadyUpdated = true;
-    }
-    // Update vertex buffers first (e.g. new tangent data), then apply skinning
-    m_resources.sceneVk.updateVertexBuffers(cmd, m_resources.staging, m_resources.scene);
-    m_resources.sceneVk.updateRenderPrimitivesBuffer(cmd, m_resources.staging, m_resources.scene);
-    m_resources.dirtyFlags.reset(DirtyFlags::eVulkanScene);
+    m_resources.sceneVk.updateRenderNodesBuffer(m_resources.staging, m_resources.scene, m_resources.dirtyMaterialVariants);
+    m_resources.dirtyMaterialVariants.clear();
+    m_rasterizer.freeRecordCommandBuffer(m_resources);
     changed = true;
   }
-  bool stagingFlushed = false;
-  if(m_uiSceneGraph.hasTransformChanged() || didAnimate)
+
+  // Recursive visibility update
+  if(m_uiSceneGraph.hasVisibilityChanged())
   {
-    m_resources.scene.updateRenderNodes();
-    m_resources.sceneVk.updateRenderNodesBuffer(cmd, m_resources.staging, m_resources.scene);
-    m_resources.sceneVk.updateRenderPrimitivesBuffer(cmd, m_resources.staging, m_resources.scene);
-    if(!lightsAlreadyUpdated)  // Only update if not already done (avoids duplicate on animation pointer light updates)
+    const auto& dirtyNodes = m_uiSceneGraph.getDirtyVisibilityNodes();
+    for(auto& dirtyNode : dirtyNodes)
     {
-      m_resources.sceneVk.updateRenderLightsBuffer(cmd, m_resources.staging, m_resources.scene);
+      m_resources.scene.updateVisibility(dirtyNode);
     }
+
+    // Update for visibility TLAS
+    std::unordered_set<int> dirtyRenderNodes;
+    bool updateAllRenderNodes = m_resources.scene.collectRenderNodeIndices(dirtyNodes, dirtyRenderNodes, true, 0.5f);
+    if(updateAllRenderNodes)
+      dirtyRenderNodes.clear();  // empty = full update
+    m_resources.sceneRtx.updateTopLevelAS(cmd, m_resources.staging, m_resources.scene, dirtyRenderNodes);
+  }
+
+  // Update the transforms
+  if(m_uiSceneGraph.hasTransformChanged())
+  {
+    SCOPED_TIMER("hasTransformChanged");
+
+    // Surgical update: only update dirty renderNodes (empty set during animation = update all)
+    const auto&             dirtyNodes = m_uiSceneGraph.getDirtyNodes();
+    std::unordered_set<int> dirtyRenderNodes;
+    bool                    updateAllRenderNodes = false;
+
+    // Update the world matrices of the scene nodes
+    m_resources.scene.updateNodeWorldMatrices(dirtyNodes);
+
+    // Find which render nodes need to be updated
+    updateAllRenderNodes = m_resources.scene.collectRenderNodeIndices(dirtyNodes, dirtyRenderNodes, true, 0.5f);
+    if(updateAllRenderNodes)
+      dirtyRenderNodes.clear();  // empty = full update
+    m_resources.sceneVk.updateRenderNodesBuffer(m_resources.staging, m_resources.scene, dirtyRenderNodes);
+    m_resources.sceneVk.updateRenderLightsBuffer(m_resources.staging, m_resources.scene);  // Empty set = update all
+
     // Make sure the staging buffers are uploaded before the acceleration structures are updated
     m_resources.staging.cmdUploadAppended(cmd);
-    stagingFlushed = true;
+    stagingUploadIssued = true;
+
     // Ensure all buffer copy operations complete before acceleration structure build begins
     nvvk::cmdMemoryBarrier(cmd, VK_PIPELINE_STAGE_2_COPY_BIT, VK_PIPELINE_STAGE_2_ACCELERATION_STRUCTURE_BUILD_BIT_KHR,
                            VK_ACCESS_2_TRANSFER_WRITE_BIT, VK_ACCESS_2_SHADER_READ_BIT);
-    m_resources.sceneRtx.updateBottomLevelAS(cmd, m_resources.scene);
-    m_resources.sceneRtx.updateTopLevelAS(cmd, m_resources.staging, m_resources.scene);
+    m_resources.sceneRtx.updateTopLevelAS(cmd, m_resources.staging, m_resources.scene, dirtyRenderNodes);
   }
-  if(m_uiSceneGraph.hasMaterialFlagChanges() || m_uiSceneGraph.hasVisibilityChanged())
+
+  // Re-pushing the tangents if they were recomputed
+  if(m_resources.dirtyFlags.test(DirtyFlags::eDirtyTangents))
   {
-    m_resources.scene.updateRenderNodes();
-    m_resources.sceneRtx.updateTopLevelAS(cmd, m_resources.staging, m_resources.scene);
+    m_resources.sceneVk.updateVertexBuffers(m_resources.staging, m_resources.scene);
+    m_resources.dirtyFlags.reset(DirtyFlags::eDirtyTangents);
+    changed = true;
   }
-  if(changed || didAnimate)
+
+  // Update changes if needed
+  if(changed && !stagingUploadIssued)
   {
-    if(!stagingFlushed)
-    {
-      m_resources.staging.cmdUploadAppended(cmd);
-    }
-    resetFrame();
+    m_resources.staging.cmdUploadAppended(cmd);
   }
   m_uiSceneGraph.resetChanges();
 
-  return changed || didAnimate;
-}
-
-
-//--------------------------------------------------------------------------------------------------
-// Create a mapping from node ID to render node index for faster lookups
-// This is a critical optimization that enables O(1) lookups from scene graph nodes to renderer nodes,
-// enabling quick interaction between UI selections and the actual render objects.
-// Called during scene creation and whenever the scene structure changes.
-void GltfRenderer::updateNodeToRenderNodeMap()
-{
-  m_nodePrimToRenderNodeMap.clear();
-
-  auto&                        renderNodes = m_resources.scene.getRenderNodes();
-  std::unordered_map<int, int> nodeCurrentPrimIndex;  // Track which primitive index we're at for each node
-
-  for(size_t i = 0; i < renderNodes.size(); i++)
-  {
-    int nodeID = renderNodes[i].refNodeID;
-
-    // Initialize primitive index counter for this node if not present
-    if(nodeCurrentPrimIndex.find(nodeID) == nodeCurrentPrimIndex.end())
-    {
-      nodeCurrentPrimIndex[nodeID] = 0;
-    }
-
-    // Map (nodeID, primitiveIndex) -> RenderNode index
-    int primIndex                                  = nodeCurrentPrimIndex[nodeID]++;
-    m_nodePrimToRenderNodeMap[{nodeID, primIndex}] = static_cast<int>(i);
-  }
-}
-
-//--------------------------------------------------------------------------------------------------
-// Get the RenderNode index for a specific primitive within a node
-// Returns -1 if not found
-int GltfRenderer::getRenderNodeForPrimitive(int nodeIndex, int primitiveIndex) const
-{
-  auto it = m_nodePrimToRenderNodeMap.find({nodeIndex, primitiveIndex});
-  if(it != m_nodePrimToRenderNodeMap.end())
-  {
-    return it->second;
-  }
-  return -1;
+  return changed;
 }
 
 

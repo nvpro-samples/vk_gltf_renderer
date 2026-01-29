@@ -29,7 +29,6 @@ It is used to render the scene graph and the details of the selected node, such 
 
 #include <string>
 #include <vector>
-#include <bitset>
 #include <unordered_set>
 #include <functional>
 
@@ -47,6 +46,16 @@ class GltfRenderer;  // Forward declaration
 class UiSceneGraph
 {
 public:
+  // Structure to store the scene transform state
+  struct SceneTransformState
+  {
+    glm::vec3              translation = glm::vec3(0.0f);
+    glm::quat              rotation    = glm::quat(1.0f, 0.0f, 0.0f, 0.0f);
+    glm::vec3              scale       = glm::vec3(1.0f);
+    std::vector<int>       nodeIds;
+    std::vector<glm::mat4> baselineLocal;
+  };
+
   // Callback types for camera operations
   using CameraApplyCallback       = std::function<void(int cameraIndex)>;
   using CameraSetFromViewCallback = std::function<void(int cameraIndex)>;
@@ -74,17 +83,8 @@ public:
 
   UiSceneGraph() = default;
 
-  void setModel(tinygltf::Model* model)
-  {
-    m_model                   = model;
-    m_selectedIndex           = -1;
-    m_selectedRenderNodeIndex = -1;
-    m_selectedPrimitiveIndex  = -1;
-    m_selectedMaterialIndex   = -1;
-    m_meshToNodeMapDirty      = true;  // Mark cache as dirty when model changes
-    m_lightToNodeMapDirty     = true;
-    m_cameraToNodeMapDirty    = true;
-  }
+  void setModel(tinygltf::Model* model);
+
   void setBbox(nvutils::Bbox bbox) { m_bbox = bbox; }  // Use for translation of model
 
   // Set the event callback to handle UI events
@@ -95,27 +95,36 @@ public:
 
   void render(bool* showSceneGraph = nullptr, bool* showProperties = nullptr);  // Render the scene graph and details
 
-  bool hasTransformChanged() { return m_changes.test(eNodeTransformDirty); }
-  bool hasMaterialChanged() { return m_changes.test(eMaterialDirty); }
-  bool hasLightChanged() { return m_changes.test(eLightDirty); }
-  bool hasCameraChanged() { return m_changes.test(eCameraDirty); }
-  bool hasVisibilityChanged() { return m_changes.test(eNodeVisibleDirty); }
-  bool hasMaterialFlagChanges() { return m_changes.test(eMaterialFlagDirty); }
-  bool hasCameraApplyToView() { return m_changes.test(eCameraApplyToView); }
-  bool hasAnyChanges() { return m_changes.any(); }
-  void resetChanges() { m_changes.reset(); }
-  void selectNode(int nodeIndex);
-  void selectPrimitive(int renderNodeIndex, int nodeIndex, int primitiveIndex);
-  void selectMaterial(int materialIndex, int nodeIndex = -1);
-  int  selectedNode() const { return m_selectedIndex; }
-  int  selectedRenderNode() const { return m_selectedRenderNodeIndex; }
-  int  selectedPrimitiveIndex() const { return m_selectedPrimitiveIndex; }
-  int  selectedMaterial() const { return m_selectedMaterialIndex; }
-  int  selectedNodeForMaterial() const { return m_selectedNodeForMaterial; }
+  // Dirty tracking - check if specific types of changes occurred
+  bool hasTransformChanged() const { return !m_dirty.nodes.empty(); }
+  bool hasMaterialChanged() const { return !m_dirty.materials.empty(); }
+  bool hasLightChanged() const { return !m_dirty.lights.empty(); }
+  bool hasCameraChanged() const { return !m_dirty.cameras.empty(); }
+  bool hasVisibilityChanged() const { return !m_dirty.visibilityNodes.empty(); }
+  bool hasMaterialInstanceFlagChanges() const { return !m_dirty.materialInstanceFlagsChanged.empty(); }
+  bool hasCameraApplyToView() const { return m_dirty.cameraApplyToView; }
+  bool hasAnyChanges() const { return m_dirty.hasAny(); }
+  void resetChanges() { m_dirty.clear(); }
 
+  // Getters for dirty index sets - enables surgical GPU buffer updates
+  const std::unordered_set<int>& getDirtyMaterials() const { return m_dirty.materials; }
+  const std::unordered_set<int>& getMaterialInstanceFlagsChanged() const
+  {
+    return m_dirty.materialInstanceFlagsChanged;
+  }
+  const std::unordered_set<int>& getDirtyLights() const { return m_dirty.lights; }
+  const std::unordered_set<int>& getDirtyNodes() const { return m_dirty.nodes; }
+  const std::unordered_set<int>& getDirtyVisibilityNodes() const { return m_dirty.visibilityNodes; }
+  const std::unordered_set<int>& getDirtyCameras() const { return m_dirty.cameras; }
+  void                           selectNode(int nodeIndex);
+  void                           selectPrimitive(int renderNodeIndex, int nodeIndex, int primitiveIndex);
+  void                           selectMaterial(int materialIndex, int nodeIndex = -1);
+  int                            selectedNode() const { return m_selectedIndex; }
+  int                            selectedRenderNode() const { return m_selectedRenderNodeIndex; }
+  int                            selectedPrimitiveIndex() const { return m_selectedPrimitiveIndex; }
+  int                            selectedMaterial() const { return m_selectedMaterialIndex; }
+  int                            selectedNodeForMaterial() const { return m_selectedNodeForMaterial; }
 
-  // Get node transform (made public for camera application)
-  void getNodeTransform(const tinygltf::Node& node, glm::vec3& translation, glm::quat& rotation, glm::vec3& scale);
 
   // Get node for camera (made public for camera application)
   int getNodeForCamera(int cameraIndex);
@@ -128,7 +137,7 @@ private:
   void renderCamera(int cameraIndex);
   void renderMaterial(int materialIndex);
 
-  void addButton(tinygltf::Material& material, const char* extensionName, std::function<void()> addCallback);
+  void addButton(const char* extensionName, std::function<void()> addCallback);
   void removeButton(tinygltf::Material& material, const char* extensionName);
   void materialAnisotropy(tinygltf::Material& material);
   void materialClearcoat(tinygltf::Material& material);
@@ -157,6 +166,7 @@ private:
   void renderSceneGraph(bool* showSceneGraph);
   void renderDetails(bool* showProperties);
   void renderAssetInfo();  // Display glTF asset info (version, generator, copyright)
+  void applySceneTransform(size_t sceneID);
 
   // Helper functions to get available materials for a node
   std::vector<int>                         getMaterialsForNode(int nodeIndex) const;
@@ -180,34 +190,54 @@ private:
     eLight,
     eCamera
   };
-  SelectType      m_selectType              = eNode;
-  int             m_selectedIndex           = -1;
-  int             m_selectedRenderNodeIndex = -1;  // Selected RenderNode index (for primitive selection)
-  int             m_selectedPrimitiveIndex  = -1;  // Selected primitive index within the mesh
-  int             m_selectedMaterialIndex   = -1;  // Currently selected material
-  int             m_selectedNodeForMaterial = -1;  // Node context for the selected material
-  std::bitset<32> m_changes;
-  nvutils::Bbox   m_bbox;
+  SelectType    m_selectType              = eNode;
+  int           m_selectedIndex           = -1;
+  int           m_selectedRenderNodeIndex = -1;  // Selected RenderNode index (for primitive selection)
+  int           m_selectedPrimitiveIndex  = -1;  // Selected primitive index within the mesh
+  int           m_selectedMaterialIndex   = -1;  // Currently selected material
+  int           m_selectedNodeForMaterial = -1;  // Node context for the selected material
+  nvutils::Bbox m_bbox;
 
   // Cache for efficient lookups
-  std::unordered_map<int, int> m_meshToNodeMap;
-  std::unordered_map<int, int> m_lightToNodeMap;
-  std::unordered_map<int, int> m_cameraToNodeMap;
-  bool                         m_meshToNodeMapDirty   = true;
-  bool                         m_lightToNodeMapDirty  = true;
-  bool                         m_cameraToNodeMapDirty = true;
+  std::unordered_map<int, int>     m_meshToNodeMap;
+  std::unordered_map<int, int>     m_lightToNodeMap;
+  std::unordered_map<int, int>     m_cameraToNodeMap;
+  bool                             m_meshToNodeMapDirty   = true;
+  bool                             m_lightToNodeMapDirty  = true;
+  bool                             m_cameraToNodeMapDirty = true;
+  std::vector<std::string>         m_textureNames;
+  std::vector<SceneTransformState> m_sceneTransforms;
 
-  enum DirtyFlags
+  // Dirty tracking - tracks which specific elements changed for surgical GPU updates
+  struct DirtyTracking
   {
-    eNodeTransformDirty,
-    eMaterialDirty,
-    eLightDirty,
-    eNodeVisibleDirty,
-    eMaterialFlagDirty,
-    eCameraDirty,
-    eCameraApplyToView,
-    // Add more flags as needed
+    std::unordered_set<int> materials;                     // Material indices that changed
+    std::unordered_set<int> materialInstanceFlagsChanged;  // Subset of materials needing TLAS rebuild (alpha mode, double-sided)
+    std::unordered_set<int> lights;                        // Light indices that changed
+    std::unordered_set<int> nodes;                         // Node indices with transform changes
+    std::unordered_set<int> visibilityNodes;               // Node indices with visibility changes
+    std::unordered_set<int> cameras;                       // Camera indices that changed
+    bool                    cameraApplyToView = false;  // Action flag (not a change)
+
+    void clear()
+    {
+      materials.clear();
+      materialInstanceFlagsChanged.clear();
+      lights.clear();
+      nodes.clear();
+      visibilityNodes.clear();
+      cameras.clear();
+      cameraApplyToView = false;
+    }
+
+    bool hasAny() const
+    {
+      return !materials.empty() || !materialInstanceFlagsChanged.empty() || !lights.empty() || !nodes.empty()
+             || !visibilityNodes.empty() || !cameras.empty() || cameraApplyToView;
+    }
   };
+  DirtyTracking m_dirty;
+
   bool m_doScroll = false;
 
   EventCallback            m_eventCallback;

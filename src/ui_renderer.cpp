@@ -91,15 +91,7 @@ void GltfRenderer::mouseClickedInViewport()
           int                         nodeID     = renderNode.refNodeID;
 
           // Find the primitive index within the node's mesh
-          int primIndex = 0;
-          for(auto& [key, value] : m_nodePrimToRenderNodeMap)
-          {
-            if(value == pickResult.instanceID)
-            {
-              primIndex = key.second;
-              break;
-            }
-          }
+          int primIndex = m_resources.scene.getPrimitiveIndexForRenderNode(pickResult.instanceID);
           m_uiSceneGraph.selectPrimitive(pickResult.instanceID, nodeID, primIndex);
         }
       }
@@ -240,7 +232,7 @@ void GltfRenderer::renderUI()
 
       // Set up render node lookup callback for primitive selection in UI
       m_uiSceneGraph.setRenderNodeLookup([this](int nodeIndex, int primitiveIndex) -> int {
-        return getRenderNodeForPrimitive(nodeIndex, primitiveIndex);
+        return m_resources.scene.getRenderNodeForPrimitive(nodeIndex, primitiveIndex);
       });
 
       m_uiSceneGraph.render(&m_resources.settings.showSceneGraphWindow, &m_resources.settings.showPropertiesWindow);
@@ -318,8 +310,12 @@ void GltfRenderer::renderUI()
             {
               if(ImGui::Selectable(m_resources.scene.getVariants()[i].c_str(), m_resources.scene.getCurrentVariant() == i))
               {
-                m_resources.scene.setCurrentVariant(int(i));
-                m_resources.dirtyFlags.set(DirtyFlags::eVulkanScene);
+                std::unordered_set<int> dirtyRenderNodes;
+                m_resources.scene.setCurrentVariant(int(i), dirtyRenderNodes);
+                for(int dirtyRenderNode : dirtyRenderNodes)
+                {
+                  m_resources.dirtyMaterialVariants.insert(dirtyRenderNode);
+                }
                 changed = true;
               }
             }
@@ -526,7 +522,7 @@ void GltfRenderer::renderMenu()
     {
       SCOPED_BANNER("Recreate Tangents - Simple");
       recomputeTangents(m_resources.scene.getModel(), true, false);
-      m_resources.dirtyFlags.set(DirtyFlags::eVulkanScene);
+      m_resources.dirtyFlags.set(DirtyFlags::eDirtyTangents);
     }
     ImGui::SetItemTooltip("This recreate tangents using UV gradient method");
     if(ImGui::MenuItem(ICON_MS_BUILD " Recreate Tangents - MikkTSpace"))
@@ -541,7 +537,7 @@ void GltfRenderer::renderMenu()
         rebuildSceneFromModel();  // Geometry changed - full rebuild needed
       }
       else
-        m_resources.dirtyFlags.set(DirtyFlags::eVulkanScene);  // Just update existing buffers
+        m_resources.dirtyFlags.set(DirtyFlags::eDirtyTangents);  // Just update existing buffers
     }
     ImGui::SetItemTooltip("Recreate tangents using MikkTSpace (may split vertices at UV seams)");
 
@@ -597,7 +593,6 @@ void GltfRenderer::renderMenu()
   {
     vkQueueWaitIdle(m_app->getQueue(0).queue);
     cleanupScene();
-    m_resources.dirtyFlags.set(DirtyFlags::eVulkanScene);
     m_uiSceneGraph.selectPrimitive(-1, -1, -1);
   }
 
@@ -639,7 +634,7 @@ void GltfRenderer::renderMenu()
     std::filesystem::path filename = getSaveImage();
     if(!filename.empty())
     {
-      m_app->screenShot(filename, 100);
+      m_app->requestScreenShot(filename, 100);
     }
   }
 

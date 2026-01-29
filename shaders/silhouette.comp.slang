@@ -1,5 +1,5 @@
 /*
- * Copyright (c) 2023-2025, NVIDIA CORPORATION.  All rights reserved.
+ * Copyright (c) 2023-2026, NVIDIA CORPORATION.  All rights reserved.
  *
  * Licensed under the Apache License, Version 2.0 (the "License");
  * you may not use this file except in compliance with the License.
@@ -13,7 +13,7 @@
  * See the License for the specific language governing permissions and
  * limitations under the License.
  *
- * SPDX-FileCopyrightText: Copyright (c) 2023-2025, NVIDIA CORPORATION.
+ * SPDX-FileCopyrightText: Copyright (c) 2023-2026, NVIDIA CORPORATION.
  * SPDX-License-Identifier: Apache-2.0
  */
 
@@ -38,10 +38,10 @@ struct PushConstantSilhouette
 [numthreads(SILHOUETTE_WORKGROUP_SIZE, SILHOUETTE_WORKGROUP_SIZE, 1)]
 void main(uint3 dispatchThreadID: SV_DispatchThreadID)
 {
-  uint2 texSize;
+  int2 texSize;
   u_RgbaImage.GetDimensions(texSize.x, texSize.y);  // DispatchRaysDimensions();
 
-  const uint2 pixelCoord = uint2(dispatchThreadID.xy);
+  const int2 pixelCoord = int2(dispatchThreadID.xy);
 
   // Early exit if pixel is outside image bounds
   if(pixelCoord.x >= texSize.x || pixelCoord.y >= texSize.y)
@@ -61,13 +61,13 @@ void main(uint3 dispatchThreadID: SV_DispatchThreadID)
     [unroll]
     for(int j = -1; j <= 1; j++)
     {
-      const uint2 offset = uint2(i, j);
-      const uint2 sampleCoord = pixelCoord + offset;
+      const int2 offset = int2(i, j);
+      const int2 sampleCoord = pixelCoord + offset;
       
       // Clamp coordinates to image bounds
-      const uint2 clampedCoord = uint2(
-        clamp(sampleCoord.x, 0u, texSize.x - 1u),
-        clamp(sampleCoord.y, 0u, texSize.y - 1u)
+      const int2 clampedCoord = int2(
+        clamp(sampleCoord.x, 0, texSize.x - 1),
+        clamp(sampleCoord.y, 0, texSize.y - 1)
       );
       
       const float val = u_R8Buffer[clampedCoord].r;

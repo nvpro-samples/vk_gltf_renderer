@@ -4,6 +4,9 @@ project(GLTF_renderer VERSION 2.0 LANGUAGES C CXX)
 option(NVPRO2_ENABLE_nvgl off)
 option(USE_DEFAULT_SCENE "Using a default scene at startup" ON)
 
+# Set Slang version
+# set(Slang_VERSION 2026.1)
+
 # Add the cmake folder to the module path
 list(APPEND CMAKE_MODULE_PATH "${CMAKE_CURRENT_SOURCE_DIR}/cmake")
 find_package(NvproCore2 REQUIRED)

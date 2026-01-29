@@ -1,5 +1,5 @@
 /*
- * Copyright (c) 2023-2025, NVIDIA CORPORATION.  All rights reserved.
+ * Copyright (c) 2023-2026, NVIDIA CORPORATION.  All rights reserved.
  *
  * Licensed under the Apache License, Version 2.0 (the "License");
  * you may not use this file except in compliance with the License.
@@ -13,7 +13,7 @@
  * See the License for the specific language governing permissions and
  * limitations under the License.
  *
- * SPDX-FileCopyrightText: Copyright (c) 2023-2025, NVIDIA CORPORATION.
+ * SPDX-FileCopyrightText: Copyright (c) 2023-2026, NVIDIA CORPORATION.
  * SPDX-License-Identifier: Apache-2.0
  */
 
@@ -112,12 +112,7 @@ constexpr inline DisplayBuffer outputImageToDisplayBuffer(shaderio::OutputImage 
 
 enum DirtyFlags
 {
-  eVulkanScene,       // When the Vulkan geometry buffers need to be updated
-  eVulkanMaterial,    // When the Vulkan material buffers need to be updated
-  eVulkanAttributes,  // When the Vulkan attributes need to be updated
-  eRtxScene,          // When the RTX acceleration structures need to be updated
-  eHdrEnv,            // When the HDR environment needs to be updated
-  eNodeVisibility,    // When the node visibility has changed
+  eDirtyTangents,  // When tangents need to be pushed to GPU
 
   eNumDirtyFlags  // Keep last - Number of dirty flags
 };
@@ -149,6 +144,7 @@ struct Settings
   glm::vec3             infinitePlaneBaseColor = glm::vec3(0.5, 0.5, 0.5);      // Default gray color
   float                 infinitePlaneMetallic  = 0.0;                           // Default non-metallic
   float                 infinitePlaneRoughness = 0.5;                           // Default medium roughness
+  float                 shadowCatcherDarkness  = 0.0f;                          // Non-physical shadow darkening
   bool                  dlssHardwareAvailable  = false;  // DLSS hardware/extensions available (set at startup)
   DisplayBuffer         displayBuffer          = DisplayBuffer::eRendered;  // Which buffer to display in viewport
 };
@@ -203,5 +199,7 @@ struct Resources
 
   Settings settings;
 
-  std::bitset<32> dirtyFlags;
+  std::bitset<32>         dirtyFlags;
+  std::unordered_set<int> dirtyMaterialVariants;  // Material variant indices that changed
+  void                    resetDirtyMaterialVariants() { dirtyMaterialVariants.clear(); }
 };

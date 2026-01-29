@@ -301,6 +301,12 @@ bool PathTracer::onUIRender(Resources& resources)
         changed |= PE::ColorEdit3("Color", glm::value_ptr(resources.settings.infinitePlaneBaseColor));
         changed |= PE::SliderFloat("Metallic", &resources.settings.infinitePlaneMetallic, 0.0f, 1.0f);
         changed |= PE::SliderFloat("Roughness", &resources.settings.infinitePlaneRoughness, 0.0f, 1.0f);
+        if(resources.settings.isShadowCatcher)
+        {
+          changed |= PE::SliderFloat("Shadow Darkness", &resources.settings.shadowCatcherDarkness, 0.0f, 1.0f, "%.2f",
+                                     ImGuiSliderFlags_Logarithmic | ImGuiSliderFlags_NoRoundToFormat,
+                                     "Non-physical: 0=default, 1=deeper shadows");
+        }
         PE::treePop();
       }
     }
@@ -308,7 +314,7 @@ bool PathTracer::onUIRender(Resources& resources)
     PE::end();
   }
 
-  if(ImGui::CollapsingHeader("Denoisers", ImGuiTreeNodeFlags_DefaultOpen))
+  if(ImGui::CollapsingHeader("AI Denoisers", ImGuiTreeNodeFlags_DefaultOpen))
   {
 // DLSS section
 #if defined(USE_DLSS)

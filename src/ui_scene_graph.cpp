@@ -22,6 +22,7 @@
 
 #include "ui_xmp.hpp"
 #include <glm/glm.hpp>
+#include <glm/gtc/matrix_transform.hpp>
 
 namespace glm {
 // vec3 specialization
@@ -36,6 +37,7 @@ GLM_FUNC_QUALIFIER vec3 fma(vec3 const& a, vec3 const& b, vec3 const& c)
 #include <nvgui/property_editor.hpp>
 #include <nvvkgltf/tinygltf_utils.hpp>
 #include <nvgui/fonts.hpp>
+#include <imgui_internal.h>
 
 #include "ui_scene_graph.hpp"
 
@@ -49,6 +51,68 @@ static ImGuiTreeNodeFlags s_treeNodeFlags = ImGuiTreeNodeFlags_SpanAllColumns | 
 
 static const double f64_zero = 0., f64_one = 1., f64_ten = 10., f64_179 = 179., f64_001 = 0.001, f64_1000 = 1000.,
                     f64_10000 = 10000., f64_01 = 0.1, f64_100 = 100., f64_neg1000 = -1000.;
+
+static std::string getTextureDisplayName(const tinygltf::Model& model, int textureIndex)
+{
+  if(textureIndex < 0 || textureIndex >= static_cast<int>(model.textures.size()))
+    return "None";
+
+  const tinygltf::Texture& texture = model.textures[textureIndex];
+  if(!texture.name.empty())
+    return texture.name + " (tex " + std::to_string(textureIndex) + ")";
+
+  if(texture.source >= 0 && texture.source < static_cast<int>(model.images.size()))
+  {
+    const tinygltf::Image& image = model.images[texture.source];
+    if(!image.name.empty())
+      return image.name + " (tex " + std::to_string(textureIndex) + ")";
+  }
+
+  return "Texture " + std::to_string(textureIndex);
+}
+
+static void buildTextureItems(const tinygltf::Model& model, std::vector<std::string>& textureNames)
+{
+  textureNames.clear();
+  textureNames.reserve(model.textures.size());
+  for(int i = 0; i < static_cast<int>(model.textures.size()); ++i)
+  {
+    textureNames.push_back(getTextureDisplayName(model, i));
+  }
+}
+
+
+void UiSceneGraph::setModel(tinygltf::Model* model)
+{
+  m_model                   = model;
+  m_selectedIndex           = -1;
+  m_selectedRenderNodeIndex = -1;
+  m_selectedPrimitiveIndex  = -1;
+  m_selectedMaterialIndex   = -1;
+  m_meshToNodeMapDirty      = true;  // Mark cache as dirty when model changes
+  m_lightToNodeMapDirty     = true;
+  m_cameraToNodeMapDirty    = true;
+  m_sceneTransforms.clear();
+  if(model)
+  {
+    buildTextureItems(*m_model, m_textureNames);
+
+    m_sceneTransforms.resize(m_model->scenes.size());
+    for(size_t sceneID = 0; sceneID < m_model->scenes.size(); ++sceneID)
+    {
+      const tinygltf::Scene&             scene = m_model->scenes[sceneID];
+      UiSceneGraph::SceneTransformState& state = m_sceneTransforms[sceneID];
+      state                                    = {};
+      state.nodeIds.reserve(scene.nodes.size());
+      state.baselineLocal.reserve(scene.nodes.size());
+      for(int nodeId : scene.nodes)
+      {
+        state.nodeIds.push_back(nodeId);
+        state.baselineLocal.push_back(tinygltf::utils::getNodeMatrix(m_model->nodes[nodeId]));
+      }
+    }
+  }
+}
 
 //--------------------------------------------------------------------------------------------------
 // Entry point for rendering the scene graph
@@ -93,6 +157,7 @@ void UiSceneGraph::renderSceneGraph(bool* showSceneGraph)
       ImGui::TableSetupColumn(" ", ImGuiTableColumnFlags_NoHide | ImGuiTableColumnFlags_WidthFixed, textBaseWidth * 2.2f);
       ImGui::TableHeadersRow();
 
+      const ImGuiTreeNodeFlags sceneTreeFlags = ImGuiTreeNodeFlags_SpanTextWidth | ImGuiTreeNodeFlags_OpenOnArrow;
       for(size_t sceneID = 0; sceneID < m_model->scenes.size(); sceneID++)
       {
         tinygltf::Scene& scene = m_model->scenes[sceneID];
@@ -100,10 +165,49 @@ void UiSceneGraph::renderSceneGraph(bool* showSceneGraph)
         ImGui::PushID(static_cast<int>(sceneID));
         ImGui::TableNextRow();
         ImGui::TableNextColumn();
-        if(ImGui::TreeNodeEx("Scene", s_treeNodeFlags, "%s", scene.name.c_str()))
+        if(ImGui::TreeNodeEx("Scene", sceneTreeFlags, "%s", scene.name.c_str()))
         {
           ImGui::TableNextColumn();
           ImGui::Text("Scene %ld", sceneID);
+          ImGui::TableNextColumn();
+          if(ImGui::SmallButton(ICON_MS_TRANSFORM "##scene"))
+          {
+            ImGui::OpenPopup("scene_transform_popup");
+          }
+          ImGui::SetNextWindowSizeConstraints(ImVec2(260.0f, 0.0f), ImVec2(600.0f, 600.0f));
+          if(ImGui::BeginPopup("scene_transform_popup"))
+          {
+            if(sceneID < m_sceneTransforms.size())
+            {
+              SceneTransformState& state = m_sceneTransforms[sceneID];
+              glm::vec3            euler = glm::degrees(glm::eulerAngles(state.rotation));
+              bool                 modif = false;
+
+              if(PE::begin("scene_transform_table", ImGuiTableFlags_BordersInnerV | ImGuiTableFlags_Resizable | ImGuiTableFlags_SizingStretchProp))
+              {
+                ImGui::TableSetupColumn("Label", ImGuiTableColumnFlags_WidthFixed, 80.0f);
+                ImGui::TableSetupColumn("Value", ImGuiTableColumnFlags_WidthStretch);
+                modif |= PE::DragFloat3("Translation", glm::value_ptr(state.translation), 0.01f * m_bbox.radius());
+                modif |= PE::DragFloat3("Rotation", glm::value_ptr(euler), 0.1f);
+                modif |= PE::DragFloat3("Scale", glm::value_ptr(state.scale), 0.01f);
+                PE::end();
+              }
+
+              if(modif)
+              {
+                state.rotation = glm::quat(glm::radians(euler));
+                applySceneTransform(sceneID);
+              }
+              if(ImGui::Button("Reset"))
+              {
+                state.translation = glm::vec3(0.0f);
+                state.rotation    = glm::quat(1.0f, 0.0f, 0.0f, 0.0f);
+                state.scale       = glm::vec3(1.0f);
+                applySceneTransform(sceneID);
+              }
+            }
+            ImGui::EndPopup();
+          }
           for(int node : scene.nodes)
           {
             renderNode(node);
@@ -117,6 +221,51 @@ void UiSceneGraph::renderSceneGraph(bool* showSceneGraph)
     }
   }
   ImGui::End();
+}
+
+//--------------------------------------------------------------------------------------------------
+// Apply the scene transform to the nodes in the scene
+// This function is called when the scene transform is modified allowing
+// to move the scene in the world
+void UiSceneGraph::applySceneTransform(size_t sceneID)
+{
+  if(!m_model || sceneID >= m_sceneTransforms.size())
+    return;
+
+  SceneTransformState& state    = m_sceneTransforms[sceneID];
+  const glm::mat4      sceneMat = glm::translate(glm::mat4(1.0f), state.translation) * glm::mat4_cast(state.rotation)
+                             * glm::scale(glm::mat4(1.0f), state.scale);
+
+  // Loop over all the nodes in the scene and apply the scene transform to them
+  for(size_t i = 0; i < state.nodeIds.size(); ++i)
+  {
+    const int       nodeId   = state.nodeIds[i];
+    tinygltf::Node& node     = m_model->nodes[nodeId];
+    const glm::mat4 newLocal = sceneMat * state.baselineLocal[i];
+
+    glm::vec3 translation;
+    glm::quat rotation;
+    glm::vec3 scale;
+    glm::vec3 skew;
+    glm::vec4 perspective;
+    if(glm::decompose(newLocal, scale, rotation, translation, skew, perspective))
+    {
+      tinygltf::utils::setNodeTRS(node, translation, rotation, scale);
+      node.matrix.clear();
+    }
+    else
+    {
+      node.matrix.resize(16);
+      const float* data = glm::value_ptr(newLocal);
+      for(size_t matIndex = 0; matIndex < 16; ++matIndex)
+        node.matrix[matIndex] = static_cast<double>(data[matIndex]);
+      node.translation.clear();
+      node.rotation.clear();
+      node.scale.clear();
+    }
+
+    m_dirty.nodes.insert(nodeId);
+  }
 }
 
 //--------------------------------------------------------------------------------------------------
@@ -611,6 +760,119 @@ struct MaterialUI
   }
 };
 
+
+template <typename T>
+static bool renderTextureEditRow(const char* label, T& info, const tinygltf::Model& model, const std::vector<std::string>& textureItems)
+{
+  bool changed = false;
+
+  ImGui::TableNextRow();
+  ImGui::TableNextColumn();
+  ImGui::Text("%s %s", ICON_MS_TEXTURE, label);
+
+  ImGui::TableNextColumn();
+  const bool hasTexture = info.index >= 0;
+  if(hasTexture)
+  {
+    const std::string displayName  = getTextureDisplayName(model, info.index);
+    const float       buttonWidth  = ImGui::CalcTextSize(ICON_MS_DELETE).x + ImGui::GetStyle().FramePadding.x * 2.0f;
+    const float       spacing      = ImGui::GetStyle().ItemSpacing.x;
+    const float       available    = ImGui::GetContentRegionAvail().x;
+    const float       textMaxWidth = std::max(0.0f, available - buttonWidth - spacing);
+    const ImVec2      textStart    = ImGui::GetCursorScreenPos();
+    const ImVec2      textEnd(textStart.x + textMaxWidth, textStart.y + ImGui::GetTextLineHeight());
+
+    ImGui::RenderTextEllipsis(ImGui::GetWindowDrawList(), textStart, textEnd, textEnd.x, displayName.c_str(), nullptr, nullptr);
+    ImGui::Dummy(ImVec2(textMaxWidth, ImGui::GetTextLineHeight()));
+    if(ImGui::IsItemHovered())
+    {
+      ImGui::BeginTooltip();
+      ImGui::TextUnformatted(displayName.c_str());
+      ImGui::EndTooltip();
+    }
+    ImGui::SameLine();
+  }
+
+  ImGui::PushID(label);
+  if(hasTexture)
+  {
+    if(ImGui::SmallButton(ICON_MS_DELETE))
+    {
+      info.index = -1;
+      changed    = true;
+    }
+    if(ImGui::IsItemHovered())
+    {
+      ImGui::BeginTooltip();
+      ImGui::TextUnformatted("Remove texture");
+      ImGui::EndTooltip();
+    }
+  }
+  else
+  {
+    if(textureItems.empty())
+    {
+      ImGui::TextDisabled(ICON_MS_ADD_CIRCLE);
+    }
+    else
+    {
+      if(ImGui::SmallButton(ICON_MS_ADD_CIRCLE))
+      {
+        ImGui::OpenPopup("AddTexture");
+      }
+      if(ImGui::IsItemHovered())
+      {
+        ImGui::BeginTooltip();
+        ImGui::TextUnformatted("Add texture");
+        ImGui::EndTooltip();
+      }
+
+      bool open = true;
+      ImGui::SetNextWindowSize(ImVec2(520.0f, 0.0f), ImGuiCond_Once);
+      if(ImGui::BeginPopupModal("AddTexture", &open, ImGuiWindowFlags_None))
+      {
+        ImGuiStorage* storage = ImGui::GetStateStorage();
+        ImGuiID       listId  = ImGui::GetID("add_index");
+        int           addIdx  = storage->GetInt(listId, 0);
+        addIdx                = std::clamp(addIdx, 0, static_cast<int>(textureItems.size() - 1));
+
+        ImGui::TextUnformatted("Select texture:");
+        ImVec2 listSize(-FLT_MIN, 8.0f * ImGui::GetTextLineHeightWithSpacing());
+        if(ImGui::BeginListBox("##TextureList", listSize))
+        {
+          for(int i = 0; i < static_cast<int>(textureItems.size()); ++i)
+          {
+            const bool selected = (addIdx == i);
+            if(ImGui::Selectable(textureItems[i].c_str(), selected))
+              addIdx = i;
+            if(selected)
+              ImGui::SetItemDefaultFocus();
+          }
+          ImGui::EndListBox();
+        }
+        storage->SetInt(listId, addIdx);
+
+        if(ImGui::Button(ICON_MS_CHECK " OK"))
+        {
+          info.index    = addIdx;
+          info.texCoord = 0;
+          changed       = true;
+          ImGui::CloseCurrentPopup();
+        }
+        ImGui::SameLine();
+        if(ImGui::Button(ICON_MS_CANCEL " Cancel"))
+        {
+          ImGui::CloseCurrentPopup();
+        }
+        ImGui::EndPopup();
+      }
+    }
+  }
+  ImGui::PopID();
+
+  return changed;
+}
+
 // Utility struct to handle material UI
 struct LightUI
 {
@@ -673,7 +935,7 @@ void UiSceneGraph::renderNodeDetails(int nodeIndex)
     visibility = tinygltf::utils::getNodeVisibility(node);
   }
 
-  getNodeTransform(node, translation, rotation, scale);
+  tinygltf::utils::getNodeTRS(node, translation, rotation, scale);
 
   ImGui::Text("Node: %s", node.name.c_str());
 
@@ -687,11 +949,9 @@ void UiSceneGraph::renderNodeDetails(int nodeIndex)
     modif |= PE::DragFloat3("Scale", glm::value_ptr(scale), 0.01f);
     if(modif)
     {
-      m_changes.set(eNodeTransformDirty);
-      node.translation = {translation.x, translation.y, translation.z};
-      rotation         = glm::quat(glm::radians(euler));
-      node.rotation    = {rotation.x, rotation.y, rotation.z, rotation.w};
-      node.scale       = {scale.x, scale.y, scale.z};
+      m_dirty.nodes.insert(nodeIndex);
+      rotation = glm::quat(glm::radians(euler));
+      tinygltf::utils::setNodeTRS(node, translation, rotation, scale);
       node.matrix.clear();  // Clear the matrix, has its been converted to translation, rotation and scale
     }
     if(hasVisibility)
@@ -699,7 +959,7 @@ void UiSceneGraph::renderNodeDetails(int nodeIndex)
       if(PE::Checkbox("Visible", &visibility.visible))
       {
         tinygltf::utils::setNodeVisibility(node, visibility);
-        m_changes.set(eNodeVisibleDirty);
+        m_dirty.visibilityNodes.insert(nodeIndex);
       }
     }
     else if(ImGui::SmallButton("Add Visibility"))
@@ -707,38 +967,6 @@ void UiSceneGraph::renderNodeDetails(int nodeIndex)
       tinygltf::utils::setNodeVisibility(node, {});
     }
     PE::end();
-  }
-}
-
-//--------------------------------------------------------------------------------------------------
-// Returning the translation, rotation and scale of a node
-// If the node has a matrix, it will decompose it
-void UiSceneGraph::getNodeTransform(const tinygltf::Node& node, glm::vec3& translation, glm::quat& rotation, glm::vec3& scale)
-{
-  translation = glm::vec3(0.0f);
-  rotation    = glm::quat(1.0f, 0.0f, 0.0f, 0.0f);
-  scale       = glm::vec3(1.0f);
-
-  if(node.matrix.size() == 16)
-  {
-    glm::mat4 matrix = glm::make_mat4(node.matrix.data());
-    glm::vec3 skew;
-    glm::vec4 perspective;
-    glm::decompose(matrix, scale, rotation, translation, skew, perspective);
-
-    return;
-  }
-  if(node.translation.size() == 3)
-  {
-    translation = glm::make_vec3(node.translation.data());
-  }
-  if(node.rotation.size() == 4)
-  {
-    rotation = glm::make_quat(node.rotation.data());
-  }
-  if(node.scale.size() == 3)
-  {
-    scale = glm::make_vec3(node.scale.data());
   }
 }
 
@@ -764,29 +992,37 @@ void UiSceneGraph::renderMaterial(int materialIndex)
     MaterialUI materialUI = {};
     materialUI.toUI(material);
     modif |= PE::ColorEdit4("Base Color", glm::value_ptr(materialUI.baseColorFactor));
+    modif |= renderTextureEditRow("Base Color", material.pbrMetallicRoughness.baseColorTexture, *m_model, m_textureNames);
+
     modif |= PE::DragScalar("Metallic", ImGuiDataType_Double, &material.pbrMetallicRoughness.metallicFactor, 0.01f,
                             &f64_zero, &f64_one);
     modif |= PE::DragScalar("Roughness", ImGuiDataType_Double, &material.pbrMetallicRoughness.roughnessFactor, 0.01f,
                             &f64_zero, &f64_one);
+    modif |= renderTextureEditRow("Metallic-Roughness", material.pbrMetallicRoughness.metallicRoughnessTexture, *m_model, m_textureNames);
     modif |= PE::ColorEdit3("Emissive", glm::value_ptr(materialUI.emissiveFactor));
+    modif |= renderTextureEditRow("Emissive", material.emissiveTexture, *m_model, m_textureNames);
+    modif |= renderTextureEditRow("Normal", material.normalTexture, *m_model, m_textureNames);
+    modif |= renderTextureEditRow("Occlusion", material.occlusionTexture, *m_model, m_textureNames);
     modif |= PE::DragScalar("Alpha Cutoff", ImGuiDataType_Double, &material.alphaCutoff, 0.01f, &f64_zero, &f64_one);
 
     if(PE::Combo("Alpha Mode", &materialUI.alphaMode, MaterialUI::alphaModes, IM_ARRAYSIZE(MaterialUI::alphaModes)))
     {
-      m_changes.set(eMaterialFlagDirty);
+      m_dirty.materials.insert(materialIndex);
+      m_dirty.materialInstanceFlagsChanged.insert(materialIndex);
       modif = true;
     }
 
     if(PE::Checkbox("Double Sided", &material.doubleSided))
     {
-      m_changes.set(eMaterialFlagDirty);
+      m_dirty.materials.insert(materialIndex);
+      m_dirty.materialInstanceFlagsChanged.insert(materialIndex);
       modif = true;
     }
 
     if(modif)
     {
       materialUI.fromUI(material);
-      m_changes.set(eMaterialDirty);
+      m_dirty.materials.insert(materialIndex);
       modif = false;
     }
 
@@ -809,14 +1045,14 @@ void UiSceneGraph::renderMaterial(int materialIndex)
   }
 }
 
-void UiSceneGraph::addButton(tinygltf::Material& material, const char* extensionName, std::function<void()> addCallback)
+void UiSceneGraph::addButton(const char* extensionName, std::function<void()> addCallback)
 {
   ImGui::TableNextColumn();
   ImGui::PushID(extensionName);
   if(ImGui::Button("Add"))
   {
     addCallback();
-    m_changes.set(eMaterialDirty);
+    m_dirty.materials.insert(m_selectedMaterialIndex);
   }
   ImGui::PopID();
 }
@@ -828,7 +1064,7 @@ void UiSceneGraph::removeButton(tinygltf::Material& material, const char* extens
   if(ImGui::Button("Remove"))
   {
     material.extensions.erase(extensionName);
-    m_changes.set(eMaterialDirty);
+    m_dirty.materials.insert(m_selectedMaterialIndex);
   }
   ImGui::PopID();
 }
@@ -847,17 +1083,20 @@ void UiSceneGraph::materialDiffuseTransmission(tinygltf::Material& material)
       bool                               modif               = false;
       modif |= PE::DragFloat("Factor", &diffuseTransmission.diffuseTransmissionFactor, 0.01f, 0.0f, 1.0f);
       modif |= PE::ColorEdit3("Color", glm::value_ptr(diffuseTransmission.diffuseTransmissionColor));
+      modif |= renderTextureEditRow("Diffuse Transmission", diffuseTransmission.diffuseTransmissionTexture, *m_model, m_textureNames);
+      modif |= renderTextureEditRow("Diffuse Transmission Color", diffuseTransmission.diffuseTransmissionColorTexture,
+                                    *m_model, m_textureNames);
       if(modif)
       {
         tinygltf::utils::setDiffuseTransmission(material, diffuseTransmission);
-        m_changes.set(eMaterialDirty);
+        m_dirty.materials.insert(m_selectedMaterialIndex);
       }
     }
     PE::treePop();
   }
   if(!hasMaterialDiffuseTransmission)
   {
-    addButton(material, KHR_MATERIALS_DIFFUSE_TRANSMISSION_EXTENSION_NAME,
+    addButton(KHR_MATERIALS_DIFFUSE_TRANSMISSION_EXTENSION_NAME,
               [&]() { tinygltf::utils::setDiffuseTransmission(material, {}); });
   }
 }
@@ -877,14 +1116,14 @@ void UiSceneGraph::materialDispersion(tinygltf::Material& material)
       if(modif)
       {
         tinygltf::utils::setDispersion(material, dispersion);
-        m_changes.set(eMaterialDirty);
+        m_dirty.materials.insert(m_selectedMaterialIndex);
       }
     }
     PE::treePop();
   }
   if(!hasMaterialDispersion)
   {
-    addButton(material, KHR_MATERIALS_DISPERSION_EXTENSION_NAME, [&]() { tinygltf::utils::setDispersion(material, {}); });
+    addButton(KHR_MATERIALS_DISPERSION_EXTENSION_NAME, [&]() { tinygltf::utils::setDispersion(material, {}); });
   }
 }
 
@@ -902,18 +1141,20 @@ void UiSceneGraph::materialIridescence(tinygltf::Material& material)
       modif |= PE::DragFloat("Iridescence Ior", &iridescence.iridescenceIor, 0.01f, 0.0f, 10.0f);
       modif |= PE::DragFloat("Thickness Min", &iridescence.iridescenceThicknessMinimum, 0.01f, 0.0f, 1000.0f, "%.3f nm");
       modif |= PE::DragFloat("Thickness Max", &iridescence.iridescenceThicknessMaximum, 0.01f, 0.0f, 1000.0f, "%.3f nm");
+      modif |= renderTextureEditRow("Iridescence", iridescence.iridescenceTexture, *m_model, m_textureNames);
+      modif |= renderTextureEditRow("Iridescence Thickness", iridescence.iridescenceThicknessTexture, *m_model, m_textureNames);
+
       if(modif)
       {
         tinygltf::utils::setIridescence(material, iridescence);
-        m_changes.set(eMaterialDirty);
+        m_dirty.materials.insert(m_selectedMaterialIndex);
       }
     }
     PE::treePop();
   }
   if(!hasMaterialIridescence)
   {
-    addButton(material, KHR_MATERIALS_IRIDESCENCE_EXTENSION_NAME,
-              [&]() { tinygltf::utils::setIridescence(material, {}); });
+    addButton(KHR_MATERIALS_IRIDESCENCE_EXTENSION_NAME, [&]() { tinygltf::utils::setIridescence(material, {}); });
   }
 }
 
@@ -929,17 +1170,19 @@ void UiSceneGraph::materialAnisotropy(tinygltf::Material& material)
       bool                     modif      = false;
       modif |= PE::DragFloat("Anisotropy Strength", &anisotropy.anisotropyStrength, 0.01f, 0.0f, 1.0f);
       modif |= PE::DragFloat("Anisotropy Rotation", &anisotropy.anisotropyRotation, 0.01f, -glm::pi<float>(), glm::pi<float>());
+      modif |= renderTextureEditRow("Anisotropy", anisotropy.anisotropyTexture, *m_model, m_textureNames);
+
       if(modif)
       {
         tinygltf::utils::setAnisotropy(material, anisotropy);
-        m_changes.set(eMaterialDirty);
+        m_dirty.materials.insert(m_selectedMaterialIndex);
       }
     }
     PE::treePop();
   }
   if(!hasMaterialAnisotropy)
   {
-    addButton(material, KHR_MATERIALS_ANISOTROPY_EXTENSION_NAME, [&]() { tinygltf::utils::setAnisotropy(material, {}); });
+    addButton(KHR_MATERIALS_ANISOTROPY_EXTENSION_NAME, [&]() { tinygltf::utils::setAnisotropy(material, {}); });
   }
 }
 
@@ -968,12 +1211,15 @@ void UiSceneGraph::materialVolume(tinygltf::Material& material)
                                logarithmicStep(volume.attenuationDistance), 0.0, FLT_MAX, "%.3f", ImGuiSliderFlags_None,
                                "Distance light travels before absorption (smaller = more opaque)");
       }
+      ImGui::BeginDisabled(true);  // Thickness texture is not used
+      modif |= renderTextureEditRow("Thickness", volume.thicknessTexture, *m_model, m_textureNames);
+      ImGui::EndDisabled();
       if(modif)
       {
         tinygltf::utils::setVolume(material, volume);
-        m_changes.set(eMaterialDirty);
+        m_dirty.materials.insert(m_selectedMaterialIndex);
         if(thicknessFactor == 0.0f && volume.thicknessFactor != 0.0f)
-          m_changes.set(eMaterialFlagDirty);
+          m_dirty.materialInstanceFlagsChanged.insert(m_selectedMaterialIndex);
       }
     }
 
@@ -981,7 +1227,7 @@ void UiSceneGraph::materialVolume(tinygltf::Material& material)
   }
   if(!hasMaterialVolume)
   {
-    addButton(material, KHR_MATERIALS_VOLUME_EXTENSION_NAME, [&]() { tinygltf::utils::setVolume(material, {}); });
+    addButton(KHR_MATERIALS_VOLUME_EXTENSION_NAME, [&]() { tinygltf::utils::setVolume(material, {}); });
   }
 }
 
@@ -1000,15 +1246,14 @@ void UiSceneGraph::materialVolumeScatter(tinygltf::Material& material)
       if(modif)
       {
         tinygltf::utils::setVolumeScatter(material, volumeScatter);
-        m_changes.set(eMaterialDirty);
+        m_dirty.materials.insert(m_selectedMaterialIndex);
       }
     }
     PE::treePop();
   }
   if(!hasMaterialVolumeScatter)
   {
-    addButton(material, KHR_MATERIALS_VOLUME_SCATTER_EXTENSION_NAME,
-              [&]() { tinygltf::utils::setVolumeScatter(material, {}); });
+    addButton(KHR_MATERIALS_VOLUME_SCATTER_EXTENSION_NAME, [&]() { tinygltf::utils::setVolumeScatter(material, {}); });
   }
 }
 
@@ -1024,17 +1269,20 @@ void UiSceneGraph::materialSpecular(tinygltf::Material& material)
       bool                   modif    = false;
       modif |= PE::ColorEdit3("Specular Color", glm::value_ptr(specular.specularColorFactor));
       modif |= PE::DragFloat("Specular Factor", &specular.specularFactor, 0.01f, 0.0f, 1.0f);
+      modif |= renderTextureEditRow("Specular", specular.specularTexture, *m_model, m_textureNames);
+      modif |= renderTextureEditRow("Specular Color", specular.specularColorTexture, *m_model, m_textureNames);
+
       if(modif)
       {
         tinygltf::utils::setSpecular(material, specular);
-        m_changes.set(eMaterialDirty);
+        m_dirty.materials.insert(m_selectedMaterialIndex);
       }
     }
     PE::treePop();
   }
   if(!hasMaterialSpecular)
   {
-    addButton(material, KHR_MATERIALS_SPECULAR_EXTENSION_NAME, [&]() { tinygltf::utils::setSpecular(material, {}); });
+    addButton(KHR_MATERIALS_SPECULAR_EXTENSION_NAME, [&]() { tinygltf::utils::setSpecular(material, {}); });
   }
 }
 
@@ -1052,14 +1300,14 @@ void UiSceneGraph::materialIor(tinygltf::Material& material)
       if(modif)
       {
         tinygltf::utils::setIor(material, ior);
-        m_changes.set(eMaterialDirty);
+        m_dirty.materials.insert(m_selectedMaterialIndex);
       }
     }
     PE::treePop();
   }
   if(!hasMaterialIor)
   {
-    addButton(material, KHR_MATERIALS_IOR_EXTENSION_NAME, [&]() { tinygltf::utils::setIor(material, {}); });
+    addButton(KHR_MATERIALS_IOR_EXTENSION_NAME, [&]() { tinygltf::utils::setIor(material, {}); });
   }
 }
 
@@ -1075,20 +1323,20 @@ void UiSceneGraph::materialTransmission(tinygltf::Material& material)
       bool                       modif              = false;
       float                      transmissionFactor = transmission.factor;
       modif |= PE::DragFloat("Transmission Factor", &transmission.factor, 0.01f, 0.0f, 1.0f);
+      modif |= renderTextureEditRow("Transmission", transmission.texture, *m_model, m_textureNames);
       if(modif)
       {
         tinygltf::utils::setTransmission(material, transmission);
-        m_changes.set(eMaterialDirty);
+        m_dirty.materials.insert(m_selectedMaterialIndex);
         if(transmissionFactor == 0.0f && transmission.factor != 0.0f)
-          m_changes.set(eMaterialFlagDirty);
+          m_dirty.materialInstanceFlagsChanged.insert(m_selectedMaterialIndex);
       }
     }
     PE::treePop();
   }
   if(!hasMaterialTransmission)
   {
-    addButton(material, KHR_MATERIALS_TRANSMISSION_EXTENSION_NAME,
-              [&]() { tinygltf::utils::setTransmission(material, {}); });
+    addButton(KHR_MATERIALS_TRANSMISSION_EXTENSION_NAME, [&]() { tinygltf::utils::setTransmission(material, {}); });
   }
 }
 
@@ -1104,17 +1352,20 @@ void UiSceneGraph::materialSheen(tinygltf::Material& material)
       bool                modif = false;
       modif |= PE::ColorEdit3("Sheen Color", glm::value_ptr(sheen.sheenColorFactor));
       modif |= PE::DragFloat("Sheen Roughness", &sheen.sheenRoughnessFactor, 0.01f, 0.0f, 1.0f);
+      modif |= renderTextureEditRow("Sheen Color", sheen.sheenColorTexture, *m_model, m_textureNames);
+      modif |= renderTextureEditRow("Sheen Roughness", sheen.sheenRoughnessTexture, *m_model, m_textureNames);
+
       if(modif)
       {
         tinygltf::utils::setSheen(material, sheen);
-        m_changes.set(eMaterialDirty);
+        m_dirty.materials.insert(m_selectedMaterialIndex);
       }
     }
     PE::treePop();
   }
   if(!hasMaterialSheen)
   {
-    addButton(material, KHR_MATERIALS_SHEEN_EXTENSION_NAME, [&]() { tinygltf::utils::setSheen(material, {}); });
+    addButton(KHR_MATERIALS_SHEEN_EXTENSION_NAME, [&]() { tinygltf::utils::setSheen(material, {}); });
   }
 }
 
@@ -1132,7 +1383,7 @@ void UiSceneGraph::materialUnlit(tinygltf::Material& material)
   }
   if(!hasMaterialUnlit)
   {
-    addButton(material, KHR_MATERIALS_UNLIT_EXTENSION_NAME, [&]() { tinygltf::utils::setUnlit(material, {}); });
+    addButton(KHR_MATERIALS_UNLIT_EXTENSION_NAME, [&]() { tinygltf::utils::setUnlit(material, {}); });
   }
 }
 
@@ -1148,17 +1399,21 @@ void UiSceneGraph::materialClearcoat(tinygltf::Material& material)
       bool                    modif     = false;
       modif |= PE::DragFloat("Clearcoat Factor", &clearcoat.factor, 0.01f, 0.0f, 1.0f);
       modif |= PE::DragFloat("Clearcoat Roughness", &clearcoat.roughnessFactor, 0.01f, 0.0f, 1.0f);
+      modif |= renderTextureEditRow("Clearcoat", clearcoat.texture, *m_model, m_textureNames);
+      modif |= renderTextureEditRow("Clearcoat Roughness", clearcoat.roughnessTexture, *m_model, m_textureNames);
+      modif |= renderTextureEditRow("Clearcoat Normal", clearcoat.normalTexture, *m_model, m_textureNames);
+
       if(modif)
       {
         tinygltf::utils::setClearcoat(material, clearcoat);
-        m_changes.set(eMaterialDirty);
+        m_dirty.materials.insert(m_selectedMaterialIndex);
       }
     }
     PE::treePop();
   }
   if(!hasMaterialClearcoat)
   {
-    addButton(material, KHR_MATERIALS_CLEARCOAT_EXTENSION_NAME, [&]() { tinygltf::utils::setClearcoat(material, {}); });
+    addButton(KHR_MATERIALS_CLEARCOAT_EXTENSION_NAME, [&]() { tinygltf::utils::setClearcoat(material, {}); });
   }
 }
 
@@ -1174,14 +1429,14 @@ void UiSceneGraph::materialEmissiveStrength(tinygltf::Material& material)
       if(PE::DragFloat("Emissive Strength", &strenght.emissiveStrength, logarithmicStep(strenght.emissiveStrength), 0.0f, FLT_MAX))
       {
         tinygltf::utils::setEmissiveStrength(material, strenght);
-        m_changes.set(eMaterialDirty);
+        m_dirty.materials.insert(m_selectedMaterialIndex);
       }
     }
     PE::treePop();
   }
   if(!hasEmissiveStrength)
   {
-    addButton(material, KHR_MATERIALS_EMISSIVE_STRENGTH_EXTENSION_NAME,
+    addButton(KHR_MATERIALS_EMISSIVE_STRENGTH_EXTENSION_NAME,
               [&]() { tinygltf::utils::setEmissiveStrength(material, {}); });
   }
 }
@@ -1365,7 +1620,7 @@ void UiSceneGraph::renderLightDetails(int lightIndex)
 
     if(modif)
     {
-      m_changes.set(eLightDirty);
+      m_dirty.lights.insert(lightIndex);
     }
 
     PE::end();
@@ -1427,7 +1682,7 @@ void UiSceneGraph::renderCameraDetails(int                              cameraIn
 
     if(modif)
     {
-      m_changes.set(eCameraDirty);
+      m_dirty.cameras.insert(cameraIndex);
     }
 
     // Add buttons to sync between GLTF camera and current view
@@ -1440,7 +1695,7 @@ void UiSceneGraph::renderCameraDetails(int                              cameraIn
       {
         applyCameraCallback(cameraIndex);
       }
-      m_changes.set(eCameraApplyToView);
+      m_dirty.cameraApplyToView = true;
     }
 
     ImGui::SameLine();
@@ -1450,7 +1705,7 @@ void UiSceneGraph::renderCameraDetails(int                              cameraIn
       {
         setCameraFromViewCallback(cameraIndex);
       }
-      m_changes.set(eCameraDirty);
+      m_dirty.cameras.insert(cameraIndex);
     }
 
     PE::end();
@@ -1501,7 +1756,7 @@ void UiSceneGraph::renderCameraDetailsWithEvents(int cameraIndex)
 
     if(modif)
     {
-      m_changes.set(eCameraDirty);
+      m_dirty.cameras.insert(cameraIndex);
     }
 
     // Add buttons to sync between GLTF camera and current view
@@ -1514,7 +1769,7 @@ void UiSceneGraph::renderCameraDetailsWithEvents(int cameraIndex)
       {
         m_eventCallback({EventType::CameraApply, cameraIndex, -1});
       }
-      m_changes.set(eCameraApplyToView);
+      m_dirty.cameraApplyToView = true;
     }
 
     ImGui::SameLine();
@@ -1524,7 +1779,7 @@ void UiSceneGraph::renderCameraDetailsWithEvents(int cameraIndex)
       {
         m_eventCallback({EventType::CameraSetFromView, cameraIndex, -1});
       }
-      m_changes.set(eCameraDirty);
+      m_dirty.cameras.insert(cameraIndex);
     }
 
     PE::end();

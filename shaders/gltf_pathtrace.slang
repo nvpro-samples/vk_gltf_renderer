@@ -217,7 +217,7 @@ LightingTechniqueProbabilities getDirectLightingTechniqueProbabilities()
   // Initial selection probabilities (unnormalized)
   float lightWeight = (pushConst.gltfScene.numLights > 0) ? 0.5f : 0.0f;
   float envWeight =
-      ((pushConst.frameInfo.environmentType == EnvSystem::eSky) || pushConst.frameInfo.envIntensity.x > 0.0f) ? 0.5f : 0.0f;
+      ((pushConst.frameInfo->environmentType == EnvSystem::eSky) || pushConst.frameInfo->envIntensity.x > 0.0f) ? 0.5f : 0.0f;
 
   // Normalize weights so they sum to 1.0
   float totalWeight = lightWeight + envWeight;
@@ -308,8 +308,8 @@ void sampleLights(in float3 pos, float3 normal, in float3 worldRayDirection, ino
         float3 rand_val = float3(rand(seed), rand(seed), rand(seed));
         float4 radiance_pdf = environmentSample(texturesHdr[HDR_IMAGE_INDEX], envSamplingData, rand_val, directLight.direction);
         envPdf                = radiance_pdf.w;
-        radiance              = radiance_pdf.xyz * pushConst.frameInfo.envIntensity / (envPdf * envWeight);
-        directLight.direction = rotate(directLight.direction, float3(0, 1, 0), pushConst.frameInfo.envRotation);
+        radiance              = radiance_pdf.xyz * pushConst.frameInfo->envIntensity / (envPdf * envWeight);
+        directLight.direction = rotate(directLight.direction, float3(0, 1, 0), pushConst.frameInfo->envRotation);
       }
       else
       {
@@ -356,10 +356,10 @@ void sampleEnvironment(float3 direction, SceneFrameInfo* frameInfo, out float3 e
   }
   else
   {
-    float3 dir = rotate(direction, float3(0, 1, 0), -frameInfo.envRotation);
+    float3 dir = rotate(direction, float3(0, 1, 0), -frameInfo->envRotation);
     float2 uv  = getSphericalUv(dir);
     float4 env = texturesHdr[HDR_IMAGE_INDEX].SampleLevel(uv, 0);
-    envColor   = env.rgb * frameInfo.envIntensity;
+    envColor   = env.rgb * frameInfo->envIntensity;
     envPdf     = env.w;
   }
 }
@@ -433,6 +433,11 @@ bool handleShadowCatcher(IRaytracer      raytracer,
 
   // Add direct contribution: environment modulated by shadow (darker in shadow)
   radiance += envColor * shadowFactor;
+
+  // Non-physical control: subtract a fraction of env in shadowed areas.
+  // darkenAmount is precomputed on CPU from slider [0..1] with exponential curve.
+  // Subtraction can go negative to darken accumulated radiance.
+  radiance -= envColor * (1.0f - shadowFactor) * frameInfo->shadowCatcherDarkenAmount;
 
   // Step 4: Handle shadowed areas - sample BSDF for indirect lighting
   // This bounce back the ray into the scene to gather indirect lighting
@@ -717,12 +722,12 @@ void selectObject(float2 samplePos, float2 imageSize)
 //-----------------------------------------------------------------------
 bool checkInfinitePlaneIntersection(RayDesc ray, inout HitPayload payload, inout HitState hit, SceneFrameInfo* frameInfo)
 {
-  if(frameInfo.useInfinitePlane == 0)
+  if(frameInfo->useInfinitePlane == 0)
     return false;
 
   // Plane definition
-  float3 normal      = float3(0, 1, 0);                  // Y-up plane normal
-  float  planeHeight = frameInfo.infinitePlaneDistance;  // Height of plane from origin (0, planeHeight, 0)
+  float3 normal      = float3(0, 1, 0);                   // Y-up plane normal
+  float  planeHeight = frameInfo->infinitePlaneDistance;  // Height of plane from origin (0, planeHeight, 0)
 
   // Only report intersection if camera is above the plane
   if(ray.Origin.y <= planeHeight)
@@ -833,7 +838,7 @@ SampleResult pathTrace(IRaytracer raytracer, RayDesc ray, inout uint seed)
           }
           else if(pushConst.frameInfo->environmentType == EnvSystem::eHdr && pushConst.frameInfo->envBlur > 0)
           {
-            float3 dir = rotate(ray.Direction, float3(0, 1, 0), -frameInfo.envRotation);
+            float3 dir = rotate(ray.Direction, float3(0, 1, 0), -frameInfo->envRotation);
             float2 uv  = getSphericalUv(dir);  // See sampling.glsl
             radiance = smoothHDRBlur(texturesHdr[HDR_IMAGE_INDEX], uv, frameInfo->envBlur).xyz * frameInfo->envIntensity;
             break;
@@ -860,12 +865,12 @@ SampleResult pathTrace(IRaytracer raytracer, RayDesc ray, inout uint seed)
       if(hitInfinitePlane)
       {
         // Evaluate the material at the hit point
-        pbrMat   = defaultPbrMaterial(frameInfo.infinitePlaneBaseColor, frameInfo.infinitePlaneMetallic,
-                                      frameInfo.infinitePlaneRoughness, hit.nrm, hit.nrm);
+        pbrMat   = defaultPbrMaterial(frameInfo->infinitePlaneBaseColor, frameInfo->infinitePlaneMetallic,
+                                      frameInfo->infinitePlaneRoughness, hit.nrm, hit.nrm);
         material = defaultGltfMaterial();
 
         // Shadow catcher: invisible plane that shows only shadows for compositing
-        if(frameInfo.useInfinitePlane == 2)
+        if(frameInfo->useInfinitePlane == 2)
         {
           bool continuePath = handleShadowCatcher(raytracer, hit, pbrMat, ray, radiance, throughput, lastSamplePdf, seed, frameInfo);
           if(!continuePath)
@@ -914,9 +919,9 @@ SampleResult pathTrace(IRaytracer raytracer, RayDesc ray, inout uint seed)
       pbrMat.roughness = maxRoughness;
 
       // Debugging, single frame
-      if(frameInfo.debugMethod != DebugMethod::eNone && firstRay)
+      if(frameInfo->debugMethod != DebugMethod::eNone && firstRay)
       {
-        radiance.xyz = debugValue(pbrMat, hit, frameInfo.debugMethod);
+        radiance.xyz = debugValue(pbrMat, hit, frameInfo->debugMethod);
         break;
       }
 
@@ -1156,14 +1161,14 @@ void processPixel(IRaytracer raytracer, float2 samplePos, float2 imageSize)
   }
 
   // Sampling n times the pixel
-  SampleResult sampleResult = samplePixel(raytracer, seed, samplePos, subpixelJitter, imageSize, pushConst.frameInfo.projInv,
-                                          pushConst.frameInfo.viewInv, pushConst.focalDistance, pushConst.aperture);
+  SampleResult sampleResult = samplePixel(raytracer, seed, samplePos, subpixelJitter, imageSize, pushConst.frameInfo->projInv,
+                                          pushConst.frameInfo->viewInv, pushConst.focalDistance, pushConst.aperture);
   float4 pixelColor = sampleResult.radiance;
   for(int s = 1; s < pushConst.numSamples; s++)
   {
     subpixelJitter = float2(rand(seed), rand(seed));
-    sampleResult   = samplePixel(raytracer, seed, samplePos, subpixelJitter, imageSize, pushConst.frameInfo.projInv,
-                                 pushConst.frameInfo.viewInv, pushConst.focalDistance, pushConst.aperture);
+    sampleResult   = samplePixel(raytracer, seed, samplePos, subpixelJitter, imageSize, pushConst.frameInfo->projInv,
+                                 pushConst.frameInfo->viewInv, pushConst.focalDistance, pushConst.aperture);
     pixelColor += sampleResult.radiance;
   }
   pixelColor /= pushConst.numSamples;
@@ -1188,12 +1193,12 @@ void processPixel(IRaytracer raytracer, float2 samplePos, float2 imageSize)
   if(pushConst.useDlss == 1)
   {
     // Transform world position to clip space and calculate depth
-    float4 posScreen = mul(float4(sampleResult.dlssOutput.hitPosition, 1.0), pushConst.frameInfo.viewProjMatrix);
+    float4 posScreen = mul(float4(sampleResult.dlssOutput.hitPosition, 1.0), pushConst.frameInfo->viewProjMatrix);
     float  viewZ     = posScreen.z / posScreen.w;  // Depth in NDC space
 
     // Calculate motion vectors using the hit position (works for both geometry and environment)
-    float2 motionVec = calculateMotionVector(sampleResult.dlssOutput.hitPosition, pushConst.frameInfo.prevMVP,
-                                             pushConst.frameInfo.viewProjMatrix, imageSize);
+    float2 motionVec = calculateMotionVector(sampleResult.dlssOutput.hitPosition, pushConst.frameInfo->prevMVP,
+                                             pushConst.frameInfo->viewProjMatrix, imageSize);
     outImages[int(OutputImage::eDlssDepth)][int2(samplePos)]           = float4(abs(viewZ));
     outImages[int(OutputImage::eDlssMotion)][int2(samplePos)]          = float4(motionVec, 0, 0);
     outImages[int(OutputImage::eDlssNormalRoughness)][int2(samplePos)] = sampleResult.dlssOutput.normalRoughness;
@@ -1206,7 +1211,7 @@ void processPixel(IRaytracer raytracer, float2 samplePos, float2 imageSize)
     // Transform normal from world space to camera space for OptiX denoiser
     // OptiX requires normals in camera space (right-handed, -Z forward, Y up, X right)
     float3 worldNormal   = sampleResult.dlssOutput.normalRoughness.xyz;
-    float3 cameraNormal  = normalize(mul(float3x3(pushConst.frameInfo.viewMatrix), worldNormal));
+    float3 cameraNormal  = normalize(mul(float3x3(pushConst.frameInfo->viewMatrix), worldNormal));
     uint   normalEncoded = compressUnitVec(cameraNormal);
     outImages[int(OutputImage::eOptixAlbedoNormal)][int2(samplePos)] =
         float4(sampleResult.dlssOutput.albedo.xyz, asfloat(normalEncoded));
