@@ -99,7 +99,7 @@ Example of headless rendering:
 
 ### Draco Compression
 
-To enable Draco mesh compression, you need to enable the option CMake. In the GUI interface, you will see the option `USE_DRACO`. If you are using the command line, you can add `-DUSE_DRACO=ON` to the cmake command. This will download the Draco library and it will be included in the project.
+To enable Draco mesh compression, you need to enable the option CMake. In the GUI interface, you will see the option `USE_DRACO`. If you are using the command line, you can add `-DUSE_DRACO=ON` to the cmake command. This will download the Draco library and it will be included in the project. Similarly, if you want to disable it, you can set `-DUSE_DRACO=OFF`.
 
 ### AI-Accelerated Denoisers
 

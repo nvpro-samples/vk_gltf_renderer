@@ -11,7 +11,6 @@ option(USE_DEFAULT_SCENE "Using a default scene at startup" ON)
 list(APPEND CMAKE_MODULE_PATH "${CMAKE_CURRENT_SOURCE_DIR}/cmake")
 find_package(NvproCore2 REQUIRED)
 
-
 # Get the name of the current directory
 get_filename_component(PROJECT_NAME ${CMAKE_CURRENT_SOURCE_DIR} NAME)
 project(${PROJECT_NAME} VERSION 2.0 LANGUAGES C CXX)
@@ -151,7 +150,7 @@ endif()
 
 #####################################################################################
 # Adding DRACO if selected
-option(USE_DRACO "Use Draco for compression" OFF)
+option(USE_DRACO "Use Draco for compression" ON)
 if(USE_DRACO)
   include(cmake/draco.cmake)
   download_draco()
@@ -214,3 +213,9 @@ endif()
 
 # Make Visual Studio use this project as the startup project
 set_property(DIRECTORY ${CMAKE_CURRENT_SOURCE_DIR} PROPERTY VS_STARTUP_PROJECT ${PROJECT_NAME})
+
+# Custom target to see files in Solution
+file(GLOB CMAKE_FILES CMakeLists.txt cmake/*.cmake)
+target_sources(${PROJECT_NAME} PRIVATE ${CMAKE_FILES})
+source_group("cmake" FILES ${CMAKE_FILES})
+
