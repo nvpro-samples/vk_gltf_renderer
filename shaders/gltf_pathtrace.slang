@@ -183,15 +183,23 @@ float2 sampleGaussian(float2 u)
 // Get a ray from a sample position and offset
 // Return the ray description
 //-----------------------------------------------------------------------
-RayDesc getRay(float2 samplePos, float2 offset, float2 imageSize, float4x4 projMatrixI, float4x4 viewMatrixI)
+RayDesc getRay(float2 samplePos, float2 offset, float2 imageSize, float4x4 projMatrixI, float4x4 viewMatrixI, bool isOrthographic)
 {
   const float2 clipCoords = (samplePos + offset) / imageSize * 2.0 - 1.0;
   float4       viewCoords = mul(float4(clipCoords, -1.0, 1.0), projMatrixI);
   viewCoords /= viewCoords.w;
 
   RayDesc ray;
-  ray.Origin    = viewMatrixI[3].xyz;
-  ray.Direction = normalize(mul(viewCoords, viewMatrixI).xyz - ray.Origin);
+  if(isOrthographic)
+  {
+    ray.Origin    = mul(viewCoords, viewMatrixI).xyz;
+    ray.Direction = normalize(mul(float4(0, 0, -1, 0), viewMatrixI).xyz);
+  }
+  else
+  {
+    ray.Origin    = viewMatrixI[3].xyz;
+    ray.Direction = normalize(mul(viewCoords, viewMatrixI).xyz - ray.Origin);
+  }
   ray.TMin      = 0.0;
   ray.TMax      = INFINITE;
   return ray;
@@ -685,16 +693,9 @@ void selectObject(float2 samplePos, float2 imageSize)
 {
   // Subpixel jitter: send the ray through a different position inside the pixel each time, to provide antialiasing.
   const float2 subpixel_jitter = float2(0.5f, 0.5f);
-  const float2 clipCoords      = (samplePos + subpixel_jitter) / imageSize * 2.0 - 1.0;
-  float4       viewCoords      = mul(float4(clipCoords, -1.0, 1.0), pushConst.frameInfo->projInv);
-  viewCoords /= viewCoords.w;
-
-  RayDesc ray;
-  ray.Origin =
-      float3(pushConst.frameInfo->viewInv[3].x, pushConst.frameInfo->viewInv[3].y, pushConst.frameInfo->viewInv[3].z);
-  ray.Direction = normalize(mul(viewCoords, pushConst.frameInfo->viewInv).xyz - ray.Origin);
-  ray.TMin      = 0.0;
-  ray.TMax      = INFINITE;
+  const bool isOrthographic = (pushConst.frameInfo->isOrthographic != 0);
+  RayDesc    ray            = getRay(samplePos, subpixel_jitter, imageSize, pushConst.frameInfo->projInv,
+                                     pushConst.frameInfo->viewInv, isOrthographic);
 
   RayQuery q;
   q.TraceRayInline(topLevelAS, RAY_FLAG_NONE, 0xFF, ray);
@@ -1090,20 +1091,24 @@ SampleResult samplePixel(IRaytracer raytracer,
                          float      focalDist,
                          float      aperture)
 {
-  RayDesc ray = getRay(samplePos, subpixelJitter, imageSize, projMatrixI, viewMatrixI);
+  const bool isOrthographic = (pushConst.frameInfo->isOrthographic != 0);
+  RayDesc    ray            = getRay(samplePos, subpixelJitter, imageSize, projMatrixI, viewMatrixI, isOrthographic);
 
-  // Depth-of-Field
-  float3 focalPoint        = focalDist * ray.Direction;
-  float  cam_r1            = rand(seed) * M_TWO_PI;
-  float  cam_r2            = rand(seed) * aperture;
-  float4 cam_right         = mul(viewMatrixI, float4(1, 0, 0, 0));
-  float4 cam_up            = mul(viewMatrixI, float4(0, 1, 0, 0));
-  float3 randomAperturePos = (cos(cam_r1) * cam_right.xyz + sin(cam_r1) * cam_up.xyz) * sqrt(cam_r2);
-  float3 finalRayDir       = normalize(focalPoint - randomAperturePos);
+  // Depth-of-Field (disabled for orthographic cameras)
+  if(!isOrthographic)
+  {
+    float3 focalPoint        = focalDist * ray.Direction;
+    float  cam_r1            = rand(seed) * M_TWO_PI;
+    float  cam_r2            = rand(seed) * aperture;
+    float4 cam_right         = mul(viewMatrixI, float4(1, 0, 0, 0));
+    float4 cam_up            = mul(viewMatrixI, float4(0, 1, 0, 0));
+    float3 randomAperturePos = (cos(cam_r1) * cam_right.xyz + sin(cam_r1) * cam_up.xyz) * sqrt(cam_r2);
+    float3 finalRayDir       = normalize(focalPoint - randomAperturePos);
 
-  // Set the new ray origin and direction with depth-of-field
-  ray.Origin += randomAperturePos;
-  ray.Direction = finalRayDir;
+    // Set the new ray origin and direction with depth-of-field
+    ray.Origin += randomAperturePos;
+    ray.Direction = finalRayDir;
+  }
 
   SampleResult sampleResult = pathTrace(raytracer, ray, seed);
 

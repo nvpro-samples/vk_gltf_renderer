@@ -81,7 +81,8 @@ static void buildTextureItems(const tinygltf::Model& model, std::vector<std::str
   }
 }
 
-
+//--------------------------------------------------------------------------------------------------
+// Initialize the UI Scene Graph with a new model
 void UiSceneGraph::setModel(tinygltf::Model* model)
 {
   m_model                   = model;
@@ -128,6 +129,8 @@ void UiSceneGraph::render(bool* showSceneGraph, bool* showProperties)
   renderDetails(showProperties);
 }
 
+//--------------------------------------------------------------------------------------------------
+// Render the scene graph
 void UiSceneGraph::renderSceneGraph(bool* showSceneGraph)
 {
   if(showSceneGraph && !*showSceneGraph)
@@ -174,6 +177,7 @@ void UiSceneGraph::renderSceneGraph(bool* showSceneGraph)
           {
             ImGui::OpenPopup("scene_transform_popup");
           }
+          // Show the scene transform popup
           ImGui::SetNextWindowSizeConstraints(ImVec2(260.0f, 0.0f), ImVec2(600.0f, 600.0f));
           if(ImGui::BeginPopup("scene_transform_popup"))
           {
@@ -208,6 +212,9 @@ void UiSceneGraph::renderSceneGraph(bool* showSceneGraph)
             }
             ImGui::EndPopup();
           }
+
+
+          // Render the nodes in the scene
           for(int node : scene.nodes)
           {
             renderNode(node);
@@ -553,6 +560,21 @@ void UiSceneGraph::renderNode(int nodeIndex)
   const std::string popupId = "node_xmp_" + std::to_string(nodeIndex);
   ui_xmp::renderInfoButton(m_model, node.extensions, popupId.c_str());
 
+  // Show icons of the node's mesh, light, and camera
+  if(node.mesh >= 0)
+  {
+    ImGui::Text("%s", ICON_MS_SHAPES);
+  }
+  if(node.light >= 0)
+  {
+    ImGui::Text("%s", ICON_MS_LIGHTBULB);
+  }
+  if(node.camera >= 0)
+  {
+    ImGui::Text("%s", ICON_MS_PHOTO_CAMERA);
+  }
+
+
   // Render the mesh, children, light, and camera if the node is open
   if(nodeOpen)
   {
@@ -681,7 +703,7 @@ void UiSceneGraph::renderPrimitive(const tinygltf::Primitive& primitive, int pri
   ImGui::TableNextColumn();
   if(materialID >= 0)
   {
-    ImGui::Text("%s", ICON_MS_SHAPES);
+    ImGui::Text("%s", ICON_MS_BRUSH);
   }
 }
 
@@ -720,6 +742,7 @@ void UiSceneGraph::renderCamera(int cameraIndex)
   // Get the node index that contains this camera
   int nodeIndex = getNodeForCamera(cameraIndex);
 
+  ImGui::PushID(cameraIndex);
   if(ImGui::Selectable(camera.name.c_str(), (m_selectedIndex == nodeIndex) && (m_selectType == eCamera)))
   {
     if(nodeIndex >= 0)
@@ -731,6 +754,7 @@ void UiSceneGraph::renderCamera(int cameraIndex)
       m_selectedNodeForMaterial = -1;
     }
   }
+  ImGui::PopID();
   ImGui::TableNextColumn();
   ImGui::Text("Camera %d", cameraIndex);
   ImGui::TableNextColumn();

@@ -1,5 +1,5 @@
 /*
- * Copyright (c) 2023-2025, NVIDIA CORPORATION.  All rights reserved.
+ * Copyright (c) 2023-2026, NVIDIA CORPORATION.  All rights reserved.
  *
  * Licensed under the Apache License, Version 2.0 (the "License");
  * you may not use this file except in compliance with the License.
@@ -13,7 +13,7 @@
  * See the License for the specific language governing permissions and
  * limitations under the License.
  *
- * SPDX-FileCopyrightText: Copyright (c) 2023-2025, NVIDIA CORPORATION.
+ * SPDX-FileCopyrightText: Copyright (c) 2023-2026, NVIDIA CORPORATION.
  * SPDX-License-Identifier: Apache-2.0
  */
 
@@ -168,7 +168,15 @@ PixelOutput fragmentMain(VertexOutput input, uint primitiveID: SV_PrimitiveID, f
 
   float3 cameraPos =
       float3(pushConst.frameInfo.viewInv[3].x, pushConst.frameInfo.viewInv[3].y, pushConst.frameInfo.viewInv[3].z);
-  float3 worldRayDirection = normalize(input.worldPos - cameraPos);
+  float3 worldRayDirection;
+  if(pushConst.frameInfo.isOrthographic != 0)
+  {
+    worldRayDirection = normalize(mul(float4(0, 0, -1, 0), pushConst.frameInfo.viewInv).xyz);
+  }
+  else
+  {
+    worldRayDirection = normalize(input.worldPos - cameraPos);
+  }
 
   HitState hit = getHitState(renderPrimitive, baryWeights, float4x3(renderNode.worldToObject),
                              float4x3(renderNode.objectToWorld), primitiveID, worldRayDirection);

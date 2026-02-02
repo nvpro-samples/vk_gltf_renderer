@@ -108,6 +108,7 @@ struct SceneFrameInfo
   float4x4    viewInv;                      // Inverse view matrix
   float4x4    viewProjMatrix;               // View-projection matrix (P*V)
   float4x4    prevMVP;                      // Previous view-projection matrix
+  int         isOrthographic = 0;           // 1 if orthographic projection
   float       envRotation;                  // Environment rotation (used for the HDR)
   float       envBlur;                      // Level of blur for the environment map (0.0: no blur, 1.0: full blur)
   float       envIntensity = 1.f;           // Environment intensity

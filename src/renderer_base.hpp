@@ -1,5 +1,5 @@
 /*
- * Copyright (c) 2023-2025, NVIDIA CORPORATION.  All rights reserved.
+ * Copyright (c) 2023-2026, NVIDIA CORPORATION.  All rights reserved.
  *
  * Licensed under the Apache License, Version 2.0 (the "License");
  * you may not use this file except in compliance with the License.
@@ -13,7 +13,7 @@
  * See the License for the specific language governing permissions and
  * limitations under the License.
  *
- * SPDX-FileCopyrightText: Copyright (c) 2023-2025, NVIDIA CORPORATION.
+ * SPDX-FileCopyrightText: Copyright (c) 2023-2026, NVIDIA CORPORATION.
  * SPDX-License-Identifier: Apache-2.0
  */
 
@@ -33,9 +33,11 @@ public:
   virtual void onAttach(Resources& resources, nvvk::ProfilerGpuTimer* profiler) { m_profiler = profiler; }
   virtual void onDetach(Resources& resources) {};
   virtual void onResize(VkCommandBuffer cmd, const VkExtent2D& size, Resources& resources) {};
-  virtual bool onUIRender(Resources&) { return false; }
   virtual void onRender(VkCommandBuffer cmd, Resources& resources) {};
   virtual void onUIMenu() {};
+
+  [[nodiscard]] virtual bool onUIRender(Resources&) { return false; }
+
   //---
   virtual void compileShader(Resources& resources, bool fromFile = true) {};
   virtual void createPipeline(Resources& resources) {};

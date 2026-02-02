@@ -19,6 +19,7 @@
 
 #include <filesystem>
 #include <fmt/format.h>
+#include <cmath>
 #include <GLFW/glfw3.h>
 #include <glm/gtc/type_ptr.hpp>
 #include <imgui.h>
@@ -68,8 +69,9 @@ void GltfRenderer::mouseClickedInViewport()
 
     m_rayPicker.run(cmd, {.modelViewInv   = glm::inverse(m_cameraManip->getViewMatrix()),
                           .perspectiveInv = glm::inverse(m_cameraManip->getPerspectiveMatrix()),
-                          .pickPos        = {localMousePos.x, localMousePos.y},
-                          .tlas           = m_resources.sceneRtx.tlas()});
+                          .isOrthographic = (m_cameraManip->getProjectionType() == nvutils::CameraManipulator::Orthographic) ? 1 : 0,
+                          .pickPos = {localMousePos.x, localMousePos.y},
+                          .tlas    = m_resources.sceneRtx.tlas()});
     m_app->submitAndWaitTempCmdBuffer(cmd);
     nvvk::RayPicker::PickResult pickResult = m_rayPicker.getResult();
 
@@ -801,14 +803,21 @@ void GltfRenderer::applyGltfCamera(int cameraIndex)
 
   if(camera.type == nvvkgltf::RenderCamera::CameraType::ePerspective)
   {
-    float fov = static_cast<float>(glm::degrees(camera.yfov));
-    m_cameraManip->setCamera({camera.eye, camera.center, camera.up, fov});
+    float                              fov = static_cast<float>(glm::degrees(camera.yfov));
+    nvutils::CameraManipulator::Camera cam{camera.eye, camera.center, camera.up, fov};
+    cam.projectionType = nvutils::CameraManipulator::Perspective;
+    m_cameraManip->setCamera(cam);
     m_cameraManip->setClipPlanes({static_cast<float>(camera.znear), static_cast<float>(camera.zfar)});
   }
   else if(camera.type == nvvkgltf::RenderCamera::CameraType::eOrthographic)
   {
-    float fov = 45.0f;
-    m_cameraManip->setCamera({camera.eye, camera.center, camera.up, fov});
+    float                              fov = 45.0f;
+    nvutils::CameraManipulator::Camera cam{camera.eye, camera.center, camera.up, fov};
+    cam.projectionType = nvutils::CameraManipulator::Orthographic;
+    cam.orthMag.x      = static_cast<float>(camera.xmag);
+    cam.orthMag.y      = static_cast<float>(camera.ymag);
+    m_cameraManip->setCamera(cam);
+    m_cameraManip->adjustOrthographicAspect();
     m_cameraManip->setClipPlanes({static_cast<float>(camera.znear), static_cast<float>(camera.zfar)});
   }
 
@@ -842,21 +851,24 @@ void GltfRenderer::setGltfCameraFromView(int cameraIndex)
   glm::vec2                          clipPlanes  = m_cameraManip->getClipPlanes();
 
   // Update the camera parameters
-  if(camera.type == "perspective")
+  if(cameraState.projectionType == nvutils::CameraManipulator::Orthographic)
   {
+    camera.type                         = "orthographic";
+    tinygltf::OrthographicCamera& ortho = camera.orthographic;
+    ortho.xmag                          = static_cast<double>(cameraState.orthMag.x);
+    ortho.ymag                          = static_cast<double>(cameraState.orthMag.y);
+    ortho.znear                         = static_cast<double>(clipPlanes.x);
+    ortho.zfar                          = static_cast<double>(clipPlanes.y);
+  }
+  else
+  {
+    camera.type                        = "perspective";
     tinygltf::PerspectiveCamera& persp = camera.perspective;
     // Convert FOV from degrees (manipulator) to radians (GLTF)
     persp.yfov  = glm::radians(cameraState.fov);
     persp.znear = static_cast<double>(clipPlanes.x);
     persp.zfar  = static_cast<double>(clipPlanes.y);
     // Aspect ratio will be calculated from viewport when camera is applied
-  }
-  else if(camera.type == "orthographic")
-  {
-    tinygltf::OrthographicCamera& ortho = camera.orthographic;
-    // For orthographic cameras, is it not yet supported
-    ortho.znear = static_cast<double>(clipPlanes.x);
-    ortho.zfar  = static_cast<double>(clipPlanes.y);
   }
 
   // Update the node transformation to match the current camera position

@@ -49,8 +49,10 @@
   }
 #define IMGUI_DEFINE_MATH_OPERATORS
 
+#include <cmath>
 #include <thread>
 #include <unordered_set>
+#include <utility>
 #include <vulkan/vulkan_core.h>
 
 
@@ -367,6 +369,7 @@ void GltfRenderer::onRender(VkCommandBuffer cmd)
         .viewInv            = glm::inverse(m_cameraManip->getViewMatrix()),
         .viewProjMatrix     = m_cameraManip->getPerspectiveMatrix() * m_cameraManip->getViewMatrix(),
         .prevMVP            = m_prevMVP,
+        .isOrthographic     = (m_cameraManip->getProjectionType() == nvutils::CameraManipulator::Orthographic) ? 1 : 0,
         .envRotation        = m_resources.settings.hdrEnvRotation,
         .envBlur            = m_resources.settings.hdrBlur,
         .envIntensity       = m_resources.settings.hdrEnvIntensity,
@@ -376,10 +379,10 @@ void GltfRenderer::onRender(VkCommandBuffer cmd)
         .selectedRenderNode = m_resources.selectedRenderNode,
         .debugMethod        = m_resources.settings.debugMethod,
         .useInfinitePlane = m_resources.settings.useInfinitePlane ? (m_resources.settings.isShadowCatcher ? 2 : 1) : 0,
-        .infinitePlaneDistance  = m_resources.settings.infinitePlaneDistance,
-        .infinitePlaneBaseColor = m_resources.settings.infinitePlaneBaseColor,
-        .infinitePlaneMetallic  = m_resources.settings.infinitePlaneMetallic,
-        .infinitePlaneRoughness = m_resources.settings.infinitePlaneRoughness,
+        .infinitePlaneDistance     = m_resources.settings.infinitePlaneDistance,
+        .infinitePlaneBaseColor    = m_resources.settings.infinitePlaneBaseColor,
+        .infinitePlaneMetallic     = m_resources.settings.infinitePlaneMetallic,
+        .infinitePlaneRoughness    = m_resources.settings.infinitePlaneRoughness,
         .shadowCatcherDarkenAmount = 1.0f - exp2f(-std::max(m_resources.settings.shadowCatcherDarkness, 0.0f)),
     };
     // Update the camera information
@@ -474,13 +477,31 @@ bool GltfRenderer::save(const std::filesystem::path& filename)
 {
   if(m_resources.scene.valid() && !filename.empty())
   {
-    // First, copy the camera
-    nvvkgltf::RenderCamera camera;
-    m_cameraManip->getLookat(camera.eye, camera.center, camera.up);
-    camera.yfov  = glm::radians(m_cameraManip->getFov());
-    camera.znear = m_cameraManip->getClipPlanes().x;
-    camera.zfar  = m_cameraManip->getClipPlanes().y;
-    m_resources.scene.setSceneCamera(camera);
+    std::vector<nvvkgltf::RenderCamera> cameras = nvvkgltf::getCamerasFromWidget();
+
+    // Replace the first camera with the current view
+    if(!cameras.empty())
+    {
+      nvvkgltf::RenderCamera& camera = cameras[0];
+      m_cameraManip->getLookat(camera.eye, camera.center, camera.up);
+      camera.znear = m_cameraManip->getClipPlanes().x;
+      camera.zfar  = m_cameraManip->getClipPlanes().y;
+
+      if(m_cameraManip->getProjectionType() == nvutils::CameraManipulator::Orthographic)
+      {
+        camera.type = nvvkgltf::RenderCamera::CameraType::eOrthographic;
+        camera.xmag = static_cast<double>(m_cameraManip->getOrthographicXmag());
+        camera.ymag = static_cast<double>(m_cameraManip->getOrthographicYmag());
+      }
+      else
+      {
+        camera.type = nvvkgltf::RenderCamera::CameraType::ePerspective;
+        camera.yfov = glm::radians(m_cameraManip->getFov());
+      }
+
+      // Set all cameras
+      m_resources.scene.setSceneCameras(cameras);
+    }
 
     // Saving the scene
     return m_resources.scene.save(filename);
@@ -996,17 +1017,14 @@ void GltfRenderer::resetFrame()
 // Returns true if the frame counter is less than the maximum number of frames
 bool GltfRenderer::updateFrameCounter()
 {
-  static float     ref_fov{0};
-  static glm::mat4 ref_cam_matrix;
+  static nvutils::CameraManipulator::Camera ref_camera{};
 
-  const auto& m   = m_cameraManip->getViewMatrix();
-  const auto  fov = m_cameraManip->getFov();
+  const auto currentCamera = m_cameraManip->getCamera();
 
-  if(ref_cam_matrix != m || ref_fov != fov)
+  if(ref_camera != currentCamera)
   {
     resetFrame();
-    ref_cam_matrix = m;
-    ref_fov        = fov;
+    ref_camera = currentCamera;
   }
 
   if(m_resources.frameCount >= m_resources.settings.maxFrames)
@@ -1134,7 +1152,7 @@ bool GltfRenderer::updateAnimation(VkCommandBuffer cmd)
       animInfo.incrementTime(deltaTime);
     }
 
-    // Update the element values: transformation, weights and return the list of nodes affected
+    // Update the element values: transformation, weights
     std::unordered_set<int> dirtyNodeIds = scn.updateAnimation(m_animControl.currentAnimation);
 
     // KHR_animation_pointer: Check if any materials/lights were animated and need GPU update
