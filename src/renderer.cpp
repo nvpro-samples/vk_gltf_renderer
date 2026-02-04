@@ -54,7 +54,7 @@
 #include <unordered_set>
 #include <utility>
 #include <vulkan/vulkan_core.h>
-
+#include <webp/decode.h>
 
 #include "GLFW/glfw3.h"
 #undef APIENTRY
@@ -90,6 +90,33 @@ extern nvutils::ProfilerManager g_profilerManager;  // #PROFILER
 namespace {
 // Background clear color used when no scene is loaded or to show DLSS render resolution borders
 constexpr VkClearColorValue kBackgroundClearColor = {{0.17f, 0.21f, 0.25f, 1.f}};
+
+// WebP callback for glTF image loading. Decodes an image into a SceneImage
+// object, returning `true` on success.
+bool webPLoadCallback(nvvkgltf::SceneVk::SceneImage& image, const void* data, size_t byteLength)
+{
+  const uint8_t* dataU8 = reinterpret_cast<const uint8_t*>(data);
+
+  int width = 0, height = 0;
+  if(!WebPGetInfo(dataU8, byteLength, &width, &height) || width <= 0 || height <= 0 || width > INT_MAX / 4)
+  {
+    return false;
+  }
+
+  std::vector<char> decompressed(static_cast<size_t>(width) * static_cast<size_t>(height) * 4);
+  if(!WebPDecodeRGBAInto(dataU8, byteLength,                                                    //
+                         reinterpret_cast<uint8_t*>(decompressed.data()), decompressed.size(),  //
+                         width * 4))
+  {
+    LOGW("Failed to decode WebP image '%s'.\n", image.imgName.c_str());
+    return false;
+  }
+
+  image.format  = VK_FORMAT_R8G8B8A8_UNORM;
+  image.size    = {static_cast<uint32_t>(width), static_cast<uint32_t>(height)};
+  image.mipData = {std::move(decompressed)};
+  return true;
+}
 }  // namespace
 
 // The constructor registers the parameters that can be set from the command line
@@ -221,6 +248,9 @@ void GltfRenderer::onAttach(nvapp::Application* app)
   // ===== Scene & Acceleration Structure =====
   m_resources.sceneVk.init(&m_resources.allocator, &m_resources.samplerPool);
   m_resources.sceneRtx.init(&m_resources.allocator);
+
+  m_resources.scene.supportedExtensions().insert(EXT_TEXTURE_WEBP_EXTENSION_NAME);
+  m_resources.sceneVk.setImageLoadCallback(webPLoadCallback);
 
   // ===== Profiling & Performance =====
   {
@@ -763,6 +793,9 @@ void GltfRenderer::rebuildSceneFromModel()
 void GltfRenderer::createVulkanScene()
 {
   {
+    // Add WebP loading support to SceneVk
+    m_resources.sceneVk.setImageLoadCallback(webPLoadCallback);
+
     // Create and queue command buffer for scene data upload (vertices, indices, materials, etc.)
     // This work happens asynchronously via the command buffer queue
     VkCommandBuffer cmd{};

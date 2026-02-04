@@ -177,6 +177,11 @@ target_include_directories(${PROJECT_NAME} PRIVATE ${MIKKTSPACE_DIR})
 target_sources(${PROJECT_NAME} PRIVATE ${MIKKTSPACE_SRC})
 source_group("MikkTSpace" FILES ${MIKKTSPACE_SRC})
 #####################################################################################
+# Add WebP
+find_package(WebP REQUIRED)
+target_link_libraries(${PROJECT_NAME} PRIVATE webp)
+# target_link_libraries(${PROJECT_NAME} PRIVATE webp)
+#####################################################################################
 # Adding DLSS if selected
 option(USE_DLSS "Use DLSS-RR for denoising" ON)
 if(USE_DLSS)
