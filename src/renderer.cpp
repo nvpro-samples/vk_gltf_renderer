@@ -1204,6 +1204,17 @@ bool GltfRenderer::updateAnimation(VkCommandBuffer cmd)
         scnVk.updateRenderLightsBuffer(m_resources.staging, scn, animPointer.getDirtyLights());
       }
 
+      // Animated visibility changes - update TLAS if needed
+      if(!animPointer.getDirtyNodes().empty())
+      {
+        // Currently only visibility is supported for animation pointer, which is why we directly update TLAS here and not matrices.
+        std::unordered_set<int> dirtyRenderNodes;
+        bool updateAllRenderNodes = scn.collectRenderNodeIndices(animPointer.getDirtyNodes(), dirtyRenderNodes, true, 0.5f);
+        if(updateAllRenderNodes)
+          dirtyRenderNodes.clear();  // empty = full update
+        m_resources.sceneRtx.updateTopLevelAS(cmd, m_resources.staging, m_resources.scene, dirtyRenderNodes);
+      }
+
       // Clear dirty flags after upload
       animPointer.clearDirty();
     }
