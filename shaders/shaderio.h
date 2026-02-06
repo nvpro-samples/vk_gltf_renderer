@@ -53,6 +53,7 @@ enum OutputImage
   eDlssNormalRoughness,    // Normal and roughness (RGBA32)
   eDlssMotion,             // Motion (RGBA32)
   eDlssDepth,              // Depth (R32)
+  eDlssSpecularHitDist,    // Specular hit distance (R16F)
   eOptixAlbedoNormal = 2,  // Albedo/encoded normal (RGBA32)
 };
 

@@ -154,7 +154,74 @@ struct DlssOutput
   float16_t3 specularAlbedo  = float16_t3(0);
   float16_t4 normalRoughness = float16_t4(0);
   float3     hitPosition     = 1e34f;
+  float      specularHitDist = 0.0f;  // Distance to reflected surface (0=no reflection, 65504=sky reflection)
 };
+
+// DLSS-RR struggles when both albedo and specular are near zero; clamp to avoid instability.
+float3 dlssEnforceMinAlbedo(float3 albedo, float3 specularAlbedo)
+{
+  float sumAlbedo = albedo.x + albedo.y + albedo.z;
+  float sumSpec   = specularAlbedo.x + specularAlbedo.y + specularAlbedo.z;
+  if(sumAlbedo + sumSpec < 0.05f)
+  {
+    return max(albedo, float3(0.2f));
+  }
+  return albedo;
+}
+
+bool dlssIsClearGlass(PbrMaterial pbrMat)
+{
+  return (pbrMat.transmission > 0.9f) && (pbrMat.roughness.x < 0.05f) && (pbrMat.opacity >= 0.99f);
+}
+
+// Compute guide albedo for clear glass by tracing a deterministic refraction ray
+// and blending background vs. glass using Fresnel to avoid stochastic flicker.
+float3 dlssGetClearGlassGuideAlbedo(IRaytracer      raytracer,
+                                    PbrMaterial     pbrMat,
+                                    HitState        hit,
+                                    float3          viewDir,
+                                    SceneFrameInfo* frameInfo,
+                                    inout uint      seed,
+                                    bool            isInside,
+                                    float3          specularAlbedo)
+{
+  float3 bgAlbedo = float3(0.5f);
+  float3 refrDir  = refract(viewDir, pbrMat.N, (pbrMat.ior1 / pbrMat.ior2));
+  if(dot(refrDir, refrDir) > 0.0f)
+  {
+    // Trace a deterministic refraction ray to get the guide albedo
+    RayDesc    guideRay;
+    HitPayload guidePayload = {};
+    guideRay.Origin         = safeOffsetRay(hit.pos, refrDir);
+    guideRay.Direction      = refrDir;
+    guideRay.TMin           = 0.0;
+    guideRay.TMax           = INFINITE;
+    raytracer.Trace(guideRay, guidePayload, seed);
+
+    // If the refraction ray hit an object, evaluate the material at the hit point
+    if(guidePayload.hitT != INFINITE)
+    {
+      HitState           guideHit      = guidePayload.hitState;
+      GltfShadeMaterial* materials     = pushConst.gltfScene->materials;
+      GltfRenderNode*    renderNodes   = pushConst.gltfScene->renderNodes;
+      GltfTextureInfo*   texInfos      = pushConst.gltfScene->textureInfos;
+      GltfRenderNode     guideNode     = renderNodes[guidePayload.rnodeID];
+      int                guideMatIndex = max(0, guideNode.materialID);
+      GltfShadeMaterial  guideMat      = materials[guideMatIndex];
+      guideMat.pbrBaseColorFactor *= guideHit.color;  // vertex color
+      MeshState guideMesh = MeshState(guideHit.nrm, guideHit.tangent, guideHit.bitangent, guideHit.geonrm, guideHit.uv, isInside);
+      PbrMaterial guidePbrMat = evaluateMaterial(guideMat, guideMesh, allTextures, texInfos);
+      bgAlbedo                = guidePbrMat.baseColor.xyz;
+    }
+  }
+
+  // Blend background vs. glass using Fresnel to avoid stochastic flicker.
+  float  ndotv    = saturate(dot(pbrMat.N, -viewDir));
+  float  iorRatio = (pbrMat.ior2 > 0.0f) ? (pbrMat.ior2 / pbrMat.ior1) : 1.5f;
+  float  fresnel  = schlickFresnel(iorRatio, ndotv);
+  float3 albedo   = lerp(bgAlbedo, pbrMat.baseColor.xyz, fresnel);
+  return dlssEnforceMinAlbedo(albedo, specularAlbedo);
+}
 
 //-----------------------------------------------------------------------
 // This is the result of sampling a pixel
@@ -200,8 +267,8 @@ RayDesc getRay(float2 samplePos, float2 offset, float2 imageSize, float4x4 projM
     ray.Origin    = viewMatrixI[3].xyz;
     ray.Direction = normalize(mul(viewCoords, viewMatrixI).xyz - ray.Origin);
   }
-  ray.TMin      = 0.0;
-  ray.TMax      = INFINITE;
+  ray.TMin = 0.0;
+  ray.TMax = INFINITE;
   return ray;
 }
 
@@ -693,9 +760,8 @@ void selectObject(float2 samplePos, float2 imageSize)
 {
   // Subpixel jitter: send the ray through a different position inside the pixel each time, to provide antialiasing.
   const float2 subpixel_jitter = float2(0.5f, 0.5f);
-  const bool isOrthographic = (pushConst.frameInfo->isOrthographic != 0);
-  RayDesc    ray            = getRay(samplePos, subpixel_jitter, imageSize, pushConst.frameInfo->projInv,
-                                     pushConst.frameInfo->viewInv, isOrthographic);
+  const bool   isOrthographic  = (pushConst.frameInfo->isOrthographic != 0);
+  RayDesc ray = getRay(samplePos, subpixel_jitter, imageSize, pushConst.frameInfo->projInv, pushConst.frameInfo->viewInv, isOrthographic);
 
   RayQuery q;
   q.TraceRayInline(topLevelAS, RAY_FLAG_NONE, 0xFF, ray);
@@ -783,11 +849,12 @@ SampleResult pathTrace(IRaytracer raytracer, RayDesc ray, inout uint seed)
   float lastSamplePdf = DIRAC;
 
   // #DLSS - Store data temporarily to avoid writing to sampleResult during loop (reduces live state)
-  bool       dlss_hasData         = false;
   float16_t3 dlss_albedo          = float16_t3(0);
   float16_t3 dlss_specularAlbedo  = float16_t3(0);
   float16_t4 dlss_normalRoughness = float16_t4(0);
-  float3     dlss_hitPosition     = 1e32f;
+  float16_t dlss_specularHitDist = float16_t(0);  // 0=non-reflective, actual_distance=reflected geometry, 65504=sky/far
+  float3    dlss_hitPosition     = 1e32f;
+  bool      captureSpecularHit   = false;  // Track if we should capture next hit distance
 
   // Path tracing loop, until the ray hits the environment or the maximum depth is reached or the ray is absorbed
   for(int depth = 0; depth < pushConst.maxDepth; depth++)
@@ -846,6 +913,14 @@ SampleResult pathTrace(IRaytracer raytracer, RayDesc ray, inout uint seed)
           }
         }
 
+        // #DLSS - If capturing specular hit and we hit environment, use max distance (65504 = fp16 max)
+        // This happens when a glossy reflection bounces into the sky
+        if(captureSpecularHit)
+        {
+          dlss_specularHitDist = float16_t(65504.0f);
+          captureSpecularHit   = false;
+        }
+
         // Add sky or HDR texture using refactored helper
         float3 envColor;
         float  envPdf;
@@ -900,18 +975,30 @@ SampleResult pathTrace(IRaytracer raytracer, RayDesc ray, inout uint seed)
         pbrMat         = evaluateMaterial(material, mesh, allTextures, texInfos);
       }
 
+      // #DLSS - Capture specular hit distance on depth 1 (first reflection bounce)
+      if(captureSpecularHit)
+      {
+        dlss_specularHitDist = float16_t(payload.hitT);
+        captureSpecularHit   = false;
+      }
+
       // #DLSS - Gather data from first hit (store temporarily, write at end to reduce live state)
       if(firstRay)
       {
-        float3 specularAlbedo = EnvBRDFApprox2(pbrMat.specularColor, pbrMat.roughness.x, dot(pbrMat.N, ray.Direction));
-        dlss_specularAlbedo   = float16_t3(specularAlbedo);
-        // Note: for transparency hack the other information are collected AFTER BSDF sampling to know if surface is transmissive
-        if(USE_DLSS_TRANSP == 0 || pushConst.useOptixDenoiser == 1)
+        // Apply KHR_materials_specular energy conservation clamping for DLSS guide buffer
+        // Spec formula: dielectric_f0 = min(f0_from_ior * specularColor, 1.0) * specular
+        float  f0_from_ior          = pow((pbrMat.ior2 - pbrMat.ior1) / (pbrMat.ior2 + pbrMat.ior1), 2.0F);
+        float3 specularColorClamped = min(f0_from_ior * pbrMat.specularColor, float3(1.0F));
+        float3 specularAlbedo = EnvBRDFApprox2(specularColorClamped, pbrMat.roughness.x, dot(pbrMat.N, ray.Direction));
+        float3 guideAlbedo    = pbrMat.baseColor.xyz;
+        if(USE_DLSS_TRANSP == 1 && pushConst.useOptixDenoiser == 0 && dlssIsClearGlass(pbrMat))
         {
-          dlss_normalRoughness = float16_t4(float16_t3(pbrMat.N), float16_t(pbrMat.roughness.x));
-          dlss_hitPosition     = hit.pos;
-          dlss_albedo          = float16_t3(pbrMat.baseColor.xyz);
+          guideAlbedo = dlssGetClearGlassGuideAlbedo(raytracer, pbrMat, hit, ray.Direction, frameInfo, seed, isInside, specularAlbedo);
         }
+        dlss_specularAlbedo  = float16_t3(specularAlbedo);
+        dlss_normalRoughness = float16_t4(float16_t3(pbrMat.N), float16_t(pbrMat.roughness.x));
+        dlss_hitPosition     = hit.pos;
+        dlss_albedo          = float16_t3(guideAlbedo);
       }
 
       // Keep track of the maximum roughness to prevent firefly artifacts
@@ -993,6 +1080,13 @@ SampleResult pathTrace(IRaytracer raytracer, RayDesc ray, inout uint seed)
         ray.Direction = sampleData.k2;  // new direction
         lastSamplePdf = sampleData.pdf;
 
+        // #DLSS - Enable specular hit distance capture on first bounce if this is a glossy reflection
+        // Matches reference implementation: only capture for BSDF_EVENT_GLOSSY_REFLECTION
+        if(firstRay && (sampleData.event_type == BSDF_EVENT_GLOSSY_REFLECTION || sampleData.event_type == BSDF_EVENT_IMPULSE_REFLECTION))
+        {
+          captureSpecularHit = true;
+        }
+
         if(sampleData.event_type != BSDF_EVENT_ABSORB)
         {
           // Continue path
@@ -1008,20 +1102,6 @@ SampleResult pathTrace(IRaytracer raytracer, RayDesc ray, inout uint seed)
           if(isTransmission)
           {
             isInside = !isInside;
-          }
-          // Transparency hack: collect data after knowing if surface is transmissive
-          // Skip clear, smooth glass but keep rough/frosted transmissive materials
-          if(USE_DLSS_TRANSP == 1 && pushConst.useOptixDenoiser == 0)
-          {
-            // Only skip glass that's both highly transmissive AND smooth
-            bool isClearGlass = (pbrMat.transmission > 0.3f) && (pbrMat.roughness.x < 0.4f);
-            if(dlss_hasData == false && !isTransmission && !isClearGlass)
-            {
-              dlss_hasData         = true;
-              dlss_albedo          = float16_t3(pbrMat.baseColor.xyz);
-              dlss_normalRoughness = float16_t4(float16_t3(pbrMat.N), float16_t(pbrMat.roughness.x));
-              dlss_hitPosition     = hit.pos;
-            }
           }
         }
         else if(sampleData.event_type == BSDF_EVENT_ABSORB)  // If the ray is absorbed , then break
@@ -1072,6 +1152,7 @@ SampleResult pathTrace(IRaytracer raytracer, RayDesc ray, inout uint seed)
   sampleResult.dlssOutput.specularAlbedo  = dlss_specularAlbedo;
   sampleResult.dlssOutput.normalRoughness = dlss_normalRoughness;
   sampleResult.dlssOutput.hitPosition     = dlss_hitPosition;
+  sampleResult.dlssOutput.specularHitDist = dlss_specularHitDist;
 
   return sampleResult;
 }
@@ -1209,6 +1290,7 @@ void processPixel(IRaytracer raytracer, float2 samplePos, float2 imageSize)
     outImages[int(OutputImage::eDlssNormalRoughness)][int2(samplePos)] = sampleResult.dlssOutput.normalRoughness;
     outImages[int(OutputImage::eDlssAlbedo)][int2(samplePos)]          = sampleResult.dlssOutput.albedo;
     outImages[int(OutputImage::eDlssSpecAlbedo)][int2(samplePos)] = float4(sampleResult.dlssOutput.specularAlbedo.xyz, 1.0f);
+    outImages[int(OutputImage::eDlssSpecularHitDist)][int2(samplePos)] = float4(sampleResult.dlssOutput.specularHitDist);
   }
 
   if(pushConst.useOptixDenoiser == 1)

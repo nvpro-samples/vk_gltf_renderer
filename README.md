@@ -188,6 +188,7 @@ The denoiser will automatically integrate using CUDA-Vulkan interoperability for
 - ✅ KHR_xmp_json_ld
 - ✅ EXT_mesh_gpu_instancing
 - ✅ EXT_meshopt_compression
+- ✅ EXT_texture_webp
 - ✅ MSFT_texture_dds
 
 ## Renderer

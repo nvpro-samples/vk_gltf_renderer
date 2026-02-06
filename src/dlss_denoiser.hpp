@@ -49,6 +49,12 @@ public:
     eMax
   };
 
+  enum class TransparencyMode
+  {
+    eDefault,
+    eImproved
+  };
+
   enum class DlssState
   {
     eNotChecked,   // Haven't attempted NGX initialization yet
@@ -107,7 +113,8 @@ public:
   void registerParameters(nvutils::ParameterRegistry* paramReg);
   void setSettingsHandler(nvgui::SettingsHandler* settingsHandler);
 
-  bool useDlssTransparency() const { return m_useDlssTransp; }
+  bool             useDlssTransparency() const { return m_transparencyMode != TransparencyMode::eDefault; }
+  TransparencyMode getTransparencyMode() const { return m_transparencyMode; }
 
   DlssState getState() const { return m_state; }  // For debugging/UI
 
@@ -127,13 +134,14 @@ private:
       {VK_FORMAT_R16G16B16A16_SFLOAT},  // #DLSS - Normal / Roughness   : eDlssNormalRoughness
       {VK_FORMAT_R16G16_SFLOAT},        // #DLSS - Motion vectors       : eDlssMotion
       {VK_FORMAT_R16_SFLOAT},           // #DLSS - ViewZ                : eDlssDepth
+      {VK_FORMAT_R16_SFLOAT},           // #DLSS - Specular Hit Dist    : eDlssSpecularHitDist
   };
 
-  nvvk::GBuffer m_dlssGBuffers{};  // G-Buffers: for denoising
-  VkExtent2D    m_renderingSize{};
-  VkDevice      m_device{};
-  VkSampler     m_linearSampler{};
-  bool          m_sizeModeChanged = false;  // Track if size mode has changed
-  bool          m_forceReset      = false;  // Force reset of the denoiser
-  bool          m_useDlssTransp   = false;  // DLSS_SKIP_TRANSPARENT
+  nvvk::GBuffer    m_dlssGBuffers{};  // G-Buffers: for denoising
+  VkExtent2D       m_renderingSize{};
+  VkDevice         m_device{};
+  VkSampler        m_linearSampler{};
+  bool             m_sizeModeChanged  = false;  // Track if size mode has changed
+  bool             m_forceReset       = false;  // Force reset of the denoiser
+  TransparencyMode m_transparencyMode = TransparencyMode::eDefault;
 };

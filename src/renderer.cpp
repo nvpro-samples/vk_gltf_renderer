@@ -935,7 +935,7 @@ void GltfRenderer::createDescriptorSets()
              .sType = VK_STRUCTURE_TYPE_DESCRIPTOR_POOL_CREATE_INFO,
              .flags = VK_DESCRIPTOR_POOL_CREATE_UPDATE_AFTER_BIND_BIT |  // allows descriptor sets to be updated after they have been bound to a command buffer
                VK_DESCRIPTOR_POOL_CREATE_FREE_DESCRIPTOR_SET_BIT,  // individual descriptor sets can be freed from the descriptor pool
-             .maxSets       = 10,                                         // For all DLSS images
+             .maxSets       = 15,  // For all GBuffer images (main: 3, DLSS: 8, OptiX: 2) + margin
              .poolSizeCount = uint32_t(poolSize.size()),
              .pPoolSizes    = poolSize.data(),
   };

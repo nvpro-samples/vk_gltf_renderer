@@ -206,6 +206,7 @@ void DlssDenoiser::setResources()
   dlssResourceFromGBufTexture(DlssRayReconstruction::ResourceType::eNormalRoughness, shaderio::OutputImage::eDlssNormalRoughness);
   dlssResourceFromGBufTexture(DlssRayReconstruction::ResourceType::eMotionVector, shaderio::OutputImage::eDlssMotion);
   dlssResourceFromGBufTexture(DlssRayReconstruction::ResourceType::eDepth, shaderio::OutputImage::eDlssDepth);
+  dlssResourceFromGBufTexture(DlssRayReconstruction::ResourceType::eSpecularHitDistance, shaderio::OutputImage::eDlssSpecularHitDist);
 }
 
 void DlssDenoiser::setResource(DlssRayReconstruction::ResourceType resourceId, VkImage image, VkImageView imageView, VkFormat format)
@@ -259,12 +260,13 @@ bool DlssDenoiser::onUi(Resources& resources)
 
   namespace PE = nvgui::PropertyEditor;
   PE::begin();
-  if(PE::Checkbox("Skip Transparent Surfaces", &m_useDlssTransp,
-                  "Skip transparent surfaces when collecting DLSS auxiliary data. "
-                  "Uses the first opaque/diffuse surface instead of the first hit. "
-                  "May improve denoiser quality with transparent materials, but results vary by scene."))
+  const char* transparencyModes[] = {"Default (first hit)", "Improved (blended guides)"};
+  int         currentTransMode    = static_cast<int>(m_transparencyMode);
+  if(PE::Combo("Transparency Handling", &currentTransMode, transparencyModes, IM_ARRAYSIZE(transparencyModes), 0,
+               "Controls how DLSS guide buffers are generated for transparent materials."))
   {
-    changed = true;
+    m_transparencyMode = static_cast<TransparencyMode>(currentTransMode);
+    changed            = true;
   }
   bool showGuideImages = true;
   if(PE::Combo("DLSS Size Mode", &currentSizeMode, sizeModes, IM_ARRAYSIZE(sizeModes)))
@@ -334,6 +336,8 @@ bool DlssDenoiser::onUi(Resources& resources)
       ImGui::TableNextRow();
       ImGui::TableNextColumn();
       showBuffer("Specular Albedo", shaderio::OutputImage::eDlssSpecAlbedo);
+      ImGui::TableNextColumn();
+      showBuffer("Specular HitT", shaderio::OutputImage::eDlssSpecularHitDist);
       ImGui::EndTable();
     }
   }

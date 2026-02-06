@@ -63,6 +63,7 @@ enum class DisplayBuffer
   eNormalRoughness,  // DLSS Normal/Roughness
   eMotionVectors,    // DLSS Motion
   eDepth,            // DLSS Depth
+  eSpecularHitDist,  // DLSS Specular Hit Distance
   eOptixDenoised,    // OptiX Denoised output
 };
 
@@ -81,6 +82,8 @@ constexpr inline shaderio::OutputImage displayBufferToOutputImage(DisplayBuffer 
       return shaderio::eDlssMotion;
     case DisplayBuffer::eDepth:
       return shaderio::eDlssDepth;
+    case DisplayBuffer::eSpecularHitDist:
+      return shaderio::eDlssSpecularHitDist;
     case DisplayBuffer::eOptixDenoised:
       return shaderio::eResultImage;  // Special case: handled separately
     default:
@@ -102,6 +105,8 @@ constexpr inline DisplayBuffer outputImageToDisplayBuffer(shaderio::OutputImage 
       return DisplayBuffer::eMotionVectors;
     case shaderio::eDlssDepth:
       return DisplayBuffer::eDepth;
+    case shaderio::eDlssSpecularHitDist:
+      return DisplayBuffer::eSpecularHitDist;
     default:
       return DisplayBuffer::eRendered;
   }

@@ -424,9 +424,9 @@ void PathTracer::pushDescriptorSet(VkCommandBuffer cmd, Resources& resources, Vk
 #if defined(USE_DLSS)
   if(getEffectiveDlssEnabled(resources))
   {
-    // With DLSS active, we have 7 output images
+    // With DLSS active, we have 8 output images
     using namespace shaderio;
-    outputImages.resize(7);
+    outputImages.resize(8);
     outputImages[eResultImage]         = m_dlss->getGBuffers().getDescriptorImageInfo(eResultImage);
     outputImages[eSelectImage]         = m_dlss->getGBuffers().getDescriptorImageInfo(eSelectImage);
     outputImages[eDlssAlbedo]          = m_dlss->getGBuffers().getDescriptorImageInfo(eDlssAlbedo);
@@ -434,6 +434,7 @@ void PathTracer::pushDescriptorSet(VkCommandBuffer cmd, Resources& resources, Vk
     outputImages[eDlssNormalRoughness] = m_dlss->getGBuffers().getDescriptorImageInfo(eDlssNormalRoughness);
     outputImages[eDlssMotion]          = m_dlss->getGBuffers().getDescriptorImageInfo(eDlssMotion);
     outputImages[eDlssDepth]           = m_dlss->getGBuffers().getDescriptorImageInfo(eDlssDepth);
+    outputImages[eDlssSpecularHitDist] = m_dlss->getGBuffers().getDescriptorImageInfo(eDlssSpecularHitDist);
   }
 #endif
 
