@@ -29,7 +29,7 @@
 #include <nvgui/tonemapper.hpp>
 #include <nvgui/file_dialog.hpp>
 #include <nvgui/axis.hpp>
-#include <nvvkgltf/tinygltf_utils.hpp>
+#include "tinygltf_utils.hpp"
 
 #include "renderer.hpp"
 #include "compact_model.hpp"

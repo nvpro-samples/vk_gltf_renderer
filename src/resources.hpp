@@ -43,9 +43,9 @@
 #include <nvvk/hdr_ibl.hpp>
 #include <nvvk/resource_allocator.hpp>
 #include <nvvk/sampler_pool.hpp>
-#include <nvvkgltf/scene.hpp>
-#include <nvvkgltf/scene_rtx.hpp>
-#include <nvvkgltf/scene_vk.hpp>
+#include "gltf_scene.hpp"
+#include "gltf_scene_rtx.hpp"
+#include "gltf_scene_vk.hpp"
 #include <nvapp/application.hpp>
 
 

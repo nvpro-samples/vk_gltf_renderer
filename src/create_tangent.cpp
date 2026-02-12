@@ -59,7 +59,7 @@
 #include <nvutils/parallel_work.hpp>
 #include <nvutils/timers.hpp>
 #include <nvutils/logger.hpp>
-#include <nvvkgltf/tinygltf_utils.hpp>
+#include "tinygltf_utils.hpp"
 
 #include "compact_model.hpp"
 

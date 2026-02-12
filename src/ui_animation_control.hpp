@@ -42,7 +42,7 @@
 #include <imgui/imgui.h>
 
 #include <nvgui/fonts.hpp>
-#include <nvvkgltf/scene.hpp>
+#include "gltf_scene.hpp"
 #include <nvgui/property_editor.hpp>
 #include <nvgui/tooltip.hpp>
 

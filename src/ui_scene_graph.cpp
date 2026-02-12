@@ -35,7 +35,7 @@ GLM_FUNC_QUALIFIER vec3 fma(vec3 const& a, vec3 const& b, vec3 const& c)
 
 
 #include <nvgui/property_editor.hpp>
-#include <nvvkgltf/tinygltf_utils.hpp>
+#include "tinygltf_utils.hpp"
 #include <nvgui/fonts.hpp>
 #include <imgui_internal.h>
 

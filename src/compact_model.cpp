@@ -22,7 +22,7 @@
 #include <set>
 #include <vector>
 
-#include <nvvkgltf/tinygltf_utils.hpp>
+#include "tinygltf_utils.hpp"
 #include "nvutils/logger.hpp"
 
 //-------------------------------------------------------------------------------------------------

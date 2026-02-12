@@ -78,12 +78,12 @@
 #include <nvvk/debug_util.hpp>
 #include <nvvk/formats.hpp>
 #include <nvvk/mipmaps.hpp>
-#include <nvvkgltf/camera_utils.hpp>
+#include "gltf_camera_utils.hpp"
 
 #include "renderer.hpp"
 #include "utils.hpp"
 #include "tinyobjloader/tiny_obj_loader.h"
-#include "nvvkgltf/converter.hpp"
+#include "tinygltf_converter.hpp"
 
 extern nvutils::ProfilerManager g_profilerManager;  // #PROFILER
 

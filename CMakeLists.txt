@@ -4,6 +4,10 @@ project(GLTF_renderer VERSION 2.0 LANGUAGES C CXX)
 option(NVPRO2_ENABLE_nvgl off)
 option(USE_DEFAULT_SCENE "Using a default scene at startup" ON)
 
+# Disable unused libraries from nvpro_core2 - we use local copy
+set(NVPRO2_ENABLE_nvvkgltf OFF CACHE BOOL "Disable nvvkgltf from nvpro_core2" FORCE)
+set(NVPRO2_ENABLE_nvvkglsl OFF CACHE BOOL "Disable nvvkglsl from nvpro_core2" FORCE)
+
 # Set Slang version
 # set(Slang_VERSION 2026.1)
 
@@ -26,6 +30,48 @@ configure_file(
 )
 message(STATUS "Application version: ${APP_VERSION_STRING}")
 
+#####################################################################################
+# Testing framework (opt-in for cleaner builds by default)
+option(BUILD_TESTING "Build test suite" OFF)
+
+if(BUILD_TESTING)
+  enable_testing()
+  
+  # Google Test
+  include(FetchContent)
+  
+  # Fetch GoogleTest
+  FetchContent_Declare(
+    googletest
+    GIT_REPOSITORY https://github.com/google/googletest.git
+    GIT_TAG v1.14.0
+  )
+  
+  # Fetch Google Benchmark
+  FetchContent_Declare(
+    googlebenchmark
+    GIT_REPOSITORY https://github.com/google/benchmark.git
+    GIT_TAG v1.8.3
+  )
+  
+  # Make available
+  set(gtest_force_shared_crt ON CACHE BOOL "" FORCE)  # Windows
+  set(BENCHMARK_ENABLE_TESTING OFF CACHE BOOL "" FORCE)  # Don't build benchmark tests
+  set(BENCHMARK_ENABLE_INSTALL OFF CACHE BOOL "" FORCE)  # Don't install benchmark
+  set(BENCHMARK_ENABLE_GTEST_TESTS OFF CACHE BOOL "" FORCE)  # Don't build benchmark's own tests
+  
+  FetchContent_MakeAvailable(googletest googlebenchmark)
+  
+  # Organize test dependencies into folders in Visual Studio
+  set_target_properties(gtest gtest_main gmock gmock_main PROPERTIES FOLDER "External/GoogleTest")
+  set_target_properties(benchmark benchmark_main PROPERTIES FOLDER "External/Benchmark")
+  
+  # Add tests subdirectory
+  add_subdirectory(tests)
+  
+  message(STATUS "Testing framework enabled (GoogleTest + Benchmark)")
+endif()
+
 # Adding all sources
 file(GLOB EXE_SOURCES "src/*.cpp" "src/*.hpp" "src/*.h" "*.md")
 list(FILTER EXE_SOURCES EXCLUDE REGEX "dlss*")
@@ -46,8 +92,15 @@ target_link_libraries(${PROJECT_NAME} PRIVATE
   nvpro2::nvvk
   nvpro2::nvshaders_host
   nvpro2::nvaftermath
-  nvpro2::nvvkgltf
   nvpro2::nvgpu_monitor
+  # Additional dependencies for local gltf (previously provided by nvvkgltf)
+  fmt
+  glm
+  nvimageformats
+  stb
+  tinygltf
+  tinyobjloader
+  meshoptimizer
 )
 
 add_project_definitions(${PROJECT_NAME})
@@ -154,10 +207,7 @@ option(USE_DRACO "Use Draco for compression" ON)
 if(USE_DRACO)
   include(cmake/draco.cmake)
   download_draco()
-  target_include_directories(${PROJECT_NAME} PRIVATE ${draco_SOURCE_DIR}/src ${draco_BINARY_DIR} ${CMAKE_CURRENT_BINARY_DIR})
-  target_link_libraries(${PROJECT_NAME} PRIVATE draco::draco)
-  target_compile_definitions(tinygltf INTERFACE TINYGLTF_ENABLE_DRACO) # Tinygltf needs to know about Draco
-  target_compile_definitions(nvvkgltf PRIVATE USE_DRACO) # Our glTF needs to know about Draco to support the extension
+  add_draco()
 endif()
 #####################################################################################
 # Add RapidJSON package
