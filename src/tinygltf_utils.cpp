@@ -462,9 +462,20 @@ void tinygltf::utils::setDiffuseTransmission(tinygltf::Material& tmat, const KHR
 bool tinygltf::utils::getMeshoptCompression(const tinygltf::BufferView& bview, EXT_meshopt_compression& mcomp)
 {
   mcomp = {};
+
+  const char* meshoptExtName = nullptr;
   if(tinygltf::utils::hasElementName(bview.extensions, EXT_MESHOPT_COMPRESSION_EXTENSION_NAME))
   {
-    const tinygltf::Value& ext = tinygltf::utils::getElementValue(bview.extensions, EXT_MESHOPT_COMPRESSION_EXTENSION_NAME);
+    meshoptExtName = EXT_MESHOPT_COMPRESSION_EXTENSION_NAME;
+  }
+  else if(tinygltf::utils::hasElementName(bview.extensions, KHR_MESHOPT_COMPRESSION_EXTENSION_NAME))
+  {
+    meshoptExtName = KHR_MESHOPT_COMPRESSION_EXTENSION_NAME;
+  }
+
+  if(meshoptExtName)
+  {
+    const tinygltf::Value& ext = tinygltf::utils::getElementValue(bview.extensions, meshoptExtName);
     tinygltf::utils::getValue(ext, "buffer", mcomp.buffer);
     int64_t byteOffset{0};
     int64_t byteLength{0};

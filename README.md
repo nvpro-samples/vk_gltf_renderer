@@ -182,6 +182,7 @@ The denoiser will automatically integrate using CUDA-Vulkan interoperability for
 - ✅ KHR_materials_volume
 - ✅ KHR_materials_volume_scatter
 - ✅ KHR_mesh_quantization
+- ✅ KHR_meshopt_compression
 - ✅ KHR_node_visibility
 - ✅ KHR_texture_basisu
 - ✅ KHR_texture_transform

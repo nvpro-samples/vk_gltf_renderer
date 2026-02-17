@@ -339,12 +339,21 @@ bool compactModel(tinygltf::Model& model)
     newBv.byteOffset = newBufferViewOffsets[bvIndex++];
     // byteLength, byteStride, target remain the same
 
-    // Handle EXT_meshopt_compression extension - update buffer reference if present
+    // Handle EXT/KHR_meshopt_compression extension - update buffer reference if present
+    const char* meshoptExtName = nullptr;
     if(tinygltf::utils::hasElementName(newBv.extensions, EXT_MESHOPT_COMPRESSION_EXTENSION_NAME))
+    {
+      meshoptExtName = EXT_MESHOPT_COMPRESSION_EXTENSION_NAME;
+    }
+    else if(tinygltf::utils::hasElementName(newBv.extensions, KHR_MESHOPT_COMPRESSION_EXTENSION_NAME))
+    {
+      meshoptExtName = KHR_MESHOPT_COMPRESSION_EXTENSION_NAME;
+    }
+    if(meshoptExtName)
     {
       // The compressed data buffer is also merged into buffer 0
       // Update the buffer index in the extension
-      tinygltf::Value& ext = newBv.extensions[EXT_MESHOPT_COMPRESSION_EXTENSION_NAME];
+      tinygltf::Value& ext = newBv.extensions[meshoptExtName];
       if(ext.Has("buffer"))
       {
         ext.Get<tinygltf::Value::Object>()["buffer"] = tinygltf::Value(0);

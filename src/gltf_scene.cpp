@@ -68,6 +68,7 @@ nvvkgltf::Scene::Scene()
       "KHR_materials_pbrSpecularGlossiness",
       "KHR_materials_diffuse_transmission",
       "EXT_meshopt_compression",
+      "KHR_meshopt_compression",
 #ifdef USE_DRACO
       "KHR_draco_mesh_compression",
 #endif
@@ -159,16 +160,26 @@ bool nvvkgltf::Scene::load(const std::filesystem::path& filename)
     }
   }
 
-  // Handle EXT_meshopt_compression by decompressing all buffer data at once
+  // Handle EXT_meshopt_compression / KHR_meshopt_compression by decompressing all buffer data at once
+  const char* meshoptExtName = nullptr;
   if(std::find(m_model.extensionsUsed.begin(), m_model.extensionsUsed.end(), EXT_MESHOPT_COMPRESSION_EXTENSION_NAME)
      != m_model.extensionsUsed.end())
+  {
+    meshoptExtName = EXT_MESHOPT_COMPRESSION_EXTENSION_NAME;
+  }
+  else if(std::find(m_model.extensionsUsed.begin(), m_model.extensionsUsed.end(), KHR_MESHOPT_COMPRESSION_EXTENSION_NAME)
+          != m_model.extensionsUsed.end())
+  {
+    meshoptExtName = KHR_MESHOPT_COMPRESSION_EXTENSION_NAME;
+  }
+  if(meshoptExtName)
   {
     for(tinygltf::Buffer& buffer : m_model.buffers)
     {
       if(buffer.data.empty())
       {
         buffer.data.resize(buffer.byteLength);
-        buffer.extensions.erase(EXT_MESHOPT_COMPRESSION_EXTENSION_NAME);
+        buffer.extensions.erase(meshoptExtName);
       }
     }
 
@@ -223,14 +234,14 @@ bool nvvkgltf::Scene::load(const std::filesystem::path& filename)
 
         if(rc != 0)
         {
-          LOGW("EXT_meshopt_compression decompression failed\n");
+          LOGW("%s decompression failed\n", meshoptExtName);
           clearParsedData();
           return false;
         }
 
         if(warn && !warned)
         {
-          LOGW("Warning: EXT_meshopt_compression data uses an unsupported or invalid encoding version\n");
+          LOGW("Warning: %s data uses an unsupported or invalid encoding version\n", meshoptExtName);
           warned = true;
         }
 
@@ -253,7 +264,7 @@ bool nvvkgltf::Scene::load(const std::filesystem::path& filename)
         }
 
         // remove extension for saving uncompressed
-        bufferView.extensions.erase(EXT_MESHOPT_COMPRESSION_EXTENSION_NAME);
+        bufferView.extensions.erase(meshoptExtName);
       }
 
       isFullyCompressedBuffer[bufferView.buffer] = 0;
@@ -293,8 +304,8 @@ bool nvvkgltf::Scene::load(const std::filesystem::path& filename)
     }
 
     // remove extension
-    std::erase(m_model.extensionsRequired, EXT_MESHOPT_COMPRESSION_EXTENSION_NAME);
-    std::erase(m_model.extensionsUsed, EXT_MESHOPT_COMPRESSION_EXTENSION_NAME);
+    std::erase(m_model.extensionsRequired, std::string(meshoptExtName));
+    std::erase(m_model.extensionsUsed, std::string(meshoptExtName));
   }
 
   m_currentScene   = m_model.defaultScene > -1 ? m_model.defaultScene : 0;

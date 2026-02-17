@@ -219,8 +219,9 @@ struct KHR_materials_diffuse_transmission
   tinygltf::TextureInfo diffuseTransmissionColorTexture = {};
 };
 
-// https://github.com/KhronosGroup/glTF/tree/main/extensions/2.0/Vendor/EXT_meshopt_compression
+// https://github.com/KhronosGroup/glTF/tree/main/extensions/2.0/Khronos/KHR_meshopt_compression
 #define EXT_MESHOPT_COMPRESSION_EXTENSION_NAME "EXT_meshopt_compression"
+#define KHR_MESHOPT_COMPRESSION_EXTENSION_NAME "KHR_meshopt_compression"
 struct EXT_meshopt_compression
 {
   enum EXT_meshopt_compression_mode
