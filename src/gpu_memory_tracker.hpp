@@ -17,10 +17,18 @@
  * SPDX-License-Identifier: Apache-2.0
  */
 
+//
+// Tracks GPU memory allocations by named category (e.g. "Geometry",
+// "Images", "BLAS"). Records current and peak byte counts per category
+// so the application can display memory usage breakdowns and detect
+// allocation regressions during development.
+//
+
 #pragma once
 
 #include <algorithm>
 #include <cstdint>
+#include <mutex>
 #include <string>
 #include <string_view>
 #include <unordered_map>
@@ -52,7 +60,9 @@ struct GpuMemoryStats
   uint32_t peakCount          = 0;  // Maximum concurrent allocations
 };
 
-// GPU memory tracker for monitoring allocations
+// GPU memory tracker for monitoring allocations.
+// Thread-safe: track(), untrack(), getStats(), getTotalStats(), getActiveCategories(),
+// reset(), and resetAll() may be called concurrently from multiple threads.
 class GpuMemoryTracker
 {
 public:
@@ -70,6 +80,7 @@ public:
     VmaAllocationInfo allocInfo;
     vmaGetAllocationInfo(*m_alloc, allocation, &allocInfo);
 
+    std::lock_guard<std::mutex> lock(m_mutex);
     std::string categoryStr(category);
     auto&       stats = m_stats[categoryStr];
     stats.currentBytes += allocInfo.size;
@@ -92,6 +103,7 @@ public:
     VmaAllocationInfo allocInfo;
     vmaGetAllocationInfo(*m_alloc, allocation, &allocInfo);
 
+    std::lock_guard<std::mutex> lock(m_mutex);
     std::string categoryStr(category);
     auto        it = m_stats.find(categoryStr);
     if(it == m_stats.end())
@@ -108,6 +120,7 @@ public:
   // Get statistics for a specific category
   GpuMemoryStats getStats(std::string_view category) const
   {
+    std::lock_guard<std::mutex> lock(m_mutex);
     std::string categoryStr(category);
     auto        it = m_stats.find(categoryStr);
     if(it != m_stats.end())
@@ -118,6 +131,7 @@ public:
   // Get statistics for all categories combined
   GpuMemoryStats getTotalStats() const
   {
+    std::lock_guard<std::mutex> lock(m_mutex);
     GpuMemoryStats total{};
     for(const auto& [name, stats] : m_stats)
     {
@@ -136,6 +150,7 @@ public:
   // ascending: true for ascending order, false for descending (default depends on sort type)
   std::vector<std::string> getActiveCategories(CategorySortBy sortBy = CategorySortBy::eName, bool ascending = true) const
   {
+    std::lock_guard<std::mutex> lock(m_mutex);
     std::vector<std::string> categories;
     for(const auto& [name, stats] : m_stats)
     {
@@ -171,6 +186,7 @@ public:
   // Keeps total allocation/deallocation counts but resets current and peak
   void reset()
   {
+    std::lock_guard<std::mutex> lock(m_mutex);
     for(auto& [name, stats] : m_stats)
     {
       stats.currentBytes = 0;
@@ -182,11 +198,16 @@ public:
   }
 
   // Complete reset - clears all statistics including totals
-  void resetAll() { m_stats.clear(); }
+  void resetAll()
+  {
+    std::lock_guard<std::mutex> lock(m_mutex);
+    m_stats.clear();
+  }
 
 private:
   nvvk::ResourceAllocator*                        m_alloc = nullptr;
   std::unordered_map<std::string, GpuMemoryStats> m_stats;
+  mutable std::mutex                              m_mutex;
 };
 
 }  // namespace nvvkgltf

@@ -241,7 +241,10 @@ void Rasterizer::renderNodes(VkCommandBuffer cmd, Resources& resources, const st
 {
   NVVK_DBG_SCOPE(cmd);
 
-  nvvkgltf::Scene&   scene   = resources.scene;
+  nvvkgltf::Scene* scenePtr = resources.getScene();
+  if(!scenePtr)
+    return;
+  nvvkgltf::Scene&   scene   = *scenePtr;
   nvvkgltf::SceneVk& sceneVk = resources.sceneVk;
 
   const VkDeviceSize                            offsets{0};
@@ -290,7 +293,7 @@ void Rasterizer::pushDescriptorSet(VkCommandBuffer cmd, Resources& resources)
 {
   //// Use a compute shader that outputs to the render target for now
   //nvvk::WriteSetContainer write{};
-  //write.append(resources.descriptorBinding[1].getWriteSet(0), resources.sceneRtx.tlas());
+  //write.append(resources.descriptorBinding[1].getWriteSet(0), resources.sceneRtx.topLevelAS());
   //write.append(resources.descriptorBinding[1].getWriteSet(1),
   //             resources.gBuffers.getColorImageView(Resources::eImgRendered), VK_IMAGE_LAYOUT_GENERAL);
   //vkCmdPushDescriptorSetKHR(cmd, VK_PIPELINE_BIND_POINT_COMPUTE, m_pipelineLayout, 1, write.size(), write.data());
@@ -484,18 +487,18 @@ void Rasterizer::renderRasterScene(VkCommandBuffer cmd, Resources& resources)
   // Back-face culling with depth bias
   vkCmdSetCullMode(cmd, VK_CULL_MODE_BACK_BIT);
   vkCmdSetDepthBias(cmd, -1.0f, 0.0f, 1.0f);  // Apply depth bias for solid objects
-  renderNodes(cmd, resources, resources.scene.getShadedNodes(nvvkgltf::Scene::eRasterSolid));
+  renderNodes(cmd, resources, resources.getScene()->getShadedNodes(nvvkgltf::Scene::eRasterSolid));
 
   // Double sided without depth bias
   vkCmdSetCullMode(cmd, VK_CULL_MODE_NONE);
   vkCmdSetDepthBias(cmd, 0.0f, 0.0f, 0.0f);  // Disable depth bias for double-sided objects
-  renderNodes(cmd, resources, resources.scene.getShadedNodes(nvvkgltf::Scene::eRasterSolidDoubleSided));
+  renderNodes(cmd, resources, resources.getScene()->getShadedNodes(nvvkgltf::Scene::eRasterSolidDoubleSided));
 
   // Blendable objects without depth bias
   VkBool32 blendEnable  = VK_TRUE;
   VkBool32 blendDisable = VK_FALSE;
   vkCmdSetColorBlendEnableEXT(cmd, 0, 1, &blendEnable);
-  renderNodes(cmd, resources, resources.scene.getShadedNodes(nvvkgltf::Scene::eRasterBlend));
+  renderNodes(cmd, resources, resources.getScene()->getShadedNodes(nvvkgltf::Scene::eRasterBlend));
 
   if(m_enableWireframe)
   {
@@ -503,7 +506,7 @@ void Rasterizer::renderRasterScene(VkCommandBuffer cmd, Resources& resources)
     vkCmdSetColorBlendEnableEXT(cmd, 0, 1, &blendDisable);
     vkCmdSetDepthBias(cmd, 0.0f, 0.0f, 0.0f);  // Disable depth bias for wireframe
     vkCmdSetPolygonModeEXT(cmd, VK_POLYGON_MODE_LINE);
-    renderNodes(cmd, resources, resources.scene.getShadedNodes(nvvkgltf::Scene::eRasterAll));
+    renderNodes(cmd, resources, resources.getScene()->getShadedNodes(nvvkgltf::Scene::eRasterAll));
   }
 }
 

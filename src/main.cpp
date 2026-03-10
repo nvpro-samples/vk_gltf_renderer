@@ -26,7 +26,6 @@
 
 #include <nvaftermath/aftermath.hpp>
 #include <nvapp/application.hpp>
-#include <nvapp/elem_camera.hpp>
 #include <nvapp/elem_logger.hpp>
 #include <nvapp/elem_profiler.hpp>
 #include <nvgpu_monitor/elem_gpu_monitor.hpp>
@@ -36,7 +35,7 @@
 #include <nvvk/validation_settings.hpp>
 
 #include "renderer.hpp"
-#include "doc/app_icon_png.h"
+#include "docs/app_icon_png.h"
 #include "version.hpp"
 
 nvutils::ProfilerManager g_profilerManager;  // #PROFILER
@@ -101,7 +100,6 @@ auto main(int argc, char** argv) -> int
 
 
   // Create all application elements
-  auto elemCamera       = std::make_shared<nvapp::ElementCamera>();
   auto elemGltfRenderer = std::make_shared<GltfRenderer>(&parameterRegistry);
   auto elemGpuMonitor   = std::make_shared<nvgpu_monitor::ElementGpuMonitor>();
   auto elemProfiler     = std::make_shared<nvapp::ElementProfiler>(&g_profilerManager, profilerSettings);
@@ -271,18 +269,21 @@ auto main(int argc, char** argv) -> int
 
   // Setting up the layout of the application
   appInfo.dockSetup = [](ImGuiID viewportID) {
-    // right side panel container
-    ImGuiID settingID = ImGui::DockBuilderSplitNode(viewportID, ImGuiDir_Right, 0.25F, nullptr, &viewportID);
-    ImGui::DockBuilderDockWindow("Settings", settingID);
-    ImGui::DockBuilderDockWindow("Scene Graph", settingID);
+    // Left side panel container
+    ImGuiID settingID = ImGui::DockBuilderSplitNode(viewportID, ImGuiDir_Left, 0.25F, nullptr, &viewportID);
     ImGui::DockBuilderDockWindow("Camera", settingID);
+    ImGui::DockBuilderDockWindow("Settings", settingID);
 
-    ImGuiID propID = ImGui::DockBuilderSplitNode(settingID, ImGuiDir_Down, 0.35F, nullptr, &settingID);
-    ImGui::DockBuilderDockWindow("Properties", propID);
+    // Under Setting
     ImGuiID tonemapID = ImGui::DockBuilderSplitNode(settingID, ImGuiDir_Down, 0.35F, nullptr, &settingID);
     ImGui::DockBuilderDockWindow("Tonemapper", tonemapID);
-    ImGuiID environmentID = ImGui::DockBuilderSplitNode(settingID, ImGuiDir_Down, 0.35F, nullptr, &settingID);
-    ImGui::DockBuilderDockWindow("Environment", environmentID);
+    ImGui::DockBuilderDockWindow("Environment", tonemapID);
+
+    // Right side: Scene Browser, Inspector (bottom)
+    ImGuiID sceneBrowserID = ImGui::DockBuilderSplitNode(viewportID, ImGuiDir_Right, 0.25F, nullptr, &viewportID);
+    ImGui::DockBuilderDockWindow("Scene Browser", sceneBrowserID);
+    ImGuiID inspectorID = ImGui::DockBuilderSplitNode(sceneBrowserID, ImGuiDir_Down, 0.35F, nullptr, &sceneBrowserID);
+    ImGui::DockBuilderDockWindow("Inspector", inspectorID);
 
     // bottom panel container
     ImGuiID logID = ImGui::DockBuilderSplitNode(viewportID, ImGuiDir_Down, 0.35F, nullptr, &viewportID);
@@ -293,6 +294,7 @@ auto main(int argc, char** argv) -> int
     ImGui::DockBuilderDockWindow("Profiler", profilerID);
     ImGuiID memStatsID = ImGui::DockBuilderSplitNode(logID, ImGuiDir_Right, 0.33F, nullptr, &logID);
     ImGui::DockBuilderDockWindow("Memory Statistics", memStatsID);
+    ImGui::DockBuilderDockWindow("Statistics", memStatsID);
   };
 
   // Create the application
@@ -305,12 +307,8 @@ auto main(int argc, char** argv) -> int
     setWindowIcon(app.getWindowHandle());
   }
 
-  // Set the camera manipulator to elements that need it.
-  auto cameraManip = elemGltfRenderer->getCameraManipulator();
-  elemCamera->setCameraManipulator(cameraManip);
   elemGltfRenderer->registerRecentFilesHandler();
 
-  app.addElement(elemCamera);
   app.addElement(elemGltfRenderer);
   app.addElement(elemLogger);
   app.addElement(elemGpuMonitor);

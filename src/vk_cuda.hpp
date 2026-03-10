@@ -18,16 +18,11 @@
  */
 
 
-/***********************************************************************
-
-  This file is contains many functions to share resources between
-  Vulkan and CUDA.
-
-  Besides Semaphore, all Vulkan resources must be created using the 
-  export flag. Then, this Vulkan resource can be pass in one of the
-  function below, to create its CUDA counterpart. 
-
-***********************************************************************/
+// Functions to share resources between Vulkan and CUDA.
+//
+// Besides Semaphore, all Vulkan resources must be created using the export flag.
+// Then, this Vulkan resource can be passed to one of the functions below to
+// create its CUDA counterpart.
 
 #pragma once
 

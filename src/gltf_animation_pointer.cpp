@@ -17,6 +17,13 @@
  * SPDX-License-Identifier: Apache-2.0
  */
 
+//
+// Implements KHR_animation_pointer extension support for glTF.
+// Resolves JSON pointer paths (e.g. "/materials/0/pbrMetallicRoughness/baseColorFactor")
+// to locate target properties in the model, and applies interpolated animation values
+// at runtime. Handles both standard and extension properties.
+//
+
 #include <charconv>
 #include <string_view>
 

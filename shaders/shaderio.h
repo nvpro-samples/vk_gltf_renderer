@@ -47,7 +47,7 @@ enum class EnvSystem
 enum OutputImage
 {
   eResultImage = 0,        // Output image (RGBA32)
-  eSelectImage,            // Selection image (R8)
+  eSelectImage,            // Selection image (R32)
   eDlssAlbedo = 2,         // Diffuse albedo (RGBA8)
   eDlssSpecAlbedo,         // Specular albedo (RGBA32)
   eDlssNormalRoughness,    // Normal and roughness (RGBA32)
@@ -61,7 +61,8 @@ enum OutputImage
 enum BindingPoints
 {
   eTlas = 0,      // Top level acceleration structure
-  eOutImages,     // Output image (RGBA32)
+  eOutImages,     // Output image (RGBA32); eSelectImage slot = ObjectID in .r (R32_SFLOAT)
+  eOutDepth,      // Scene depth output (D32_SFLOAT as r32f storage image)
   eTextures,      // Textures (array of textures)
   eTexturesCube,  // Textures (array of textures)
   eTexturesHdr,   // HDR textures (array of textures)
@@ -81,8 +82,9 @@ enum OptixBindingPoints
 // Binding points for descriptors
 enum SilhouetteBindings
 {
-  eObjectID,    // In: the object ID image
-  eRGBAIImage,  // Out: the output image
+  eObjectID,          // In: the object ID image (R32_UINT)
+  eRGBAIImage,        // Out: the output image
+  eSelectionBitMask,  // In: storage buffer of uint32_t (one bit per render node)
 };
 
 enum DebugMethod
@@ -104,27 +106,34 @@ enum DebugMethod
 // Camera info
 struct SceneFrameInfo
 {
-  float4x4    viewMatrix;                   // View matrix
-  float4x4    projInv;                      // Inverse projection matrix
-  float4x4    viewInv;                      // Inverse view matrix
-  float4x4    viewProjMatrix;               // View-projection matrix (P*V)
-  float4x4    prevMVP;                      // Previous view-projection matrix
-  int         isOrthographic = 0;           // 1 if orthographic projection
-  float       envRotation;                  // Environment rotation (used for the HDR)
-  float       envBlur;                      // Level of blur for the environment map (0.0: no blur, 1.0: full blur)
-  float       envIntensity = 1.f;           // Environment intensity
-  int         useSolidBackground;           // Use solid background color (0==false, 1==true)
-  float3      backgroundColor;              // Background color when using solid background
-  int         environmentType        = 0;   // Environment type; 0: sky, 1: environment map
-  int         selectedRenderNode     = -1;  // Selected render node
-  DebugMethod debugMethod            = DebugMethod::eNone;  // Debug method
-  int         useInfinitePlane       = 0;
-  float       infinitePlaneDistance  = 0;
-  float3      infinitePlaneBaseColor = float3(0.5, 0.5, 0.5);  // Default gray color
-  float       infinitePlaneMetallic  = 0.0;                    // Default non-metallic
-  float       infinitePlaneRoughness = 0.5;                    // Default medium roughness
-  float       shadowCatcherDarkenAmount = 0.0;                 // Non-physical shadow darkening (precomputed from darkness slider)
+  float4x4    viewMatrix;                     // View matrix
+  float4x4    projInv;                        // Inverse projection matrix
+  float4x4    viewInv;                        // Inverse view matrix
+  float4x4    viewProjMatrix;                 // View-projection matrix (P*V)
+  float4x4    prevMVP;                        // Previous view-projection matrix
+  int         isOrthographic = 0;             // 1 if orthographic projection
+  float       envRotation;                    // Environment rotation (used for the HDR)
+  float       envBlur;                        // Level of blur for the environment map (0.0: no blur, 1.0: full blur)
+  float       envIntensity = 1.f;             // Environment intensity
+  int         useSolidBackground;             // Use solid background color (0==false, 1==true)
+  float3      backgroundColor;                // Background color when using solid background
+  int         environmentType           = 0;  // Environment type; 0: sky, 1: environment map
+  DebugMethod debugMethod               = DebugMethod::eNone;  // Debug method
+  int         useInfinitePlane          = 0;
+  float       infinitePlaneDistance     = 0;
+  float3      infinitePlaneBaseColor    = float3(0.5, 0.5, 0.5);  // Default gray color
+  float       infinitePlaneMetallic     = 0.0;                    // Default non-metallic
+  float       infinitePlaneRoughness    = 0.5;                    // Default medium roughness
+  float       shadowCatcherDarkenAmount = 0.0;  // Non-physical shadow darkening (precomputed from darkness slider)
 };
+
+enum PathtracerFlags
+{
+  ePtUseDlss          = 1 << 0,
+  ePtUseOptixDenoiser = 1 << 1,
+  ePtFirstFrame       = 1 << 2,
+};
+
 
 // Push constant
 struct PathtracePushConstant
@@ -136,10 +145,7 @@ struct PathtracePushConstant
   int   totalSamples          = 0;     // Total samples accumulated so far
   float focalDistance         = 0.0f;  // Focal distance for depth of field
   float aperture              = 0.0f;  // Aperture for depth of field
-  int   useDlss               = 0;     // Use DLSS (0: no, 1: yes)
-  int   useOptixDenoiser      = 0;     // Use the Optix Denoiser
-  int   renderSelection       = 1;     // Padding to align the structure
-  /// Infinite plane
+  int                    flags                 = 0;     // Bit flags: ePtUseDlss | ePtUseOptixDenoiser | ePtFirstFrame
   float2                 jitter;               // Jitter for the DLSS
   float2                 mouseCoord = {0, 0};  // Mouse coordinates (use for debug)
   SceneFrameInfo*        frameInfo;            // Camera info
@@ -163,6 +169,7 @@ struct RasterPushConstant
 struct SilhouettePushConstant
 {
   float3 color;
+  uint   selectionBitMaskWordCount;  // Number of uint32 words in selection bitmask (for bounds check)
 };
 
 NAMESPACE_SHADERIO_END()

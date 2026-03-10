@@ -4,15 +4,15 @@
       "bufferView": 0,
       "componentType": 5126,
       "count": 8093,
-      "max": [
-        1.3013720512390137,
-        1.0,
-        1.2017070055007935
-      ],
       "min": [
         -1.0,
         -1.045469045639038,
-        -1.2017070055007935
+        -1.2017070055007937
+      ],
+      "max": [
+        1.3013720512390137,
+        1.0,
+        1.2017070055007937
       ],
       "type": "VEC3"
     },
@@ -36,56 +36,42 @@
     }
   ],
   "asset": {
+    "generator": "Iray glTF plugin + NVIDIA vk_gltf_renderer v2.0.260219",
     "copyright": "NVIDIA Corporation",
-    "generator": "Iray glTF plugin",
     "version": "2.0"
   },
   "bufferViews": [
     {
       "buffer": 0,
       "byteLength": 97116,
-      "byteStride": 12
+      "byteStride": 12,
+      "target": 34962
     },
     {
       "buffer": 0,
       "byteLength": 97116,
+      "byteStride": 12,
       "byteOffset": 97116,
-      "byteStride": 12
+      "target": 34962
     },
     {
       "buffer": 0,
       "byteLength": 64744,
+      "byteStride": 8,
       "byteOffset": 194232,
-      "byteStride": 8
+      "target": 34962
     },
     {
       "buffer": 0,
       "byteLength": 113400,
-      "byteOffset": 258976
-    }
-  ],
-  "buffers": [
-    {
-      "byteLength": 372376,
-      "uri": "shader_ball.bin"
-    }
-  ],
-  "cameras": [
-    {
-      "name": "default",
-      "perspective": {
-        "aspectRatio": 1.3333333730697632,
-        "yfov": 0.7362615466117859,
-        "zfar": 10000.0,
-        "znear": 0.10000000149011612
-      },
-      "type": "perspective"
+      "byteOffset": 258976,
+      "target": 34963
     }
   ],
   "materials": [
     {
-      "doubleSided": true,
       "name": "blinn2SG",
+      "doubleSided": true,
       "pbrMetallicRoughness": {
         "roughnessFactor": 0.6
       }
@@ -93,7 +79,6 @@
   ],
   "meshes": [
     {
-      "name": "polySurfaceShape11",
       "primitives": [
         {
           "attributes": {
@@ -105,35 +90,46 @@
           "material": 0,
           "mode": 4
         }
-      ]
+      ],
+      "name": "Mesh"
     }
   ],
   "nodes": [
     {
-      "camera": 0,
-      "matrix": [
-        -0.5007145417658573,
-        1.3190265968514163e-07,
-        0.8656126938498631,
-        0.0,
-        0.39035914223452695,
-        0.892542810433716,
-        0.22580404539530088,
-        0.0,
-        -0.7725953983820218,
-        0.45096394842012943,
-        -0.44690939069551067,
-        -0.0,
-        -5.4127602684444795,
-        3.0078693000514987,
-        -2.9272519782591875,
-        1.0
+      "translation": [
+        -6.100406646728516,
+        3.0585501194000244,
+        1.417274832725525
       ],
-      "name": "persp"
+      "rotation": [
+        -0.18247966468334198,
+        -0.6153372526168823,
+        -0.14928126335144043,
+        0.7521810531616211
+      ],
+      "camera": 0,
+      "extras": {
+        "camera::center": [
+          -0.02529621124267578,
+          -0.1367936134338379,
+          0.18913745880126953
+        ],
+        "camera::eye": [
+          -6.100406646728516,
+          3.0585501194000244,
+          1.417274832725525
+        ],
+        "camera::up": [
+          0.0,
+          1.0,
+          0.0
+        ]
+      },
+      "name": "Camera"
     },
     {
       "mesh": 0,
-      "name": "polySurface11"
+      "name": "ShaderBall"
     }
   ],
   "scene": 0,
@@ -142,7 +138,26 @@
       "nodes": [
         0,
         1
-      ]
+      ],
+      "name": "Scene-0"
+    }
+  ],
+  "cameras": [
+    {
+      "type": "perspective",
+      "name": "default",
+      "perspective": {
+        "zfar": 10000.0,
+        "znear": 0.10000000149011612,
+        "aspectRatio": 1.3333333730697632,
+        "yfov": 0.7362615466117859
+      }
+    }
+  ],
+  "buffers": [
+    {
+      "byteLength": 372376,
+      "uri": "shader_ball.bin"
     }
   ]
 }

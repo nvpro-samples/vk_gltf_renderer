@@ -188,10 +188,8 @@ PixelOutput fragmentMain(VertexOutput input, uint primitiveID: SV_PrimitiveID, f
   output.color.xyz = pbrMat.baseColor;
   output.color.a   = pbrMat.opacity * (1.0 - pbrMat.transmission);
 
-  if(pushConst.renderNodeID == pushConst.frameInfo->selectedRenderNode)
-    output.selection = float4(1);
-  else
-    output.selection = float4(0);
+  // Write ObjectID for silhouette (0 = no hit, N+1 = render node N); silhouette uses bitmask for selection
+  output.selection = float4(asfloat(pushConst.renderNodeID + 1), 0, 0, 0);
 
 
   if(pushConst.frameInfo.debugMethod != DebugMethod::eNone)
@@ -207,7 +205,7 @@ PixelOutput fragmentMain(VertexOutput input, uint primitiveID: SV_PrimitiveID, f
       discard;
   }
 
-  const float3 toEye             = -worldRayDirection;
+  const float3 toEye = -worldRayDirection;
 
   // Result
   float3 contribution = float3(0);

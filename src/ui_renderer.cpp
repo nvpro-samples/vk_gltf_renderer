@@ -17,13 +17,23 @@
  * SPDX-License-Identifier: Apache-2.0
  */
 
+//
+// Main renderer UI and application loop. Orchestrates scene loading,
+// environment map setup, camera control, renderer switching (path tracer /
+// rasterizer), picking, gizmo interaction, animation playback, and
+// the top-level ImGui layout with viewport, menus, and side panels.
+//
+
+#include <algorithm>
 #include <filesystem>
 #include <fmt/format.h>
 #include <cmath>
 #include <GLFW/glfw3.h>
+#include <glm/gtc/matrix_transform.hpp>
 #include <glm/gtc/type_ptr.hpp>
 #include <imgui.h>
 
+#include <nvvk/check_error.hpp>
 #include <nvvk/helpers.hpp>
 #include <nvutils/bounding_box.hpp>
 #include <nvgui/tonemapper.hpp>
@@ -31,12 +41,12 @@
 #include <nvgui/axis.hpp>
 #include "tinygltf_utils.hpp"
 
+#include <nvapp/elem_camera.hpp>
+
 #include "renderer.hpp"
-#include "compact_model.hpp"
-#include "create_tangent.hpp"
+#include "gltf_create_tangent.hpp"
 #include "scoped_banner.hpp"
 #include "ui_mouse_state.hpp"
-#include "ui_collapsing_header_manager.h"
 #include "version.hpp"
 
 void GltfRenderer::mouseClickedInViewport()
@@ -48,12 +58,35 @@ void GltfRenderer::mouseClickedInViewport()
     return;
 
   // Do not pick if the scene is not valid or the renderer is busy
-  if(!m_resources.scene.valid() || m_busy.isBusy())
+  if(!m_resources.getScene() || !m_resources.getScene()->valid() || m_busy.isBusy())
   {
     return;
   }
 
   s_mouseClickState.update();
+
+  // Process gizmo input before ray picking (gizmo gets priority)
+  if(m_resources.settings.showGizmo && m_visualHelpers.transform.isAttached())
+  {
+    ImVec2 mousePos  = ImGui::GetMousePos();
+    ImVec2 cursorPos = ImGui::GetCursorScreenPos();
+    ImVec2 avail     = ImGui::GetContentRegionAvail();
+
+    glm::vec2 localMouse(mousePos.x - cursorPos.x, mousePos.y - cursorPos.y);
+    glm::vec2 mouseDelta(ImGui::GetIO().MouseDelta.x, ImGui::GetIO().MouseDelta.y);
+    glm::vec2 viewportSize(avail.x, avail.y);
+
+    bool mouseDown     = ImGui::IsMouseDown(ImGuiMouseButton_Left);
+    bool mousePressed  = ImGui::IsMouseClicked(ImGuiMouseButton_Left);
+    bool mouseReleased = ImGui::IsMouseReleased(ImGuiMouseButton_Left);
+
+    bool gizmoActive = m_visualHelpers.transform.processInput(localMouse, mouseDelta, mouseDown, mousePressed,
+                                                              mouseReleased, m_cameraManip->getViewMatrix(),
+                                                              m_cameraManip->getPerspectiveMatrix(), viewportSize);
+
+    if(gizmoActive || m_visualHelpers.transform.isDragging())
+      return;
+  }
 
   // If double-clicking in the "Viewport", shoot a ray to the scene under the mouse.
   // If the ray hit something, set the camera center to the hit position.
@@ -71,37 +104,47 @@ void GltfRenderer::mouseClickedInViewport()
                           .perspectiveInv = glm::inverse(m_cameraManip->getPerspectiveMatrix()),
                           .isOrthographic = (m_cameraManip->getProjectionType() == nvutils::CameraManipulator::Orthographic) ? 1 : 0,
                           .pickPos = {localMousePos.x, localMousePos.y},
-                          .tlas    = m_resources.sceneRtx.tlas()});
+                          .tlas    = m_resources.sceneRtx.topLevelAS()});
     m_app->submitAndWaitTempCmdBuffer(cmd);
     nvvk::RayPicker::PickResult pickResult = m_rayPicker.getResult();
 
     // Set or de-select the selected object (primitive-level selection)
+    // pickResult.instanceID is the TLAS instance index = render node index
     if(s_mouseClickState.isMouseSingleClicked(ImGuiMouseButton_Left))
     {
       if(pickResult.instanceID > -1)
       {
-        // Toggle: deselect if clicking the same primitive
-        if(m_resources.selectedRenderNode == pickResult.instanceID)
+        const int        renderNodeIdx = pickResult.instanceID;
+        nvvkgltf::Scene* scene         = m_resources.getScene();
+        const auto&      renderNodes   = scene->getRenderNodes();
+        const bool       valid         = renderNodeIdx >= 0 && renderNodeIdx < static_cast<int>(renderNodes.size());
+
+        if(!valid)
         {
-          m_resources.selectedRenderNode = -1;
-          m_uiSceneGraph.selectPrimitive(-1, -1, -1);
+          m_resources.selectedRenderNodes.clear();
+          m_sceneSelection.clearSelection();
+        }
+        else if(m_resources.selectedRenderNodes.size() == 1 && m_resources.selectedRenderNodes.count(renderNodeIdx))
+        {
+          m_resources.selectedRenderNodes.clear();
+          m_sceneSelection.clearSelection();
         }
         else
         {
-          m_resources.selectedRenderNode         = pickResult.instanceID;
-          const nvvkgltf::RenderNode& renderNode = m_resources.scene.getRenderNodes()[pickResult.instanceID];
-          int                         nodeID     = renderNode.refNodeID;
+          const auto& renderNode = renderNodes[renderNodeIdx];
+          int         nodeID     = renderNode.refNodeID;
+          int         primIndex  = scene->getPrimitiveIndexForRenderNode(renderNodeIdx);
+          int         meshID     = scene->getModel().nodes[nodeID].mesh;
 
-          // Find the primitive index within the node's mesh
-          int primIndex = m_resources.scene.getPrimitiveIndexForRenderNode(pickResult.instanceID);
-          m_uiSceneGraph.selectPrimitive(pickResult.instanceID, nodeID, primIndex);
+          m_resources.selectedRenderNodes = {renderNodeIdx};
+          m_sceneSelection.selectPrimitive(renderNodeIdx, nodeID, primIndex, meshID);
+          m_sceneBrowser.focusOnSelection();
         }
       }
       else
       {
-        // Clicked on background - deselect
-        m_resources.selectedRenderNode = -1;
-        m_uiSceneGraph.selectPrimitive(-1, -1, -1);
+        m_resources.selectedRenderNodes.clear();
+        m_sceneSelection.clearSelection();
       }
     }
 
@@ -120,26 +163,36 @@ void GltfRenderer::mouseClickedInViewport()
     }
 
     {
-      // Logging picking info.
-      const nvvkgltf::RenderNode& renderNode = m_resources.scene.getRenderNodes()[pickResult.instanceID];
-      const tinygltf::Node&       node       = m_resources.scene.getModel().nodes[renderNode.refNodeID];
-      LOGI("Node Name: %s\n", node.name.c_str());
-      LOGI(" - GLTF: NodeID: %d, MeshID: %d, TriangleId: %d\n", renderNode.refNodeID, node.mesh, pickResult.primitiveID);
-      LOGI(" - Render: RenderNode: %d, RenderPrim: %d\n", pickResult.instanceID, pickResult.instanceCustomIndex);
-      LOGI("{%3.2f, %3.2f, %3.2f}, Dist: %3.2f\n", worldPos.x, worldPos.y, worldPos.z, pickResult.hitT);
+      const int        renderNodeIdx = pickResult.instanceID;
+      nvvkgltf::Scene* scene         = m_resources.getScene();
+      const auto&      renderNodes   = scene->getRenderNodes();
+      if(renderNodeIdx >= 0 && renderNodeIdx < static_cast<int>(renderNodes.size()))
+      {
+        const nvvkgltf::RenderNode& renderNode = renderNodes[renderNodeIdx];
+        const tinygltf::Node&       node       = scene->getModel().nodes[renderNode.refNodeID];
+        LOGI("Node Name: %s\n", node.name.c_str());
+        LOGI(" - GLTF: NodeID: %d, MeshID: %d, TriangleId: %d\n", renderNode.refNodeID, node.mesh, pickResult.primitiveID);
+        LOGI(" - Render: renderNode: %d, RenderPrim: %d\n", renderNodeIdx, pickResult.instanceCustomIndex);
+        LOGI("{%3.2f, %3.2f, %3.2f}, Dist: %3.2f\n", worldPos.x, worldPos.y, worldPos.z, pickResult.hitT);
+      }
     }
   }
 }
 
-nvutils::Bbox GltfRenderer::getRenderNodeBbox(int nodeID)
+nvutils::Bbox GltfRenderer::getRenderNodeBbox(int renderNodeIndex)
 {
-  nvutils::Bbox worldBbox({-1, -1, -1}, {1, 1, 1});
-  if(nodeID < 0 || !m_resources.scene.valid())
+  nvutils::Bbox    worldBbox({-1, -1, -1}, {1, 1, 1});
+  nvvkgltf::Scene* scene = m_resources.getScene();
+  if(renderNodeIndex < 0 || !scene || !scene->valid())
     return worldBbox;
 
-  const nvvkgltf::RenderNode&      renderNode      = m_resources.scene.getRenderNodes()[nodeID];
-  const nvvkgltf::RenderPrimitive& renderPrimitive = m_resources.scene.getRenderPrimitive(renderNode.renderPrimID);
-  const tinygltf::Model&           model           = m_resources.scene.getModel();
+  const auto& renderNodes = scene->getRenderNodes();
+  if(renderNodeIndex >= static_cast<int>(renderNodes.size()))
+    return worldBbox;
+
+  const nvvkgltf::RenderNode&      renderNode      = renderNodes[renderNodeIndex];
+  const nvvkgltf::RenderPrimitive& renderPrimitive = scene->getRenderPrimitive(renderNode.renderPrimID);
+  const tinygltf::Model&           model           = scene->getModel();
   const tinygltf::Accessor&        accessor = model.accessors[renderPrimitive.pPrimitive->attributes.at("POSITION")];
 
   glm::vec3 minValues = {-1.f, -1.f, -1.f};
@@ -154,14 +207,26 @@ nvutils::Bbox GltfRenderer::getRenderNodeBbox(int nodeID)
   return worldBbox;
 }
 
+nvutils::Bbox GltfRenderer::getRenderNodesBbox(const std::unordered_set<int>& renderNodeIndices)
+{
+  nvutils::Bbox unionBbox;
+  for(int idx : renderNodeIndices)
+    unionBbox.insert(getRenderNodeBbox(idx));
+  if(unionBbox.isEmpty())
+    return {};
+  return unionBbox;
+}
+
 void GltfRenderer::windowTitle()
 {
   static float dirty_timer = 0.0F;
   dirty_timer += ImGui::GetIO().DeltaTime;
   if(dirty_timer > 1.0F)  // Refresh every seconds
   {
-    const VkExtent2D&     size     = m_app->getViewportSize();
-    std::filesystem::path filename = m_resources.scene.getFilename().filename();
+    const VkExtent2D&     size = m_app->getViewportSize();
+    std::filesystem::path filename;
+    if(m_resources.getScene())
+      filename = m_resources.getScene()->getFilename().filename();
     if(filename.empty())
     {
       filename = "No Scene";
@@ -204,40 +269,47 @@ void GltfRenderer::renderUI()
       ImGui::End();  // End Camera
     }
 
-    // Scene Graph UI
+    // Scene Browser system: translate selection events into Resources for silhouette and fit-object
     {
-      // Use event-based approach for maximum decoupling
-      // The scene graph UI emits events instead of calling renderer methods directly
-      // This eliminates the circular dependency and makes the code more modular
-      m_uiSceneGraph.setEventCallback([&](const UiSceneGraph::Event& event) {
+      m_sceneSelection.setEventCallback([&](const SceneSelection::Event& event) {
         switch(event.type)
         {
-          case UiSceneGraph::EventType::CameraApply:
+          case SceneSelection::EventType::CameraApply:
             applyGltfCamera(event.data);
             break;
-          case UiSceneGraph::EventType::CameraSetFromView:
+          case SceneSelection::EventType::CameraSetFromView:
             setGltfCameraFromView(event.data);
             break;
-          case UiSceneGraph::EventType::NodeSelected:
-            // Update the selected render node index when a node is selected (first primitive)
-            m_resources.selectedRenderNode = event.renderNodeIndex;
+          case SceneSelection::EventType::NodeSelected: {
+            m_resources.selectedRenderNodes.clear();
+            nvvkgltf::Scene* scn = m_resources.getScene();
+            if(scn && scn->valid())
+            {
+              const int        nodeIdx = event.data;
+              std::vector<int> renderNodeIDs;
+              scn->getRenderNodeRegistry().getAllRenderNodesForNodeRecursive(
+                  nodeIdx,
+                  [scn](int nid) {
+                    const auto& node = scn->getModel().nodes[static_cast<size_t>(nid)];
+                    return node.children;
+                  },
+                  renderNodeIDs);
+              for(int id : renderNodeIDs)
+                m_resources.selectedRenderNodes.insert(id);
+            }
             break;
-          case UiSceneGraph::EventType::PrimitiveSelected:
-            // Update the selected render node directly from the RenderNode index
-            m_resources.selectedRenderNode = event.renderNodeIndex;
+          }
+          case SceneSelection::EventType::PrimitiveSelected:
+            m_resources.selectedRenderNodes = {event.renderNodeIndex};
             break;
-          case UiSceneGraph::EventType::MaterialSelected:
-            // [TODO] Handle material selection
+          case SceneSelection::EventType::MaterialSelected:
+            // Material selection event
             break;
         }
       });
 
-      // Set up render node lookup callback for primitive selection in UI
-      m_uiSceneGraph.setRenderNodeLookup([this](int nodeIndex, int primitiveIndex) -> int {
-        return m_resources.scene.getRenderNodeForPrimitive(nodeIndex, primitiveIndex);
-      });
-
-      m_uiSceneGraph.render(&m_resources.settings.showSceneGraphWindow, &m_resources.settings.showPropertiesWindow);
+      m_sceneBrowser.render(&m_resources.settings.showSceneBrowserWindow, m_busy.isBusy());
+      m_inspector.render(&m_resources.settings.showInspectorWindow, m_busy.isBusy());
     }
 
     if(m_resources.settings.showSettingsWindow)
@@ -261,7 +333,7 @@ void GltfRenderer::renderUI()
             m_resources.settings.renderSystem = static_cast<RenderingMode>(currentItem);
             changed                           = true;  // Reset frame counter when switching renderers
           }
-          changed |= PE::Combo("Debug Method", reinterpret_cast<int32_t*>(&m_resources.settings.debugMethod),
+          changed |= PE::Combo("Debug Method", (int32_t*)(&m_resources.settings.debugMethod),
                                "None\0BaseColor\0Metallic\0Roughness\0Normal\0Tangent\0Bitangent\0Emissive\0Opacity\0TexCoord0\0TexCoord1\0\0");
           PE::end();
           if(m_resources.settings.renderSystem == RenderingMode::ePathtracer)
@@ -281,56 +353,26 @@ void GltfRenderer::renderUI()
         }
         ImGui::Separator();
 
-        // Multiple scenes
-        if(m_resources.scene.getModel().scenes.size() > 1)
+        // Multiple scenes (glTF scenes within one file)
+        if(m_resources.getScene() && m_resources.getScene()->getModel().scenes.size() > 1)
         {
           if(ImGui::CollapsingHeader("Multiple Scenes"))
           {
             ImGui::PushID("Scenes");
-            for(size_t i = 0; i < m_resources.scene.getModel().scenes.size(); i++)
+            for(size_t i = 0; i < m_resources.getScene()->getModel().scenes.size(); i++)
             {
-              if(ImGui::RadioButton(m_resources.scene.getModel().scenes[i].name.c_str(), m_resources.scene.getCurrentScene() == i))
+              if(ImGui::RadioButton(m_resources.getScene()->getModel().scenes[i].name.c_str(),
+                                    m_resources.getScene()->getCurrentScene() == i))
               {
-                m_resources.scene.setCurrentScene(int(i));
-                vkDeviceWaitIdle(m_device);
+                m_resources.getScene()->setCurrentScene(int(i));
+                // SYNC NOTE: User-initiated scene switch — wait before full GPU resource rebuild.
+                NVVK_CHECK(vkQueueWaitIdle(m_app->getQueue(0).queue));
                 createVulkanScene();
                 updateTextures();
                 changed = true;
               }
             }
             ImGui::PopID();
-          }
-        }
-
-        // Variant selection
-        if(m_resources.scene.getVariants().size() > 0)
-        {
-          if(ImGui::CollapsingHeader("Variants"))
-          {
-            ImGui::PushID("Variants");
-            for(size_t i = 0; i < m_resources.scene.getVariants().size(); i++)
-            {
-              if(ImGui::Selectable(m_resources.scene.getVariants()[i].c_str(), m_resources.scene.getCurrentVariant() == i))
-              {
-                std::unordered_set<int> dirtyRenderNodes;
-                m_resources.scene.setCurrentVariant(int(i), dirtyRenderNodes);
-                for(int dirtyRenderNode : dirtyRenderNodes)
-                {
-                  m_resources.dirtyMaterialVariants.insert(dirtyRenderNode);
-                }
-                changed = true;
-              }
-            }
-            ImGui::PopID();
-          }
-        }
-
-        // Animation
-        if(m_resources.scene.hasAnimation())
-        {
-          if(ImGui::CollapsingHeader("Animation"))
-          {
-            m_animControl.onUI(&m_resources.scene);
           }
         }
       }
@@ -347,8 +389,27 @@ void GltfRenderer::renderUI()
     ImGui::PushStyleVar(ImGuiStyleVar_WindowPadding, ImVec2(0.0F, 0.0F));
     ImGui::Begin("Viewport");
 
-    // Handle mouse clicks in the viewport
+    // Camera smooth animation runs always
+    m_cameraManip->updateAnim();
+
+    // Camera orbit/pan/zoom only when gizmo is not capturing input
+    bool gizmoCapturedInput = m_visualHelpers.transform.isDragging();
+    if(!gizmoCapturedInput)
+    {
+      nvapp::ElementCamera::updateCamera(m_cameraManip, ImGui::GetCurrentWindow());
+    }
+
+    // Handle mouse clicks and gizmo interaction in the viewport
     GltfRenderer::mouseClickedInViewport();
+
+    // Viewport-scoped keyboard shortcuts (only when hovered or focused)
+    if(ImGui::IsWindowHovered(ImGuiHoveredFlags_RootWindow) || ImGui::IsWindowFocused())
+    {
+      if(ImGui::IsKeyPressed(ImGuiKey_G, false))
+        m_resources.settings.showGrid = !m_resources.settings.showGrid;
+      if(ImGui::IsKeyPressed(ImGuiKey_T, false))
+        m_resources.settings.showGizmo = !m_resources.settings.showGizmo;
+    }
 
     // Display the G-Buffer tonemapped image
     ImGui::Image(ImTextureID(m_resources.gBuffers.getDescriptorSet(Resources::eImgTonemapped)), ImGui::GetContentRegionAvail());
@@ -377,13 +438,265 @@ void GltfRenderer::renderUI()
   renderEnvironmentWindow();
   renderTonemapperWindow();
   renderStatisticsWindow();
+
+#ifndef NDEBUG
+  if(m_resources.settings.showGridStyleWindow)
+  {
+    if(ImGui::Begin("Grid Style", &m_resources.settings.showGridStyleWindow))
+    {
+      GridHelperVk::onDebugUI(m_visualHelpers.grid.style());
+    }
+    ImGui::End();
+  }
+  if(m_resources.settings.showGizmoStyleWindow)
+  {
+    if(ImGui::Begin("Gizmo Style", &m_resources.settings.showGizmoStyleWindow))
+    {
+      TransformHelperVk::onDebugUI(m_visualHelpers.transform.style());
+    }
+    ImGui::End();
+  }
+#endif
+}
+
+void GltfRenderer::renderFileMenu(bool                   validScene,
+                                  bool&                  newScene,
+                                  bool&                  openFile,
+                                  bool&                  mergeFile,
+                                  bool&                  loadHdrFile,
+                                  bool&                  saveFile,
+                                  bool&                  saveScreenFile,
+                                  bool&                  saveImageFile,
+                                  bool&                  closeApp,
+                                  std::filesystem::path& sceneToLoadFilename,
+                                  std::filesystem::path& sceneToMergeFilename)
+{
+  if(!ImGui::BeginMenu("File"))
+    return;
+  newScene = ImGui::MenuItem(ICON_MS_FILTER_NONE " New Scene", "Ctrl+N");
+  openFile |= ImGui::MenuItem(ICON_MS_FILE_OPEN " Open", "Ctrl+O");
+  ImGui::BeginDisabled(!validScene);
+  mergeFile |= ImGui::MenuItem(ICON_MS_ADD " Import/Merge Scene...");
+  ImGui::EndDisabled();
+  loadHdrFile |= ImGui::MenuItem(ICON_MS_IMAGE " Load HDR Environment", "Ctrl+Shift+O");
+  if(ImGui::BeginMenu(ICON_MS_HISTORY " Open Recent"))
+  {
+    for(const auto& file : m_recentFiles)
+    {
+      if(ImGui::MenuItem(file.string().c_str()))
+        sceneToLoadFilename = file;
+    }
+    ImGui::EndMenu();
+  }
+  ImGui::BeginDisabled(!validScene);
+  saveFile |= ImGui::MenuItem(ICON_MS_FILE_SAVE " Save As", "Ctrl+S");
+  ImGui::EndDisabled();
+  ImGui::Separator();
+  saveImageFile |= ImGui::MenuItem(ICON_MS_IMAGE " Save Image", "Ctrl+Shift+S");
+  saveScreenFile |= ImGui::MenuItem(ICON_MS_DESKTOP_WINDOWS " Save Screen", "Ctrl+Alt+Shift+S");
+  ImGui::Separator();
+  closeApp |= ImGui::MenuItem(ICON_MS_POWER_SETTINGS_NEW " Exit", "Ctrl+Q");
+  ImGui::EndMenu();
+}
+
+void GltfRenderer::renderEditMenu(bool validScene)
+{
+  if(!ImGui::BeginMenu("Edit"))
+    return;
+
+  ImGui::BeginDisabled(!validScene || !m_undoStack.canUndo());
+  std::string undoLabel = m_undoStack.canUndo() ? ICON_MS_UNDO " Undo " + m_undoStack.undoDescription() : ICON_MS_UNDO " Undo";
+  if(ImGui::MenuItem(undoLabel.c_str(), "Ctrl+Z"))
+  {
+    m_undoStack.undo();
+    onUndoRedo();
+  }
+  ImGui::EndDisabled();
+
+  ImGui::BeginDisabled(!validScene || !m_undoStack.canRedo());
+  std::string redoLabel = m_undoStack.canRedo() ? ICON_MS_REDO " Redo " + m_undoStack.redoDescription() : ICON_MS_REDO " Redo";
+  if(ImGui::MenuItem(redoLabel.c_str(), "Ctrl+Y"))
+  {
+    m_undoStack.redo();
+    onUndoRedo();
+  }
+  ImGui::EndDisabled();
+
+  ImGui::EndMenu();
+}
+
+void GltfRenderer::renderViewMenu(bool validScene, bool& fitScene, bool& fitObject, bool& toggleVsync)
+{
+  if(!ImGui::BeginMenu("View"))
+    return;
+  ImGui::BeginDisabled(!validScene);
+  fitScene |= ImGui::MenuItem(ICON_MS_ZOOM_OUT " Fit Scene", "Ctrl+Shift+F");
+  ImGui::BeginDisabled(m_resources.selectedRenderNodes.empty());
+  fitObject |= ImGui::MenuItem(ICON_MS_ZOOM_IN " Fit Object", "Ctrl+F");
+  ImGui::EndDisabled();
+  ImGui::EndDisabled();
+  ImGui::Separator();
+  ImGui::MenuItem(ICON_MS_BOTTOM_PANEL_OPEN " V-Sync", "Ctrl+Shift+V", &toggleVsync);
+  ImGui::MenuItem(ICON_MS_VIEW_IN_AR " 3D-Axis", nullptr, &m_resources.settings.showAxis);
+  ImGui::Separator();
+  ImGui::MenuItem(ICON_MS_GRID_ON " Grid", "G", &m_resources.settings.showGrid);
+  ImGui::MenuItem(ICON_MS_3D_ROTATION " Gizmo", "T", &m_resources.settings.showGizmo);
+  ImGui::EndMenu();
+}
+
+void GltfRenderer::renderWindowsMenu()
+{
+  struct WindowToggleInfo
+  {
+    const char* icon;
+    const char* name;
+    const char* shortcut;
+    bool*       visible;
+  };
+  static const std::array<WindowToggleInfo, 6> toggles = {{
+      {ICON_MS_PHOTO_CAMERA, "Camera", "F1", &m_resources.settings.showCameraWindow},
+      {ICON_MS_ACCOUNT_TREE, "Scene Browser", "F2", &m_resources.settings.showSceneBrowserWindow},
+      {ICON_MS_SETTINGS, "Settings", "F3", &m_resources.settings.showSettingsWindow},
+      {ICON_MS_LIST_ALT, "Inspector", "F4", &m_resources.settings.showInspectorWindow},
+      {ICON_MS_PUBLIC, "Environment", "F5", &m_resources.settings.showEnvironmentWindow},
+      {ICON_MS_TONALITY, "Tonemapper", "F6", &m_resources.settings.showTonemapperWindow},
+  }};
+  if(!ImGui::BeginMenu("Windows"))
+    return;
+  for(const auto& t : toggles)
+  {
+    std::string label = std::string(t.icon) + " " + t.name;
+    ImGui::MenuItem(label.c_str(), t.shortcut, t.visible);
+  }
+  ImGui::MenuItem(ICON_MS_ANALYTICS " Statistics", nullptr, &m_resources.settings.showStatisticsWindow);
+  ImGui::Separator();
+  ImGui::MenuItem(ICON_MS_MONITORING " Memory Usage", nullptr, &m_resources.settings.showMemStats);
+  ImGui::EndMenu();
+}
+
+void GltfRenderer::renderToolsMenu(bool validScene, bool& reloadShader, bool& compactScene)
+{
+  if(!ImGui::BeginMenu("Tools"))
+    return;
+  reloadShader |= ImGui::MenuItem(ICON_MS_REFRESH " Reload Shaders", "Ctrl+Shift+R");
+  ImGui::Separator();
+  ImGui::BeginDisabled(!validScene);
+  if(ImGui::MenuItem(ICON_MS_BUILD " Recreate Tangents - Simple"))
+  {
+    SCOPED_BANNER("Recreate Tangents - Simple");
+    recomputeTangents(m_resources.getScene()->getModel(), true, false);
+    m_resources.dirtyFlags.set(DirtyFlags::eDirtyTangents);
+  }
+  ImGui::SetItemTooltip("This recreate tangents using UV gradient method");
+  if(ImGui::MenuItem(ICON_MS_BUILD " Recreate Tangents - MikkTSpace"))
+  {
+    bool buffersChanged = false;
+    {
+      SCOPED_BANNER("Recreate Tangents - MikkTSpace");
+      buffersChanged = recomputeTangents(m_resources.getScene()->getModel(), true, true);
+    }
+    if(buffersChanged)
+      rebuildSceneFromModel();
+    else
+      m_resources.dirtyFlags.set(DirtyFlags::eDirtyTangents);
+  }
+  ImGui::SetItemTooltip("Recreate tangents using MikkTSpace (may split vertices at UV seams)");
+  ImGui::Separator();
+  compactScene |= ImGui::MenuItem(ICON_MS_COMPRESS " Compact Scene", "Ctrl+K");
+  ImGui::SetItemTooltip(
+      "Remove orphaned resources (meshes, materials, textures, images, geometry).\n"
+      "Use after deleting nodes or importing/merging scenes.");
+  ImGui::EndDisabled();
+  ImGui::EndMenu();
+}
+
+void GltfRenderer::renderDebugMenu()
+{
+#ifndef NDEBUG
+  if(ImGui::BeginMenu("Debug"))
+  {
+    ImGui::MenuItem("Grid Style", nullptr, &m_resources.settings.showGridStyleWindow);
+    ImGui::MenuItem("Gizmo Style", nullptr, &m_resources.settings.showGizmoStyleWindow);
+    ImGui::EndMenu();
+  }
+#endif
+}
+
+void GltfRenderer::renderMenuToolbarAndGizmos()
+{
+  struct WindowToggleInfo
+  {
+    const char* icon;
+    const char* shortcut;
+    bool*       visible;
+    const char* tooltip;
+  };
+  static const std::array<WindowToggleInfo, 6> windowToggles  = {{
+      {ICON_MS_PHOTO_CAMERA, "F1", &m_resources.settings.showCameraWindow, "Camera"},
+      {ICON_MS_ACCOUNT_TREE, "F2", &m_resources.settings.showSceneBrowserWindow, "Scene Browser"},
+      {ICON_MS_SETTINGS, "F3", &m_resources.settings.showSettingsWindow, "Settings"},
+      {ICON_MS_LIST_ALT, "F4", &m_resources.settings.showInspectorWindow, "Inspector"},
+      {ICON_MS_PUBLIC, "F5", &m_resources.settings.showEnvironmentWindow, "Environment"},
+      {ICON_MS_TONALITY, "F6", &m_resources.settings.showTonemapperWindow, "Tonemapper"},
+  }};
+  float                                        buttonSize     = ImGui::GetFrameHeight();
+  const ImGuiStyle&                            style          = ImGui::GetStyle();
+  float                                        separatorWidth = 2.0f;
+  float totalWidth  = separatorWidth + static_cast<float>(windowToggles.size()) * (buttonSize + style.ItemSpacing.x);
+  float windowWidth = ImGui::GetWindowWidth();
+  float offsetX     = windowWidth * 0.5f - totalWidth * 0.5f;
+  ImGui::SameLine(offsetX);
+  ImGui::SeparatorEx(ImGuiSeparatorFlags_Vertical);
+  ImGui::SameLine();
+  for(size_t i = 0; i < windowToggles.size(); ++i)
+  {
+    const auto& toggle = windowToggles[i];
+    ImVec4      buttonColor =
+        *toggle.visible ? ImGui::GetStyle().Colors[ImGuiCol_ButtonActive] : ImGui::GetStyle().Colors[ImGuiCol_ChildBg];
+    ImGui::PushStyleColor(ImGuiCol_Button, buttonColor);
+    if(ImGui::Button(toggle.icon))
+      *toggle.visible = !*toggle.visible;
+    ImGui::PopStyleColor();
+    if(ImGui::IsItemHovered())
+      ImGui::SetTooltip("Toggle %s Window (%s)", toggle.tooltip, toggle.shortcut);
+    if(i < windowToggles.size() - 1)
+      ImGui::SameLine(0, 0);
+  }
+  ImGui::SameLine();
+  ImGui::SeparatorEx(ImGuiSeparatorFlags_Vertical);
+  ImGui::SameLine();
+  struct GizmoToggle
+  {
+    const char* icon;
+    const char* tooltip;
+    const char* shortcut;
+    bool*       visible;
+  };
+  GizmoToggle gizmoToggles[] = {
+      {ICON_MS_GRID_ON, "Grid", "G", &m_resources.settings.showGrid},
+      {ICON_MS_3D_ROTATION, "Gizmo", "T", &m_resources.settings.showGizmo},
+  };
+  for(size_t i = 0; i < std::size(gizmoToggles); ++i)
+  {
+    const auto& toggle = gizmoToggles[i];
+    ImVec4      buttonColor =
+        *toggle.visible ? ImGui::GetStyle().Colors[ImGuiCol_ButtonActive] : ImGui::GetStyle().Colors[ImGuiCol_ChildBg];
+    ImGui::PushStyleColor(ImGuiCol_Button, buttonColor);
+    if(ImGui::Button(toggle.icon, ImVec2(buttonSize, buttonSize)))
+      *toggle.visible = !*toggle.visible;
+    ImGui::PopStyleColor();
+    if(ImGui::IsItemHovered())
+      ImGui::SetTooltip("Toggle %s (%s in viewport)", toggle.tooltip, toggle.shortcut);
+    if(i < std::size(gizmoToggles) - 1)
+      ImGui::SameLine(0, 0);
+  }
+  ImGui::SameLine();
+  ImGui::SeparatorEx(ImGuiSeparatorFlags_Vertical);
 }
 
 void GltfRenderer::renderMenu()
 {
   bool v_sync = m_app->isVsync();
-
-  // Window toggle information structure for DRY approach
   struct WindowToggleInfo
   {
     const char* icon;
@@ -394,18 +707,14 @@ void GltfRenderer::renderMenu()
     bool*       visible;
     const char* tooltip;
   };
-
-  // Define all window toggles with their shortcuts
   static const std::array<WindowToggleInfo, 6> windowToggles = {{
       {ICON_MS_PHOTO_CAMERA, "Camera", "F1", ImGuiKey_F1, false, &m_resources.settings.showCameraWindow, "Camera"},
-      {ICON_MS_ACCOUNT_TREE, "Scene Graph", "F2", ImGuiKey_F2, false, &m_resources.settings.showSceneGraphWindow, "Scene Graph"},
+      {ICON_MS_ACCOUNT_TREE, "Scene Browser", "F2", ImGuiKey_F2, false, &m_resources.settings.showSceneBrowserWindow, "Scene Browser"},
       {ICON_MS_SETTINGS, "Settings", "F3", ImGuiKey_F3, false, &m_resources.settings.showSettingsWindow, "Settings"},
-      {ICON_MS_LIST_ALT, "Properties", "F4", ImGuiKey_F4, false, &m_resources.settings.showPropertiesWindow, "Properties"},
+      {ICON_MS_LIST_ALT, "Inspector", "F4", ImGuiKey_F4, false, &m_resources.settings.showInspectorWindow, "Inspector"},
       {ICON_MS_PUBLIC, "Environment", "F5", ImGuiKey_F5, false, &m_resources.settings.showEnvironmentWindow, "Environment"},
       {ICON_MS_TONALITY, "Tonemapper", "F6", ImGuiKey_F6, false, &m_resources.settings.showTonemapperWindow, "Tonemapper"},
   }};
-
-  // Check window toggle shortcuts
   for(const auto& toggle : windowToggles)
   {
     if(toggle.useShift)
@@ -413,28 +722,15 @@ void GltfRenderer::renderMenu()
       if(ImGui::IsKeyChordPressed(ImGuiMod_Shift | toggle.key))
         *toggle.visible = !*toggle.visible;
     }
-    else
-    {
-      if(ImGui::IsKeyPressed(toggle.key))
-        *toggle.visible = !*toggle.visible;
-    }
+    else if(toggle.key != ImGuiKey_None && ImGui::IsKeyPressed(toggle.key))
+      *toggle.visible = !*toggle.visible;
   }
-
-  auto getSaveImage = [&]() {
-    std::filesystem::path filename =
-        nvgui::windowSaveFileDialog(m_app->getWindowHandle(), "Save Image",
-                                    "Image Files|*.png;*.jpg;*.hdr|PNG Files|*.png|JPG Files|*.jpg|HDR Files|*.hdr");
-    if(!filename.empty())
-    {
-      std::filesystem::path ext = std::filesystem::path(filename).extension();
-    }
-    return filename;
-  };
   std::filesystem::path sceneToLoadFilename{};
-
+  std::filesystem::path sceneToMergeFilename{};
   GltfRenderer::windowTitle();
   bool newScene       = ImGui::IsKeyChordPressed(ImGuiMod_Ctrl | ImGuiKey_N);
   bool openFile       = ImGui::IsKeyChordPressed(ImGuiMod_Ctrl | ImGuiKey_O);
+  bool mergeFile      = false;
   bool loadHdrFile    = ImGui::IsKeyChordPressed(ImGuiMod_Ctrl | ImGuiMod_Shift | ImGuiKey_O);
   bool saveFile       = ImGui::IsKeyChordPressed(ImGuiMod_Ctrl | ImGuiKey_S);
   bool saveScreenFile = ImGui::IsKeyChordPressed(ImGuiMod_Ctrl | ImGuiMod_Shift | ImGuiMod_Alt | ImGuiKey_S);
@@ -444,164 +740,57 @@ void GltfRenderer::renderMenu()
   bool fitObject      = ImGui::IsKeyChordPressed(ImGuiMod_Ctrl | ImGuiKey_F);
   bool toggleVsyc     = ImGui::IsKeyChordPressed(ImGuiMod_Ctrl | ImGuiMod_Shift | ImGuiKey_V);
   bool reloadShader   = ImGui::IsKeyChordPressed(ImGuiMod_Ctrl | ImGuiMod_Shift | ImGuiKey_R);
-
+  bool compactScene   = ImGui::IsKeyChordPressed(ImGuiMod_Ctrl | ImGuiKey_K);
+  bool undoCmd        = ImGui::IsKeyChordPressed(ImGuiMod_Ctrl | ImGuiKey_Z);
+  bool redoCmd        = ImGui::IsKeyChordPressed(ImGuiMod_Ctrl | ImGuiKey_Y);
   if(toggleVsyc)
-  {
     v_sync = !v_sync;
-  }
-  bool validScene = m_resources.scene.valid();
-  if(ImGui::BeginMenu("File"))
-  {
-    newScene = ImGui::MenuItem(ICON_MS_FILTER_NONE " New Scene", "Ctrl+N");
-    openFile |= ImGui::MenuItem(ICON_MS_FILE_OPEN " Open", "Ctrl+O");
-    loadHdrFile |= ImGui::MenuItem(ICON_MS_IMAGE " Load HDR Environment", "Ctrl+Shift+O");
-    if(ImGui::BeginMenu(ICON_MS_HISTORY " Open Recent"))
-    {
-      for(const auto& file : m_recentFiles)
-      {
-        if(ImGui::MenuItem(file.string().c_str()))
-        {
-          sceneToLoadFilename = file;
-        }
-      }
-      ImGui::EndMenu();
-    }
+  bool validScene = m_resources.getScene() && m_resources.getScene()->valid();
 
-    ImGui::BeginDisabled(!validScene);  // Disable menu item if no scene is loaded
-    saveFile |= ImGui::MenuItem(ICON_MS_FILE_SAVE " Save As", "Ctrl+S");
-    ImGui::EndDisabled();
-    ImGui::Separator();
-    saveImageFile |= ImGui::MenuItem(ICON_MS_IMAGE " Save Image", "Ctrl+Shift+S");
-    saveScreenFile |= ImGui::MenuItem(ICON_MS_DESKTOP_WINDOWS " Save Screen", "Ctrl+Alt+Shift+S");
-    ImGui::Separator();
-    closeApp |= ImGui::MenuItem(ICON_MS_POWER_SETTINGS_NEW " Exit", "Ctrl+Q");
-    ImGui::EndMenu();
-  }
+  renderFileMenu(validScene, newScene, openFile, mergeFile, loadHdrFile, saveFile, saveScreenFile, saveImageFile,
+                 closeApp, sceneToLoadFilename, sceneToMergeFilename);
+  renderEditMenu(validScene);
 
-  // De-selecting the object
   if(ImGui::IsKeyPressed(ImGuiKey_Escape))
   {
-    m_resources.selectedRenderNode = -1;
-    m_uiSceneGraph.selectPrimitive(-1, -1, -1);
+    m_resources.selectedRenderNodes.clear();
+    m_sceneSelection.clearSelection();
   }
 
-  if(ImGui::BeginMenu("View"))
+  if(undoCmd && m_undoStack.canUndo())
   {
-    ImGui::BeginDisabled(!validScene);  // Disable menu item if no scene is loaded)
-    fitScene |= ImGui::MenuItem(ICON_MS_ZOOM_OUT " Fit Scene", "Ctrl+Shift+F");
-    ImGui::BeginDisabled(m_resources.selectedRenderNode < 0);  // Disable menu item if no object is selected
-    fitObject |= ImGui::MenuItem(ICON_MS_ZOOM_IN " Fit Object", "Ctrl+F");
-    ImGui::EndDisabled();
-    ImGui::EndDisabled();
-    ImGui::Separator();
-    ImGui::MenuItem(ICON_MS_BOTTOM_PANEL_OPEN " V-Sync", "Ctrl+Shift+V", &v_sync);
-    ImGui::MenuItem(ICON_MS_VIEW_IN_AR " 3D-Axis", nullptr, &m_resources.settings.showAxis);
-    ImGui::EndMenu();
+    m_undoStack.undo();
+    onUndoRedo();
   }
-
-  if(ImGui::BeginMenu("Windows"))
+  if(redoCmd && m_undoStack.canRedo())
   {
-    // Add menu items for windows with toolbar icons and shortcuts
-    for(const auto& toggle : windowToggles)
-    {
-      std::string label = std::string(toggle.icon) + " " + toggle.name;
-      ImGui::MenuItem(label.c_str(), toggle.shortcut, toggle.visible);
-    }
-    // Windows without toolbar shortcuts
-    ImGui::MenuItem(ICON_MS_ANALYTICS " Statistics", nullptr, &m_resources.settings.showStatisticsWindow);
-    ImGui::Separator();
-    ImGui::MenuItem(ICON_MS_MONITORING " Memory Usage", nullptr, &m_resources.settings.showMemStats);
-    ImGui::EndMenu();
+    m_undoStack.redo();
+    onUndoRedo();
   }
 
-  if(ImGui::BeginMenu("Tools"))
-  {
-    reloadShader |= ImGui::MenuItem(ICON_MS_REFRESH " Reload Shaders", "Ctrl+Shift+R");
-    ImGui::Separator();
-    ImGui::BeginDisabled(!validScene);  // Disable menu item if no scene is loaded)
+  renderViewMenu(validScene, fitScene, fitObject, v_sync);
+  renderWindowsMenu();
+  renderToolsMenu(validScene, reloadShader, compactScene);
+  renderDebugMenu();
+  renderMenuToolbarAndGizmos();
 
-    if(ImGui::MenuItem(ICON_MS_BUILD " Recreate Tangents - Simple"))
-    {
-      SCOPED_BANNER("Recreate Tangents - Simple");
-      recomputeTangents(m_resources.scene.getModel(), true, false);
-      m_resources.dirtyFlags.set(DirtyFlags::eDirtyTangents);
-    }
-    ImGui::SetItemTooltip("This recreate tangents using UV gradient method");
-    if(ImGui::MenuItem(ICON_MS_BUILD " Recreate Tangents - MikkTSpace"))
-    {
-      bool buffersChanged = false;
-      {
-        SCOPED_BANNER("Recreate Tangents - MikkTSpace");
-        buffersChanged = recomputeTangents(m_resources.scene.getModel(), true, true);
-      }
-      if(buffersChanged)
-      {
-        rebuildSceneFromModel();  // Geometry changed - full rebuild needed
-      }
-      else
-        m_resources.dirtyFlags.set(DirtyFlags::eDirtyTangents);  // Just update existing buffers
-    }
-    ImGui::SetItemTooltip("Recreate tangents using MikkTSpace (may split vertices at UV seams)");
-
-    ImGui::EndDisabled();
-
-    ImGui::EndMenu();
-  }
-
-  // Add toolbar icons for window toggles
-  {
-    float buttonSize = ImGui::GetFrameHeight();
-
-    // Position icons on the right side
-    ImGui::SameLine(ImGui::GetContentRegionAvail().x);
-
-    // Add vertical separator
-    ImGui::SeparatorEx(ImGuiSeparatorFlags_Vertical);
-    ImGui::SameLine();
-
-    // Create toggle buttons for each window using the window info array
-    for(size_t i = 0; i < windowToggles.size(); ++i)
-    {
-      const auto& toggle = windowToggles[i];
-
-      // Set button color based on window visibility state
-      ImVec4 buttonColor =
-          *toggle.visible ? ImGui::GetStyle().Colors[ImGuiCol_ButtonActive] : ImGui::GetStyle().Colors[ImGuiCol_ChildBg];
-      ImGui::PushStyleColor(ImGuiCol_Button, buttonColor);
-
-      if(ImGui::Button(toggle.icon, ImVec2(buttonSize, buttonSize)))
-      {
-        *toggle.visible = !*toggle.visible;
-      }
-
-      ImGui::PopStyleColor();
-
-      // Show tooltip with window name and shortcut
-      if(ImGui::IsItemHovered())
-      {
-        std::string tooltipText = std::string("Toggle ") + toggle.tooltip + " Window (" + toggle.shortcut + ")";
-        ImGui::SetTooltip("%s", tooltipText.c_str());
-      }
-
-      // Add next button
-      if(i < windowToggles.size() - 1)
-      {
-        ImGui::SameLine();
-      }
-    }
-  }
+  auto getSaveImage = [this]() {
+    return nvgui::windowSaveFileDialog(m_app->getWindowHandle(), "Save Image",
+                                       "Image Files|*.png;*.jpg;*.hdr|PNG Files|*.png|JPG Files|*.jpg|HDR Files|*.hdr");
+  };
 
   if(newScene)
   {
+    // SYNC NOTE: User-initiated new scene — wait before full cleanup.
     vkQueueWaitIdle(m_app->getQueue(0).queue);
     cleanupScene();
-    m_uiSceneGraph.selectPrimitive(-1, -1, -1);
+    m_sceneSelection.clearSelection();
   }
 
   if(reloadShader)
   {
-    SCOPED_BANNER("Reload Sahders");
-
+    SCOPED_BANNER("Reload Shaders");
+    // SYNC NOTE: User-initiated shader recompile (F5) — wait before destroying old pipelines.
     vkQueueWaitIdle(m_app->getQueue(0).queue);
     compileShaders();
     resetFrame();
@@ -610,12 +799,24 @@ void GltfRenderer::renderMenu()
   if(openFile)
   {
     sceneToLoadFilename = nvgui::windowOpenFileDialog(m_app->getWindowHandle(), "Load 3D Scene",
-                                                      "3D Scene Files|*.gltf;*.glb;*.obj|glTF Text|*.gltf|glTF Binary|*.glb|OBJ Files|*.obj",
+                                                      "3D Scene Files|*.gltf;*.glb;*.obj;*.scene.json;*.glxf|glTF|*.gltf;*.glb|OBJ|*.obj|Scene Descriptor|*.scene.json;*.glxf",
                                                       m_lastSceneDirectory);
   }
   if(!sceneToLoadFilename.empty())
   {
     onFileDrop(sceneToLoadFilename.c_str());
+  }
+
+  if(mergeFile)
+  {
+    sceneToMergeFilename = nvgui::windowOpenFileDialog(m_app->getWindowHandle(), "Import/Merge Scene",
+                                                       "3D Scene Files|*.gltf;*.glb|glTF Text|*.gltf|glTF Binary|*.glb",
+                                                       m_lastSceneDirectory);
+  }
+  if(!sceneToMergeFilename.empty())
+  {
+    onMergeScene(sceneToMergeFilename);
+    sceneToMergeFilename.clear();
   }
 
   if(loadHdrFile)
@@ -645,19 +846,29 @@ void GltfRenderer::renderMenu()
     std::filesystem::path filename = getSaveImage();
     if(!filename.empty())
     {
-      // Save the G-Buffer color image to a file (RAW image for HDR and tonemapped for JPG, PNG)
-      Resources::ImageType imageType = (filename.extension() == ".hdr") ? imageType = Resources::ImageType::eImgRendered :
-                                                                          Resources::ImageType::eImgTonemapped;
+      Resources::ImageType imageType =
+          (filename.extension() == ".hdr") ? Resources::ImageType::eImgRendered : Resources::ImageType::eImgTonemapped;
 
       m_app->saveImageToFile(m_resources.gBuffers.getColorImage(imageType), m_resources.gBuffers.getSize(), filename);
     }
   }
 
-  if(validScene && (fitScene || (fitObject && m_resources.selectedRenderNode > -1)))
+  if(validScene && (fitScene || (fitObject && !m_resources.selectedRenderNodes.empty())))
   {
-    nvutils::Bbox bbox =
-        fitScene ? m_resources.scene.getSceneBounds() : GltfRenderer::getRenderNodeBbox(m_resources.selectedRenderNode);
+    nvutils::Bbox bbox = fitScene ? m_resources.getScene()->getSceneBounds() :
+                                    GltfRenderer::getRenderNodesBbox(m_resources.selectedRenderNodes);
     m_cameraManip->fit(bbox.min(), bbox.max(), false, true, m_cameraManip->getAspectRatio());
+  }
+
+  if(compactScene && validScene)
+  {
+    SCOPED_BANNER("Compact Scene");
+    if(m_resources.getScene()->compactModel())
+    {
+      // Model compacted - need full GPU rebuild including textures
+      rebuildVulkanSceneFull();
+      resetFrame();  // Reset path tracer accumulation
+    }
   }
 
   if(closeApp)
@@ -774,15 +985,15 @@ void GltfRenderer::registerRecentFilesHandler()
 //
 void GltfRenderer::applyGltfCamera(int cameraIndex)
 {
-  if(!m_resources.scene.valid())
+  if(!m_resources.getScene() || !m_resources.getScene()->valid())
     return;
 
   // Get the node that contains this camera to clear its extras
-  int nodeIndex = m_uiSceneGraph.getNodeForCamera(cameraIndex);
+  int nodeIndex = m_sceneBrowser.getNodeForCamera(cameraIndex);
   if(nodeIndex >= 0)
   {
     // Clear the camera extras so that eye/center/up are recalculated from the world matrix
-    tinygltf::Node& node = m_resources.scene.getModel().nodes[nodeIndex];
+    tinygltf::Node& node = m_resources.getScene()->getModel().nodes[nodeIndex];
     if(node.extras.IsObject())
     {
       tinygltf::Value::Object extras = node.extras.Get<tinygltf::Value::Object>();
@@ -794,7 +1005,7 @@ void GltfRenderer::applyGltfCamera(int cameraIndex)
   }
 
   // Force refresh of render cameras to reflect latest UI changes
-  const std::vector<nvvkgltf::RenderCamera>& cameras = m_resources.scene.getRenderCameras(true);
+  const std::vector<nvvkgltf::RenderCamera>& cameras = m_resources.getScene()->getRenderCameras(true);
 
   if(cameraIndex < 0 || cameraIndex >= static_cast<int>(cameras.size()))
     return;
@@ -822,7 +1033,7 @@ void GltfRenderer::applyGltfCamera(int cameraIndex)
   }
 
   // Also update the scene's camera to keep extras (eye, center, up) in sync
-  m_resources.scene.setSceneCamera(camera);
+  m_resources.getScene()->setSceneCamera(camera);
 }
 
 //--------------------------------------------------------------------------------------------------
@@ -831,20 +1042,20 @@ void GltfRenderer::applyGltfCamera(int cameraIndex)
 //
 void GltfRenderer::setGltfCameraFromView(int cameraIndex)
 {
-  if(!m_resources.scene.valid() || !m_cameraManip)
+  if(!m_resources.getScene() || !m_resources.getScene()->valid() || !m_cameraManip)
   {
     return;
   }
 
   // Get the node that contains this camera
-  int nodeIndex = m_uiSceneGraph.getNodeForCamera(cameraIndex);
+  int nodeIndex = m_sceneBrowser.getNodeForCamera(cameraIndex);
   if(nodeIndex < 0)
   {
     return;
   }
 
-  tinygltf::Node&   node   = m_resources.scene.getModel().nodes[nodeIndex];
-  tinygltf::Camera& camera = m_resources.scene.getModel().cameras[cameraIndex];
+  tinygltf::Node&   node   = m_resources.getScene()->getModel().nodes[nodeIndex];
+  tinygltf::Camera& camera = m_resources.getScene()->getModel().cameras[cameraIndex];
 
   // Get current camera state from manipulator
   nvutils::CameraManipulator::Camera cameraState = m_cameraManip->getCamera();
@@ -1129,14 +1340,14 @@ void GltfRenderer::renderStatisticsWindow()
     return;
   }
 
-  if(!m_resources.scene.valid())
+  if(!m_resources.getScene() || !m_resources.getScene()->valid())
   {
     ImGui::TextDisabled("No scene loaded");
     ImGui::End();
     return;
   }
 
-  const tinygltf::Model& tiny = m_resources.scene.getModel();
+  const tinygltf::Model& tiny = m_resources.getScene()->getModel();
 
   // Create a table for better organization
   if(ImGui::BeginTable("StatisticsTable", 2, ImGuiTableFlags_Borders | ImGuiTableFlags_RowBg))
@@ -1156,12 +1367,12 @@ void GltfRenderer::renderStatisticsWindow()
 
     // Scene Structure
     addStatRow(ICON_MS_LAYERS, "Nodes", tiny.nodes.size());
-    addStatRow(ICON_MS_VIEW_LIST, "Render Nodes", m_resources.scene.getRenderNodes().size());
-    addStatRow(ICON_MS_EXTENSION, "Render Primitives", m_resources.scene.getNumRenderPrimitives());
+    addStatRow(ICON_MS_VIEW_LIST, "Render Nodes", m_resources.getScene()->getRenderNodes().size());
+    addStatRow(ICON_MS_EXTENSION, "Render Primitives", m_resources.getScene()->getNumRenderPrimitives());
 
     // Materials & Geometry
     addStatRow(ICON_MS_BRUSH, "Materials", tiny.materials.size());
-    addStatRow(ICON_MS_SIGNAL_CELLULAR_NULL, "Triangles", m_resources.scene.getNumTriangles());
+    addStatRow(ICON_MS_SIGNAL_CELLULAR_NULL, "Triangles", m_resources.getScene()->getNumTriangles());
 
     // Lighting & Assets
     addStatRow(ICON_MS_LIGHTBULB, "Lights", tiny.lights.size());
@@ -1180,10 +1391,10 @@ void GltfRenderer::renderStatisticsWindow()
     // Log all statistics to clipboard
     ImGui::LogText("Scene Statistics:\n");
     ImGui::LogText("Nodes: %zu\n", tiny.nodes.size());
-    ImGui::LogText("Render Nodes: %zu\n", m_resources.scene.getRenderNodes().size());
-    ImGui::LogText("Render Primitives: %zu\n", m_resources.scene.getNumRenderPrimitives());
+    ImGui::LogText("Render Nodes: %zu\n", m_resources.getScene()->getRenderNodes().size());
+    ImGui::LogText("Render Primitives: %zu\n", m_resources.getScene()->getNumRenderPrimitives());
     ImGui::LogText("Materials: %zu\n", tiny.materials.size());
-    ImGui::LogText("Triangles: %d\n", m_resources.scene.getNumTriangles());
+    ImGui::LogText("Triangles: %d\n", m_resources.getScene()->getNumTriangles());
     ImGui::LogText("Lights: %zu\n", tiny.lights.size());
     ImGui::LogText("Textures: %zu\n", tiny.textures.size());
     ImGui::LogText("Images: %zu\n", tiny.images.size());
@@ -1192,6 +1403,23 @@ void GltfRenderer::renderStatisticsWindow()
   if(ImGui::IsItemHovered())
   {
     ImGui::SetTooltip("Copy statistics to clipboard");
+  }
+
+  // Compact Scene button
+  ImGui::SameLine();
+  if(ImGui::Button(ICON_MS_COMPRESS " Compact Scene"))
+  {
+    SCOPED_BANNER("Compact Scene");
+    if(m_resources.getScene()->compactModel())
+    {
+      // Model compacted - need full GPU rebuild including textures
+      rebuildVulkanSceneFull();
+      resetFrame();  // Reset path tracer accumulation
+    }
+  }
+  if(ImGui::IsItemHovered())
+  {
+    ImGui::SetTooltip("Remove orphaned resources - see counts update immediately");
   }
 
   ImGui::End();

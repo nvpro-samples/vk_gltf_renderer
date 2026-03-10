@@ -17,6 +17,12 @@
  * SPDX-License-Identifier: Apache-2.0
  */
 
+//
+// Miscellaneous application-level utilities. Includes a templated
+// RollingAverage calculator for frame-time smoothing, file-type
+// detection helpers, and common small functions shared across
+// the renderer application.
+//
 
 #pragma once
 

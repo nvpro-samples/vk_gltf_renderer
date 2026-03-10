@@ -19,30 +19,16 @@
 
 #pragma once
 
-//////////////////////////////////////////////////////////////////////////
-/*
-    Animation Control UI Component
-
-    This component provides a comprehensive UI interface for controlling GLTF animations.
-    Key features include:
-    
-    - Animation selection dropdown for multiple animations in the scene
-    - Play/pause toggle with visual feedback
-    - Frame-by-frame advancement controls
-    - Animation reset functionality
-    - Playback speed control with multiplier
-    - Timeline slider for precise animation control
-    - Real-time animation state management
-    
-    The implementation integrates with ImGui for rendering and uses the nvvkgltf::Scene
-    class for animation data management. 
-*/
-//////////////////////////////////////////////////////////////////////////
+// Animation Control UI Component
+//
+// Provides a UI for controlling glTF animations: selection, play/pause,
+// frame stepping, reset, speed control, and timeline scrubbing.
 
 #include <imgui/imgui.h>
 
 #include <nvgui/fonts.hpp>
 #include "gltf_scene.hpp"
+#include "gltf_scene_animation.hpp"
 #include <nvgui/property_editor.hpp>
 #include <nvgui/tooltip.hpp>
 
@@ -62,9 +48,9 @@ struct AnimationControl
   {
     namespace PE = nvgui::PropertyEditor;
     std::vector<const char*> animationNames;
-    for(int i = 0; i < gltfScene->getNumAnimations(); i++)
+    for(int i = 0; i < gltfScene->animation().getNumAnimations(); i++)
     {
-      animationNames.push_back(gltfScene->getAnimationInfo(i).name.c_str());
+      animationNames.push_back(gltfScene->animation().getAnimationInfo(i).name.c_str());
     }
     if(PE::begin(""))
     {
@@ -105,7 +91,7 @@ struct AnimationControl
     ImGui::TextUnformatted("x");
 
     // Show the timeline slider
-    nvvkgltf::AnimationInfo& animInfo = gltfScene->getAnimationInfo(currentAnimation);
+    nvvkgltf::AnimationInfo& animInfo = gltfScene->animation().getAnimationInfo(currentAnimation);
     ImGui::TextDisabled("Timeline");
     ImGui::PushItemWidth(ImGui::GetContentRegionAvail().x);
     if(ImGui::SliderFloat("##no-label", &animInfo.currentTime, animInfo.start, animInfo.end, "Time: %.2f"))

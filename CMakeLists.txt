@@ -1,15 +1,21 @@
 cmake_minimum_required(VERSION 3.22...3.31)
 project(GLTF_renderer VERSION 2.0 LANGUAGES C CXX)
 
+# Enable export of compile commands for clangd
+set(CMAKE_EXPORT_COMPILE_COMMANDS ON)
+
 option(NVPRO2_ENABLE_nvgl off)
 option(USE_DEFAULT_SCENE "Using a default scene at startup" ON)
+
+# Path to glTF-Sample-Assets repository (for testing)
+# Optional. Set via -DGLTF_SAMPLE_ASSETS_PATH=..., environment variable GLTF_SAMPLE_ASSETS_PATH, or CMake GUI.
+if(NOT DEFINED GLTF_SAMPLE_ASSETS_PATH)
+  set(GLTF_SAMPLE_ASSETS_PATH "$ENV{GLTF_SAMPLE_ASSETS_PATH}" CACHE PATH "Path to glTF-Sample-Assets (optional)")
+endif()
 
 # Disable unused libraries from nvpro_core2 - we use local copy
 set(NVPRO2_ENABLE_nvvkgltf OFF CACHE BOOL "Disable nvvkgltf from nvpro_core2" FORCE)
 set(NVPRO2_ENABLE_nvvkglsl OFF CACHE BOOL "Disable nvvkglsl from nvpro_core2" FORCE)
-
-# Set Slang version
-# set(Slang_VERSION 2026.1)
 
 # Add the cmake folder to the module path
 list(APPEND CMAKE_MODULE_PATH "${CMAKE_CURRENT_SOURCE_DIR}/cmake")
@@ -114,13 +120,17 @@ endif()
 target_include_directories(${PROJECT_NAME} PRIVATE ${CMAKE_BINARY_DIR}/${PROJECT_NAME} ${CMAKE_CURRENT_SOURCE_DIR})
 
 #------------------------------------------------------------------------------------------------------------------------------
-# Compile shaders
+# Compile Slang shaders
+#------------------------------------------------------------------------------------------------------------------------------
+
+# Collect all local shader files (exclude header-only .h.slang files)
+# Includes e.g. gizmo_grid.slang, gizmo_visuals.slang
 file(GLOB_RECURSE _ALL_SLANG_FILES "shaders/*.slang")
 list(FILTER _ALL_SLANG_FILES EXCLUDE REGEX ".*\\.h\\.slang$")
 set(SHADER_SRC_SLANG_FILES ${_ALL_SLANG_FILES})
 file(GLOB SHADER_H_FILES "shaders/*.h" "shaders/*.h.slang")
 
-# Adding local pre-compiled version of the tonemapper
+# Include shared shaders from nvshaders (tonemapper, sky, HDR processing)
 set(SHADER_SHARED_SLANG_FILES
   ${NVSHADERS_DIR}/nvshaders/tonemapper.slang
   ${NVSHADERS_DIR}/nvshaders/sky_physical.slang
@@ -129,26 +139,50 @@ set(SHADER_SHARED_SLANG_FILES
   ${NVSHADERS_DIR}/nvshaders/hdr_dome.slang
   ${NVSHADERS_DIR}/nvshaders/hdr_integrate_brdf.slang
 )
-set(SHADER_SLANG_FILES ${SHADER_SRC_SLANG_FILES} ${SHADER_SHARED_SLANG_FILES})
-message(STATUS "Compiling shaders: ${SHADER_SLANG_FILES}")
 
+# Combine all shader files for compilation
+set(SHADER_SLANG_FILES ${SHADER_SRC_SLANG_FILES} ${SHADER_SHARED_SLANG_FILES})
+list(LENGTH SHADER_SLANG_FILES _SHADER_COUNT)
+message(STATUS "Compiling ${_SHADER_COUNT} Slang shader(s) to SPIR-V")
+
+# Define required SPIR-V capabilities for ray tracing and advanced features
+set(SHADER_CAPABILITIES 
+  spvInt64Atomics                     # 64-bit atomic operations
+  spvShaderClockKHR                   # Shader clock for profiling
+  spvRayTracingMotionBlurNV           # Motion blur for ray tracing
+  spvRayQueryKHR                      # Ray query operations
+  spvGroupNonUniformBallot            # Ballot operations for subgroup functionality
+  spvGroupNonUniformArithmetic        # Arithmetic operations across subgroups
+)
+
+# Shader compile options: -O0 for both (driver optimizes SPIR-V when compiling to native; pre-optimization can remove driver opportunities)
+set(SHADER_DEBUG_LEVEL 2)   # None:0, minimal:1, standard:2, maximal:3 (see Slang documentation for details)
+set(SHADER_OPT_LEVEL 0)     # None:0 — let the driver optimize
+
+# Compile all shaders to embedded headers (.h) and SPIR-V binaries (.spv) [optionally generate SPIR-V binaries (.spv) for debugging]
 compile_slang(
   "${SHADER_SLANG_FILES}"
   "${CMAKE_BINARY_DIR}/${PROJECT_NAME}/_autogen"
-  GENERATED_SHADER_HEADERS
+  HEADERS_VAR GENERATED_SHADER_HEADERS
+  # SPVS_VAR GENERATED_SHADER_SPIRV  # For debugging purpose
+  CAPABILITIES ${SHADER_CAPABILITIES}  # List expands and is automatically joined with `+`
   EXTRA_FLAGS "-I${NVSHADERS_DIR}"
-  OPTIMIZATION_LEVEL 1
-  DEBUG_LEVEL 1
+  DEBUG_LEVEL ${SHADER_DEBUG_LEVEL}
+  OPTIMIZATION_LEVEL ${SHADER_OPT_LEVEL}
 )
 
-# Add shader files to the project
+# Add shader files to the project for IDE organization
 source_group("Shaders" FILES ${SHADER_SRC_SLANG_FILES} ${SHADER_H_FILES})
 source_group("Shaders/Compiled" FILES ${GENERATED_SHADER_HEADERS})
 source_group("Shaders/Shared" FILES ${SHADER_SHARED_SLANG_FILES})
 
-# Add the output shader headers (target) directly to the executable
-# This allow to compile the shaders when the executable is built
-target_sources(${PROJECT_NAME} PRIVATE ${GENERATED_SHADER_HEADERS} ${SHADER_H_FILES})
+# Add shader files to target for Visual Studio integration
+target_sources(${PROJECT_NAME} PRIVATE 
+  ${GENERATED_SHADER_HEADERS}
+  ${SHADER_SRC_SLANG_FILES}
+  ${SHADER_H_FILES}
+  ${SHADER_SHARED_SLANG_FILES}
+)
 
 
 #####################################################################################
@@ -208,6 +242,7 @@ if(USE_DRACO)
   include(cmake/draco.cmake)
   download_draco()
   add_draco()
+  target_compile_definitions(${PROJECT_NAME} PRIVATE USE_DRACO)
 endif()
 #####################################################################################
 # Add RapidJSON package

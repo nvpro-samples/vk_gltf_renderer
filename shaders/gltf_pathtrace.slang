@@ -55,6 +55,7 @@
 [[vk::binding(BindingPoints::eTexturesHdr, 0)]] Sampler2D texturesHdr[];
 [[vk::binding(BindingPoints::eTlas, 1)]]        RaytracingAccelerationStructure topLevelAS;
 [[vk::binding(BindingPoints::eOutImages, 1)]]   RWTexture2D<float4> outImages[];
+[[vk::binding(BindingPoints::eOutDepth, 1)]]    RWTexture2D<float>  outDepth;
 
 // HDR Environment
 [[vk::binding(EnvBindings::eImpSamples, 2)]]    StructuredBuffer<EnvAccel> envSamplingData;
@@ -112,6 +113,8 @@ struct LightingTechniqueProbabilities
 // scenes) are always traced before probabilistic termination.
 //-----------------------------------------------------------------------
 #define RR_MIN_DEPTH 3
+
+bool hasFlag(int flags, int bit) { return (flags & bit) != 0; }
 
 //-----------------------------------------------------------------------
 // The safeOffsetRay function shifts a point on a surface so that a ray
@@ -229,8 +232,9 @@ float3 dlssGetClearGlassGuideAlbedo(IRaytracer      raytracer,
 //-----------------------------------------------------------------------
 struct SampleResult
 {
-  float4     radiance   = float4(0, 0, 0, 0);
-  DlssOutput dlssOutput = {};  // DLSS output
+  float4     radiance             = float4(0, 0, 0, 0);
+  DlssOutput dlssOutput           = {};  // DLSS output
+  int        firstHitRenderNodeID = -1;  // First ray hit render node (for selection ObjectID), -1 if miss/env/plane
 };
 
 
@@ -754,37 +758,6 @@ bool handleVolumeScatter(PbrMaterial pbrMat, float hitDistance, inout RayDesc ra
 }
 
 //-----------------------------------------------------------------------
-// Shoot a ray and store 1 if the ray hits the selected object
-//-----------------------------------------------------------------------
-void selectObject(float2 samplePos, float2 imageSize)
-{
-  // Subpixel jitter: send the ray through a different position inside the pixel each time, to provide antialiasing.
-  const float2 subpixel_jitter = float2(0.5f, 0.5f);
-  const bool   isOrthographic  = (pushConst.frameInfo->isOrthographic != 0);
-  RayDesc ray = getRay(samplePos, subpixel_jitter, imageSize, pushConst.frameInfo->projInv, pushConst.frameInfo->viewInv, isOrthographic);
-
-  RayQuery q;
-  q.TraceRayInline(topLevelAS, RAY_FLAG_NONE, 0xFF, ray);
-
-  while(q.Proceed())
-  {
-    q.CommitNonOpaqueTriangleHit();
-  }
-
-  float hitObj = 0.0;
-  if(q.CommittedStatus() != COMMITTED_NOTHING)
-  {
-    int rprimID = q.CommittedInstanceIndex();
-    if(rprimID != -1 && rprimID == pushConst.frameInfo->selectedRenderNode)
-    {
-      hitObj = 1.0f;
-    }
-  }
-  // Store the hit object in the selection image
-  outImages[int(OutputImage::eSelectImage)][int2(samplePos)] = float4(hitObj, 0, 0, 0);
-}
-
-//-----------------------------------------------------------------------
 // Check for infinite plane intersection and update hit state if needed
 //-----------------------------------------------------------------------
 bool checkInfinitePlaneIntersection(RayDesc ray, inout HitPayload payload, inout HitState hit, SceneFrameInfo* frameInfo)
@@ -855,6 +828,7 @@ SampleResult pathTrace(IRaytracer raytracer, RayDesc ray, inout uint seed)
   float16_t dlss_specularHitDist = float16_t(0);  // 0=non-reflective, actual_distance=reflected geometry, 65504=sky/far
   float3    dlss_hitPosition     = 1e32f;
   bool      captureSpecularHit   = false;  // Track if we should capture next hit distance
+  int       firstHitRnodeID      = -1;     // First ray geometry hit render node ID (for ObjectID buffer)
 
   // Path tracing loop, until the ray hits the environment or the maximum depth is reached or the ray is absorbed
   for(int depth = 0; depth < pushConst.maxDepth; depth++)
@@ -982,16 +956,19 @@ SampleResult pathTrace(IRaytracer raytracer, RayDesc ray, inout uint seed)
         captureSpecularHit   = false;
       }
 
-      // #DLSS - Gather data from first hit (store temporarily, write at end to reduce live state)
       if(firstRay)
       {
+        // Capture first-hit render node ID for selection ObjectID buffer
+        firstHitRnodeID = payload.rnodeID;
+
+        // #DLSS - Gather data from first hit (store temporarily, write at end to reduce live state)
         // Apply KHR_materials_specular energy conservation clamping for DLSS guide buffer
         // Spec formula: dielectric_f0 = min(f0_from_ior * specularColor, 1.0) * specular
         float  f0_from_ior          = pow((pbrMat.ior2 - pbrMat.ior1) / (pbrMat.ior2 + pbrMat.ior1), 2.0F);
         float3 specularColorClamped = min(f0_from_ior * pbrMat.specularColor, float3(1.0F));
         float3 specularAlbedo = EnvBRDFApprox2(specularColorClamped, pbrMat.roughness.x, dot(pbrMat.N, ray.Direction));
         float3 guideAlbedo    = pbrMat.baseColor.xyz;
-        if(USE_DLSS_TRANSP == 1 && pushConst.useOptixDenoiser == 0 && dlssIsClearGlass(pbrMat))
+        if(USE_DLSS_TRANSP == 1 && !hasFlag(pushConst.flags, PathtracerFlags::ePtUseOptixDenoiser) && dlssIsClearGlass(pbrMat))
         {
           guideAlbedo = dlssGetClearGlassGuideAlbedo(raytracer, pbrMat, hit, ray.Direction, frameInfo, seed, isInside, specularAlbedo);
         }
@@ -1145,8 +1122,9 @@ SampleResult pathTrace(IRaytracer raytracer, RayDesc ray, inout uint seed)
   }
 
   // Returning the sample result; radiance + DLSS data
-  SampleResult sampleResult = {};
-  sampleResult.radiance     = float4(radiance, solid ? 1 : 0);
+  SampleResult sampleResult         = {};
+  sampleResult.radiance             = float4(radiance, solid ? 1 : 0);
+  sampleResult.firstHitRenderNodeID = firstHitRnodeID;
 
   sampleResult.dlssOutput.albedo          = float16_t4(dlss_albedo, solid ? 1.0h : 0.0h);
   sampleResult.dlssOutput.specularAlbedo  = dlss_specularAlbedo;
@@ -1221,13 +1199,6 @@ void processPixel(IRaytracer raytracer, float2 samplePos, float2 imageSize)
     doDebug = true;
   }
 
-  // Shoot a ray to find which element is selected, done only when the object selection changed
-  // or when rendering is re-starting (camera, object moved, .. )
-  if(pushConst.renderSelection == 1 || pushConst.frameCount <= 1)
-  {
-    selectObject(samplePos, imageSize);
-  }
-
   // Initialize the random number
   uint seed = xxhash32(uint3(uint2(samplePos.xy), pushConst.frameCount));
 
@@ -1241,7 +1212,7 @@ void processPixel(IRaytracer raytracer, float2 samplePos, float2 imageSize)
   }
 
   // #DLSS - use the DLSS jitter and frame index (not resetting to zero)
-  if(pushConst.useDlss == 1)
+  if(hasFlag(pushConst.flags, PathtracerFlags::ePtUseDlss))
   {
     subpixelJitter = pushConst.jitter + float2(0.5f, 0.5f);
   }
@@ -1259,10 +1230,24 @@ void processPixel(IRaytracer raytracer, float2 samplePos, float2 imageSize)
   }
   pixelColor /= pushConst.numSamples;
 
-  bool first_frame = (pushConst.frameCount == 0);
+  bool first_frame = hasFlag(pushConst.flags, PathtracerFlags::ePtFirstFrame);
+
+  // NDC depth from first-hit world position (Vulkan [0,1] range, 1.0 = far/miss).
+  // Written to two targets: outDepth (main GBuffer, full viewport resolution, frame 0 only)
+  // and eDlssDepth (DLSS guide buffer, DLSS render resolution, every frame when DLSS active).
+  // Both use the same NDC value but the images differ in resolution.
+  float4 clipPos  = mul(float4(sampleResult.dlssOutput.hitPosition, 1.0), pushConst.frameInfo->viewProjMatrix);
+  float  ndcDepth = (sampleResult.firstHitRenderNodeID >= 0) ? (clipPos.z / clipPos.w) : 1.0;
+
+  if(first_frame)
+  {
+    uint objectID                                              = uint(sampleResult.firstHitRenderNodeID + 1);
+    outImages[int(OutputImage::eSelectImage)][int2(samplePos)] = float4(asfloat(objectID), 0.0, 0.0, 0.0);
+    outDepth[int2(samplePos)]                                  = ndcDepth;
+  }
 
   // Saving result
-  if(first_frame || (pushConst.useDlss == 1))
+  if(first_frame || hasFlag(pushConst.flags, PathtracerFlags::ePtUseDlss))
   {  // First frame, replace the value in the buffer
     outImages[int(OutputImage::eResultImage)][int2(samplePos)] = pixelColor;
   }
@@ -1276,16 +1261,12 @@ void processPixel(IRaytracer raytracer, float2 samplePos, float2 imageSize)
   }
 
   // #DLSS - Storing the GBuffer for the DLSS denoiser
-  if(pushConst.useDlss == 1)
+  if(hasFlag(pushConst.flags, PathtracerFlags::ePtUseDlss))
   {
-    // Transform world position to clip space and calculate depth
-    float4 posScreen = mul(float4(sampleResult.dlssOutput.hitPosition, 1.0), pushConst.frameInfo->viewProjMatrix);
-    float  viewZ     = posScreen.z / posScreen.w;  // Depth in NDC space
-
     // Calculate motion vectors using the hit position (works for both geometry and environment)
     float2 motionVec = calculateMotionVector(sampleResult.dlssOutput.hitPosition, pushConst.frameInfo->prevMVP,
                                              pushConst.frameInfo->viewProjMatrix, imageSize);
-    outImages[int(OutputImage::eDlssDepth)][int2(samplePos)]           = float4(abs(viewZ));
+    outImages[int(OutputImage::eDlssDepth)][int2(samplePos)]           = float4(ndcDepth);
     outImages[int(OutputImage::eDlssMotion)][int2(samplePos)]          = float4(motionVec, 0, 0);
     outImages[int(OutputImage::eDlssNormalRoughness)][int2(samplePos)] = sampleResult.dlssOutput.normalRoughness;
     outImages[int(OutputImage::eDlssAlbedo)][int2(samplePos)]          = sampleResult.dlssOutput.albedo;
@@ -1293,7 +1274,7 @@ void processPixel(IRaytracer raytracer, float2 samplePos, float2 imageSize)
     outImages[int(OutputImage::eDlssSpecularHitDist)][int2(samplePos)] = float4(sampleResult.dlssOutput.specularHitDist);
   }
 
-  if(pushConst.useOptixDenoiser == 1)
+  if(hasFlag(pushConst.flags, PathtracerFlags::ePtUseOptixDenoiser))
   {
     // Transform normal from world space to camera space for OptiX denoiser
     // OptiX requires normals in camera space (right-handed, -Z forward, Y up, X right)

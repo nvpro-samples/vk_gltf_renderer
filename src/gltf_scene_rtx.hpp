@@ -41,43 +41,49 @@ public:
   SceneRtx() = default;
   ~SceneRtx() { assert(m_blasAccel.empty()); }  // Missing deinit call
 
+  // ---------- Init / Deinit ----------
   void init(nvvk::ResourceAllocator* alloc);
   void deinit();
 
+  // Optional: set the graphics queue for finer-grained sync in the fallback path.
+  void setGraphicsQueue(VkQueue queue) { m_graphicsQueue = queue; }
 
-  // Create both bottom and top level acceleration structures (cannot compact)
+  // Optional: set a callback for deferred GPU resource destruction (same pattern as SceneVk).
+  using DeferredFreeFunc = std::function<void(std::function<void()>&&)>;
+  void setDeferredFree(DeferredFreeFunc func) { m_deferredFree = std::move(func); }
+
+  // ---------- Create ----------
+  // Create BLAS and TLAS for the scene (no compaction). Calls destroy() first.
   void create(VkCommandBuffer cmd, nvvk::StagingUploader& staging, const nvvkgltf::Scene& scn, const SceneVk& scnVk, VkBuildAccelerationStructureFlagsKHR flags);
-  // Create the bottom level acceleration structure
   void createBottomLevelAccelerationStructure(const nvvkgltf::Scene& scene, const SceneVk& sceneVk, VkBuildAccelerationStructureFlagsKHR flags);
-  // Build the bottom level acceleration structure
-  bool cmdBuildBottomLevelAccelerationStructure(VkCommandBuffer cmd, VkDeviceSize hintMaxBudget = 512'000'000);
-
-  // Create the top level acceleration structure
+  // Build BLAS on GPU; may return false if budget exceeded (call again to continue). Returns true when done.
+  [[nodiscard]] bool cmdBuildBottomLevelAccelerationStructure(VkCommandBuffer cmd, VkDeviceSize hintMaxBudget = 512'000'000);
   void cmdCreateBuildTopLevelAccelerationStructure(VkCommandBuffer cmd, nvvk::StagingUploader& staging, const nvvkgltf::Scene& scene);
-  // Compact the bottom level acceleration structure
-  VkResult cmdCompactBlas(VkCommandBuffer cmd);
-  // Destroy the original acceleration structures that was compacted
-  void destroyNonCompactedBlas();
-  // Update the instance buffer and build the TLAS (animation)
-  // If dirtyRenderNodes is empty, updates all instances.
-  void updateTopLevelAS(VkCommandBuffer                cmd,
-                        nvvk::StagingUploader&         staging,
-                        const nvvkgltf::Scene&         scene,
-                        const std::unordered_set<int>& dirtyRenderNodes = {});
-  // Update the bottom level acceleration structure
+  VkResult                                 cmdCompactBlas(VkCommandBuffer cmd);
+  void                                     destroyNonCompactedBlas();
+  void                                     trackBlasMemory();
+  [[nodiscard]] VkAccelerationStructureKHR topLevelAS();
+
+  // ---------- Sync / Update ----------
+  // Sync TLAS from Scene dirty flags (reads + clears renderNodesRtx). Returns true if TLAS was updated.
+  [[nodiscard]] bool syncTopLevelAS(VkCommandBuffer cmd, nvvk::StagingUploader& staging, nvvkgltf::Scene& scene);
+  // Rebuild or update TLAS. dirtyRenderNodes empty = full update.
+  void rebuildTopLevelAS(VkCommandBuffer                cmd,
+                         nvvk::StagingUploader&         staging,
+                         const nvvkgltf::Scene&         scene,
+                         const std::unordered_set<int>& dirtyRenderNodes = {});
+  // Update BLAS for morph targets and skinned primitives.
   void updateBottomLevelAS(VkCommandBuffer cmd, const nvvkgltf::Scene& scene);
 
-  // Return the constructed acceleration structure
-  VkAccelerationStructureKHR tlas();
-
-  // Destroy all acceleration structures
+  // ---------- Destroy ----------
   void destroy();
   void destroyScratchBuffers();
 
-  // Memory tracking
+  // ---------- Memory tracking ----------
   const GpuMemoryTracker& getMemoryTracker() const { return m_memoryTracker; }
   GpuMemoryTracker&       getMemoryTracker() { return m_memoryTracker; }
-  void                    trackBlasMemory();  // Track all BLAS allocations (call after all BLAS are built)
+
+  const std::vector<VkAccelerationStructureInstanceKHR>& getTlasInstances() const { return m_tlasInstances; }
 
 protected:
   VkPhysicalDeviceRayTracingPipelinePropertiesKHR m_rtProperties{VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_RAY_TRACING_PIPELINE_PROPERTIES_KHR};
@@ -87,8 +93,12 @@ protected:
                                                                       VkDeviceAddress                  vertexAddress,
                                                                       VkDeviceAddress                  indexAddress);
 
+  void destroyTlasResources();
+  void destroyTlasResourcesDeferred();
+
   VkDevice         m_device         = VK_NULL_HANDLE;
   VkPhysicalDevice m_physicalDevice = VK_NULL_HANDLE;
+  VkQueue          m_graphicsQueue  = VK_NULL_HANDLE;
 
   nvvk::ResourceAllocator* m_alloc = nullptr;
 
@@ -106,6 +116,7 @@ protected:
 
   int32_t m_numVisibleElement = 0;  // Keep track of the number of visible elements in the TLAS
 
+  DeferredFreeFunc m_deferredFree;   // Optional: schedules deferred GPU resource destruction
   GpuMemoryTracker m_memoryTracker;  // GPU memory tracking
 };
 

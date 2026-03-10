@@ -17,22 +17,37 @@
  * SPDX-License-Identifier: Apache-2.0
  */
 
-// This shader applies a Sobel filter to detect edges in an R8 image and
-// highlights them in the output RGBA image.
+// This shader applies a Sobel filter to detect edges using an ObjectID image
+// and a selection bitmask, then highlights them in the output RGBA image.
 
 #include "shaderio.h"
 
 struct PushConstantSilhouette
 {
   float3 color;
+  uint   selectionBitMaskWordCount;
 };
 
 // clang-format off
-[[vk::binding(SilhouetteBindings::eObjectID)]]      Texture2D<float>    u_R8Buffer;
-[[vk::binding(SilhouetteBindings::eRGBAIImage)]]    RWTexture2D<float4> u_RgbaImage;
+[[vk::binding(SilhouetteBindings::eObjectID)]]         Texture2D<float>      u_ObjectID;  // .r = objectID+1 (0 = no hit)
+[[vk::binding(SilhouetteBindings::eRGBAIImage)]]       RWTexture2D<float4>   u_RgbaImage;
+[[vk::binding(SilhouetteBindings::eSelectionBitMask)]] StructuredBuffer<uint> u_SelectionBitMask;
 
 [[vk::push_constant]]   ConstantBuffer<PushConstantSilhouette> pushConst;
 // clang-format on
+
+// Returns true if objectIDPlusOne (from the ObjectID image) is selected (bit set in mask)
+bool isSelected(uint objectIDPlusOne)
+{
+  if(objectIDPlusOne == 0u)
+    return false;  // No hit
+  uint objectID = objectIDPlusOne - 1u;
+  uint wordIdx  = objectID / 32u;
+  if(wordIdx >= pushConst.selectionBitMaskWordCount)
+    return false;
+  uint bitIdx = objectID % 32u;
+  return ((u_SelectionBitMask[wordIdx] >> bitIdx) & 1u) != 0u;
+}
 
 [shader("compute")]
 [numthreads(SILHOUETTE_WORKGROUP_SIZE, SILHOUETTE_WORKGROUP_SIZE, 1)]
@@ -61,16 +76,14 @@ void main(uint3 dispatchThreadID: SV_DispatchThreadID)
     [unroll]
     for(int j = -1; j <= 1; j++)
     {
-      const int2 offset = int2(i, j);
+      const int2 offset      = int2(i, j);
       const int2 sampleCoord = pixelCoord + offset;
-      
+
       // Clamp coordinates to image bounds
-      const int2 clampedCoord = int2(
-        clamp(sampleCoord.x, 0, texSize.x - 1),
-        clamp(sampleCoord.y, 0, texSize.y - 1)
-      );
-      
-      const float val = u_R8Buffer[clampedCoord].r;
+      const int2 clampedCoord = int2(clamp(sampleCoord.x, 0, texSize.x - 1), clamp(sampleCoord.y, 0, texSize.y - 1));
+
+      const float rawIDFloat = u_ObjectID[clampedCoord].r;
+      const float val        = isSelected(asuint(rawIDFloat)) ? 1.0 : 0.0;
       sumX += val * kernelX[(i + 1) * 3 + (j + 1)];
       sumY += val * kernelY[(i + 1) * 3 + (j + 1)];
     }

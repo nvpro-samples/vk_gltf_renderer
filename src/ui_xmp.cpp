@@ -17,6 +17,12 @@
  * SPDX-License-Identifier: Apache-2.0
  */
 
+//
+// KHR_xmp_json_ld extension UI. Parses XMP metadata packets embedded
+// in glTF models (Dublin Core, rights, creator info, etc.) and renders
+// them as read-only property tables in the inspector panel using ImGui.
+//
+
 #include "ui_xmp.hpp"
 
 #include <cctype>

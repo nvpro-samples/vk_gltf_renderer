@@ -17,10 +17,18 @@
  * SPDX-License-Identifier: Apache-2.0
  */
 
+//
+// Creates and manages Vulkan GPU resources for rendering a glTF scene.
+// Uploads geometry buffers (vertices, indices), loads and creates texture
+// images, builds scene-data buffers (materials, instances, render nodes),
+// and maintains descriptor sets. Handles resource updates for animations.
+//
 
 #include <algorithm>
+#include <atomic>
 #include <cassert>
 #include <cinttypes>
+#include <cstdio>
 #include <mutex>
 #include <sstream>
 #include <span>
@@ -30,10 +38,6 @@
 
 #include "nvshaders/gltf_scene_io.h.slang"  // Shared between host and device
 
-#include <stb/stb_image.h>
-#include "nvimageformats/nv_dds.h"
-#include "nvimageformats/nv_ktx.h"
-#include "nvimageformats/texture_formats.h"
 #include "nvutils/file_mapping.hpp"
 #include "nvutils/file_operations.hpp"
 #include "nvutils/logger.hpp"
@@ -45,6 +49,8 @@
 #include "nvvk/mipmaps.hpp"
 
 #include "gltf_scene_vk.hpp"
+#include "gltf_scene_animation.hpp"
+#include "gltf_image_loader.hpp"
 #include "nvutils/parallel_work.hpp"
 #include "nvvk/helpers.hpp"
 
@@ -53,34 +59,6 @@ namespace {
 constexpr std::string_view kMemCategoryGeometry  = "Geometry";
 constexpr std::string_view kMemCategorySceneData = "SceneData";
 constexpr std::string_view kMemCategoryImages    = "Images";
-
-// Convert KTX swizzle to Vulkan component swizzle
-VkComponentSwizzle ktxSwizzleToVk(nv_ktx::KTX_SWIZZLE swizzle)
-{
-  switch(swizzle)
-  {
-    case nv_ktx::KTX_SWIZZLE::ZERO:
-      return VK_COMPONENT_SWIZZLE_ZERO;
-    case nv_ktx::KTX_SWIZZLE::ONE:
-      return VK_COMPONENT_SWIZZLE_ONE;
-    case nv_ktx::KTX_SWIZZLE::R:
-      return VK_COMPONENT_SWIZZLE_R;
-    case nv_ktx::KTX_SWIZZLE::G:
-      return VK_COMPONENT_SWIZZLE_G;
-    case nv_ktx::KTX_SWIZZLE::B:
-      return VK_COMPONENT_SWIZZLE_B;
-    case nv_ktx::KTX_SWIZZLE::A:
-      return VK_COMPONENT_SWIZZLE_A;
-    default:
-      return VK_COMPONENT_SWIZZLE_IDENTITY;
-  }
-}
-
-// Convert KTX swizzle array to VkComponentMapping
-VkComponentMapping ktxSwizzleToVkComponentMapping(const std::array<nv_ktx::KTX_SWIZZLE, 4>& swizzle)
-{
-  return {ktxSwizzleToVk(swizzle[0]), ktxSwizzleToVk(swizzle[1]), ktxSwizzleToVk(swizzle[2]), ktxSwizzleToVk(swizzle[3])};
-}
 
 // Gets the friendly name of a TinyGLTF image for logs and UIs.
 std::string getImageName(const tinygltf::Image& img, size_t index)
@@ -139,10 +117,18 @@ size_t getImageByteSize(const tinygltf::Model& model, const tinygltf::Image& img
 std::vector<shaderio::GltfLight> getShaderLights(const std::vector<nvvkgltf::RenderLight>& rlights,
                                                  const std::vector<tinygltf::Light>&       gltfLights);
 
-//-------------------------------------------------------------------------------------------------
-//
-//
+//--------------------------------------------------------------------------------------------------
+// SceneVk implementation grouped by work area:
+//   1. Init / Deinit  - allocator setup and teardown
+//   2. Create         - full or partial resource creation (create, createGeometry, buffers, textures)
+//   3. Sync / Upload  - push scene data to GPU (syncFromScene, upload*)
+//   4. Destroy        - release geometry or all resources (destroyGeometry, destroy)
+//--------------------------------------------------------------------------------------------------
 
+//========== Init / Deinit ==========
+
+//--------------------------------------------------------------------------------------------------
+// Initialize the Vulkan scene with allocator and sampler pool. Must be called before create().
 void nvvkgltf::SceneVk::init(nvvk::ResourceAllocator* alloc, nvvk::SamplerPool* samplerPool)
 {
   assert(!m_alloc);
@@ -152,6 +138,34 @@ void nvvkgltf::SceneVk::init(nvvk::ResourceAllocator* alloc, nvvk::SamplerPool* 
   m_alloc          = alloc;
   m_samplerPool    = samplerPool;
   m_memoryTracker.init(alloc);
+}
+
+//--------------------------------------------------------------------------------------------------
+// Tear down allocator reference and release all resources. Idempotent if already deinit.
+void nvvkgltf::SceneVk::destroyBufferDeferred(nvvk::Buffer& buf)
+{
+  if(buf.buffer == VK_NULL_HANDLE)
+    return;
+
+  nvvk::Buffer             oldBuf  = buf;
+  nvvk::ResourceAllocator* alloc   = m_alloc;
+  GpuMemoryTracker*        tracker = &m_memoryTracker;
+  auto                     cleanup = [=]() mutable {
+    tracker->untrack(kMemCategorySceneData, oldBuf.allocation);
+    alloc->destroyBuffer(oldBuf);
+  };
+  buf = {};
+
+  if(m_deferredFree)
+  {
+    m_deferredFree(std::move(cleanup));
+  }
+  else
+  {
+    if(m_graphicsQueue)
+      vkQueueWaitIdle(m_graphicsQueue);
+    cleanup();
+  }
 }
 
 void nvvkgltf::SceneVk::deinit()
@@ -169,12 +183,14 @@ void nvvkgltf::SceneVk::deinit()
   m_device         = VK_NULL_HANDLE;
 }
 
+//========== Create ==========
+
 //--------------------------------------------------------------------------------------------------
-// Create all Vulkan resources to hold a nvvkgltf::Scene
-//
+// Create all Vulkan resources for the given scene: materials, render nodes, vertex/index buffers,
+// textures, lights, primitives, and scene descriptor. Calls destroy() first to ensure a clean state.
 void nvvkgltf::SceneVk::create(VkCommandBuffer        cmd,
                                nvvk::StagingUploader& staging,
-                               const nvvkgltf::Scene& scn,
+                               nvvkgltf::Scene&       scn,
                                bool                   generateMipmaps /*= true*/,
                                bool                   enableRayTracing /*= true*/)
 {
@@ -184,103 +200,103 @@ void nvvkgltf::SceneVk::create(VkCommandBuffer        cmd,
   m_generateMipmaps   = generateMipmaps;
   m_rayTracingEnabled = enableRayTracing;
 
-  namespace fs     = std::filesystem;
-  fs::path basedir = fs::path(scn.getFilename()).parent_path();
-  updateMaterialBuffer(staging, scn);
-  updateRenderNodesBuffer(staging, scn);
+  std::vector<std::filesystem::path> imageSearchPaths = scn.getImageSearchPaths();
+  if(imageSearchPaths.empty())
+  {
+    std::error_code       ec;
+    std::filesystem::path baseDir = std::filesystem::absolute(scn.getFilename().parent_path(), ec);
+    if(!ec)
+      imageSearchPaths.push_back(baseDir);
+  }
+
+  uploadMaterials(staging, scn);
+  uploadRenderNodes(staging, scn);
   createVertexBuffers(cmd, staging, scn);
-  createTextureImages(cmd, staging, scn.getModel(), basedir);
-  updateRenderLightsBuffer(staging, scn);
+  createTextureImages(cmd, staging, scn, imageSearchPaths);
+  uploadLights(staging, scn);
 
   // Update the buffers for morph and skinning
-  updateRenderPrimitivesBuffer(cmd, staging, scn);
+  uploadPrimitives(cmd, staging, scn);
 
-  updateSceneDescBuffer(staging, scn);
+  (void)flushSceneDescIfDirty(staging, scn);
 }
 
-void nvvkgltf::SceneVk::update(VkCommandBuffer cmd, nvvk::StagingUploader& staging, const nvvkgltf::Scene& scn)
+//========== Sync / Upload ==========
+
+//--------------------------------------------------------------------------------------------------
+// Sync GPU buffers from Scene dirty flags. Uploads materials, lights, and/or render nodes according
+// to mask; clears the corresponding dirty sets. Returns a bitmask of which categories were updated.
+uint32_t nvvkgltf::SceneVk::syncFromScene(nvvk::StagingUploader& staging, nvvkgltf::Scene& scn, uint32_t mask)
 {
-  updateMaterialBuffer(staging, scn);
-  updateRenderNodesBuffer(staging, scn);
-  updateRenderPrimitivesBuffer(cmd, staging, scn);
+  uint32_t result = eSyncNone;
+  auto&    df     = scn.getDirtyFlags();
+
+  constexpr float fullUpdateRatio = 0.5f;
+
+  if(mask & eSyncMaterials)
+  {
+    const auto&                            dirty     = df.materials;
+    const std::vector<tinygltf::Material>& materials = scn.getModel().materials;
+    const VkDeviceSize requiredMaterialBytes         = materials.size() * sizeof(shaderio::GltfShadeMaterial);
+    if(!dirty.empty() || m_bMaterial.buffer == VK_NULL_HANDLE || m_bMaterial.bufferSize < requiredMaterialBytes)
+    {
+      uploadMaterials(staging, scn, dirty);
+      df.materials.clear();
+      result |= eSyncMaterials;
+    }
+  }
+
+  if(mask & eSyncLights)
+  {
+    const auto&                     dirty         = df.lights;
+    const std::vector<RenderLight>& rlights       = scn.getRenderLights();
+    const VkDeviceSize              requiredBytes = rlights.size() * sizeof(shaderio::GltfLight);
+    if(!rlights.empty() && (dirty.empty() == false || m_bLights.buffer == VK_NULL_HANDLE || m_bLights.bufferSize != requiredBytes))
+    {
+      uploadLights(staging, scn, dirty);
+      df.lights.clear();
+      result |= eSyncLights;
+    }
+  }
+
+  if(mask & eSyncRenderNodes)
+  {
+    const auto&        dirty         = df.renderNodesVk;
+    const auto&        renderNodes   = scn.getRenderNodes();
+    const VkDeviceSize requiredBytes = renderNodes.size() * sizeof(shaderio::GltfRenderNode);
+    const bool         needsUpdate = df.allRenderNodesDirty || !dirty.empty() || m_bRenderNode.buffer == VK_NULL_HANDLE
+                             || m_bRenderNode.bufferSize != requiredBytes;
+    if(needsUpdate)
+    {
+      const bool useFullUpdate = df.allRenderNodesDirty || renderNodes.empty()
+                                 || float(dirty.size()) / float(renderNodes.size()) >= fullUpdateRatio;
+      uploadRenderNodes(staging, scn, useFullUpdate ? std::unordered_set<int>{} : dirty);
+      df.renderNodesVk.clear();
+      df.allRenderNodesDirty = false;
+      result |= eSyncRenderNodes;
+    }
+  }
+
+  if(flushSceneDescIfDirty(staging, scn))
+    result |= eSyncRenderNodes;  // Staging was appended; ensure caller flushes.
+
+  return result;
 }
 
 //--------------------------------------------------------------------------------------------------
-// Destroy only geometry resources (vertex/index buffers, render primitives)
-// Preserves textures and materials - useful for geometry-only rebuilds like tangent generation
-//
-void nvvkgltf::SceneVk::destroyGeometry()
+// Recreate only geometry (vertex/index buffers, primitives). Call after destroyGeometry();
+// preserves textures and materials.
+void nvvkgltf::SceneVk::createGeometry(VkCommandBuffer cmd, nvvk::StagingUploader& staging, nvvkgltf::Scene& scn)
 {
-  for(auto& vertexBuffer : m_vertexBuffers)
-  {
-    if(vertexBuffer.position.buffer != VK_NULL_HANDLE)
-    {
-      m_memoryTracker.untrack(kMemCategoryGeometry, vertexBuffer.position.allocation);
-      m_alloc->destroyBuffer(vertexBuffer.position);
-    }
-    if(vertexBuffer.normal.buffer != VK_NULL_HANDLE)
-    {
-      m_memoryTracker.untrack(kMemCategoryGeometry, vertexBuffer.normal.allocation);
-      m_alloc->destroyBuffer(vertexBuffer.normal);
-    }
-    if(vertexBuffer.tangent.buffer != VK_NULL_HANDLE)
-    {
-      m_memoryTracker.untrack(kMemCategoryGeometry, vertexBuffer.tangent.allocation);
-      m_alloc->destroyBuffer(vertexBuffer.tangent);
-    }
-    if(vertexBuffer.texCoord0.buffer != VK_NULL_HANDLE)
-    {
-      m_memoryTracker.untrack(kMemCategoryGeometry, vertexBuffer.texCoord0.allocation);
-      m_alloc->destroyBuffer(vertexBuffer.texCoord0);
-    }
-    if(vertexBuffer.texCoord1.buffer != VK_NULL_HANDLE)
-    {
-      m_memoryTracker.untrack(kMemCategoryGeometry, vertexBuffer.texCoord1.allocation);
-      m_alloc->destroyBuffer(vertexBuffer.texCoord1);
-    }
-    if(vertexBuffer.color.buffer != VK_NULL_HANDLE)
-    {
-      m_memoryTracker.untrack(kMemCategoryGeometry, vertexBuffer.color.allocation);
-      m_alloc->destroyBuffer(vertexBuffer.color);
-    }
-  }
-  m_vertexBuffers.clear();
-
-  for(auto& indicesBuffer : m_bIndices)
-  {
-    if(indicesBuffer.buffer != VK_NULL_HANDLE)
-    {
-      m_memoryTracker.untrack(kMemCategoryGeometry, indicesBuffer.allocation);
-      m_alloc->destroyBuffer(indicesBuffer);
-    }
-  }
-  m_bIndices.clear();
-
-  if(m_bRenderPrim.buffer != VK_NULL_HANDLE)
-  {
-    m_memoryTracker.untrack(kMemCategorySceneData, m_bRenderPrim.allocation);
-    m_alloc->destroyBuffer(m_bRenderPrim);
-  }
-
-  if(m_bSceneDesc.buffer != VK_NULL_HANDLE)
-  {
-    m_memoryTracker.untrack(kMemCategorySceneData, m_bSceneDesc.allocation);
-    m_alloc->destroyBuffer(m_bSceneDesc);
-  }
-}
-
-//--------------------------------------------------------------------------------------------------
-// Recreate only geometry resources (vertex/index buffers, render primitives)
-// Call after destroyGeometry() - preserves existing textures
-//
-void nvvkgltf::SceneVk::createGeometry(VkCommandBuffer cmd, nvvk::StagingUploader& staging, const nvvkgltf::Scene& scn)
-{
+  m_sceneDescDirty = true;  // Geometry buffers may be recreated below.
   createVertexBuffers(cmd, staging, scn);
-  updateRenderPrimitivesBuffer(cmd, staging, scn);
-
-  updateSceneDescBuffer(staging, scn);
+  uploadPrimitives(cmd, staging, scn);
+  (void)flushSceneDescIfDirty(staging, scn);
 }
 
+//--------------------------------------------------------------------------------------------------
+// Update or create the scene descriptor buffer (GPU pointer to materials, textures, primitives,
+// render nodes, lights). Called when buffer addresses change (e.g. after create or buffer resize).
 void nvvkgltf::SceneVk::updateSceneDescBuffer(nvvk::StagingUploader& staging, const nvvkgltf::Scene& scn)
 {
   // Buffer references
@@ -296,242 +312,35 @@ void nvvkgltf::SceneVk::updateSceneDescBuffer(nvvk::StagingUploader& staging, co
   {
     NVVK_CHECK(m_alloc->createBuffer(m_bSceneDesc, std::span(&scene_desc, 1).size_bytes(),
                                      VK_BUFFER_USAGE_2_STORAGE_BUFFER_BIT | VK_BUFFER_USAGE_2_SHADER_DEVICE_ADDRESS_BIT));
+    NVVK_DBG_NAME(m_bSceneDesc.buffer);
+    m_memoryTracker.track(kMemCategorySceneData, m_bSceneDesc.allocation);  // Only track when creating!
   }
   NVVK_CHECK(staging.appendBuffer(m_bSceneDesc, 0, std::span(&scene_desc, 1)));
-  NVVK_DBG_NAME(m_bSceneDesc.buffer);
-  m_memoryTracker.track(kMemCategorySceneData, m_bSceneDesc.allocation);
-}
-
-template <typename T>
-inline shaderio::GltfTextureInfo getTextureInfo(const T& tinfo)
-{
-  const KHR_texture_transform& transform = tinygltf::utils::getTextureTransform(tinfo);
-  const int                    texCoord  = std::min(tinfo.texCoord, 1);  // Only 2 texture coordinates
-
-  // This is the texture info that will be used in the shader
-  return {
-      .uvTransform = shaderio::float3x2(transform.uvTransform[0][0], transform.uvTransform[1][0],   //
-                                        transform.uvTransform[0][1], transform.uvTransform[1][1],   //
-                                        transform.uvTransform[0][2], transform.uvTransform[1][2]),  //
-      .index       = tinfo.index,
-      .texCoord    = texCoord,
-  };
-}
-
-// Helper to handle texture info and update textureInfos vector
-template <typename T>
-uint16_t addTextureInfo(const T& tinfo, std::vector<shaderio::GltfTextureInfo>& textureInfos)
-{
-  shaderio::GltfTextureInfo ti = getTextureInfo(tinfo);
-  if(ti.index != -1)
-  {
-    uint16_t idx = static_cast<uint16_t>(textureInfos.size());
-    textureInfos.push_back(ti);
-    return idx;
-  }
-  return 0;  // No texture
 }
 
 //--------------------------------------------------------------------------------------------------
-// Shared material population logic. TextureHandler should have the signature:
-//   void(uint16_t& texIndex, const tinygltf::TextureInfo& srcTexInfo)
-// On creation: assign texIndex = addTextureInfo(srcTexInfo, textureInfos)
-// On update: if texIndex != 0, update cachedTextureInfos[texIndex] in-place
-//
-template <typename TextureHandler>
-static void populateShaderMaterial(shaderio::GltfShadeMaterial& dstMat, const tinygltf::Material& srcMat, TextureHandler handleTexture)
+// Flush scene descriptor buffer once per sync cycle if any buffer address changed.
+bool nvvkgltf::SceneVk::flushSceneDescIfDirty(nvvk::StagingUploader& staging, const nvvkgltf::Scene& scn)
 {
-  // Core PBR properties
-  dstMat.alphaMode          = srcMat.alphaMode == "OPAQUE" ? 0 : (srcMat.alphaMode == "MASK" ? 1 : 2 /*BLEND*/);
-  dstMat.alphaCutoff        = static_cast<float>(srcMat.alphaCutoff);
-  dstMat.doubleSided        = srcMat.doubleSided ? 1 : 0;
-  dstMat.pbrBaseColorFactor = glm::make_vec4<double>(srcMat.pbrMetallicRoughness.baseColorFactor.data());
-  dstMat.pbrMetallicFactor  = static_cast<float>(srcMat.pbrMetallicRoughness.metallicFactor);
-  dstMat.pbrRoughnessFactor = static_cast<float>(srcMat.pbrMetallicRoughness.roughnessFactor);
-  dstMat.normalTextureScale = static_cast<float>(srcMat.normalTexture.scale);
-  dstMat.occlusionStrength  = static_cast<float>(srcMat.occlusionTexture.strength);
-
-  if(!srcMat.emissiveFactor.empty())
-    dstMat.emissiveFactor = glm::make_vec3<double>(srcMat.emissiveFactor.data());
-
-  // Core textures
-  handleTexture(dstMat.emissiveTexture, srcMat.emissiveTexture);
-  handleTexture(dstMat.normalTexture, srcMat.normalTexture);
-  handleTexture(dstMat.pbrBaseColorTexture, srcMat.pbrMetallicRoughness.baseColorTexture);
-  handleTexture(dstMat.pbrMetallicRoughnessTexture, srcMat.pbrMetallicRoughness.metallicRoughnessTexture);
-  handleTexture(dstMat.occlusionTexture, srcMat.occlusionTexture);
-
-  // Extensions
-  KHR_materials_transmission transmission = tinygltf::utils::getTransmission(srcMat);
-  dstMat.transmissionFactor               = transmission.factor;
-  handleTexture(dstMat.transmissionTexture, transmission.texture);
-
-  KHR_materials_ior ior = tinygltf::utils::getIor(srcMat);
-  dstMat.ior            = ior.ior;
-
-  KHR_materials_volume volume = tinygltf::utils::getVolume(srcMat);
-  dstMat.attenuationColor     = volume.attenuationColor;
-  dstMat.thicknessFactor      = volume.thicknessFactor;
-  dstMat.attenuationDistance  = volume.attenuationDistance;
-  handleTexture(dstMat.thicknessTexture, volume.thicknessTexture);
-
-  KHR_materials_clearcoat clearcoat = tinygltf::utils::getClearcoat(srcMat);
-  dstMat.clearcoatFactor            = clearcoat.factor;
-  dstMat.clearcoatRoughness         = clearcoat.roughnessFactor;
-  handleTexture(dstMat.clearcoatRoughnessTexture, clearcoat.roughnessTexture);
-  handleTexture(dstMat.clearcoatTexture, clearcoat.texture);
-  handleTexture(dstMat.clearcoatNormalTexture, clearcoat.normalTexture);
-
-  KHR_materials_specular specular = tinygltf::utils::getSpecular(srcMat);
-  dstMat.specularFactor           = specular.specularFactor;
-  dstMat.specularColorFactor      = specular.specularColorFactor;
-  handleTexture(dstMat.specularTexture, specular.specularTexture);
-  handleTexture(dstMat.specularColorTexture, specular.specularColorTexture);
-
-  KHR_materials_emissive_strength emissiveStrength = tinygltf::utils::getEmissiveStrength(srcMat);
-  dstMat.emissiveFactor *= emissiveStrength.emissiveStrength;
-
-  KHR_materials_unlit unlit = tinygltf::utils::getUnlit(srcMat);
-  dstMat.unlit              = unlit.active ? 1 : 0;
-
-  KHR_materials_iridescence iridescence = tinygltf::utils::getIridescence(srcMat);
-  dstMat.iridescenceFactor              = iridescence.iridescenceFactor;
-  dstMat.iridescenceIor                 = iridescence.iridescenceIor;
-  dstMat.iridescenceThicknessMaximum    = iridescence.iridescenceThicknessMaximum;
-  dstMat.iridescenceThicknessMinimum    = iridescence.iridescenceThicknessMinimum;
-  handleTexture(dstMat.iridescenceTexture, iridescence.iridescenceTexture);
-  handleTexture(dstMat.iridescenceThicknessTexture, iridescence.iridescenceThicknessTexture);
-
-  KHR_materials_anisotropy anisotropy = tinygltf::utils::getAnisotropy(srcMat);
-  dstMat.anisotropyRotation = glm::vec2(glm::sin(anisotropy.anisotropyRotation), glm::cos(anisotropy.anisotropyRotation));
-  dstMat.anisotropyStrength = anisotropy.anisotropyStrength;
-  handleTexture(dstMat.anisotropyTexture, anisotropy.anisotropyTexture);
-
-  KHR_materials_sheen sheen   = tinygltf::utils::getSheen(srcMat);
-  dstMat.sheenColorFactor     = sheen.sheenColorFactor;
-  dstMat.sheenRoughnessFactor = sheen.sheenRoughnessFactor;
-  handleTexture(dstMat.sheenColorTexture, sheen.sheenColorTexture);
-  handleTexture(dstMat.sheenRoughnessTexture, sheen.sheenRoughnessTexture);
-
-  KHR_materials_dispersion dispersion = tinygltf::utils::getDispersion(srcMat);
-  dstMat.dispersion                   = dispersion.dispersion;
-
-  KHR_materials_pbrSpecularGlossiness pbr = tinygltf::utils::getPbrSpecularGlossiness(srcMat);
-  dstMat.usePbrSpecularGlossiness =
-      tinygltf::utils::hasElementName(srcMat.extensions, KHR_MATERIALS_PBR_SPECULAR_GLOSSINESS_EXTENSION_NAME);
-  if(dstMat.usePbrSpecularGlossiness)
-  {
-    dstMat.pbrDiffuseFactor    = pbr.diffuseFactor;
-    dstMat.pbrSpecularFactor   = pbr.specularFactor;
-    dstMat.pbrGlossinessFactor = pbr.glossinessFactor;
-  }
-  handleTexture(dstMat.pbrDiffuseTexture, pbr.diffuseTexture);
-  handleTexture(dstMat.pbrSpecularGlossinessTexture, pbr.specularGlossinessTexture);
-
-  KHR_materials_diffuse_transmission diffuseTransmission = tinygltf::utils::getDiffuseTransmission(srcMat);
-  dstMat.diffuseTransmissionFactor                       = diffuseTransmission.diffuseTransmissionFactor;
-  dstMat.diffuseTransmissionColor                        = diffuseTransmission.diffuseTransmissionColor;
-  handleTexture(dstMat.diffuseTransmissionTexture, diffuseTransmission.diffuseTransmissionTexture);
-  handleTexture(dstMat.diffuseTransmissionColorTexture, diffuseTransmission.diffuseTransmissionColorTexture);
-
-  KHR_materials_volume_scatter volumeScatter = tinygltf::utils::getVolumeScatter(srcMat);
-  dstMat.multiscatterColor                   = volumeScatter.multiscatterColor;
-  dstMat.scatterAnisotropy                   = volumeScatter.scatterAnisotropy;
+  if(!m_sceneDescDirty)
+    return false;
+  m_sceneDescDirty = false;
+  updateSceneDescBuffer(staging, scn);
+  return true;
 }
 
 //--------------------------------------------------------------------------------------------------
-// Create a new shader material, appending texture infos to the vector
-//
-static void getShaderMaterial(const tinygltf::Material&                 srcMat,
-                              std::vector<shaderio::GltfShadeMaterial>& shadeMaterials,
-                              std::vector<shaderio::GltfTextureInfo>&   textureInfos)
-{
-  shaderio::GltfShadeMaterial dstMat = shaderio::defaultGltfMaterial();
-  populateShaderMaterial(dstMat, srcMat, [&](uint16_t& texIndex, const auto& srcTexInfo) {
-    texIndex = addTextureInfo(srcTexInfo, textureInfos);
-  });
-  shadeMaterials.emplace_back(dstMat);
-}
-
-//--------------------------------------------------------------------------------------------------
-// Information about a contiguous span of texture infos used by a material
-//  Used to upload the texture infos for a material in a single call
-struct TextureInfoSpan
-{
-  uint16_t minIdx = std::numeric_limits<uint16_t>::max();
-  uint16_t maxIdx = 0;
-  uint16_t count  = 0;
-
-  bool   hasAny() const { return count > 0; }
-  size_t spanSize() const { return static_cast<size_t>(maxIdx - minIdx + 1); }
-};
-
-struct MaterialUpdateResult
-{
-  TextureInfoSpan span{};
-  bool            topologyChanged = false;
-};
-
-// Update an existing cached material, preserving texture indices, and updating texture info.
-// Returns the contiguous texture-info span used by this material and whether texture slot topology changed.
-static MaterialUpdateResult updateCachedMaterial(shaderio::GltfShadeMaterial& dstMat,
-                                                 const tinygltf::Material&    srcMat,
-                                                 shaderio::GltfTextureInfo*   cachedTextureInfos)
-{
-  MaterialUpdateResult result{};
-  populateShaderMaterial(dstMat, srcMat, [&](uint16_t& texIndex, const auto& srcTexInfo) {
-    const bool hasSrcTexture = srcTexInfo.index != -1;
-
-    // Check if a texture slot was added or removed
-    {
-      // The cached material has no texture slots, check if the source material has any texture slots
-      if(texIndex == 0)
-      {
-        if(hasSrcTexture)
-          result.topologyChanged = true;  // New texture slots, we need to rebuild the cache
-        return;
-      }
-
-      // The cached material has texture slots, so we need to check if the source material has any texture slots
-      if(!hasSrcTexture)
-      {
-        result.topologyChanged = true;
-        return;
-      }
-    }
-
-    // Update the cached texture info and the span of texture infos
-    cachedTextureInfos[texIndex] = getTextureInfo(srcTexInfo);
-    result.span.minIdx           = std::min(result.span.minIdx, texIndex);  // Minimum txt ID in this material
-    result.span.maxIdx = std::max(result.span.maxIdx, texIndex);  //Max to check later if the texture infos are contiguous
-    result.span.count++;                                          // Count the number of texture infos for this material
-  });
-  return result;
-}
-
-//--------------------------------------------------------------------------------------------------
-// Create a buffer of all materials, with only the elements we need
-//
-void nvvkgltf::SceneVk::updateMaterialBuffer(nvvk::StagingUploader&         staging,
-                                             const nvvkgltf::Scene&         scn,
-                                             const std::unordered_set<int>& dirtyIndices)
+// Upload material and texture-info data to GPU. dirtyIndices = material indices to update;
+// empty = full upload. Supports surgical update when few materials change.
+void nvvkgltf::SceneVk::uploadMaterials(nvvk::StagingUploader& staging, const nvvkgltf::Scene& scn, const std::unordered_set<int>& dirtyIndices)
 {
   // nvutils::ScopedTimer st(__FUNCTION__);
 
   using namespace tinygltf;
   const std::vector<tinygltf::Material>& materials = scn.getModel().materials;
 
-  // Rebuild the cached materials and texture infos
-  auto rebuildCaches = [&]() {
-    m_cachedTextureInfos.clear();
-    m_cachedTextureInfos.push_back({});  // 0 is reserved for no texture
-    m_cachedShadeMaterials.clear();
-    m_cachedShadeMaterials.reserve(materials.size());
-    for(const auto& srcMat : materials)
-    {
-      getShaderMaterial(srcMat, m_cachedShadeMaterials, m_cachedTextureInfos);
-    }
-  };
+  const std::vector<shaderio::GltfShadeMaterial>& shadeMaterials = m_materialCache.getShadeMaterials();
+  const std::vector<shaderio::GltfTextureInfo>&   textureInfos   = m_materialCache.getTextureInfos();
 
   // Ensure that the buffer has the required capacity to avoid resizing the buffer
   // If the buffer is already large enough, return false
@@ -543,8 +352,7 @@ void nvvkgltf::SceneVk::updateMaterialBuffer(nvvk::StagingUploader&         stag
 
     if(buffer.buffer != VK_NULL_HANDLE)
     {
-      m_memoryTracker.untrack(kMemCategorySceneData, buffer.allocation);
-      m_alloc->destroyBuffer(buffer);
+      destroyBufferDeferred(buffer);
     }
 
     NVVK_CHECK(m_alloc->createBuffer(buffer, requiredBytes,
@@ -559,8 +367,8 @@ void nvvkgltf::SceneVk::updateMaterialBuffer(nvvk::StagingUploader&         stag
   // If the buffers are not large enough, destroy the buffers and create new ones
   // Return true if the buffers were resized
   auto ensureMaterialBuffers = [&]() {
-    const VkDeviceSize materialBytes = std::span(m_cachedShadeMaterials).size_bytes();
-    const VkDeviceSize textureBytes  = std::span(m_cachedTextureInfos).size_bytes();
+    const VkDeviceSize materialBytes = std::span(shadeMaterials).size_bytes();
+    const VkDeviceSize textureBytes  = std::span(textureInfos).size_bytes();
 
     bool resized = false;
     resized |= ensureBufferCapacity(m_bMaterial, materialBytes);
@@ -574,21 +382,18 @@ void nvvkgltf::SceneVk::updateMaterialBuffer(nvvk::StagingUploader&         stag
   // Rebuild all materials and texture infos into cache
   if(doFullUpdate)
   {
-    rebuildCaches();
+    m_materialCache.buildFromMaterials(materials);
   }
 
-  // If the buffer changed, update the scene descriptor buffer (contain the buffer addresses)
   const bool buffersResized = ensureMaterialBuffers();
   if(buffersResized && m_bSceneDesc.buffer != VK_NULL_HANDLE)
-  {
-    updateSceneDescBuffer(staging, scn);
-  }
+    m_sceneDescDirty = true;
 
   // Full update: upload all materials and texture infos (faster when many materials changed)
   if(doFullUpdate || buffersResized)
   {
-    staging.appendBuffer(m_bMaterial, 0, std::span(m_cachedShadeMaterials));
-    staging.appendBuffer(m_bTextureInfos, 0, std::span(m_cachedTextureInfos));
+    staging.appendBuffer(m_bMaterial, 0, std::span(shadeMaterials));
+    staging.appendBuffer(m_bTextureInfos, 0, std::span(textureInfos));
     return;
   }
 
@@ -602,60 +407,44 @@ void nvvkgltf::SceneVk::updateMaterialBuffer(nvvk::StagingUploader&         stag
     TextureInfoSpan span{};
   };
 
-  // We will upload the materials and texture infos for the dirty materials after the process
   std::vector<PendingUpload> pendingUploads;
   pendingUploads.reserve(dirtyIndices.size());
-
-  // We will track if the texture slots changed
   bool topologyChanged = false;
 
-  // Go through the dirty materials indices and update the materials and texture infos
   for(int idx : dirtyIndices)
   {
-    if(idx < 0 || idx >= static_cast<int>(materials.size()) || idx >= static_cast<int>(m_cachedShadeMaterials.size()))
+    if(idx < 0 || idx >= static_cast<int>(materials.size()) || idx >= static_cast<int>(shadeMaterials.size()))
       continue;
 
-    shaderio::GltfShadeMaterial& cachedMat = m_cachedShadeMaterials[idx];
-
-    // Update material properties AND texture infos in one pass (parses extensions once)
-    MaterialUpdateResult update = updateCachedMaterial(cachedMat, materials[idx], m_cachedTextureInfos.data());
+    MaterialUpdateResult update = m_materialCache.updateMaterial(idx, materials[idx]);
     if(update.topologyChanged)
     {
-      topologyChanged = true;  // New texture slots, we need to rebuild the entirecache
+      topologyChanged = true;
       break;
     }
-
-    // Add the material and texture infos to the pending uploads
     pendingUploads.push_back({idx, update.span});
   }
 
-  // If the texture slots changed, we need to rebuild the cache and upload
-  // the new materials and texture infos
   if(topologyChanged)
   {
-    rebuildCaches();
+    m_materialCache.buildFromMaterials(materials);
     const bool resized = ensureMaterialBuffers();
     if(resized)
-    {
-      // Making sure the scene descriptor buffer is updated with the new material and texture info buffer addresses
-      updateSceneDescBuffer(staging, scn);
-    }
-    // Upload all materials and texture infos
-    staging.appendBuffer(m_bMaterial, 0, std::span(m_cachedShadeMaterials));
-    staging.appendBuffer(m_bTextureInfos, 0, std::span(m_cachedTextureInfos));
+      m_sceneDescDirty = true;
+    const std::vector<shaderio::GltfShadeMaterial>& shadeMaterialsRebuilt = m_materialCache.getShadeMaterials();
+    const std::vector<shaderio::GltfTextureInfo>&   textureInfosRebuilt   = m_materialCache.getTextureInfos();
+    staging.appendBuffer(m_bMaterial, 0, std::span(shadeMaterialsRebuilt));
+    staging.appendBuffer(m_bTextureInfos, 0, std::span(textureInfosRebuilt));
     return;
   }
 
-  // Upload the materials and texture infos for the dirty materials
   for(const PendingUpload& upload : pendingUploads)
   {
-    shaderio::GltfShadeMaterial& cachedMat = m_cachedShadeMaterials[upload.idx];
+    const shaderio::GltfShadeMaterial& cachedMat = m_materialCache.getShadeMaterials()[upload.idx];
 
-    // Upload material `idx` (only one material per upload)
     size_t matOffset = upload.idx * sizeof(shaderio::GltfShadeMaterial);
     staging.appendBuffer(m_bMaterial, matOffset, sizeof(shaderio::GltfShadeMaterial), &cachedMat);
 
-    // Batch-upload the contiguous texture info range for this material (ex. texID 9, 10, 11)
     if(upload.span.hasAny())
     {
       const size_t spanSize = upload.span.spanSize();
@@ -663,194 +452,91 @@ void nvvkgltf::SceneVk::updateMaterialBuffer(nvvk::StagingUploader&         stag
 
       size_t texOffset = upload.span.minIdx * sizeof(shaderio::GltfTextureInfo);
       staging.appendBuffer(m_bTextureInfos, texOffset, spanSize * sizeof(shaderio::GltfTextureInfo),
-                           &m_cachedTextureInfos[upload.span.minIdx]);
+                           &m_materialCache.getTextureInfos()[upload.span.minIdx]);
     }
   }
 }
 
 //--------------------------------------------------------------------------------------------------
-// Function to blend positions of a primitive with morph targets
-static std::vector<glm::vec3> getBlendedPositions(const tinygltf::Accessor&  baseAccessor,
-                                                  const glm::vec3*           basePositionData,
-                                                  const tinygltf::Primitive& primitive,
-                                                  const tinygltf::Mesh&      mesh,
-                                                  const tinygltf::Model&     model)
+// Upload render node (instance) data to GPU SSBO. dirtyIndices = render node indices to update;
+// empty = full upload. Resizes buffer if node count changed.
+// Convert CPU render node to GPU format.
+static shaderio::GltfRenderNode buildRenderNodeInfo(const nvvkgltf::RenderNode& renderNode)
 {
-  // Prepare for blending positions
-  std::vector<glm::vec3> blendedPositions(baseAccessor.count);
-  std::copy(basePositionData, basePositionData + baseAccessor.count, blendedPositions.begin());
-
-  // Blend the positions with the morph targets
-  for(size_t targetIndex = 0; targetIndex < primitive.targets.size(); ++targetIndex)
-  {
-    // Retrieve the weight for the current morph target
-    float weight = float(mesh.weights[targetIndex]);
-    if(weight == 0.0f)
-      continue;  // Skip this morph target if its weight is zero
-
-    // Get the morph target attribute (e.g., POSITION)
-    const auto& findResult = primitive.targets[targetIndex].find("POSITION");
-    if(findResult != primitive.targets[targetIndex].end())
-    {
-      const tinygltf::Accessor& morphAccessor = model.accessors[findResult->second];
-      std::vector<glm::vec3>    tempStorage;
-      const std::span<const glm::vec3> morphTargetData = tinygltf::utils::getAccessorData(model, morphAccessor, &tempStorage);
-
-      // Apply the morph target offset in parallel, scaled by the corresponding weight
-      nvutils::parallel_batches(blendedPositions.size(),
-                                [&](uint64_t v) { blendedPositions[v] += weight * morphTargetData[v]; });
-    }
-  }
-
-  return blendedPositions;
-}
-
-// Unified skinning function that transforms positions, normals, and tangents in a single pass.
-//
-// Normals are transformed by the inverse-transpose of the joint matrix (correct for non-uniform scaling)
-// Tangents are transformed by the upper 3x3 of the joint matrix, preserving the w (handedness) component
-//
-// Returns spans into workspace buffers - valid until next applySkinning call with same workspace
-struct SkinningResult
-{
-  std::span<const glm::vec3> positions;
-  std::span<const glm::vec3> normals;   // Empty if input had no normals
-  std::span<const glm::vec4> tangents;  // Empty if input had no tangents
-};
-
-static SkinningResult applySkinning(nvvkgltf::SkinningWorkspace&       workspace,
-                                    const std::span<const glm::vec3>&  basePositions,
-                                    const std::span<const glm::vec3>&  baseNormals,   // Can be empty
-                                    const std::span<const glm::vec4>&  baseTangents,  // Can be empty
-                                    const std::span<const glm::vec4>&  weights,
-                                    const std::span<const glm::ivec4>& joints,
-                                    const std::vector<glm::mat4>&      jointMatrices)
-{
-  const size_t vertexCount = weights.size();
-  const bool   hasNormals  = !baseNormals.empty();
-  const bool   hasTangents = !baseTangents.empty();
-  const size_t numJoints   = jointMatrices.size();
-
-  // Reserve workspace (only allocates if current buffers are too small)
-  workspace.reserve(vertexCount, numJoints, hasNormals, hasTangents);
-
-  // Pre-compute normal matrices (inverse-transpose of upper 3x3) once per joint
-  for(size_t i = 0; i < numJoints; ++i)
-  {
-    glm::mat3 upperLeft3x3      = glm::mat3(jointMatrices[i]);
-    workspace.normalMatrices[i] = glm::transpose(glm::inverse(upperLeft3x3));
-  }
-
-  // Apply skinning to all attributes in a single parallel pass
-  nvutils::parallel_batches<2048>(vertexCount, [&](uint64_t v) {
-    const glm::vec4&  w = weights[v];
-    const glm::ivec4& j = joints[v];
-
-    glm::vec3 skinnedPos(0.0f);
-    glm::vec3 skinnedNrm(0.0f);
-    glm::vec3 skinnedTan(0.0f);
-
-    // Process all 4 joint influences in one loop
-    for(int i = 0; i < 4; ++i)
-    {
-      const float jointWeight = w[i];
-      if(jointWeight > 0.0f)
-      {
-        const int jointIndex = j[i];
-
-        // Position: transform as point (w=1)
-        skinnedPos += jointWeight * glm::vec3(jointMatrices[jointIndex] * glm::vec4(basePositions[v], 1.0f));
-
-        // Normal: transform with inverse-transpose matrix
-        if(hasNormals)
-          skinnedNrm += jointWeight * (workspace.normalMatrices[jointIndex] * baseNormals[v]);
-
-        // Tangent: transform with upper 3x3 matrix
-        if(hasTangents)
-          skinnedTan += jointWeight * (glm::mat3(jointMatrices[jointIndex]) * glm::vec3(baseTangents[v]));
-      }
-    }
-
-    // Store results (normalize direction vectors)
-    workspace.positions[v] = skinnedPos;
-    if(hasNormals)
-      workspace.normals[v] = glm::normalize(skinnedNrm);
-    if(hasTangents)
-      workspace.tangents[v] = glm::vec4(glm::normalize(skinnedTan), baseTangents[v].w);  // Preserve handedness
-  });
-
-  // Return spans into workspace buffers (valid until next applySkinning call with same workspace)
-  SkinningResult result;
-  result.positions = std::span(workspace.positions.data(), vertexCount);
-  result.normals   = hasNormals ? std::span(workspace.normals.data(), vertexCount) : std::span<const glm::vec3>{};
-  result.tangents  = hasTangents ? std::span(workspace.tangents.data(), vertexCount) : std::span<const glm::vec4>{};
-  return result;
+  shaderio::GltfRenderNode info{};
+  info.objectToWorld = renderNode.worldMatrix;
+  info.worldToObject = glm::inverse(renderNode.worldMatrix);
+  info.materialID    = renderNode.materialID;
+  info.renderPrimID  = renderNode.renderPrimID;
+  return info;
 }
 
 //--------------------------------------------------------------------------------------------------
-// Array of instance information
-// - Use by the vertex shader to retrieve the position of the instance
-// - dirtyIndices contains renderNode indices that changed (empty means update all)
-void nvvkgltf::SceneVk::updateRenderNodesBuffer(nvvk::StagingUploader&         staging,
-                                                const nvvkgltf::Scene&         scn,
-                                                const std::unordered_set<int>& dirtyIndices)
+// Ensure the render node GPU buffer matches the required size. Destroys and nulls the buffer if
+// the current size doesn't match, so the caller can detect wasNullBuffer and recreate.
+void nvvkgltf::SceneVk::ensureRenderNodeBuffer(nvvk::StagingUploader& staging, size_t renderNodeCount)
 {
-  // nvutils::ScopedTimer st(__FUNCTION__);
-
-  const std::vector<nvvkgltf::RenderNode>& renderNodes       = scn.getRenderNodes();
-  const auto                               buildInstanceInfo = [](const nvvkgltf::RenderNode& renderNode) {
-    shaderio::GltfRenderNode info{};
-    info.objectToWorld = renderNode.worldMatrix;
-    info.worldToObject = glm::inverse(renderNode.worldMatrix);
-    info.materialID    = renderNode.materialID;
-    info.renderPrimID  = renderNode.renderPrimID;
-    return info;
-  };
-
-  const bool wasNullBuffer = (m_bRenderNode.buffer == VK_NULL_HANDLE);
-  if(wasNullBuffer)
+  const size_t requiredBytes = renderNodeCount * sizeof(shaderio::GltfRenderNode);
+  if(m_bRenderNode.bufferSize != requiredBytes)
   {
-    // Create the buffer early (size is known), fill below
-    NVVK_CHECK(m_alloc->createBuffer(m_bRenderNode, renderNodes.size() * sizeof(shaderio::GltfRenderNode),
+    if(m_bRenderNode.buffer != VK_NULL_HANDLE)
+    {
+      destroyBufferDeferred(m_bRenderNode);
+    }
+    m_bRenderNode = {};
+  }
+
+  if(renderNodeCount == 0)
+    return;
+
+  if(m_bRenderNode.buffer == VK_NULL_HANDLE)
+  {
+    NVVK_CHECK(m_alloc->createBuffer(m_bRenderNode, requiredBytes,
                                      VK_BUFFER_USAGE_2_STORAGE_BUFFER_BIT | VK_BUFFER_USAGE_2_SHADER_DEVICE_ADDRESS_BIT));
     NVVK_DBG_NAME(m_bRenderNode.buffer);
     m_memoryTracker.track(kMemCategorySceneData, m_bRenderNode.allocation);
+    m_sceneDescDirty = true;
   }
+}
 
-  if(wasNullBuffer || dirtyIndices.empty())
+void nvvkgltf::SceneVk::uploadRenderNodes(nvvk::StagingUploader& staging, const nvvkgltf::Scene& scn, const std::unordered_set<int>& dirtyIndices)
+{
+  const std::vector<nvvkgltf::RenderNode>& renderNodes = scn.getRenderNodes();
+
+  const VkDeviceSize prevSize = m_bRenderNode.bufferSize;
+  ensureRenderNodeBuffer(staging, renderNodes.size());
+  if(renderNodes.empty())
+    return;
+
+  const bool bufferRecreated = (m_bRenderNode.bufferSize != prevSize) || (prevSize == 0);
+  if(bufferRecreated || dirtyIndices.empty())
   {
-    // First time or empty dirty set means update all
     std::vector<shaderio::GltfRenderNode> instanceInfo;
     instanceInfo.reserve(renderNodes.size());
-    for(const nvvkgltf::RenderNode& renderNode : renderNodes)
-    {
-      instanceInfo.emplace_back(buildInstanceInfo(renderNode));
-    }
+    for(const nvvkgltf::RenderNode& rn : renderNodes)
+      instanceInfo.emplace_back(buildRenderNodeInfo(rn));
     staging.appendBuffer(m_bRenderNode, 0, std::span(instanceInfo));
   }
   else
   {
-    // Surgical update: dirtyIndices are renderNode indices
-    const size_t renderNodeCount = renderNodes.size();
     for(int renderNodeIdx : dirtyIndices)
     {
-      if(renderNodeIdx < 0 || static_cast<size_t>(renderNodeIdx) >= renderNodeCount)
+      if(renderNodeIdx < 0 || static_cast<size_t>(renderNodeIdx) >= renderNodes.size())
         continue;
-      const shaderio::GltfRenderNode info   = buildInstanceInfo(renderNodes[renderNodeIdx]);
+      const shaderio::GltfRenderNode info   = buildRenderNodeInfo(renderNodes[renderNodeIdx]);
       const size_t                   offset = static_cast<size_t>(renderNodeIdx) * sizeof(shaderio::GltfRenderNode);
       staging.appendBuffer(m_bRenderNode, offset, sizeof(shaderio::GltfRenderNode), &info);
     }
   }
+
+#ifndef NDEBUG
+  debugUpdateShadowCopy(scn);
+#endif
 }
 
-
 //--------------------------------------------------------------------------------------------------
-// Update the buffer of all lights
-// - If the light data was changes, the buffer needs to be updated
-// - dirtyIndices contains glTF light indices that changed (empty means update all)
-void nvvkgltf::SceneVk::updateRenderLightsBuffer(nvvk::StagingUploader&         staging,
-                                                 const nvvkgltf::Scene&         scn,
-                                                 const std::unordered_set<int>& dirtyIndices)
+// Upload light data to GPU. dirtyIndices = glTF light indices that changed; empty = full upload.
+void nvvkgltf::SceneVk::uploadLights(nvvk::StagingUploader& staging, const nvvkgltf::Scene& scn, const std::unordered_set<int>& dirtyIndices)
 {
   const std::vector<nvvkgltf::RenderLight>& rlights = scn.getRenderLights();
   if(rlights.empty())
@@ -858,23 +544,32 @@ void nvvkgltf::SceneVk::updateRenderLightsBuffer(nvvk::StagingUploader&         
 
   std::vector<shaderio::GltfLight> shaderLights = getShaderLights(rlights, scn.getModel().lights);
 
+  const VkDeviceSize requiredBytes = std::span(shaderLights).size_bytes();
+  const VkDeviceSize prevSize      = m_bLights.bufferSize;
+
+  if(m_bLights.bufferSize != requiredBytes)
+  {
+    if(m_bLights.buffer != VK_NULL_HANDLE)
+      destroyBufferDeferred(m_bLights);
+    m_bLights = {};
+  }
+
   if(m_bLights.buffer == VK_NULL_HANDLE)
   {
-    // First time: create buffer and upload all
-    NVVK_CHECK(m_alloc->createBuffer(m_bLights, std::span(shaderLights).size_bytes(),
+    NVVK_CHECK(m_alloc->createBuffer(m_bLights, requiredBytes,
                                      VK_BUFFER_USAGE_2_STORAGE_BUFFER_BIT | VK_BUFFER_USAGE_2_SHADER_DEVICE_ADDRESS_BIT));
-    NVVK_CHECK(staging.appendBuffer(m_bLights, 0, std::span(shaderLights)));
     NVVK_DBG_NAME(m_bLights.buffer);
     m_memoryTracker.track(kMemCategorySceneData, m_bLights.allocation);
+    m_sceneDescDirty = true;
   }
-  else if(dirtyIndices.empty())
+
+  const bool bufferRecreated = (m_bLights.bufferSize != prevSize) || (prevSize == 0);
+  if(bufferRecreated || dirtyIndices.empty())
   {
-    // Empty dirty set means update all (backward compatibility / full re-parse)
     staging.appendBuffer(m_bLights, 0, std::span(shaderLights));
   }
   else
   {
-    // Surgical update: find RenderLights that reference dirty glTF lights
     for(size_t renderLightIdx = 0; renderLightIdx < rlights.size(); ++renderLightIdx)
     {
       if(dirtyIndices.contains(rlights[renderLightIdx].light))
@@ -887,116 +582,66 @@ void nvvkgltf::SceneVk::updateRenderLightsBuffer(nvvk::StagingUploader&         
 }
 
 //--------------------------------------------------------------------------------------------------
-// Update the buffer of all primitives that have morph targets
-//
-void nvvkgltf::SceneVk::updateRenderPrimitivesBuffer(VkCommandBuffer cmd, nvvk::StagingUploader& staging, const nvvkgltf::Scene& scn)
+// Upload render primitive info (and morph/skin vertex data) to GPU. Used for morph targets and skinning.
+void nvvkgltf::SceneVk::uploadPrimitives(VkCommandBuffer cmd, nvvk::StagingUploader& staging, nvvkgltf::Scene& scn)
 {
-  // SCOPED_TIMER(__FUNCTION__);
-  const tinygltf::Model& model = scn.getModel();
+  scn.animation().computeMorphTargets();
+  scn.animation().computeSkinning();
 
   // ** Morph **
-  for(uint32_t renderPrimID : scn.getMorphPrimitives())
+  for(size_t i = 0; i < scn.animation().getMorphPrimitives().size(); i++)
   {
-    const nvvkgltf::RenderPrimitive& renderPrimitive  = scn.getRenderPrimitive(renderPrimID);
-    const tinygltf::Primitive&       primitive        = *renderPrimitive.pPrimitive;
-    const tinygltf::Mesh&            mesh             = model.meshes[renderPrimitive.meshID];
-    const tinygltf::Accessor&        positionAccessor = model.accessors[primitive.attributes.at("POSITION")];
-    std::vector<glm::vec3>           tempStorage;
-    const std::span<const glm::vec3> positionData = tinygltf::utils::getAccessorData(model, positionAccessor, &tempStorage);
+    const auto& morph = scn.animation().getMorphResult(i);
+    if(morph.renderPrimID < 0)
+      continue;
 
-    // Get blended position
-    std::vector<glm::vec3> blendedPositions = getBlendedPositions(positionAccessor, positionData.data(), primitive, mesh, model);
-
-    // Flush any pending buffer operations and add synchronization before updating morph/skinning buffers
     staging.cmdUploadAppended(cmd);
     nvvk::cmdMemoryBarrier(cmd, VK_PIPELINE_STAGE_2_ALL_COMMANDS_BIT, VK_PIPELINE_STAGE_2_COPY_BIT,
                            VK_ACCESS_2_TRANSFER_WRITE_BIT, VK_ACCESS_2_TRANSFER_WRITE_BIT);
 
-    // Update buffer
-    VertexBuffers& vertexBuffers = m_vertexBuffers[renderPrimID];
-    staging.appendBuffer(vertexBuffers.position, 0, std::span(blendedPositions));
+    VertexBuffers& vertexBuffers = m_vertexBuffers[morph.renderPrimID];
+    staging.appendBuffer(vertexBuffers.position, 0, std::span(morph.blendedPositions));
+
+    if(morph.blendedNormals.empty() != (vertexBuffers.normal.buffer == VK_NULL_HANDLE))
+      LOGW("Morph prim %d: normal buffer/data mismatch\n", morph.renderPrimID);
+    if(morph.blendedTangents.empty() != (vertexBuffers.tangent.buffer == VK_NULL_HANDLE))
+      LOGW("Morph prim %d: tangent buffer/data mismatch\n", morph.renderPrimID);
+
+    if(!morph.blendedNormals.empty() && vertexBuffers.normal.buffer != VK_NULL_HANDLE)
+      staging.appendBuffer(vertexBuffers.normal, 0, std::span(morph.blendedNormals));
+
+    if(!morph.blendedTangents.empty() && vertexBuffers.tangent.buffer != VK_NULL_HANDLE)
+      staging.appendBuffer(vertexBuffers.tangent, 0, std::span(morph.blendedTangents));
   }
 
   // ** Skin **
-  const std::vector<nvvkgltf::RenderNode>& renderNodes = scn.getRenderNodes();
-  for(uint32_t skinNodeID : scn.getSkinNodes())
+  for(size_t i = 0; i < scn.animation().getSkinTasks().size(); i++)
   {
-    const nvvkgltf::RenderNode& skinNode  = renderNodes[skinNodeID];
-    const tinygltf::Skin&       skin      = model.skins[skinNode.skinID];
-    const tinygltf::Primitive&  primitive = *scn.getRenderPrimitive(skinNode.renderPrimID).pPrimitive;
+    const auto& task    = scn.animation().getSkinTasks()[i];
+    const auto& skinned = scn.animation().getSkinningResult(i);
 
-    int32_t                numJoints = int32_t(skin.joints.size());
-    std::vector<glm::mat4> inverseBindMatrices(numJoints, glm::mat4(1));
-    std::vector<glm::mat4> jointMatrices(numJoints, glm::mat4(1));
-
-    if(skin.inverseBindMatrices > -1)
-    {
-      std::vector<glm::mat4> storage;
-      std::span<const glm::mat4> ibm = tinygltf::utils::getAccessorData(model, model.accessors[skin.inverseBindMatrices], &storage);
-      for(int i = 0; i < numJoints; i++)
-      {
-        inverseBindMatrices[i] = ibm[i];
-      }
-    }
-
-    // Calculate joint matrices
-    const std::vector<glm::mat4>& nodeMatrices = scn.getNodesWorldMatrices();
-    glm::mat4 invNode = glm::inverse(nodeMatrices[skinNode.refNodeID]);  // Removing current node transform as it will be applied by the shaders
-    for(int i = 0; i < numJoints; ++i)
-    {
-      int jointNodeID = skin.joints[i];
-      jointMatrices[i] = invNode * nodeMatrices[jointNodeID] * inverseBindMatrices[i];  // World matrix of the joint's node
-    }
-
-    // Get skinning weights and joint indices
-    std::vector<glm::vec4> tempWeightStorage;
-    std::span<const glm::vec4> weights = tinygltf::utils::getAttributeData3(model, primitive, "WEIGHTS_0", &tempWeightStorage);
-
-    std::vector<glm::ivec4> tempJointStorage;
-    std::span<const glm::ivec4> joints = tinygltf::utils::getAttributeData3(model, primitive, "JOINTS_0", &tempJointStorage);
-
-    // Get base vertex attributes
-    std::vector<glm::vec3>           tempPosStorage;
-    const std::span<const glm::vec3> basePositions =
-        tinygltf::utils::getAttributeData3(model, primitive, "POSITION", &tempPosStorage);
-
-    std::vector<glm::vec3> tempNrmStorage;
-    const std::span<const glm::vec3> baseNormals = tinygltf::utils::getAttributeData3(model, primitive, "NORMAL", &tempNrmStorage);
-
-    std::vector<glm::vec4> tempTanStorage;
-    const std::span<const glm::vec4> baseTangents = tinygltf::utils::getAttributeData3(model, primitive, "TANGENT", &tempTanStorage);
-
-    // Apply skinning to all attributes in a single pass
-    SkinningResult skinned =
-        applySkinning(m_skinningWorkspace, basePositions, baseNormals, baseTangents, weights, joints, jointMatrices);
-
-    // Flush any pending buffer operations and add synchronization before updating skinning buffers
     staging.cmdUploadAppended(cmd);
     nvvk::cmdMemoryBarrier(cmd, VK_PIPELINE_STAGE_2_ALL_COMMANDS_BIT, VK_PIPELINE_STAGE_2_COPY_BIT,
                            VK_ACCESS_2_TRANSFER_WRITE_BIT, VK_ACCESS_2_TRANSFER_WRITE_BIT);
 
-    // Update GPU buffers
-    VertexBuffers& vertexBuffers = m_vertexBuffers[skinNode.renderPrimID];
-    staging.appendBuffer(vertexBuffers.position, 0, skinned.positions);
+    VertexBuffers& vertexBuffers = m_vertexBuffers[task.renderPrimID];
+    staging.appendBuffer(vertexBuffers.position, 0, std::span(skinned.positions));
 
-    // Sanity check: skinned results and GPU buffers should be consistent (both derive from primitive attributes)
-    assert(skinned.normals.empty() == (vertexBuffers.normal.buffer == VK_NULL_HANDLE));
-    assert(skinned.tangents.empty() == (vertexBuffers.tangent.buffer == VK_NULL_HANDLE));
+    if(skinned.normals.empty() != (vertexBuffers.normal.buffer == VK_NULL_HANDLE))
+      LOGW("Skin prim %d: normal buffer/data mismatch\n", task.renderPrimID);
+    if(skinned.tangents.empty() != (vertexBuffers.tangent.buffer == VK_NULL_HANDLE))
+      LOGW("Skin prim %d: tangent buffer/data mismatch\n", task.renderPrimID);
 
     if(!skinned.normals.empty() && vertexBuffers.normal.buffer != VK_NULL_HANDLE)
-    {
-      staging.appendBuffer(vertexBuffers.normal, 0, skinned.normals);
-    }
+      staging.appendBuffer(vertexBuffers.normal, 0, std::span(skinned.normals));
 
     if(!skinned.tangents.empty() && vertexBuffers.tangent.buffer != VK_NULL_HANDLE)
-    {
-      staging.appendBuffer(vertexBuffers.tangent, 0, skinned.tangents);
-    }
+      staging.appendBuffer(vertexBuffers.tangent, 0, std::span(skinned.tangents));
   }
 }
 
-// Function to create attribute buffers in Vulkan only if the attribute is present
-// Return true if a buffer was created, false if the buffer was updated
+//--------------------------------------------------------------------------------------------------
+// Create or update a vertex attribute buffer for a primitive. Returns true if a new buffer was created.
 template <typename T>
 bool nvvkgltf::SceneVk::updateAttributeBuffer(const std::string&         attributeName,
                                               const tinygltf::Model&     model,
@@ -1008,7 +653,10 @@ bool nvvkgltf::SceneVk::updateAttributeBuffer(const std::string&         attribu
   const auto& findResult = primitive.attributes.find(attributeName);
   if(findResult != primitive.attributes.end())
   {
-    const tinygltf::Accessor& accessor = model.accessors[findResult->second];
+    const int accessorIdx = findResult->second;
+    if(accessorIdx < 0 || accessorIdx >= static_cast<int>(model.accessors.size()))
+      return false;
+    const tinygltf::Accessor& accessor = model.accessors[accessorIdx];
     std::vector<T>            tempStorage;
     const std::span<const T>  data = tinygltf::utils::getAccessorData(model, accessor, &tempStorage);
     if(data.empty())
@@ -1035,7 +683,7 @@ bool nvvkgltf::SceneVk::updateAttributeBuffer(const std::string&         attribu
 }
 
 //--------------------------------------------------------------------------------------------------
-// Returns the common usage flags used for all buffers.
+// Common buffer usage flags for scene buffers (storage, device address, transfer). Adds ray tracing bit if enabled.
 VkBufferUsageFlags2 nvvkgltf::SceneVk::getBufferUsageFlags() const
 {
   VkBufferUsageFlags2 bufferUsageFlag =
@@ -1054,10 +702,8 @@ VkBufferUsageFlags2 nvvkgltf::SceneVk::getBufferUsageFlags() const
 }
 
 //--------------------------------------------------------------------------------------------------
-// Creating information per primitive
-// - Create a buffer of Vertex and Index for each primitive
-// - Each primInfo has a reference to the vertex and index buffer, and which material id it uses
-//
+// Create vertex/index buffers and render-primitive info for all primitives. One vertex buffer set
+// per primitive; primitive buffer references vertex/index buffers and material id.
 void nvvkgltf::SceneVk::createVertexBuffers(VkCommandBuffer cmd, nvvk::StagingUploader& staging, const nvvkgltf::Scene& scn)
 {
   nvutils::ScopedTimer st(__FUNCTION__);
@@ -1189,8 +835,9 @@ void nvvkgltf::SceneVk::createVertexBuffers(VkCommandBuffer cmd, nvvk::StagingUp
                        nullptr, 0, nullptr);
 }
 
-// This version updates all the vertex buffers
-void nvvkgltf::SceneVk::updateVertexBuffers(nvvk::StagingUploader& staging, const nvvkgltf::Scene& scene)
+//--------------------------------------------------------------------------------------------------
+// Re-upload all vertex buffers (e.g. after tangent recompute). Updates primitives that changed.
+void nvvkgltf::SceneVk::uploadVertexBuffers(nvvk::StagingUploader& staging, const nvvkgltf::Scene& scene)
 {
   const auto& model = scene.getModel();
 
@@ -1265,15 +912,15 @@ static VkSamplerCreateInfo getSampler(const tinygltf::Model& model, int index)
   return samplerInfo;
 }
 
-//--------------------------------------------------------------------------------------------------------------
-// This is creating all images stored in textures
-//
-void nvvkgltf::SceneVk::createTextureImages(VkCommandBuffer              cmd,
-                                            nvvk::StagingUploader&       staging,
-                                            const tinygltf::Model&       model,
-                                            const std::filesystem::path& basedir)
+//--------------------------------------------------------------------------------------------------
+// Create GPU images for all textures referenced by the scene. Loads from disk or embedded data.
+void nvvkgltf::SceneVk::createTextureImages(VkCommandBuffer                           cmd,
+                                            nvvk::StagingUploader&                    staging,
+                                            const nvvkgltf::Scene&                    scn,
+                                            const std::vector<std::filesystem::path>& imageSearchPaths)
 {
-  nvutils::ScopedTimer st(std::string(__FUNCTION__) + "\n");
+  nvutils::ScopedTimer   st(std::string(__FUNCTION__) + "\n");
+  const tinygltf::Model& model = scn.getModel();
 
   VkSamplerCreateInfo default_sampler{VK_STRUCTURE_TYPE_SAMPLER_CREATE_INFO};
   default_sampler.minFilter  = VK_FILTER_LINEAR;
@@ -1334,10 +981,16 @@ void nvvkgltf::SceneVk::createTextureImages(VkCommandBuffer              cmd,
     if(usedImages.find(static_cast<int>(i)) == usedImages.end())
       continue;  // Skip unused images
 
-    const auto& gltfImage = model.images[i];
-
+    const auto&           gltfImage = model.images[i];
+    std::filesystem::path diskPath;
+    if(!gltfImage.uri.empty() && gltfImage.bufferView < 0 && (gltfImage.uri.size() < 5 || gltfImage.uri.compare(0, 5, "data:") != 0))
+    {
+      std::string uriDecoded;
+      tinygltf::URIDecode(gltfImage.uri, &uriDecoded, nullptr);
+      diskPath = nvutils::findFile(nvutils::pathFromUtf8(uriDecoded), imageSearchPaths, false);
+    }
     ImageLoadItem item{.imageId = i};
-    item.diskPath       = resolveImagePath(basedir, gltfImage);
+    item.diskPath       = diskPath;
     item.numBytes       = getImageByteSize(model, gltfImage, item.diskPath);
     m_images[i].imgName = getImageName(gltfImage, i);
 
@@ -1348,11 +1001,19 @@ void nvvkgltf::SceneVk::createTextureImages(VkCommandBuffer              cmd,
   std::sort(imageLoadItems.begin(), imageLoadItems.end(),
             [](const ImageLoadItem& a, const ImageLoadItem& b) { return a.numBytes > b.numBytes; });
 
+  std::atomic<uint32_t> failedImageCount{0};
   nvutils::parallel_batches<1>(  // Not batching
       imageLoadItems.size(), [&](uint64_t i) {
         const ImageLoadItem& item = imageLoadItems[i];
-        loadImage(item.diskPath, model, item.imageId);
+        if(!loadImage(item.diskPath, model, item.imageId))
+        {
+          ++failedImageCount;
+        }
       });
+  if(failedImageCount > 0)
+  {
+    LOGW("%" PRIu32 " of %zu image(s) failed to load.\n", failedImageCount.load(), imageLoadItems.size());
+  }
 
   // Create Vulkan images
   for(size_t i = 0; i < m_images.size(); i++)
@@ -1400,9 +1061,8 @@ void nvvkgltf::SceneVk::createTextureImages(VkCommandBuffer              cmd,
   }
 }
 
-//-------------------------------------------------------------------------------------------------
-// Some images must be sRgb encoded, we find them and will be uploaded with the _SRGB format.
-//
+//--------------------------------------------------------------------------------------------------
+// Identify images that must use sRGB format (e.g. base color). Stored in m_sRgbImages for createImage.
 void nvvkgltf::SceneVk::findSrgbImages(const tinygltf::Model& model)
 {
   // Lambda helper functions
@@ -1420,7 +1080,11 @@ void nvvkgltf::SceneVk::findSrgbImages(const tinygltf::Model& model)
     if(ext != mat.extensions.end())
     {
       if(ext->second.Has(name))
-        addImage(ext->second.Get(name).Get<int>());
+      {
+        const auto& texInfo = ext->second.Get(name);
+        if(texInfo.Has("index"))
+          addImage(texInfo.Get("index").GetNumberAsInt());
+      }
     }
   };
 
@@ -1454,9 +1118,8 @@ void nvvkgltf::SceneVk::findSrgbImages(const tinygltf::Model& model)
 }
 
 //--------------------------------------------------------------------------------------------------
-// Loads glTF image `imageID` into m_images[imageID].
-//
-void nvvkgltf::SceneVk::loadImage(const std::filesystem::path& diskPath, const tinygltf::Model& model, uint64_t imageID)
+// Load glTF image by ID from disk or embedded buffer; populate m_images[imageID] (size, format, mipData).
+bool nvvkgltf::SceneVk::loadImage(const std::filesystem::path& diskPath, const tinygltf::Model& model, uint64_t imageID)
 {
   const tinygltf::Image& gltfImage = model.images[imageID];
   SceneImage&            outImage  = m_images[imageID];
@@ -1471,7 +1134,7 @@ void nvvkgltf::SceneVk::loadImage(const std::filesystem::path& diskPath, const t
     if(static_cast<size_t>(bufferViewIndex) >= model.bufferViews.size())
     {
       LOGW("The buffer view index (%i) for image %" PRIu64 " was out of range.\n", bufferViewIndex, imageID);
-      return;
+      return false;
     }
 
     const tinygltf::BufferView& bufferView  = model.bufferViews[bufferViewIndex];
@@ -1480,18 +1143,18 @@ void nvvkgltf::SceneVk::loadImage(const std::filesystem::path& diskPath, const t
     {
       LOGW("The buffer index (%i) from the buffer view (%i) for image %" PRIu64 " was out of range.\n", bufferIndex,
            bufferViewIndex, imageID);
-      return;
+      return false;
     }
 
     const tinygltf::Buffer& buffer = model.buffers[bufferIndex];
     // Make sure the data's in-bounds. TinyGLTF doesn't seem to verify this (!)
     const size_t byteOffset = bufferView.byteOffset;
     const size_t byteLength = bufferView.byteLength;
-    if(byteOffset > buffer.data.size() || byteLength > buffer.data.size() - byteOffset)
+    if(byteOffset >= buffer.data.size() || byteLength > buffer.data.size() - byteOffset)
     {
       LOGW("The buffer offset (%zu) and length (%zu) were out-of-range for buffer %i, which has length %zu, for image %" PRIu64 ".\n",
            byteOffset, byteLength, bufferIndex, buffer.data.size(), imageID);
-      return;
+      return false;
     }
 
     loadImageFromMemory(imageID, &buffer.data[byteOffset], byteLength);
@@ -1508,7 +1171,7 @@ void nvvkgltf::SceneVk::loadImage(const std::filesystem::path& diskPath, const t
     if(!fileMapping.open(diskPath))
     {
       LOGW("The file for image %" PRIu64 " (%s) could not be opened.\n", imageID, nvutils::utf8FromPath(diskPath).c_str());
-      return;
+      return false;
     }
 
     loadImageFromMemory(imageID, fileMapping.data(), fileMapping.size());
@@ -1516,182 +1179,35 @@ void nvvkgltf::SceneVk::loadImage(const std::filesystem::path& diskPath, const t
   else
   {
     LOGW("Image %" PRIu64 " has no data source (no bufferView, no stored data, and no URI).\n", imageID);
+    return false;
   }
+
+  return true;
 }
 
-//-------------------------------------------------------------------------------------------------
-// Loads data, extent, and swizzle for an image loaded or mapped to a range of
-// memory into m_images[imageID] without changing the other fields.
-//
+//--------------------------------------------------------------------------------------------------
+// Load image from memory (e.g. embedded glTF buffer). Fills m_images[imageID] size, format, mipData.
+// Custom callback is tried first; then ImageLoader decodes DDS, KTX, or stb_image formats.
 void nvvkgltf::SceneVk::loadImageFromMemory(uint64_t imageID, const void* data, size_t byteLength)
 {
   SceneImage& image = m_images[imageID];
   image.srgb        = m_sRgbImages.find(static_cast<int>(imageID)) != m_sRgbImages.end();
 
-  // Try the custom image load callback first.
   if(m_imageLoadCallback && m_imageLoadCallback(image, data, byteLength))
-  {
-    return;  // Successfully loaded
-  }
+    return;
 
-  // Look at the first few bytes to determine the type of the image and choose
-  // between our other loaders.
-  const char    ddsIdentifier[4] = {'D', 'D', 'S', ' '};
-  const uint8_t ktxIdentifier[5] = {0xAB, 0x4B, 0x54, 0x58, 0x20};  // Common for KTX1 + KTX2
+  LoadedImageData loaded;
+  if(!nvvkgltf::loadFromMemory(loaded, data, byteLength, image.srgb, imageID))
+    return;
 
-  if(byteLength >= sizeof(ddsIdentifier) && memcmp(data, ddsIdentifier, sizeof(ddsIdentifier)) == 0)
-  {
-    nv_dds::Image        ddsImage{};
-    nv_dds::ReadSettings settings{};
-    const nv_dds::ErrorWithText readResult = ddsImage.readFromMemory(reinterpret_cast<const char*>(data), byteLength, settings);
-    if(readResult.has_value())
-    {
-      LOGW("Failed to read image %" PRIu64 " using nv_dds: %s\n", imageID, readResult.value().c_str());
-      return;
-    }
-
-    image.size.width  = ddsImage.getWidth(0);
-    image.size.height = ddsImage.getHeight(0);
-    if(ddsImage.getDepth(0) > 1)
-    {
-      LOGW("This DDS image had a depth of %u, but loadImage() cannot handle volume textures.\n", ddsImage.getDepth(0));
-      return;
-    }
-    if(ddsImage.getNumFaces() > 1)
-    {
-      LOGW("This DDS image had %u faces, but loadImage() cannot handle cubemaps.\n", ddsImage.getNumFaces());
-      return;
-    }
-    if(ddsImage.getNumLayers() > 1)
-    {
-      LOGW("This DDS image had %u array elements, but loadImage() cannot handle array textures.\n", ddsImage.getNumLayers());
-      return;
-    }
-    image.format = texture_formats::dxgiToVulkan(ddsImage.dxgiFormat);
-    image.format = texture_formats::tryForceVkFormatTransferFunction(image.format, image.srgb);
-    if(VK_FORMAT_UNDEFINED == image.format)
-    {
-      LOGW("Could not determine a VkFormat for DXGI format %u (%s).\n", ddsImage.dxgiFormat,
-           texture_formats::getDXGIFormatName(ddsImage.dxgiFormat));
-      return;
-    }
-
-    // Add all mip-levels. We don't need the ddsImage after this so we can move instead of copy.
-    for(uint32_t i = 0; i < ddsImage.getNumMips(); i++)
-    {
-      std::vector<char>& mip = ddsImage.subresource(i, 0, 0).data;
-      image.mipData.push_back(std::move(mip));
-    }
-  }
-  else if(byteLength >= sizeof(ktxIdentifier) && memcmp(data, ktxIdentifier, sizeof(ktxIdentifier)) == 0)
-  {
-    nv_ktx::KTXImage            ktxImage;
-    const nv_ktx::ReadSettings  ktxReadSettings;
-    const nv_ktx::ErrorWithText maybeError =
-        ktxImage.readFromMemory(reinterpret_cast<const char*>(data), byteLength, ktxReadSettings);
-    if(maybeError.has_value())
-    {
-      LOGW("Failed to read image %" PRIu64 " using nv_ktx: %s\n", imageID, maybeError->c_str());
-      return;
-    }
-
-    image.size.width  = ktxImage.mip_0_width;
-    image.size.height = ktxImage.mip_0_height;
-    if(ktxImage.mip_0_depth > 1)
-    {
-      LOGW("KTX image %" PRIu64 " had a depth of %u, but loadImage() cannot handle volume textures.\n", imageID,
-           ktxImage.mip_0_depth);
-      return;
-    }
-    if(ktxImage.num_faces > 1)
-    {
-      LOGW("KTX image %" PRIu64 " had %u faces, but loadImage() cannot handle cubemaps.\n", imageID, ktxImage.num_faces);
-      return;
-    }
-    if(ktxImage.num_layers_possibly_0 > 1)
-    {
-      LOGW("KTX image %" PRIu64 " had %u array elements, but loadImage() cannot handle array textures.\n", imageID,
-           ktxImage.num_layers_possibly_0);
-      return;
-    }
-    image.format           = texture_formats::tryForceVkFormatTransferFunction(ktxImage.format, image.srgb);
-    image.componentMapping = ktxSwizzleToVkComponentMapping(ktxImage.swizzle);
-
-    // Add all mip-levels. We don't need the ktxImage after this so we can move instead of copy.
-    for(uint32_t i = 0; i < ktxImage.num_mips; i++)
-    {
-      std::vector<char>& mip = ktxImage.subresource(i, 0, 0);
-      image.mipData.push_back(std::move(mip));
-    }
-  }
-  else
-  {
-    // Try to load the image using stb_image.
-    if(byteLength > std::numeric_limits<int>::max())
-    {
-      LOGW("File for image %" PRIu64 " was too large (%zu bytes) for stb_image to read.\n", imageID, byteLength);
-      return;
-    }
-
-    // stb_image wants a buffer of type stbi_uc* and length of type int:
-    const stbi_uc* dataStb   = reinterpret_cast<const stbi_uc*>(data);
-    const int      lengthStb = static_cast<int>(byteLength);
-
-    // Read the header once to check how many channels it has. We can't trivially use RGB/VK_FORMAT_R8G8B8_UNORM and
-    // need to set requiredComponents=4 in such cases.
-    int w = 0, h = 0, comp = 0;
-    if(!stbi_info_from_memory(dataStb, lengthStb, &w, &h, &comp))
-    {
-      LOGW("Failed to get info using stb_image for image %" PRIu64 "\n", imageID);
-      return;
-    }
-
-    // Read the header again to check if it has 16 bit data, e.g. for a heightmap.
-    const bool is16Bit = stbi_is_16_bit_from_memory(dataStb, lengthStb);
-
-    // Load the image
-    stbi_uc* decompressed = nullptr;
-    size_t   bytesPerPixel{0};
-    int      requiredComponents = comp == 1 ? 1 : 4;
-    if(is16Bit)
-    {
-      stbi_us* decompressed16 = stbi_load_16_from_memory(dataStb, lengthStb, &w, &h, &comp, requiredComponents);
-      bytesPerPixel           = sizeof(*decompressed16) * requiredComponents;
-      decompressed            = (stbi_uc*)(decompressed16);
-    }
-    else
-    {
-      decompressed  = stbi_load_from_memory(dataStb, lengthStb, &w, &h, &comp, requiredComponents);
-      bytesPerPixel = sizeof(*decompressed) * requiredComponents;
-    }
-
-    switch(requiredComponents)
-    {
-      case 1:
-        image.format = is16Bit ? VK_FORMAT_R16_UNORM : VK_FORMAT_R8_UNORM;
-        // For 1-component textures, expand the single channel to RGB for proper grayscale display
-        image.componentMapping = {VK_COMPONENT_SWIZZLE_R, VK_COMPONENT_SWIZZLE_R, VK_COMPONENT_SWIZZLE_R, VK_COMPONENT_SWIZZLE_ONE};
-        break;
-      case 4:
-        image.format = is16Bit    ? VK_FORMAT_R16G16B16A16_UNORM :
-                       image.srgb ? VK_FORMAT_R8G8B8A8_SRGB :
-                                    VK_FORMAT_R8G8B8A8_UNORM;
-
-        break;
-    }
-
-    // Make a copy of the image data to be uploaded to Vulkan later
-    if(decompressed && w > 0 && h > 0 && image.format != VK_FORMAT_UNDEFINED)
-    {
-      VkDeviceSize bufferSize = static_cast<VkDeviceSize>(w) * h * bytesPerPixel;
-      image.size              = VkExtent2D{(uint32_t)w, (uint32_t)h};
-      image.mipData           = {{decompressed, decompressed + bufferSize}};
-    }
-
-    stbi_image_free(decompressed);
-  }
+  image.format           = loaded.format;
+  image.size             = loaded.size;
+  image.mipData          = std::move(loaded.mipData);
+  image.componentMapping = loaded.componentMapping;
 }
 
+//--------------------------------------------------------------------------------------------------
+// Create a Vulkan image from a populated SceneImage (size, format, mipData). Returns false if invalid.
 bool nvvkgltf::SceneVk::createImage(const VkCommandBuffer& cmd, nvvk::StagingUploader& staging, SceneImage& image)
 {
   if(image.size.width == 0 || image.size.height == 0)
@@ -1830,9 +1346,77 @@ std::vector<shaderio::GltfLight> getShaderLights(const std::vector<nvvkgltf::Ren
   return lightsInfo;
 }
 
+//========== Destroy ==========
+
+//--------------------------------------------------------------------------------------------------
+// Release only geometry resources (vertex/index buffers, render primitives, scene descriptor).
+// Preserves textures and materials. Use for geometry-only rebuilds (e.g. tangent generation).
+void nvvkgltf::SceneVk::destroyGeometry()
+{
+  for(auto& vertexBuffer : m_vertexBuffers)
+  {
+    if(vertexBuffer.position.buffer != VK_NULL_HANDLE)
+    {
+      m_memoryTracker.untrack(kMemCategoryGeometry, vertexBuffer.position.allocation);
+      m_alloc->destroyBuffer(vertexBuffer.position);
+    }
+    if(vertexBuffer.normal.buffer != VK_NULL_HANDLE)
+    {
+      m_memoryTracker.untrack(kMemCategoryGeometry, vertexBuffer.normal.allocation);
+      m_alloc->destroyBuffer(vertexBuffer.normal);
+    }
+    if(vertexBuffer.tangent.buffer != VK_NULL_HANDLE)
+    {
+      m_memoryTracker.untrack(kMemCategoryGeometry, vertexBuffer.tangent.allocation);
+      m_alloc->destroyBuffer(vertexBuffer.tangent);
+    }
+    if(vertexBuffer.texCoord0.buffer != VK_NULL_HANDLE)
+    {
+      m_memoryTracker.untrack(kMemCategoryGeometry, vertexBuffer.texCoord0.allocation);
+      m_alloc->destroyBuffer(vertexBuffer.texCoord0);
+    }
+    if(vertexBuffer.texCoord1.buffer != VK_NULL_HANDLE)
+    {
+      m_memoryTracker.untrack(kMemCategoryGeometry, vertexBuffer.texCoord1.allocation);
+      m_alloc->destroyBuffer(vertexBuffer.texCoord1);
+    }
+    if(vertexBuffer.color.buffer != VK_NULL_HANDLE)
+    {
+      m_memoryTracker.untrack(kMemCategoryGeometry, vertexBuffer.color.allocation);
+      m_alloc->destroyBuffer(vertexBuffer.color);
+    }
+  }
+  m_vertexBuffers.clear();
+
+  for(auto& indicesBuffer : m_bIndices)
+  {
+    if(indicesBuffer.buffer != VK_NULL_HANDLE)
+    {
+      m_memoryTracker.untrack(kMemCategoryGeometry, indicesBuffer.allocation);
+      m_alloc->destroyBuffer(indicesBuffer);
+    }
+  }
+  m_bIndices.clear();
+
+  if(m_bRenderPrim.buffer != VK_NULL_HANDLE)
+  {
+    m_memoryTracker.untrack(kMemCategorySceneData, m_bRenderPrim.allocation);
+    m_alloc->destroyBuffer(m_bRenderPrim);
+    m_bRenderPrim = {};  // Reset to ensure clean state
+  }
+
+  if(m_bSceneDesc.buffer != VK_NULL_HANDLE)
+  {
+    m_memoryTracker.untrack(kMemCategorySceneData, m_bSceneDesc.allocation);
+    m_alloc->destroyBuffer(m_bSceneDesc);
+    m_bSceneDesc = {};  // Reset to ensure clean state
+  }
+}
+
+//--------------------------------------------------------------------------------------------------
+// Release all Vulkan resources (geometry, scene data buffers, textures, images). Idempotent.
 void nvvkgltf::SceneVk::destroy()
 {
-  // Destroy geometry (vertex/index buffers, render primitives, scene descriptor)
   destroyGeometry();
 
   // Destroy remaining scene data buffers
@@ -1840,21 +1424,25 @@ void nvvkgltf::SceneVk::destroy()
   {
     m_memoryTracker.untrack(kMemCategorySceneData, m_bMaterial.allocation);
     m_alloc->destroyBuffer(m_bMaterial);
+    m_bMaterial = {};  // Reset to ensure clean state
   }
   if(m_bTextureInfos.buffer != VK_NULL_HANDLE)
   {
     m_memoryTracker.untrack(kMemCategorySceneData, m_bTextureInfos.allocation);
     m_alloc->destroyBuffer(m_bTextureInfos);
+    m_bTextureInfos = {};  // Reset to ensure clean state
   }
   if(m_bLights.buffer != VK_NULL_HANDLE)
   {
     m_memoryTracker.untrack(kMemCategorySceneData, m_bLights.allocation);
     m_alloc->destroyBuffer(m_bLights);
+    m_bLights = {};  // Reset to ensure clean state
   }
   if(m_bRenderNode.buffer != VK_NULL_HANDLE)
   {
     m_memoryTracker.untrack(kMemCategorySceneData, m_bRenderNode.allocation);
     m_alloc->destroyBuffer(m_bRenderNode);
+    m_bRenderNode = {};  // Reset to ensure clean state
   }
 
   // Destroy textures and images
@@ -1875,38 +1463,86 @@ void nvvkgltf::SceneVk::destroy()
 
   m_sRgbImages.clear();
 
-  // Release CPU skinning workspace memory
-  m_skinningWorkspace.clear();
-  m_cachedShadeMaterials.clear();
-  m_cachedTextureInfos.clear();
+  m_materialCache.clear();
 }
 
-//////////////////////////////////////////////////////////////////////////
-///
-/// SkinningWorkspace
-///
-//////////////////////////////////////////////////////////////////////////
+//========== Debug Validation (debug builds only) ==========
 
-//--------------------------------------------------------------------------------------------------
-// Growing the workspace buffers if needed
-void nvvkgltf::SkinningWorkspace::reserve(size_t vertexCount, size_t jointCount, bool needNormals, bool needTangents)
+#ifndef NDEBUG
+
+void nvvkgltf::SceneVk::debugUpdateShadowCopy(const nvvkgltf::Scene& scn)
 {
-  if(normalMatrices.size() < jointCount)
-    normalMatrices.resize(jointCount);
-  if(positions.size() < vertexCount)
-    positions.resize(vertexCount);
-  if(needNormals && normals.size() < vertexCount)
-    normals.resize(vertexCount);
-  if(needTangents && tangents.size() < vertexCount)
-    tangents.resize(vertexCount);
+  const auto& rn = scn.getRenderNodes();
+  m_debugLastUploadedRN.resize(rn.size());
+  for(size_t i = 0; i < rn.size(); i++)
+  {
+    m_debugLastUploadedRN[i].materialID   = rn[i].materialID;
+    m_debugLastUploadedRN[i].renderPrimID = rn[i].renderPrimID;
+  }
 }
 
-//--------------------------------------------------------------------------------------------------
-// Clearing the workspace buffers
-void nvvkgltf::SkinningWorkspace::clear()
+std::vector<nvvkgltf::SceneVk::GpuSyncMismatch> nvvkgltf::SceneVk::validateGpuSync(const nvvkgltf::Scene& scene,
+                                                                                   const std::vector<VkAccelerationStructureInstanceKHR>& tlasInstances) const
 {
-  normalMatrices = {};
-  positions      = {};
-  normals        = {};
-  tangents       = {};
+  std::vector<GpuSyncMismatch> mismatches;
+  const auto&                  renderNodes = scene.getRenderNodes();
+  char                         buf[256];
+
+  size_t gpuRNCount = m_bRenderNode.bufferSize / sizeof(shaderio::GltfRenderNode);
+  if(gpuRNCount != renderNodes.size())
+  {
+    snprintf(buf, sizeof(buf), "RenderNode count: GPU buffer holds %zu but CPU has %zu", gpuRNCount, renderNodes.size());
+    mismatches.push_back({buf});
+  }
+
+  if(m_debugLastUploadedRN.size() != renderNodes.size())
+  {
+    snprintf(buf, sizeof(buf), "RenderNode shadow: uploaded %zu but CPU has %zu", m_debugLastUploadedRN.size(),
+             renderNodes.size());
+    mismatches.push_back({buf});
+  }
+  else
+  {
+    for(size_t i = 0; i < renderNodes.size(); i++)
+    {
+      if(m_debugLastUploadedRN[i].materialID != renderNodes[i].materialID
+         || m_debugLastUploadedRN[i].renderPrimID != renderNodes[i].renderPrimID)
+      {
+        snprintf(buf, sizeof(buf), "RenderNode[%zu]: GPU mat=%d prim=%d, CPU mat=%d prim=%d", i,
+                 m_debugLastUploadedRN[i].materialID, m_debugLastUploadedRN[i].renderPrimID, renderNodes[i].materialID,
+                 renderNodes[i].renderPrimID);
+        mismatches.push_back({buf});
+      }
+    }
+  }
+
+  if(tlasInstances.size() != renderNodes.size())
+  {
+    snprintf(buf, sizeof(buf), "TLAS instance count: %zu but CPU has %zu render nodes", tlasInstances.size(),
+             renderNodes.size());
+    mismatches.push_back({buf});
+  }
+  else
+  {
+    for(size_t i = 0; i < renderNodes.size(); i++)
+    {
+      if(tlasInstances[i].instanceCustomIndex != static_cast<uint32_t>(renderNodes[i].renderPrimID))
+      {
+        snprintf(buf, sizeof(buf), "TLAS[%zu].instanceCustomIndex=%u but CPU renderPrimID=%d", i,
+                 tlasInstances[i].instanceCustomIndex, renderNodes[i].renderPrimID);
+        mismatches.push_back({buf});
+      }
+    }
+  }
+
+  size_t gpuMatCount = m_bMaterial.bufferSize / sizeof(shaderio::GltfShadeMaterial);
+  if(gpuMatCount < scene.getModel().materials.size())
+  {
+    snprintf(buf, sizeof(buf), "Material buffer: GPU holds %zu but CPU has %zu", gpuMatCount, scene.getModel().materials.size());
+    mismatches.push_back({buf});
+  }
+
+  return mismatches;
 }
+
+#endif  // NDEBUG

@@ -219,19 +219,20 @@ struct KHR_materials_diffuse_transmission
   tinygltf::TextureInfo diffuseTransmissionColorTexture = {};
 };
 
-// https://github.com/KhronosGroup/glTF/tree/main/extensions/2.0/Khronos/KHR_meshopt_compression
-#define EXT_MESHOPT_COMPRESSION_EXTENSION_NAME "EXT_meshopt_compression"
+// https://github.com/KhronosGroup/glTF/tree/main/extensions/2.0/Vendor/EXT_meshopt_compression
+// Both EXT and KHR variants use the same data format; we support either extension name.
 #define KHR_MESHOPT_COMPRESSION_EXTENSION_NAME "KHR_meshopt_compression"
-struct EXT_meshopt_compression
+#define EXT_MESHOPT_COMPRESSION_EXTENSION_NAME "EXT_meshopt_compression"
+struct KHR_meshopt_compression
 {
-  enum EXT_meshopt_compression_mode
+  enum KHR_meshopt_compression_mode
   {
     MESHOPT_COMPRESSION_MODE_INVALID,
     MESHOPT_COMPRESSION_MODE_ATTRIBUTES,
     MESHOPT_COMPRESSION_MODE_TRIANGLES,
     MESHOPT_COMPRESSION_MODE_INDICES,
   };
-  enum EXT_meshopt_compression_filter
+  enum KHR_meshopt_compression_filter
   {
     MESHOPT_COMPRESSION_FILTER_NONE,
     MESHOPT_COMPRESSION_FILTER_OCTAHEDRAL,
@@ -243,8 +244,8 @@ struct EXT_meshopt_compression
   size_t                         byteLength{0};
   size_t                         byteStride{0};
   size_t                         count{0};
-  EXT_meshopt_compression_mode   compressionMode   = MESHOPT_COMPRESSION_MODE_INVALID;
-  EXT_meshopt_compression_filter compressionFilter = MESHOPT_COMPRESSION_FILTER_NONE;
+  KHR_meshopt_compression_mode   compressionMode   = MESHOPT_COMPRESSION_MODE_INVALID;
+  KHR_meshopt_compression_filter compressionFilter = MESHOPT_COMPRESSION_FILTER_NONE;
 };
 
 namespace tinygltf {
@@ -541,6 +542,37 @@ template <typename MapType>
 const typename MapType::mapped_type& getElementValue(const MapType& map, const std::string& key)
 {
   return map.at(key);
+}
+
+/*-------------------------------------------------------------------------------------------------
+## Function `findExtension<MapType>`
+> Returns a pointer to the extension value if present, nullptr otherwise.
+
+Combines hasElementName + getElementValue in a single lookup. Use for reading
+extension data when the extension may be absent.
+-------------------------------------------------------------------------------------------------*/
+template <typename MapType>
+const typename MapType::mapped_type* findExtension(const MapType& map, const std::string& key)
+{
+  auto it = map.find(key);
+  return (it != map.end()) ? &it->second : nullptr;
+}
+
+/*-------------------------------------------------------------------------------------------------
+## Function `ensureExtension<MapType>`
+> Ensures the extension exists and returns a reference. Creates an empty object if absent.
+
+Use for writing extension data. Avoids the repetitive 4-line ensure block in setters.
+-------------------------------------------------------------------------------------------------*/
+template <typename MapType>
+typename MapType::mapped_type& ensureExtension(MapType& map, const std::string& key)
+{
+  auto it = map.find(key);
+  if(it == map.end())
+  {
+    it = map.emplace(key, tinygltf::Value(tinygltf::Value::Object())).first;
+  }
+  return it->second;
 }
 
 
@@ -1076,13 +1108,12 @@ template <typename T>
 inline KHR_texture_transform getTextureTransform(const T& tinfo)
 {
   KHR_texture_transform gmat;
-  if(tinygltf::utils::hasElementName(tinfo.extensions, KHR_TEXTURE_TRANSFORM_EXTENSION_NAME))
+  if(const auto* ext = tinygltf::utils::findExtension(tinfo.extensions, KHR_TEXTURE_TRANSFORM_EXTENSION_NAME))
   {
-    const tinygltf::Value& ext = tinygltf::utils::getElementValue(tinfo.extensions, KHR_TEXTURE_TRANSFORM_EXTENSION_NAME);
-    tinygltf::utils::getArrayValue(ext, "offset", gmat.offset);
-    tinygltf::utils::getArrayValue(ext, "scale", gmat.scale);
-    tinygltf::utils::getValue(ext, "rotation", gmat.rotation);
-    tinygltf::utils::getValue(ext, "texCoord", gmat.texCoord);
+    tinygltf::utils::getArrayValue(*ext, "offset", gmat.offset);
+    tinygltf::utils::getArrayValue(*ext, "scale", gmat.scale);
+    tinygltf::utils::getValue(*ext, "rotation", gmat.rotation);
+    tinygltf::utils::getValue(*ext, "texCoord", gmat.texCoord);
 
     gmat.updateTransform();
   }
@@ -1120,7 +1151,7 @@ Compute tangents based on the texture coordinates, using also position and norma
 void simpleCreateTangents(tinygltf::Model& model, tinygltf::Primitive& primitive);
 
 /*------------------------------------------------------------------------------------------------*/
-bool getMeshoptCompression(const tinygltf::BufferView& bview, EXT_meshopt_compression& mcomp);
+bool getMeshoptCompression(const tinygltf::BufferView& bview, KHR_meshopt_compression& mcomp);
 
 }  // namespace utils
 

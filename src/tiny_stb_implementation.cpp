@@ -17,6 +17,12 @@
  * SPDX-License-Identifier: Apache-2.0
  */
 
+//
+// Single-translation-unit compilation of third-party libraries.
+// Defines the implementation macros for tinygltf (glTF loader),
+// stb_image / stb_image_write (image I/O), and tinyobjloader (OBJ loader)
+// so their code is compiled exactly once in the project.
+//
 
 #define TINYGLTF_IMPLEMENTATION
 #define STB_IMAGE_IMPLEMENTATION

@@ -313,123 +313,68 @@ void vkcuda::destroyCudaBuffer(vkcuda::Buffer& buffer)
 
 cudaChannelFormatDesc vkcuda::getCudaChannelFormat(VkFormat format)
 {
-  switch(format)
-  {
-    case VK_FORMAT_R8_UNORM:
-      return {8, 0, 0, 0, cudaChannelFormatKindUnsigned};
-    case VK_FORMAT_R8_SNORM:
-      return {8, 0, 0, 0, cudaChannelFormatKindSigned};
-    case VK_FORMAT_R8_UINT:
-      return {8, 0, 0, 0, cudaChannelFormatKindUnsigned};
-    case VK_FORMAT_R8_SINT:
-      return {8, 0, 0, 0, cudaChannelFormatKindSigned};
-    case VK_FORMAT_R8G8_UNORM:
-      return {8, 8, 0, 0, cudaChannelFormatKindUnsigned};
-    case VK_FORMAT_R8G8_SNORM:
-      return {8, 8, 0, 0, cudaChannelFormatKindSigned};
-    case VK_FORMAT_R8G8_UINT:
-      return {8, 8, 0, 0, cudaChannelFormatKindUnsigned};
-    case VK_FORMAT_R8G8_SINT:
-      return {8, 8, 0, 0, cudaChannelFormatKindSigned};
-    case VK_FORMAT_R8G8B8_UNORM:
-      return {8, 8, 8, 0, cudaChannelFormatKindUnsigned};
-    case VK_FORMAT_R8G8B8_SNORM:
-      return {8, 8, 8, 0, cudaChannelFormatKindSigned};
-    case VK_FORMAT_R8G8B8_UINT:
-      return {8, 8, 8, 0, cudaChannelFormatKindUnsigned};
-    case VK_FORMAT_R8G8B8_SINT:
-      return {8, 8, 8, 0, cudaChannelFormatKindSigned};
-    case VK_FORMAT_R8G8B8A8_UNORM:
-      return {8, 8, 8, 8, cudaChannelFormatKindUnsigned};
-    case VK_FORMAT_R8G8B8A8_SNORM:
-      return {8, 8, 8, 8, cudaChannelFormatKindSigned};
-    case VK_FORMAT_R8G8B8A8_UINT:
-      return {8, 8, 8, 8, cudaChannelFormatKindUnsigned};
-    case VK_FORMAT_R8G8B8A8_SINT:
-      return {8, 8, 8, 8, cudaChannelFormatKindSigned};
-    case VK_FORMAT_B8G8R8A8_UNORM:
-      return {8, 8, 8, 8, cudaChannelFormatKindUnsigned};
-    case VK_FORMAT_B8G8R8A8_SNORM:
-      return {8, 8, 8, 8, cudaChannelFormatKindSigned};
-    case VK_FORMAT_B8G8R8A8_UINT:
-      return {8, 8, 8, 8, cudaChannelFormatKindUnsigned};
-    case VK_FORMAT_B8G8R8A8_SINT:
-      return {8, 8, 8, 8, cudaChannelFormatKindSigned};
-    case VK_FORMAT_R16_UNORM:
-      return {16, 0, 0, 0, cudaChannelFormatKindUnsigned};
-    case VK_FORMAT_R16_SNORM:
-      return {16, 0, 0, 0, cudaChannelFormatKindSigned};
-    case VK_FORMAT_R16_SFLOAT:
-      return {16, 0, 0, 0, cudaChannelFormatKindFloat};
-    case VK_FORMAT_R16G16_UNORM:
-      return {16, 16, 0, 0, cudaChannelFormatKindUnsigned};
-    case VK_FORMAT_R16G16_SNORM:
-      return {16, 16, 0, 0, cudaChannelFormatKindSigned};
-    case VK_FORMAT_R16G16_SFLOAT:
-      return {16, 16, 0, 0, cudaChannelFormatKindFloat};
-    case VK_FORMAT_R16G16B16_UNORM:
-      return {16, 16, 16, 0, cudaChannelFormatKindUnsigned};
-    case VK_FORMAT_R16G16B16_SNORM:
-      return {16, 16, 16, 0, cudaChannelFormatKindSigned};
-    case VK_FORMAT_R16G16B16_SFLOAT:
-      return {16, 16, 16, 0, cudaChannelFormatKindFloat};
-    case VK_FORMAT_R16G16B16A16_UNORM:
-      return {16, 16, 16, 16, cudaChannelFormatKindUnsigned};
-    case VK_FORMAT_R16G16B16A16_SNORM:
-      return {16, 16, 16, 16, cudaChannelFormatKindSigned};
-    case VK_FORMAT_R16G16B16A16_SFLOAT:
-      return {16, 16, 16, 16, cudaChannelFormatKindFloat};
-    case VK_FORMAT_R32_UINT:
-      return {32, 0, 0, 0, cudaChannelFormatKindUnsigned};
-    case VK_FORMAT_R32_SINT:
-      return {32, 0, 0, 0, cudaChannelFormatKindSigned};
-    case VK_FORMAT_R32_SFLOAT:
-      return {32, 0, 0, 0, cudaChannelFormatKindFloat};
-    case VK_FORMAT_R32G32_UINT:
-      return {32, 32, 0, 0, cudaChannelFormatKindUnsigned};
-    case VK_FORMAT_R32G32_SINT:
-      return {32, 32, 0, 0, cudaChannelFormatKindSigned};
-    case VK_FORMAT_R32G32_SFLOAT:
-      return {32, 32, 0, 0, cudaChannelFormatKindFloat};
-    case VK_FORMAT_R32G32B32_UINT:
-      return {32, 32, 32, 0, cudaChannelFormatKindUnsigned};
-    case VK_FORMAT_R32G32B32_SINT:
-      return {32, 32, 32, 0, cudaChannelFormatKindSigned};
-    case VK_FORMAT_R32G32B32_SFLOAT:
-      return {32, 32, 32, 0, cudaChannelFormatKindFloat};
-    case VK_FORMAT_R32G32B32A32_UINT:
-      return {32, 32, 32, 32, cudaChannelFormatKindUnsigned};
-    case VK_FORMAT_R32G32B32A32_SINT:
-      return {32, 32, 32, 32, cudaChannelFormatKindSigned};
-    case VK_FORMAT_R32G32B32A32_SFLOAT:
-      return {32, 32, 32, 32, cudaChannelFormatKindFloat};
-    case VK_FORMAT_R64_UINT:
-      return {64, 0, 0, 0, cudaChannelFormatKindUnsigned};
-    case VK_FORMAT_R64_SINT:
-      return {64, 0, 0, 0, cudaChannelFormatKindSigned};
-    case VK_FORMAT_R64_SFLOAT:
-      return {64, 0, 0, 0, cudaChannelFormatKindFloat};
-    case VK_FORMAT_R64G64_UINT:
-      return {64, 64, 0, 0, cudaChannelFormatKindUnsigned};
-    case VK_FORMAT_R64G64_SINT:
-      return {64, 64, 0, 0, cudaChannelFormatKindSigned};
-    case VK_FORMAT_R64G64_SFLOAT:
-      return {64, 64, 0, 0, cudaChannelFormatKindFloat};
-    case VK_FORMAT_R64G64B64_UINT:
-      return {64, 64, 64, 0, cudaChannelFormatKindUnsigned};
-    case VK_FORMAT_R64G64B64_SINT:
-      return {64, 64, 64, 0, cudaChannelFormatKindSigned};
-    case VK_FORMAT_R64G64B64_SFLOAT:
-      return {64, 64, 64, 0, cudaChannelFormatKindFloat};
-    case VK_FORMAT_R64G64B64A64_UINT:
-      return {64, 64, 64, 64, cudaChannelFormatKindUnsigned};
-    case VK_FORMAT_R64G64B64A64_SINT:
-      return {64, 64, 64, 64, cudaChannelFormatKindSigned};
-    case VK_FORMAT_R64G64B64A64_SFLOAT:
-      return {64, 64, 64, 64, cudaChannelFormatKindFloat};
-    default:
-      break;
-  }
-  assert(!"Unsupported");
-  return {0, 0, 0, cudaChannelFormatKindSigned};
+  static const std::unordered_map<VkFormat, cudaChannelFormatDesc> s_formatMap = {
+      {VK_FORMAT_R8_UNORM, {8, 0, 0, 0, cudaChannelFormatKindUnsigned}},
+      {VK_FORMAT_R8_SNORM, {8, 0, 0, 0, cudaChannelFormatKindSigned}},
+      {VK_FORMAT_R8_UINT, {8, 0, 0, 0, cudaChannelFormatKindUnsigned}},
+      {VK_FORMAT_R8_SINT, {8, 0, 0, 0, cudaChannelFormatKindSigned}},
+      {VK_FORMAT_R8G8_UNORM, {8, 8, 0, 0, cudaChannelFormatKindUnsigned}},
+      {VK_FORMAT_R8G8_SNORM, {8, 8, 0, 0, cudaChannelFormatKindSigned}},
+      {VK_FORMAT_R8G8_UINT, {8, 8, 0, 0, cudaChannelFormatKindUnsigned}},
+      {VK_FORMAT_R8G8_SINT, {8, 8, 0, 0, cudaChannelFormatKindSigned}},
+      {VK_FORMAT_R8G8B8_UNORM, {8, 8, 8, 0, cudaChannelFormatKindUnsigned}},
+      {VK_FORMAT_R8G8B8_SNORM, {8, 8, 8, 0, cudaChannelFormatKindSigned}},
+      {VK_FORMAT_R8G8B8_UINT, {8, 8, 8, 0, cudaChannelFormatKindUnsigned}},
+      {VK_FORMAT_R8G8B8_SINT, {8, 8, 8, 0, cudaChannelFormatKindSigned}},
+      {VK_FORMAT_R8G8B8A8_UNORM, {8, 8, 8, 8, cudaChannelFormatKindUnsigned}},
+      {VK_FORMAT_R8G8B8A8_SNORM, {8, 8, 8, 8, cudaChannelFormatKindSigned}},
+      {VK_FORMAT_R8G8B8A8_UINT, {8, 8, 8, 8, cudaChannelFormatKindUnsigned}},
+      {VK_FORMAT_R8G8B8A8_SINT, {8, 8, 8, 8, cudaChannelFormatKindSigned}},
+      {VK_FORMAT_B8G8R8A8_UNORM, {8, 8, 8, 8, cudaChannelFormatKindUnsigned}},
+      {VK_FORMAT_B8G8R8A8_SNORM, {8, 8, 8, 8, cudaChannelFormatKindSigned}},
+      {VK_FORMAT_B8G8R8A8_UINT, {8, 8, 8, 8, cudaChannelFormatKindUnsigned}},
+      {VK_FORMAT_B8G8R8A8_SINT, {8, 8, 8, 8, cudaChannelFormatKindSigned}},
+      {VK_FORMAT_R16_UNORM, {16, 0, 0, 0, cudaChannelFormatKindUnsigned}},
+      {VK_FORMAT_R16_SNORM, {16, 0, 0, 0, cudaChannelFormatKindSigned}},
+      {VK_FORMAT_R16_SFLOAT, {16, 0, 0, 0, cudaChannelFormatKindFloat}},
+      {VK_FORMAT_R16G16_UNORM, {16, 16, 0, 0, cudaChannelFormatKindUnsigned}},
+      {VK_FORMAT_R16G16_SNORM, {16, 16, 0, 0, cudaChannelFormatKindSigned}},
+      {VK_FORMAT_R16G16_SFLOAT, {16, 16, 0, 0, cudaChannelFormatKindFloat}},
+      {VK_FORMAT_R16G16B16_UNORM, {16, 16, 16, 0, cudaChannelFormatKindUnsigned}},
+      {VK_FORMAT_R16G16B16_SNORM, {16, 16, 16, 0, cudaChannelFormatKindSigned}},
+      {VK_FORMAT_R16G16B16_SFLOAT, {16, 16, 16, 0, cudaChannelFormatKindFloat}},
+      {VK_FORMAT_R16G16B16A16_UNORM, {16, 16, 16, 16, cudaChannelFormatKindUnsigned}},
+      {VK_FORMAT_R16G16B16A16_SNORM, {16, 16, 16, 16, cudaChannelFormatKindSigned}},
+      {VK_FORMAT_R16G16B16A16_SFLOAT, {16, 16, 16, 16, cudaChannelFormatKindFloat}},
+      {VK_FORMAT_R32_UINT, {32, 0, 0, 0, cudaChannelFormatKindUnsigned}},
+      {VK_FORMAT_R32_SINT, {32, 0, 0, 0, cudaChannelFormatKindSigned}},
+      {VK_FORMAT_R32_SFLOAT, {32, 0, 0, 0, cudaChannelFormatKindFloat}},
+      {VK_FORMAT_R32G32_UINT, {32, 32, 0, 0, cudaChannelFormatKindUnsigned}},
+      {VK_FORMAT_R32G32_SINT, {32, 32, 0, 0, cudaChannelFormatKindSigned}},
+      {VK_FORMAT_R32G32_SFLOAT, {32, 32, 0, 0, cudaChannelFormatKindFloat}},
+      {VK_FORMAT_R32G32B32_UINT, {32, 32, 32, 0, cudaChannelFormatKindUnsigned}},
+      {VK_FORMAT_R32G32B32_SINT, {32, 32, 32, 0, cudaChannelFormatKindSigned}},
+      {VK_FORMAT_R32G32B32_SFLOAT, {32, 32, 32, 0, cudaChannelFormatKindFloat}},
+      {VK_FORMAT_R32G32B32A32_UINT, {32, 32, 32, 32, cudaChannelFormatKindUnsigned}},
+      {VK_FORMAT_R32G32B32A32_SINT, {32, 32, 32, 32, cudaChannelFormatKindSigned}},
+      {VK_FORMAT_R32G32B32A32_SFLOAT, {32, 32, 32, 32, cudaChannelFormatKindFloat}},
+      {VK_FORMAT_R64_UINT, {64, 0, 0, 0, cudaChannelFormatKindUnsigned}},
+      {VK_FORMAT_R64_SINT, {64, 0, 0, 0, cudaChannelFormatKindSigned}},
+      {VK_FORMAT_R64_SFLOAT, {64, 0, 0, 0, cudaChannelFormatKindFloat}},
+      {VK_FORMAT_R64G64_UINT, {64, 64, 0, 0, cudaChannelFormatKindUnsigned}},
+      {VK_FORMAT_R64G64_SINT, {64, 64, 0, 0, cudaChannelFormatKindSigned}},
+      {VK_FORMAT_R64G64_SFLOAT, {64, 64, 0, 0, cudaChannelFormatKindFloat}},
+      {VK_FORMAT_R64G64B64_UINT, {64, 64, 64, 0, cudaChannelFormatKindUnsigned}},
+      {VK_FORMAT_R64G64B64_SINT, {64, 64, 64, 0, cudaChannelFormatKindSigned}},
+      {VK_FORMAT_R64G64B64_SFLOAT, {64, 64, 64, 0, cudaChannelFormatKindFloat}},
+      {VK_FORMAT_R64G64B64A64_UINT, {64, 64, 64, 64, cudaChannelFormatKindUnsigned}},
+      {VK_FORMAT_R64G64B64A64_SINT, {64, 64, 64, 64, cudaChannelFormatKindSigned}},
+      {VK_FORMAT_R64G64B64A64_SFLOAT, {64, 64, 64, 64, cudaChannelFormatKindFloat}},
+  };
+
+  auto it = s_formatMap.find(format);
+  if(it != s_formatMap.end())
+    return it->second;
+  LOGW("Unsupported VkFormat %d for CUDA channel format, returning zero-initialized desc.\n", static_cast<int>(format));
+  return {0, 0, 0, 0, cudaChannelFormatKindSigned};
 }

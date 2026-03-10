@@ -17,6 +17,13 @@
  * SPDX-License-Identifier: Apache-2.0
  */
 
+//
+// Vulkan pipeline cache manager. Loads a previously saved pipeline cache
+// from disk at startup, creates a VkPipelineCache from it, and writes
+// the updated cache back to disk on shutdown. Reduces pipeline compilation
+// time across application runs.
+//
+
 #include "pipeline_cache_util.hpp"
 #include <fstream>
 #include <vector>
@@ -42,13 +49,18 @@ VkResult PipelineCacheManager::init(VkDevice device, const std::filesystem::path
       if(file.is_open())
       {
         size_t fileSize = static_cast<size_t>(file.tellg());
-        if(fileSize > 0)
+        constexpr size_t kMaxPipelineCacheFileSize = 256ULL * 1024 * 1024;  // 256 MB cap to avoid unbounded allocation
+        if(fileSize > 0 && fileSize <= kMaxPipelineCacheFileSize)
         {
           cacheData.resize(fileSize);
           file.seekg(0);
           file.read(cacheData.data(), fileSize);
           file.close();
           LOGI("Loaded pipeline cache from %s (%zu bytes)\n", m_cacheFilePath.string().c_str(), fileSize);
+        }
+        else if(fileSize > kMaxPipelineCacheFileSize)
+        {
+          LOGW("Pipeline cache file too large (%zu bytes), ignoring\n", fileSize);
         }
       }
     }
@@ -132,9 +144,16 @@ bool PipelineCacheManager::save()
     if(file.is_open())
     {
       file.write(cacheData.data(), cacheSize);
+      file.flush();
+      bool writeOk = !file.fail();
       file.close();
-      LOGI("Saved pipeline cache to %s (%zu bytes)\n", m_cacheFilePath.string().c_str(), cacheSize);
-      return true;
+      if(writeOk)
+      {
+        LOGI("Saved pipeline cache to %s (%zu bytes)\n", m_cacheFilePath.string().c_str(), cacheSize);
+        return true;
+      }
+      LOGW("Failed to write pipeline cache to %s\n", m_cacheFilePath.string().c_str());
+      return false;
     }
     else
     {

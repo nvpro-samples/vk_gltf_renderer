@@ -23,7 +23,10 @@
 #include <algorithm>
 #include <cassert>
 #include <functional>
+#include <cstdint>
 #include <map>
+#include <memory>
+#include <optional>
 #include <string>
 #include <unordered_map>
 #include <unordered_set>
@@ -90,6 +93,50 @@ struct RenderLight
   int       light       = 0;
 };
 
+// Centralized registry for renderNode mappings (nodeID/primID <-> renderNodeID).
+// Provides O(1) bidirectional lookups and sparse storage for nodes with meshes.
+class RenderNodeRegistry
+{
+public:
+  // Add a render node; returns the new renderNodeID.
+  int addRenderNode(const RenderNode& node, int nodeID, int primIndex);
+
+  // Lookups
+  int getRenderNodeID(int nodeID, int primIndex) const;  // (nodeID, primID) -> RenderNodeID, -1 if not found
+  std::optional<std::pair<int, int>> getNodeAndPrim(int renderNodeID) const;   // RenderNodeID -> (nodeID, primID)
+  const std::vector<int>&            getRenderNodesForNode(int nodeID) const;  // nodeID -> [RenderNodeIDs]
+
+  // Batch: collect all renderNodeIDs for node and its descendants. getChildren(nodeID) returns child node indices.
+  void getAllRenderNodesForNodeRecursive(int nodeID, std::function<std::vector<int>(int)> getChildren, std::vector<int>& outRenderNodeIDs) const;
+
+  // Clear all mappings and the flat array.
+  void clear();
+
+  // Direct access to flat array (for GPU upload).
+  const std::vector<RenderNode>& getRenderNodes() const { return m_renderNodes; }
+  std::vector<RenderNode>&       getRenderNodes() { return m_renderNodes; }
+
+private:
+  std::vector<RenderNode> m_renderNodes;
+
+  // Forward: (nodeID, primIndex) -> renderNodeID
+  std::unordered_map<uint64_t, int> m_nodeAndPrimToRenderNode;
+
+  // Reverse: renderNodeID -> (nodeID, primIndex)
+  std::vector<std::pair<int, int>> m_renderNodeToNodeAndPrim;
+
+  // Grouped by node: nodeID -> [renderNodeIDs] (sparse, only nodes with meshes)
+  std::unordered_map<int, std::vector<int>> m_nodeToRenderNodes;
+
+  // Empty vector returned when node has no render nodes
+  static const std::vector<int> s_emptyRenderNodes;
+
+  static uint64_t makeKey(int nodeID, int primIndex)
+  {
+    return (static_cast<uint64_t>(static_cast<uint32_t>(nodeID)) << 32) | static_cast<uint32_t>(primIndex);
+  }
+};
+
 // Animation data
 struct AnimationInfo
 {
@@ -136,19 +183,20 @@ The Scene class is responsible for loading and managing a glTF scene.
 -  RenderNodes are the instances of the primitives in the scene that will be rendered.
 -  RenderPrimitives are the unique primitives in the scene.
 
-Note: The Scene class is a more advanced and light weight version of the GltfScene class.
-      But it is to the user to retrieve the primitive data from the RenderPrimitives.
-      Check the tinygltf_utils.hpp for more information on how to extract the primitive data.
-
 -------------------------------------------------------------------------------------------------*/
 
+class SceneEditor;
+class AnimationSystem;
+class SceneValidator;
 
 class Scene
 {
 public:
-  Scene();
+  //--------------------------------------------------------------------------------------------------
+  // Types and Enums
+  //--------------------------------------------------------------------------------------------------
 
-  // Used to specify the type of pipeline to be used
+  // Used to specify the type of pipeline to be used (Raster only)
   enum PipelineType
   {
     eRasterSolid,
@@ -157,185 +205,304 @@ public:
     eRasterAll
   };
 
-  // File Management
-  bool load(const std::filesystem::path& filename);  // Load the glTF file, .gltf or .glb
-  bool save(const std::filesystem::path& filename);  // Save the glTF file, .gltf or .glb
-  // Read or modify supported extensions before loading (for e.g. custom image formats)
-  std::unordered_set<std::string>& supportedExtensions() { return m_supportedExtensions; }
-  const std::filesystem::path&     getFilename() const { return m_filename; }
-  void                             takeModel(tinygltf::Model&& model);  // Use a model that has been loaded
+  // Validation result structure
+  struct ValidationResult
+  {
+    bool                     valid = true;
+    std::vector<std::string> errors;
+    std::vector<std::string> warnings;
 
-  // Getters
+    void addError(const std::string& msg)
+    {
+      errors.push_back(msg);
+      valid = false;
+    }
+
+    void addWarning(const std::string& msg) { warnings.push_back(msg); }
+
+    void print() const;
+  };
+
+  //--------------------------------------------------------------------------------------------------
+  // Construction / Destruction
+  //--------------------------------------------------------------------------------------------------
+
+  Scene();
+  ~Scene();
+
+  SceneEditor&           editor();
+  AnimationSystem&       animation();
+  const AnimationSystem& animation() const;
+  SceneValidator&        validator();
+  const SceneValidator&  validator() const;
+
+  //--------------------------------------------------------------------------------------------------
+  // File I/O
+  //--------------------------------------------------------------------------------------------------
+
+  [[nodiscard]] bool load(const std::filesystem::path& filename);  // Load .gltf or .glb
+  [[nodiscard]] bool save(const std::filesystem::path& filename);  // Save .gltf or .glb
+  // Merge another glTF into this scene. Optional maxTextureCount validates combined texture limit (e.g. GPU descriptor limit).
+  [[nodiscard]] int mergeScene(const std::filesystem::path& filename, std::optional<uint32_t> maxTextureCount = std::nullopt);  // Returns wrapper node index, or -1 on failure
+  void                                   takeModel(tinygltf::Model&& model);  // Use pre-loaded model
+  std::unordered_set<std::string>&       supportedExtensions() { return m_supportedExtensions; }
+  const std::unordered_set<std::string>& supportedExtensions() const { return m_supportedExtensions; }
+  const std::filesystem::path&           getFilename() const { return m_filename; }
+  // Order: base scene directory first, then each imported scene's directory in merge order.
+  // Used to resolve image URIs via findFile and when saving/copying images.
+  const std::vector<std::filesystem::path>& getImageSearchPaths() const { return m_imageSearchPaths; }
+
+  //--------------------------------------------------------------------------------------------------
+  // Model Access
+  //--------------------------------------------------------------------------------------------------
+
   const tinygltf::Model& getModel() const { return m_model; }
   tinygltf::Model&       getModel() { return m_model; }
-  bool                   valid() const { return m_validSceneParsed; }
+  [[nodiscard]] bool     valid() const { return m_validSceneParsed; }
 
-  // Update render node world matrices.
-  // If dirtyNodeIds is empty, performs a full update.
-  void updateNodeWorldMatrices(const std::unordered_set<int>& dirtyNodeIds = {});
-  void updateVisibility(int nodeID);
+  //--------------------------------------------------------------------------------------------------
+  // Scene Management
+  //--------------------------------------------------------------------------------------------------
 
-  // Animation Management
-  std::unordered_set<int>  updateAnimation(uint32_t animationIndex);
-  int                      getNumAnimations() const { return static_cast<int>(m_animations.size()); }
-  bool                     hasAnimation() const { return !m_animations.empty(); }
-  nvvkgltf::AnimationInfo& getAnimationInfo(int index) { return m_animations[index].info; }
+  void                          setCurrentScene(int sceneID);  // Parse scene and create render nodes
+  [[nodiscard]] int             getCurrentScene() const { return m_currentScene; }
+  const std::vector<glm::mat4>& getNodesWorldMatrices() const { return m_nodesWorldMatrices; }
+  void                          updateNodeWorldMatrices();  // Uses internal dirty node tracking (m_dirtyFlags.nodes)
 
-  // KHR_animation_pointer - Get dirty resources (for GPU updates)
-  nvvkgltf::AnimationPointerSystem& getAnimationPointer() { return m_animationPointer; }
+  //--------------------------------------------------------------------------------------------------
+  // Variant Management
+  //--------------------------------------------------------------------------------------------------
 
-  // Resource Management
-  void destroy();  // Destroy the loaded resources
+  void                            setCurrentVariant(int variant);  // Marks dirty RenderNodes internally
+  const std::vector<std::string>& getVariants() const { return m_variants; }
+  [[nodiscard]] int               getCurrentVariant() const { return m_currentVariant; }
+  [[nodiscard]] std::unordered_set<int> getMaterialRenderNodes(const std::unordered_set<int>& materialVariantNodeIDs) const;
 
-  // Light Management
-  const std::vector<nvvkgltf::RenderLight>& getRenderLights() const { return m_lights; }
-
+  //--------------------------------------------------------------------------------------------------
   // Camera Management
-  const std::vector<nvvkgltf::RenderCamera>& getRenderCameras(bool force = false);
+  //--------------------------------------------------------------------------------------------------
+
+  // Rebuild: if true, clears and repopulates the camera list from the scene graph before returning.
+  const std::vector<nvvkgltf::RenderCamera>& getRenderCameras(bool rebuild = false);
   void                                       setSceneCamera(const nvvkgltf::RenderCamera& camera);
   void                                       setSceneCameras(const std::vector<nvvkgltf::RenderCamera>& cameras);
 
-  // Render Node Management
-  const std::vector<nvvkgltf::RenderNode>& getRenderNodes() const { return m_renderNodes; }
-  // Collect render node indices affected by node changes (optionally including descendants).
-  // Returns true if a full update is recommended (e.g., root node changed or too many nodes affected).
-  // Returns false if a partial update is recommended or if no render nodes are affected.
-  bool collectRenderNodeIndices(const std::unordered_set<int>& nodeIds,
-                                std::unordered_set<int>&       outRenderNodeIndices,
-                                bool                           includeDescendants = true,
-                                float                          fullUpdateRatio    = 0.5f) const;
-  // Map (nodeID, primitiveIndex) to RenderNode index using the scene-owned mapping.
-  int getRenderNodeForPrimitive(int nodeId, int primitiveIndex) const;
-  // Map RenderNode index back to primitive index within its node.
-  int getPrimitiveIndexForRenderNode(int renderNodeIndex) const;
+  //--------------------------------------------------------------------------------------------------
+  // Light Management
+  //--------------------------------------------------------------------------------------------------
 
+  const std::vector<nvvkgltf::RenderLight>& getRenderLights() const { return m_lights; }
+
+  //--------------------------------------------------------------------------------------------------
+  // Render Node Management
+  //--------------------------------------------------------------------------------------------------
+
+  const std::vector<nvvkgltf::RenderNode>& getRenderNodes() const { return m_renderNodeRegistry.getRenderNodes(); }
+  const RenderNodeRegistry&                getRenderNodeRegistry() const { return m_renderNodeRegistry; }
+  RenderNodeRegistry&                      getRenderNodeRegistry() { return m_renderNodeRegistry; }
+  [[nodiscard]] bool                       collectRenderNodeIndices(const std::unordered_set<int>& nodeIndices,
+                                                                    std::unordered_set<int>&       outRenderNodeIndices,
+                                                                    bool                           includeDescendants = true,
+                                                                    float                          fullUpdateRatio = 0.5f) const;
+  // Uses m_dirtyFlags.nodes to populate renderNodesVk/Rtx
+  void              updateRenderNodeDirtyFromNodes(bool includeDescendants = true);
+  [[nodiscard]] int getRenderNodeForPrimitive(int nodeIndex, int primitiveIndex) const;
+  [[nodiscard]] int getPrimitiveIndexForRenderNode(int renderNodeIndex) const;
+
+  //--------------------------------------------------------------------------------------------------
   // Render Primitive Management
+  //--------------------------------------------------------------------------------------------------
+
   const std::vector<nvvkgltf::RenderPrimitive>& getRenderPrimitives() const { return m_renderPrimitives; }
   const nvvkgltf::RenderPrimitive&              getRenderPrimitive(size_t ID) const { return m_renderPrimitives[ID]; }
-  size_t                                        getNumRenderPrimitives() const { return m_renderPrimitives.size(); }
-  const std::vector<uint32_t>&                  getMorphPrimitives() const { return m_morphPrimitives; }
-  const std::vector<uint32_t>&                  getSkinNodes() const { return m_skinNodes; }
+  [[nodiscard]] size_t                          getNumRenderPrimitives() const { return m_renderPrimitives.size(); }
 
-  // Scene Management
-  void setCurrentScene(int sceneID);  // Parse the scene and create the render nodes, call when changing scene
-  int  getCurrentScene() const { return m_currentScene; }
-  const std::vector<glm::mat4>& getNodesWorldMatrices() const { return m_nodesWorldMatrices; }
+  //--------------------------------------------------------------------------------------------------
+  // Shading & Statistics
+  //--------------------------------------------------------------------------------------------------
 
-  // Variant Management
-  // Set the variant to be used and return the list of modified renderNodes
-  void                            setCurrentVariant(int variant, std::unordered_set<int>& dirtyRenderNodes);
-  const std::vector<std::string>& getVariants() const { return m_variants; }
-  int                             getCurrentVariant() const { return m_currentVariant; }
+  std::vector<uint32_t> getShadedNodes(PipelineType type) const;
+  [[nodiscard]] int     getNumTriangles() const { return m_numTriangles; }
+  // Returns cached bounds; lazily computes on first call (mutable cache, logically const).
+  [[nodiscard]] nvutils::Bbox getSceneBounds() const;
 
-  // Return the list of render nodes that are affected by the material variant change
-  std::unordered_set<int> getMaterialRenderNodes(const std::unordered_set<int>& materialVariantNodeIDs) const;
+  //--------------------------------------------------------------------------------------------------
+  // Resource Management
+  //--------------------------------------------------------------------------------------------------
 
-  // Shading Management
-  std::vector<uint32_t> getShadedNodes(PipelineType type);  // Get the nodes that will be shaded by the pipeline type
+  void destroy();
 
-  // Statistics
-  int           getNumTriangles() const { return m_numTriangles; }
-  nvutils::Bbox getSceneBounds();
+  // Compact scene model - remove orphaned resources (meshes, materials, textures, images, samplers, skins, cameras, animations, lights, and geometry data)
+  // Returns true if any resources were removed.
+  // Use after operations that create orphaned resources: delete nodes, import then delete, etc.
+  // IMPORTANT: Caller must rebuild GPU resources after compaction (call rebuildVulkanSceneFull() for full rebuild with textures).
+  [[nodiscard]] bool compactModel();
 
+  //--------------------------------------------------------------------------------------------------
+  // Debug and Diagnostics
+  //--------------------------------------------------------------------------------------------------
+
+  void rebuildRenderNodes();  // Force rebuild of all render nodes (for debugging/validation)
+
+  //--------------------------------------------------------------------------------------------------
+  // Dirty Tracking for GPU Updates
+  //--------------------------------------------------------------------------------------------------
+
+  struct DirtyFlags
+  {
+    std::unordered_set<int> renderNodesVk;                // RenderNode indices for SceneVk
+    std::unordered_set<int> renderNodesRtx;               // RenderNode indices for SceneRTX
+    std::unordered_set<int> materials;                    // Material indices
+    std::unordered_set<int> lights;                       // Light indices (glTF light array)
+    std::unordered_set<int> nodes;                        // Node indices (for transform updates)
+    bool                    allRenderNodesDirty = false;  // Full RN upload (count change or massive reorder)
+    bool                    primitivesChanged   = false;  // BLAS rebuild needed (primitive set changed)
+
+    void clear()
+    {
+      renderNodesVk.clear();
+      renderNodesRtx.clear();
+      materials.clear();
+      lights.clear();
+      nodes.clear();
+      allRenderNodesDirty = false;
+      primitivesChanged   = false;
+    }
+
+    [[nodiscard]] bool isEmpty() const
+    {
+      return renderNodesVk.empty() && renderNodesRtx.empty() && materials.empty() && lights.empty() && nodes.empty()
+             && !allRenderNodesDirty && !primitivesChanged;
+    }
+  };
+
+  const DirtyFlags& getDirtyFlags() const { return m_dirtyFlags; }
+  DirtyFlags&       getDirtyFlags() { return m_dirtyFlags; }
+  void              clearDirtyFlags() { m_dirtyFlags.clear(); }
+
+  void markMaterialDirty(int materialIndex);
+  void markLightDirty(int lightIndex);
+  void markRenderNodeDirty(int renderNodeIndex, bool forVk = true, bool forRtx = true);
+  void markNodeDirty(int nodeIndex);  // Converts node to renderNodes and marks them
+  void markRenderNodeRtxDirtyForMaterials(const std::unordered_set<int>& materialIds);  // For TLAS instance flags
 
 private:
-  struct AnimationChannel
-  {
-    enum PathType
-    {
-      eTranslation,
-      eRotation,
-      eScale,
-      eWeights,
-      ePointer
-    };
-    PathType path         = eTranslation;
-    int      node         = -1;
-    uint32_t samplerIndex = 0;
+  friend class SceneEditor;
 
-    std::string pointerPath;  // JSON pointer string (e.g., "/materials/0/pbrMetallicRoughness/baseColorFactor")
-  };
+  //--------------------------------------------------------------------------------------------------
+  // Private Methods: Load and Extension Handling
+  //--------------------------------------------------------------------------------------------------
 
-  struct AnimationSampler
-  {
-    enum InterpolationType
-    {
-      eLinear,
-      eStep,
-      eCubicSpline
-    };
-    InterpolationType               interpolation = eLinear;
-    std::vector<float>              inputs;
-    std::vector<glm::vec2>          outputsVec2;
-    std::vector<glm::vec3>          outputsVec3;
-    std::vector<glm::vec4>          outputsVec4;
-    std::vector<std::vector<float>> outputsFloat;
-  };
+  // Decompress KHR/EXT_meshopt_compression buffer views in-place; removes extension when done.
+  // Returns false on decompression failure (caller should clear and return).
+  bool decompressMeshoptExtension();
 
-  struct Animation
-  {
-    AnimationInfo                 info;
-    std::vector<AnimationSampler> samplers;
-    std::vector<AnimationChannel> channels;
-  };
+  //--------------------------------------------------------------------------------------------------
+  // Private Methods: Scene Parsing
+  //--------------------------------------------------------------------------------------------------
 
+  void parseScene();
+  void clearParsedData();
+  void parseVariants();
+  void setSceneElementsDefaultNames();
+  void createSceneCamera();
 
-  void parseScene();                    // Parse the scene and create the render nodes
-  void clearParsedData();               // Clear the parsed data
-  void parseAnimations();               // Parse the animations
-  void parseVariants();                 // Parse the variants
-  void setSceneElementsDefaultNames();  // Set a default name for the scene elements
-  void createSceneCamera();             // Create a camera for the scene
+  //--------------------------------------------------------------------------------------------------
+  // Private Methods: Render Node Helpers
+  //--------------------------------------------------------------------------------------------------
 
-  int getUniqueRenderPrimitive(tinygltf::Primitive& primitive, int meshID);
-  int getMaterialVariantIndex(const tinygltf::Primitive& primitive, int currentVariant);
+  using PrimitiveKeyMap = std::map<std::string, int>;
 
-  bool   handleRenderNode(int nodeID, glm::mat4 worldMatrix);
-  size_t handleGpuInstancing(const tinygltf::Value& attributes, nvvkgltf::RenderNode renderNode, glm::mat4 worldMatrix);
-  bool   handleCameraTraversal(int nodeID, const glm::mat4& worldMatrix);
-  bool   handleLightTraversal(int nodeID, const glm::mat4& worldMatrix);
-  void   createMissingTangents();
-  bool processAnimationChannel(tinygltf::Node* gltfNode, AnimationSampler& sampler, const AnimationChannel& channel, float time);
-  float calculateInterpolationFactor(float inputStart, float inputEnd, float time);
-  void handleLinearInterpolation(tinygltf::Node* gltfNode, AnimationSampler& sampler, const AnimationChannel& channel, float t, size_t index);
-  void handleStepInterpolation(tinygltf::Node* gltfNode, AnimationSampler& sampler, const AnimationChannel& channel, size_t index);
-  void handleCubicSplineInterpolation(tinygltf::Node*         gltfNode,
-                                      AnimationSampler&       sampler,
-                                      const AnimationChannel& channel,
-                                      float                   t,
-                                      float                   keyDelta,
-                                      size_t                  index);
+  PrimitiveKeyMap buildPrimitiveKeyMap();
+  int             getMaterialVariantIndex(const tinygltf::Primitive& primitive, int currentVariant);
+  void createRenderNodesForNode(int nodeID, const glm::mat4& worldMatrix, bool visible, const PrimitiveKeyMap& primMap);
+  bool handleRenderNode(int nodeID, glm::mat4 worldMatrix, const PrimitiveKeyMap& primMap);
+  size_t handleGpuInstancing(const tinygltf::Value& attributes, nvvkgltf::RenderNode renderNode, glm::mat4 worldMatrix, int nodeID, int primIndex);
+  bool handleCameraTraversal(int nodeID, const glm::mat4& worldMatrix);
+  bool handleLightTraversal(int nodeID, const glm::mat4& worldMatrix);
   void updateRenderNodesFull();
 
+  // Lightweight rebuild after structural change (e.g. node deletion). Only clears and repopulates
+  // render nodes and lights; does not touch primitives, cameras, animations, variants.
+  void rebuildRenderNodesAndLights();
 
-  tinygltf::Model                        m_model;                 // The glTF model
-  std::filesystem::path                  m_filename;              // Filename of the glTF
-  std::vector<nvvkgltf::RenderNode>      m_renderNodes;           // Render nodes
-  std::vector<nvvkgltf::RenderPrimitive> m_renderPrimitives;      // Unique primitives from key
-  std::vector<nvvkgltf::RenderCamera>    m_cameras;               // Cameras
-  std::vector<nvvkgltf::RenderLight>     m_lights;                // Lights
-  std::vector<Animation>                 m_animations;            // Animations
-  std::vector<std::string>               m_variants;              // KHR_materials_variants
-  std::unordered_map<std::string, int>   m_uniquePrimitiveIndex;  // Key: primitive, Value: renderPrimID
-  std::vector<uint32_t>                  m_morphPrimitives;       // All the primitives that are animated
-  std::vector<uint32_t>                  m_skinNodes;             // All the primitives that are animated
+  // Traverse scene roots computing local/world matrices, visibility, and parent links.
+  void traverseSceneWithVisibility(const std::function<void(int nodeID, const glm::mat4& worldMatrix, bool visible)>& callback);
+
+  // Expand a set of node indices to their associated render node IDs, optionally including descendants.
+  void expandNodesToRenderNodes(const std::unordered_set<int>&               nodeIndices,
+                                bool                                         includeDescendants,
+                                const std::function<void(int renderNodeID)>& callback) const;
+
+  //--------------------------------------------------------------------------------------------------
+  // Private Methods: Utilities
+  //--------------------------------------------------------------------------------------------------
+
+  // Creates missing tangents for all primitives that need them (normal map, no TANGENT).
+  // Deduplicates by primitive key so shared geometry keeps one TANGENT accessor. Safe to call anytime.
+  void createMissingTangentsForModel();
+
+  // For each image whose URI doesn't resolve on disk, try common alternative extensions
+  // (.dds, .ktx2, etc.) and update the URI if a match is found. Called after load/import
+  // so that all downstream consumers (Vulkan upload, save/copy, display) see the correct path.
+  void resolveImageURIs();
 
 
-  std::vector<glm::mat4>        m_nodesLocalMatrices;
-  std::vector<glm::mat4>        m_nodesWorldMatrices;
-  std::vector<std::vector<int>> m_nodeToRenderNodes;  // nodeID -> renderNode indices in primitive order
-  std::vector<int>              m_nodeParents;        // Parent node index for each node (cached)
+  //--------------------------------------------------------------------------------------------------
+  // Data Members: Core glTF Model
+  //--------------------------------------------------------------------------------------------------
 
-  nvvkgltf::AnimationPointerSystem m_animationPointer;     // Unified animation pointer system (direct member)
-  std::unordered_set<std::string>  m_supportedExtensions;  // Modifiable list of extensions
+  tinygltf::Model                    m_model;             // The glTF model (source of truth)
+  std::filesystem::path              m_filename;          // Loaded file path
+  std::vector<std::filesystem::path> m_imageSearchPaths;  // Base dirs for image resolution (base first, then imports)
+  std::unordered_set<std::string>    m_supportedExtensions;  // Extensions to load
+  bool                               m_validSceneParsed = false;
 
-  int           m_numTriangles    = 0;   // Stat - Number of triangles
-  int           m_currentScene    = 0;   // Scene index
-  int           m_currentVariant  = 0;   // Variant index
-  int           m_sceneCameraNode = -1;  // Node index of the camera
-  nvutils::Bbox m_sceneBounds;           // Scene bounds
+  //--------------------------------------------------------------------------------------------------
+  // Data Members: Render Data (Built from Model)
+  //--------------------------------------------------------------------------------------------------
 
-  bool m_validSceneParsed = false;
+  RenderNodeRegistry                     m_renderNodeRegistry;  // Centralized renderNode mappings
+  std::vector<nvvkgltf::RenderPrimitive> m_renderPrimitives;    // Unique primitives
+  std::vector<nvvkgltf::RenderCamera>    m_cameras;             // Cameras
+  std::vector<nvvkgltf::RenderLight>     m_lights;              // Lights
+
+
+  //--------------------------------------------------------------------------------------------------
+  // Data Members: Node Transforms (Cached)
+  //--------------------------------------------------------------------------------------------------
+
+  std::vector<glm::mat4> m_nodesLocalMatrices;  // Per-node local transforms
+  std::vector<glm::mat4> m_nodesWorldMatrices;  // Per-node world transforms
+  std::vector<int>       m_nodeParents;         // Parent index for each node
+
+  std::unordered_map<int, std::vector<glm::mat4>> m_gpuInstanceLocalMatrices;  // nodeID -> per-instance local transforms (EXT_mesh_gpu_instancing)
+
+  //--------------------------------------------------------------------------------------------------
+  // Data Members: Material Variants
+  //--------------------------------------------------------------------------------------------------
+
+  std::vector<std::string> m_variants;  // KHR_materials_variants
+  int                      m_currentVariant = 0;
+
+  //--------------------------------------------------------------------------------------------------
+  // Data Members: Scene State
+  //--------------------------------------------------------------------------------------------------
+
+  int                   m_currentScene    = 0;
+  int                   m_sceneCameraNode = -1;
+  int                   m_numTriangles    = 0;
+  mutable nvutils::Bbox m_sceneBounds;
+
+  //--------------------------------------------------------------------------------------------------
+  // Data Members: Dirty Tracking for GPU Updates
+  //--------------------------------------------------------------------------------------------------
+
+  DirtyFlags m_dirtyFlags;
+
+  std::unique_ptr<SceneEditor>             m_editor;
+  mutable std::unique_ptr<AnimationSystem> m_animation;
+  mutable std::unique_ptr<SceneValidator>  m_validator;
 };
 
 }  // namespace nvvkgltf

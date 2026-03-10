@@ -23,11 +23,13 @@
 #include <functional>
 #include <set>
 #include <unordered_set>
+#include <vector>
 
 #include <glm/glm.hpp>
 #include <nvvk/resource_allocator.hpp>
 
 #include "gltf_scene.hpp"
+#include "gltf_material_cache.hpp"
 #include "nvvk/sampler_pool.hpp"
 #include "nvvk/staging.hpp"
 #include "gpu_memory_tracker.hpp"
@@ -44,25 +46,6 @@ It is using `nvvkgltf::Scene` to create the Vulkan buffers and images.
 -------------------------------------------------------------------------------------------------*/
 
 namespace nvvkgltf {
-
-// Reusable workspace for CPU skinning operations - avoids per-frame allocations
-// Buffers grow as needed and are released when the scene is destroyed
-struct SkinningWorkspace
-{
-  // Per-joint normal matrices: inverse-transpose of upper 3x3 (reused across primitives)
-  std::vector<glm::mat3> normalMatrices;
-
-  // Output buffers (reused across frames)
-  std::vector<glm::vec3> positions;
-  std::vector<glm::vec3> normals;
-  std::vector<glm::vec4> tangents;
-
-  // Ensure buffers are large enough, only grows (never shrinks during scene lifetime)
-  void reserve(size_t vertexCount, size_t jointCount, bool needNormals, bool needTangents);
-
-  // Release all memory
-  void clear();
-};
 
 // Create the Vulkan version of the Scene
 // Allocate the buffers, etc.
@@ -86,48 +69,59 @@ public:
   void init(nvvk::ResourceAllocator* alloc, nvvk::SamplerPool* samplerPool);
   void deinit();
 
+  // Optional: set the graphics queue used for scene buffers. When set, the fallback buffer
+  // reallocation path waits on this queue instead of the entire device.
+  void setGraphicsQueue(VkQueue queue) { m_graphicsQueue = queue; }
+
+  // Optional: set a callback for deferred GPU resource destruction. When set, buffer
+  // reallocation schedules destruction via this callback instead of stalling the GPU.
+  // The callback receives a void() function to execute later (after the GPU is done).
+  // Typical wiring: setDeferredFree([app](auto&& fn){ app->submitResourceFree(std::move(fn)); });
+  using DeferredFreeFunc = std::function<void(std::function<void()>&&)>;
+  void setDeferredFree(DeferredFreeFunc func) { m_deferredFree = std::move(func); }
+
   virtual void create(VkCommandBuffer        cmd,
                       nvvk::StagingUploader& staging,
-                      const nvvkgltf::Scene& scn,
+                      nvvkgltf::Scene&       scn,
                       bool                   generateMipmaps  = true,
                       bool                   enableRayTracing = true);
 
-  void update(VkCommandBuffer cmd, nvvk::StagingUploader& staging, const nvvkgltf::Scene& scn);
+  // --- Tier 1: sync API (reads + clears Scene dirty flags) ---
+  enum SyncFlags : uint32_t
+  {
+    eSyncNone        = 0,
+    eSyncRenderNodes = 1 << 0,
+    eSyncMaterials   = 1 << 1,
+    eSyncLights      = 1 << 2,
+  };
+  [[nodiscard]] uint32_t syncFromScene(nvvk::StagingUploader& staging, nvvkgltf::Scene& scn, uint32_t mask = ~0u);
 
-  // Update render node transforms and material/primitive IDs.
-  // @param dirtyIndices  renderNode indices that changed; empty = update all (full refresh)
-  void updateRenderNodesBuffer(nvvk::StagingUploader&         staging,
-                               const nvvkgltf::Scene&         scn,
-                               const std::unordered_set<int>& dirtyIndices = {});
+  // --- Tier 2: explicit upload (const Scene, caller owns dirty tracking) ---
+  void uploadRenderNodes(nvvk::StagingUploader& staging, const nvvkgltf::Scene& scn, const std::unordered_set<int>& dirtyIndices = {});
+  void uploadMaterials(nvvk::StagingUploader& staging, const nvvkgltf::Scene& scn, const std::unordered_set<int>& dirtyIndices = {});
+  void uploadLights(nvvk::StagingUploader& staging, const nvvkgltf::Scene& scn, const std::unordered_set<int>& dirtyIndices = {});
+  void uploadPrimitives(VkCommandBuffer cmd, nvvk::StagingUploader& staging, nvvkgltf::Scene& scn);
+  void uploadVertexBuffers(nvvk::StagingUploader& staging, const nvvkgltf::Scene& scn);
 
-  void updateRenderPrimitivesBuffer(VkCommandBuffer cmd, nvvk::StagingUploader& staging, const nvvkgltf::Scene& scn);
+  // Call once per sync cycle after all buffer uploads. Updates scene descriptor if any buffer address changed.
+  // Returns true if an update was performed (staging was appended).
+  [[nodiscard]] bool flushSceneDescIfDirty(nvvk::StagingUploader& staging, const nvvkgltf::Scene& scn);
 
-  // Update light positions and properties.
-  // @param dirtyIndices  glTF light indices (model.extensions["KHR_lights_punctual"]) that changed; empty = update all
-  void updateRenderLightsBuffer(nvvk::StagingUploader&         staging,
-                                const nvvkgltf::Scene&         scn,
-                                const std::unordered_set<int>& dirtyIndices = {});
-
-  // Update material properties and texture bindings.
-  // @param dirtyIndices  glTF material indices (model.materials[]) that changed; empty = update all
-  void updateMaterialBuffer(nvvk::StagingUploader& staging, const nvvkgltf::Scene& scn, const std::unordered_set<int>& dirtyIndices = {});
-
-  void         updateVertexBuffers(nvvk::StagingUploader& staging, const nvvkgltf::Scene& scene);
   virtual void destroy();
 
   // Geometry-only recreation (preserves textures) - useful after tangent generation or mesh optimization
   void destroyGeometry();
-  void createGeometry(VkCommandBuffer cmd, nvvk::StagingUploader& staging, const nvvkgltf::Scene& scn);
+  void createGeometry(VkCommandBuffer cmd, nvvk::StagingUploader& staging, nvvkgltf::Scene& scn);
 
   // Getters
   const nvvk::Buffer&               material() const { return m_bMaterial; }
-  const nvvk::Buffer&               primInfo() const { return m_bRenderPrim; }
-  const nvvk::Buffer&               instances() const { return m_bRenderNode; }
+  const nvvk::Buffer&               primitiveBuffer() const { return m_bRenderPrim; }
+  const nvvk::Buffer&               renderNodeBuffer() const { return m_bRenderNode; }
   const nvvk::Buffer&               sceneDesc() const { return m_bSceneDesc; }
   const std::vector<VertexBuffers>& vertexBuffers() const { return m_vertexBuffers; }
   const std::vector<nvvk::Buffer>&  indices() const { return m_bIndices; }
   const std::vector<nvvk::Image>&   textures() const { return m_textures; }
-  uint32_t                          nbTextures() const { return static_cast<uint32_t>(m_textures.size()); }
+  [[nodiscard]] uint32_t            textureCount() const { return static_cast<uint32_t>(m_textures.size()); }
   const GpuMemoryTracker&           getMemoryTracker() const { return m_memoryTracker; }
   GpuMemoryTracker&                 getMemoryTracker() { return m_memoryTracker; }
 
@@ -161,29 +155,34 @@ protected:
   VkBufferUsageFlags2 getBufferUsageFlags() const;
   virtual void createVertexBuffers(VkCommandBuffer cmd, nvvk::StagingUploader& staging, const nvvkgltf::Scene& scn);
   template <typename T>
-  bool         updateAttributeBuffer(const std::string&         attributeName,
-                                     const tinygltf::Model&     model,
-                                     const tinygltf::Primitive& primitive,
-                                     nvvk::ResourceAllocator*   alloc,
-                                     nvvk::StagingUploader*     staging,
-                                     nvvk::Buffer&              attributeBuffer);
-  virtual void createTextureImages(VkCommandBuffer              cmd,
-                                   nvvk::StagingUploader&       staging,
-                                   const tinygltf::Model&       model,
-                                   const std::filesystem::path& basedir);
+  bool updateAttributeBuffer(const std::string&         attributeName,
+                             const tinygltf::Model&     model,
+                             const tinygltf::Primitive& primitive,
+                             nvvk::ResourceAllocator*   alloc,
+                             nvvk::StagingUploader*     staging,
+                             nvvk::Buffer&              attributeBuffer);
+  // imageSearchPaths: directories to search for image files (base first, then imports). Empty or missing files yield default image.
+  virtual void createTextureImages(VkCommandBuffer                           cmd,
+                                   nvvk::StagingUploader&                    staging,
+                                   const nvvkgltf::Scene&                    scn,
+                                   const std::vector<std::filesystem::path>& imageSearchPaths);
 
   void findSrgbImages(const tinygltf::Model& model);
 
-  // Rebuild scene descriptor buffer (used when buffer addresses change)
+  // Rebuild scene descriptor buffer (buffer addresses + numLights). Called internally when buffers change.
   void updateSceneDescBuffer(nvvk::StagingUploader& staging, const nvvkgltf::Scene& scn);
 
-  virtual void loadImage(const std::filesystem::path& basedir, const tinygltf::Model& model, uint64_t imageID);
+  // Ensure render node buffer matches required size; recreates if needed. Marks scene descriptor dirty on buffer creation.
+  void ensureRenderNodeBuffer(nvvk::StagingUploader& staging, size_t renderNodeCount);
+
+  virtual bool loadImage(const std::filesystem::path& basedir, const tinygltf::Model& model, uint64_t imageID);
   virtual void loadImageFromMemory(uint64_t imageID, const void* data, size_t byteLength);
   virtual bool createImage(const VkCommandBuffer& cmd, nvvk::StagingUploader& staging, SceneImage& image);
 
   //--
   VkDevice         m_device{VK_NULL_HANDLE};
   VkPhysicalDevice m_physicalDevice{VK_NULL_HANDLE};
+  VkQueue m_graphicsQueue{VK_NULL_HANDLE};  // Optional; when set, buffer realloc uses queue wait instead of device wait
 
   nvvk::ResourceAllocator* m_alloc       = nullptr;
   nvvk::SamplerPool*       m_samplerPool = nullptr;
@@ -206,14 +205,34 @@ protected:
   ImageLoadCallback m_imageLoadCallback = {};
 
   // Cached material data for updates.
-  std::vector<shaderio::GltfShadeMaterial> m_cachedShadeMaterials;
-  std::vector<shaderio::GltfTextureInfo>   m_cachedTextureInfos;
+  MaterialCache m_materialCache;
 
+  bool m_sceneDescDirty    = false;  // Set when any scene buffer address changes; cleared by flushSceneDescIfDirty.
   bool m_generateMipmaps   = {};
   bool m_rayTracingEnabled = {};
 
-  GpuMemoryTracker  m_memoryTracker;      // GPU memory tracking
-  SkinningWorkspace m_skinningWorkspace;  // Reusable workspace for CPU skinning (avoids per-frame allocations)
+  DeferredFreeFunc m_deferredFree;                            // Optional: schedules deferred GPU resource destruction
+  void             destroyBufferDeferred(nvvk::Buffer& buf);  // Destroy via m_deferredFree or fallback to queue wait
+
+  GpuMemoryTracker m_memoryTracker;  // GPU memory tracking
+
+#ifndef NDEBUG
+public:
+  struct GpuSyncMismatch
+  {
+    std::string description;
+  };
+  std::vector<GpuSyncMismatch> validateGpuSync(const nvvkgltf::Scene& scene,
+                                               const std::vector<VkAccelerationStructureInstanceKHR>& tlasInstances) const;
+
+  struct DebugRenderNodeEntry
+  {
+    int materialID;
+    int renderPrimID;
+  };
+  std::vector<DebugRenderNodeEntry> m_debugLastUploadedRN;
+  void                              debugUpdateShadowCopy(const nvvkgltf::Scene& scn);
+#endif
 };
 
 }  // namespace nvvkgltf

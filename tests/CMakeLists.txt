@@ -12,15 +12,46 @@ set(TEST_COMMON_SOURCES
 set(TEST_SOURCES
     ${TEST_COMMON_SOURCES}
     test_basic.cpp
+    # Phase 2A: Validation and round-trip tests
+    test_roundtrip.cpp
+    test_features_preserved.cpp
+    # Phase 2B: Model-primary architecture tests
+    test_model_primary.cpp
+    # Phase 2C: Basic editing operations tests
+    test_basic_editing.cpp
+    # Phase 2D.1: Basic index remapping tests
+    test_index_remapping_basic.cpp
+    # Phase 2D.2: Advanced index remapping tests
+    test_index_remapping_advanced.cpp
+    # Dirty flags and RenderNodes/RenderPrimitives
+    test_dirty_flags_and_render_nodes.cpp
+    # Node hierarchy operations (add, duplicate, reparent, delete)
+    test_node_hierarchy_operations.cpp
+    # Children order preservation test
+    test_children_order_preservation.cpp
+    # Animation and validation (empty sampler, compact, validator)
+    test_animation_and_validation.cpp
+    # Error paths and edge cases (bounds checks, merger failures, load failures)
+    test_error_paths.cpp
+    # MaterialCache conversion, incremental updates, topology change detection
+    test_material_cache.cpp
+    # Animation update, time advancement, wrapping, stability
+    test_animation_update.cpp
     # Need tinygltf implementation
     ${CMAKE_SOURCE_DIR}/src/tiny_stb_implementation.cpp
     # Local glTF scene implementation
+    ${CMAKE_SOURCE_DIR}/src/gltf_compact_model.cpp
+    ${CMAKE_SOURCE_DIR}/src/gltf_compact_scene.cpp
+    ${CMAKE_SOURCE_DIR}/src/gltf_material_cache.cpp
     ${CMAKE_SOURCE_DIR}/src/gltf_scene.cpp
+    ${CMAKE_SOURCE_DIR}/src/gltf_scene_editor.cpp
+    ${CMAKE_SOURCE_DIR}/src/gltf_scene_animation.cpp
+    ${CMAKE_SOURCE_DIR}/src/gltf_scene_validator.cpp
+    ${CMAKE_SOURCE_DIR}/src/gltf_scene_merger.cpp
     ${CMAKE_SOURCE_DIR}/src/tinygltf_converter.cpp
     ${CMAKE_SOURCE_DIR}/src/tinygltf_utils.cpp
     ${CMAKE_SOURCE_DIR}/src/gltf_animation_pointer.cpp
-    ${CMAKE_SOURCE_DIR}/src/create_tangent.cpp
-    ${CMAKE_SOURCE_DIR}/src/compact_model.cpp
+    ${CMAKE_SOURCE_DIR}/src/gltf_create_tangent.cpp
     # MikkTSpace for tangent generation
     ${CMAKE_SOURCE_DIR}/third_party/MikkTSpace/mikktspace.c
     # Phase-specific tests added here as we progress
@@ -31,9 +62,7 @@ add_executable(${TEST_NAME} ${TEST_SOURCES})
 
 # Add compile definitions for tinygltf
 target_compile_definitions(${TEST_NAME} PRIVATE
-    TINYGLTF_USE_RAPIDJSON
-    TINYGLTF_USE_RAPIDJSON_CRTALLOCATOR
-    TINYGLTF_NO_EXTERNAL_IMAGE
+    GLTF_SAMPLE_ASSETS_PATH="${GLTF_SAMPLE_ASSETS_PATH}"
 )
 
 # Add Draco support if enabled
@@ -103,22 +132,21 @@ add_executable(${BENCHMARK_NAME}
     # Need tinygltf implementation
     ${CMAKE_SOURCE_DIR}/src/tiny_stb_implementation.cpp
     # Local glTF scene implementation
+    ${CMAKE_SOURCE_DIR}/src/gltf_animation_pointer.cpp
+    ${CMAKE_SOURCE_DIR}/src/gltf_compact_model.cpp
     ${CMAKE_SOURCE_DIR}/src/gltf_scene.cpp
+    ${CMAKE_SOURCE_DIR}/src/gltf_scene_editor.cpp
+    ${CMAKE_SOURCE_DIR}/src/gltf_scene_animation.cpp
+    ${CMAKE_SOURCE_DIR}/src/gltf_scene_validator.cpp
+    ${CMAKE_SOURCE_DIR}/src/gltf_scene_merger.cpp
     ${CMAKE_SOURCE_DIR}/src/tinygltf_converter.cpp
     ${CMAKE_SOURCE_DIR}/src/tinygltf_utils.cpp
-    ${CMAKE_SOURCE_DIR}/src/gltf_animation_pointer.cpp
-    ${CMAKE_SOURCE_DIR}/src/create_tangent.cpp
-    ${CMAKE_SOURCE_DIR}/src/compact_model.cpp
+    ${CMAKE_SOURCE_DIR}/src/gltf_create_tangent.cpp
     # MikkTSpace for tangent generation
     ${CMAKE_SOURCE_DIR}/third_party/MikkTSpace/mikktspace.c
 )
 
-# Add compile definitions for tinygltf
-target_compile_definitions(${BENCHMARK_NAME} PRIVATE
-    TINYGLTF_USE_RAPIDJSON
-    TINYGLTF_USE_RAPIDJSON_CRTALLOCATOR
-    TINYGLTF_NO_EXTERNAL_IMAGE
-)
+
 
 # Add Draco support if enabled
 if(USE_DRACO)

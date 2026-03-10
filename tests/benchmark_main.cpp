@@ -1,5 +1,5 @@
 #include <benchmark/benchmark.h>
-#include <nvvkgltf/scene.hpp>
+#include <gltf_scene.hpp>
 #include "common/test_utils.hpp"
 
 // Benchmark scene loading
@@ -11,7 +11,8 @@ static void BM_SceneLoad_Simple(benchmark::State& state)
     for(auto _ : state)
     {
       nvvkgltf::Scene scene;
-      scene.load(path);
+      if(!scene.load(path))
+        state.SkipWithError("load failed");
       benchmark::DoNotOptimize(scene.getRenderNodes().size());
     }
   }
@@ -31,7 +32,8 @@ static void BM_SceneLoad_Complex(benchmark::State& state)
     for(auto _ : state)
     {
       nvvkgltf::Scene scene;
-      scene.load(path);
+      if(!scene.load(path))
+        state.SkipWithError("load failed");
       benchmark::DoNotOptimize(scene.getRenderNodes().size());
     }
   }
@@ -50,7 +52,8 @@ static void BM_SceneSave(benchmark::State& state)
     // Load once
     auto            loadPath = gltf_test::TestResources::getResourcePath("shader_ball.gltf");
     nvvkgltf::Scene scene;
-    scene.load(loadPath);
+    if(!scene.load(loadPath))
+      state.SkipWithError("load failed");
 
     auto savePath = gltf_test::TestResources::getTempPath("benchmark_save.gltf");
 
@@ -85,14 +88,17 @@ static void BM_SceneRoundTrip(benchmark::State& state)
     {
       // Load original
       nvvkgltf::Scene scene1;
-      scene1.load(loadPath);
+      if(!scene1.load(loadPath))
+        state.SkipWithError("load failed");
 
       // Save
-      scene1.save(savePath);
+      if(!scene1.save(savePath))
+        state.SkipWithError("save failed");
 
       // Load saved
       nvvkgltf::Scene scene2;
-      scene2.load(savePath);
+      if(!scene2.load(savePath))
+        state.SkipWithError("load failed");
 
       benchmark::DoNotOptimize(scene2.getRenderNodes().size());
     }
@@ -117,7 +123,8 @@ static void BM_UpdateNodeWorldMatrices(benchmark::State& state)
   {
     auto            path = gltf_test::TestResources::getResourcePath("shader_ball.gltf");
     nvvkgltf::Scene scene;
-    scene.load(path);
+    if(!scene.load(path))
+      state.SkipWithError("load failed");
 
     for(auto _ : state)
     {

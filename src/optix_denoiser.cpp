@@ -17,6 +17,13 @@
  * SPDX-License-Identifier: Apache-2.0
  */
 
+//
+// OptiX-based AI denoiser integration for path-traced images.
+// Manages the OptiX denoiser lifecycle, Vulkan-CUDA interop for sharing
+// framebuffer data, and a compute shader that copies the denoised result
+// back into the Vulkan render target.
+//
+
 #include "optix_denoiser.hpp"
 
 // Define OptiX function table (must be in exactly one translation unit)
@@ -261,7 +268,7 @@ void OptiXDenoiser::updateSize(VkCommandBuffer cmd, VkExtent2D size)
   if(m_bufferSize.width != size.width || m_bufferSize.height != size.height)
   {
     m_bufferSize         = size;
-    m_needRebuitlBuffers = true;
+    m_needRebuildBuffers = true;
   }
 }
 
@@ -269,7 +276,7 @@ void OptiXDenoiser::updateSize(VkCommandBuffer cmd, VkExtent2D size)
 // Called when the buffer size has changed, we will need to rebuild the OptiX buffers before denoising.
 void OptiXDenoiser::rebuiltBuffers()
 {
-  m_needRebuitlBuffers = false;
+  m_needRebuildBuffers = false;
   m_outputSize         = m_bufferSize;
 
   if(isAvailable())
@@ -312,12 +319,14 @@ bool OptiXDenoiser::denoiseOneShot(Resources& resources)
   // 2. The denoised output image is not being read by the display pipeline
   // 3. All previous frames have finished rendering
   {
+    // SYNC NOTE: Required for Vulkan→CUDA interop — ensures all GPU rendering is complete
+    // before CUDA reads the images. Cannot be replaced with a fence without changing the interop model.
     SCOPED_TIMER("OptiX: wait");
     vkQueueWaitIdle(resources.app->getQueue(0).queue);
   }
 
   // If the OptiX buffers need to be rebuilt, do it now.
-  if(m_needRebuitlBuffers)
+  if(m_needRebuildBuffers)
   {
     rebuiltBuffers();
 
@@ -759,9 +768,9 @@ bool OptiXDenoiser::onUi(Resources& resources)
       }
       PE::end();
 
-      // Show denoised output thumbnail if available
-      if(m_hasValidOutput)
+      if(m_hasValidOutput && ImGui::CollapsingHeader("Denoised Output"))
       {
+        ImGui::TextWrapped("Click on the thumbnail to view it in the viewport. Click again to toggle back to rendered image.");
         ImGui::Spacing();
 
         float  aspectRatio   = m_outputSize.width > 0 ? float(m_outputSize.width) / float(m_outputSize.height) : 1.0f;
@@ -770,7 +779,6 @@ bool OptiXDenoiser::onUi(Resources& resources)
         DisplayBuffer bufferType = DisplayBuffer::eOptixDenoised;
         bool          isActive   = (resources.settings.displayBuffer == bufferType);
 
-        // Highlight active buffer with green border
         if(isActive)
         {
           ImGui::PushStyleColor(ImGuiCol_Border, ImVec4(0.0f, 1.0f, 0.0f, 1.0f));
@@ -780,7 +788,6 @@ bool OptiXDenoiser::onUi(Resources& resources)
         ImGui::Text("Denoised Result%s", isActive ? " (Active)" : "");
         if(ImGui::ImageButton("OptiXDenoised", ImTextureID(m_inputOutputGbuffers.getDescriptorSet(eGBufferDenoised)), thumbnailSize))
         {
-          // Toggle back to rendered image
           resources.settings.displayBuffer = isActive ? DisplayBuffer::eRendered : DisplayBuffer::eOptixDenoised;
           changed                          = true;
         }
@@ -794,5 +801,5 @@ bool OptiXDenoiser::onUi(Resources& resources)
     }
   }
 
-  return false;
+  return changed;
 }

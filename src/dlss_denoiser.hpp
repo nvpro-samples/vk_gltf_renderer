@@ -128,7 +128,7 @@ private:
 
   std::vector<VkFormat> m_bufferInfos = {
       {VK_FORMAT_R32G32B32A32_SFLOAT},  // #DLSS - Rendered image       : eResultImage
-      {VK_FORMAT_R8_UNORM},             // #DLSS - Object ID            : eSelectImage
+      {VK_FORMAT_R32_SFLOAT},           // #DLSS - Object ID in .r      : eSelectImage
       {VK_FORMAT_R8G8B8A8_UNORM},       // #DLSS - BaseColor            : eDlssAlbedo
       {VK_FORMAT_R16G16B16A16_SFLOAT},  // #DLSS - SpecAlbedo           : eDlssSpecAlbedo
       {VK_FORMAT_R16G16B16A16_SFLOAT},  // #DLSS - Normal / Roughness   : eDlssNormalRoughness
@@ -140,6 +140,7 @@ private:
   nvvk::GBuffer    m_dlssGBuffers{};  // G-Buffers: for denoising
   VkExtent2D       m_renderingSize{};
   VkDevice         m_device{};
+  VkQueue          m_graphicsQueue{VK_NULL_HANDLE};  // For queue-based sync (prefer over vkDeviceWaitIdle)
   VkSampler        m_linearSampler{};
   bool             m_sizeModeChanged  = false;  // Track if size mode has changed
   bool             m_forceReset       = false;  // Force reset of the denoiser

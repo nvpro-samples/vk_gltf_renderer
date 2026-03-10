@@ -17,9 +17,17 @@
  * SPDX-License-Identifier: Apache-2.0
  */
 
+//
+// DLSS Ray Reconstruction denoiser integration. Wraps the DLSS-RR
+// feature for denoising path-traced output, manages the required
+// G-buffer inputs (depth, normals, motion vectors), and provides
+// UI controls and settings persistence for the denoiser.
+//
+
 #include <nvgui/tooltip.hpp>
 #include <nvutils/logger.hpp>
 #include <nvutils/timers.hpp>
+#include <nvvk/check_error.hpp>
 #include <nvvk/debug_util.hpp>
 #include <imgui/imgui.h>
 
@@ -50,6 +58,7 @@ void DlssDenoiser::init(Resources& resources)
   }
 
   // Create GBuffers (fast operation - only done if hardware available)
+  m_graphicsQueue = resources.app ? resources.app->getQueue(0).queue : VK_NULL_HANDLE;
   resources.samplerPool.acquireSampler(m_linearSampler);
   m_dlssGBuffers.init({.allocator      = &resources.allocator,
                        .colorFormats   = m_bufferInfos,
@@ -180,7 +189,8 @@ VkExtent2D DlssDenoiser::updateSize(VkCommandBuffer cmd, VkExtent2D size)
       .outputSize = size,
   };
   m_dlss.deinit();
-  vkDeviceWaitIdle(m_device);
+  if(m_graphicsQueue)
+    NVVK_CHECK(vkQueueWaitIdle(m_graphicsQueue));
   m_dlss.cmdInit(cmd, m_ngx, initInfo);
 
   // Recreate the G-Buffers

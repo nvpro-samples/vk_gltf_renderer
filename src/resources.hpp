@@ -17,16 +17,18 @@
  * SPDX-License-Identifier: Apache-2.0
  */
 
-/**
- * Core resource management header for the Vulkan GLTF renderer.
- * 
- * This header defines the main resource structures and settings for a Vulkan-based 3D renderer
- * that supports both path tracing and rasterization. It manages Vulkan resources, GLTF scene data,
- * environment maps, and rendering settings.
- */
+// Core resource management header for the Vulkan glTF renderer.
+//
+// Defines the main resource structures and settings for a Vulkan-based 3D renderer
+// that supports both path tracing and rasterization. Manages Vulkan resources, glTF scene data,
+// environment maps, and rendering settings.
 
 #pragma once
+#include <algorithm>
 #include <bitset>
+#include <cstdint>
+#include <memory>
+#include <unordered_set>
 
 #include <glm/glm.hpp>
 #include <glm/ext/scalar_constants.hpp>
@@ -128,21 +130,23 @@ struct Settings
   shaderio::DebugMethod debugMethod            = shaderio::DebugMethod::eNone;  // Debug method for the rasterizer
   shaderio::EnvSystem   envSystem              = shaderio::EnvSystem::eSky;     // Environment system: Sky or HDR
   bool                  showAxis               = true;                          // Show the axis (bottom left)
+  bool                  showGrid               = false;                         // Show infinite grid
+  bool                  showGizmo              = false;                         // Show transform gizmo on selected node
   bool                  showMemStats           = false;                         // Show memory statistics window
   bool                  showCameraWindow       = true;                          // Show Camera window
-  bool                  showSceneGraphWindow   = true;                          // Show Scene Graph window
   bool                  showSettingsWindow     = true;                          // Show Settings window
-  bool                  showPropertiesWindow   = true;                          // Show Properties window
   bool                  showEnvironmentWindow  = true;                          // Show Environment window
   bool                  showTonemapperWindow   = true;                          // Show Tonemapper window
   bool                  showStatisticsWindow   = false;                         // Show Statistics window
+  bool                  showSceneBrowserWindow = true;                          // Show Scene Browser window
+  bool                  showInspectorWindow    = true;                          // Show Inspector window
   float                 hdrEnvIntensity        = 1.0f;                          // Intensity of the environment (HDR)
   float                 hdrEnvRotation         = 0.0f;                          // Rotation of the environment (HDR)
   float                 hdrBlur                = 0.0f;                          // Blur of the environment (HDR)
-  glm::vec3             silhouetteColor        = {0.6f, 0.4f, 0.0f};            // Color of the silhouette
+  glm::vec3             silhouetteColor        = {0.933f, 0.580f, 0.180f};      // Color of the silhouette
   bool                  useSolidBackground     = false;                         // Use solid background color
   glm::vec3             solidBackgroundColor   = {0.0f, 0.0f, 0.0f};            // Solid background color
-  int                   maxFrames              = {200};                         // Maximum number of frames to render
+  int                   maxFrames              = {500};                         // Maximum number of frames to render
   bool                  useInfinitePlane       = false;                         // Use infinite plane
   bool                  isShadowCatcher        = true;                          // Infinite place only catch shadow
   float                 infinitePlaneDistance  = 0;                             // Distance/height of the infinite plane
@@ -152,6 +156,11 @@ struct Settings
   float                 shadowCatcherDarkness  = 0.0f;                          // Non-physical shadow darkening
   bool                  dlssHardwareAvailable  = false;  // DLSS hardware/extensions available (set at startup)
   DisplayBuffer         displayBuffer          = DisplayBuffer::eRendered;  // Which buffer to display in viewport
+
+#ifndef NDEBUG
+  bool showGridStyleWindow  = false;  // Show Grid Style debug window
+  bool showGizmoStyleWindow = false;  // Show Gizmo Style debug window
+#endif
 };
 
 
@@ -174,10 +183,12 @@ struct Resources
   VkCommandPool          commandPool{};    // Command pool for secondary command buffer
   nvslang::SlangCompiler slangCompiler{};  // Slang compiler
 
-  // Scene
-  nvvkgltf::Scene    scene;     // GLTF Scene
-  nvvkgltf::SceneVk  sceneVk;   // GLTF Scene buffers
-  nvvkgltf::SceneRtx sceneRtx;  // GLTF Scene BLAS/TLAS
+  std::unique_ptr<nvvkgltf::Scene> scene;
+  nvvkgltf::SceneVk                sceneVk;
+  nvvkgltf::SceneRtx               sceneRtx;
+
+  nvvkgltf::Scene*       getScene() { return scene.get(); }
+  const nvvkgltf::Scene* getScene() const { return scene.get(); }
 
   // Resources
   nvvk::HdrIbl                    hdrIbl;  // HDR environment map
@@ -200,11 +211,33 @@ struct Resources
 
 
   int frameCount{0};
-  int selectedRenderNode{-1};  // Selected RenderNode index (corresponds to a primitive)
+
+  // Selection: set of render node indices (TLAS order). One primitive = set of size 1; node + branch = many.
+  std::unordered_set<int> selectedRenderNodes;
+
+  // Selection bitmask for silhouette: one bit per render node (GPU buffer + CPU mirror)
+  std::vector<uint32_t> selectionBitMask;
+  nvvk::Buffer          bSelectionBitMask;
+  bool                  selectionDirty = true;
+
+  // Build CPU-side selection bitmask from selectedRenderNodes. Cleared and refilled each call.
+  void updateSelectionBitMask(int numRenderNodes)
+  {
+    const size_t numWords = numRenderNodes > 0 ? (static_cast<size_t>(numRenderNodes) + 31u) / 32u : 1u;
+    selectionBitMask.resize(numWords, 0u);
+    std::fill(selectionBitMask.begin(), selectionBitMask.end(), 0u);
+    for(int rnIdx : selectedRenderNodes)
+    {
+      if(rnIdx >= 0 && static_cast<size_t>(rnIdx) < numRenderNodes)
+      {
+        const size_t word = static_cast<size_t>(rnIdx) / 32u;
+        const size_t bit  = static_cast<size_t>(rnIdx) % 32u;
+        selectionBitMask[word] |= (1u << bit);
+      }
+    }
+  }
 
   Settings settings;
 
-  std::bitset<32>         dirtyFlags;
-  std::unordered_set<int> dirtyMaterialVariants;  // Material variant indices that changed
-  void                    resetDirtyMaterialVariants() { dirtyMaterialVariants.clear(); }
+  std::bitset<32> dirtyFlags;
 };

@@ -17,6 +17,13 @@
  * SPDX-License-Identifier: Apache-2.0
  */
 
+//
+// NVIDIA DLSS (Deep Learning Super Sampling) wrapper. Initializes the
+// NGX SDK, creates and configures DLSS-SR and DLSS-RR features, handles
+// quality-mode selection and jitter offsets, and evaluates the DLSS
+// network each frame to produce upscaled or denoised output.
+//
+
 #define _CRT_SECURE_NO_WARNINGS
 #include <volk.h>
 #include <unordered_set>

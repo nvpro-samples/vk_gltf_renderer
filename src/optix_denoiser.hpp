@@ -193,7 +193,7 @@ private:
   OptixDenoiser      m_denoiser     = nullptr;
 
   // Buffers
-  bool       m_needRebuitlBuffers = true;
+  bool       m_needRebuildBuffers = true;
   VkExtent2D m_bufferSize{};
   void       rebuiltBuffers();
 

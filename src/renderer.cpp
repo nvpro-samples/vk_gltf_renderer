@@ -59,6 +59,11 @@
 #include "GLFW/glfw3.h"
 #undef APIENTRY
 
+#if defined(_WIN32)
+#define WIN32_LEAN_AND_MEAN
+#include <windows.h>
+#endif
+
 // Shader Input/Output
 #include "shaders/shaderio.h"  // Shared between host and device
 
@@ -79,8 +84,14 @@
 #include <nvvk/formats.hpp>
 #include <nvvk/mipmaps.hpp>
 #include "gltf_camera_utils.hpp"
+#include "gltf_scene_editor.hpp"
+#include "gltf_scene_animation.hpp"
+
+#include <glm/gtc/quaternion.hpp>
 
 #include "renderer.hpp"
+#include "scene_descriptor.hpp"
+#include "tinygltf_utils.hpp"
 #include "utils.hpp"
 #include "tinyobjloader/tiny_obj_loader.h"
 #include "tinygltf_converter.hpp"
@@ -126,7 +137,7 @@ GltfRenderer::GltfRenderer(nvutils::ParameterRegistry* paramReg)
   paramReg->add({"envSystem", "Environment: [Sky:0, HDR:1]"}, (int*)&m_resources.settings.envSystem);
   paramReg->add({"renderSystem", "Renderer [Path tracer:0, Rasterizer:1]"}, (int*)&m_resources.settings.renderSystem);
   paramReg->add({"showAxis", "Show Axis"}, &m_resources.settings.showAxis);
-  paramReg->add({"showMemStats", "Show Axis"}, &m_resources.settings.showMemStats);
+  paramReg->add({"showMemStats", "Show Memory Statistics"}, &m_resources.settings.showMemStats);
   paramReg->add({"hdrEnvIntensity", "HDR Environment Intensity"}, &m_resources.settings.hdrEnvIntensity);
   paramReg->add({"hdrEnvRotation", "HDR Environment Rotation"}, &m_resources.settings.hdrEnvRotation);
   paramReg->add({"hdrBlur", "HDR Environment Blur"}, &m_resources.settings.hdrBlur);
@@ -171,14 +182,16 @@ void GltfRenderer::onAttach(nvapp::Application* app)
     m_settingsHandler.setHandlerName("GltfRenderer");
     m_settingsHandler.setSetting("maxFrames", &m_resources.settings.maxFrames);
     m_settingsHandler.setSetting("showAxis", &m_resources.settings.showAxis);
+    m_settingsHandler.setSetting("showGrid", &m_resources.settings.showGrid);
+    m_settingsHandler.setSetting("showGizmo", &m_resources.settings.showGizmo);
     m_settingsHandler.setSetting("showMemStats", &m_resources.settings.showMemStats);
     m_settingsHandler.setSetting("showCameraWindow", &m_resources.settings.showCameraWindow);
-    m_settingsHandler.setSetting("showSceneGraphWindow", &m_resources.settings.showSceneGraphWindow);
     m_settingsHandler.setSetting("showSettingsWindow", &m_resources.settings.showSettingsWindow);
-    m_settingsHandler.setSetting("showPropertiesWindow", &m_resources.settings.showPropertiesWindow);
     m_settingsHandler.setSetting("showEnvironmentWindow", &m_resources.settings.showEnvironmentWindow);
     m_settingsHandler.setSetting("showTonemapperWindow", &m_resources.settings.showTonemapperWindow);
     m_settingsHandler.setSetting("showStatisticsWindow", &m_resources.settings.showStatisticsWindow);
+    m_settingsHandler.setSetting("showSceneBrowserWindow", &m_resources.settings.showSceneBrowserWindow);
+    m_settingsHandler.setSetting("showInspectorWindow", &m_resources.settings.showInspectorWindow);
     m_settingsHandler.setSetting("envSystem", (int*)&m_resources.settings.envSystem);
     m_settingsHandler.setSetting("renderSystem", (int*)&m_resources.settings.renderSystem);
     m_settingsHandler.setSetting("useSolidBackground", &m_resources.settings.useSolidBackground);
@@ -188,6 +201,10 @@ void GltfRenderer::onAttach(nvapp::Application* app)
     m_settingsHandler.addImGuiHandler();
   }
 
+  // Customize ImGui style for better visibility
+  ImGui::GetStyle().Colors[ImGuiCol_ButtonActive] = (ImVec4)ImColor::HSV(0.3F, 0.5F, 0.5F);
+
+
   // ===== Memory Allocation & Buffer Management =====
   m_resources.allocator.init({
       .flags            = VMA_ALLOCATOR_CREATE_BUFFER_DEVICE_ADDRESS_BIT,
@@ -196,6 +213,10 @@ void GltfRenderer::onAttach(nvapp::Application* app)
       .instance         = app->getInstance(),
       .vulkanApiVersion = VK_API_VERSION_1_4,
   });  // Allocator
+
+  // If there is a leak (nvvkAllocID -> ID)
+  // m_resources.allocator.setLeakID(32914);
+
 
   m_transientCmdPool = nvvk::createTransientCommandPool(m_device, app->getQueue(0).familyIndex);
   NVVK_DBG_NAME(m_transientCmdPool);
@@ -222,7 +243,7 @@ void GltfRenderer::onAttach(nvapp::Application* app)
                                  {
                                      VK_FORMAT_R8G8B8A8_UNORM,       // Tonemapped (eImgTonemapped)
                                      VK_FORMAT_R32G32B32A32_SFLOAT,  // Rendered image (eImgRendered)
-                                     VK_FORMAT_R8_UNORM,             // Selection/Silhouette (eImgSelection)
+                                     VK_FORMAT_R32_SFLOAT,  // ObjectID for selection/silhouette (eImgSelection), .r = render node ID+1
                                  },
                              .depthFormat    = nvvk::findDepthFormat(app->getPhysicalDevice()),
                              .imageSampler   = linearSampler,
@@ -247,10 +268,13 @@ void GltfRenderer::onAttach(nvapp::Application* app)
 
   // ===== Scene & Acceleration Structure =====
   m_resources.sceneVk.init(&m_resources.allocator, &m_resources.samplerPool);
-  m_resources.sceneRtx.init(&m_resources.allocator);
-
-  m_resources.scene.supportedExtensions().insert(EXT_TEXTURE_WEBP_EXTENSION_NAME);
+  m_resources.sceneVk.setGraphicsQueue(m_app->getQueue(0).queue);
+  m_resources.sceneVk.setDeferredFree([app](std::function<void()>&& fn) { app->submitResourceFree(std::move(fn)); });
   m_resources.sceneVk.setImageLoadCallback(webPLoadCallback);
+
+  m_resources.sceneRtx.init(&m_resources.allocator);
+  m_resources.sceneRtx.setGraphicsQueue(m_app->getQueue(0).queue);
+  m_resources.sceneRtx.setDeferredFree([app](std::function<void()>&& fn) { app->submitResourceFree(std::move(fn)); });
 
   // ===== Profiling & Performance =====
   {
@@ -268,10 +292,21 @@ void GltfRenderer::onAttach(nvapp::Application* app)
     m_resources.slangCompiler.addSearchPaths(nvsamples::getShaderDirs());
     m_resources.slangCompiler.defaultTarget();
     m_resources.slangCompiler.defaultOptions();
+
+    // Specific options for this sample
     m_resources.slangCompiler.addOption(
-        {CompilerOptionName::DebugInformation, {CompilerOptionValueKind::Int, SLANG_DEBUG_INFO_LEVEL_MAXIMAL}});
+        {CompilerOptionName::DebugInformation, {CompilerOptionValueKind::Int, SLANG_DEBUG_INFO_LEVEL_STANDARD}});
     m_resources.slangCompiler.addOption(
-        {CompilerOptionName::Optimization, {CompilerOptionValueKind::Int, SLANG_OPTIMIZATION_LEVEL_DEFAULT}});
+        {CompilerOptionName::Optimization, {CompilerOptionValueKind::Int, SLANG_OPTIMIZATION_LEVEL_NONE}});
+
+    // Enable specific capabilities for better performance and features
+    m_resources.slangCompiler.addCapability("spvShaderInvocationReorderNV");  // Enable the shader invocation reorder capability for better performance on NVIDIA hardware
+    m_resources.slangCompiler.addCapability("spvInt64Atomics");            // # 64-bit atomic operations
+    m_resources.slangCompiler.addCapability("spvShaderClockKHR");          // # Shader clock for profiling
+    m_resources.slangCompiler.addCapability("spvRayTracingMotionBlurNV");  // # Motion blur for ray tracing
+    m_resources.slangCompiler.addCapability("spvRayQueryKHR");             // # Ray query operations
+    m_resources.slangCompiler.addCapability("spvGroupNonUniformBallot");  // # Ballot operations for subgroup functionality
+    m_resources.slangCompiler.addCapability("spvGroupNonUniformArithmetic");  // # Arithmetic operations across subgroups
 
 #if defined(AFTERMATH_AVAILABLE)
     // This aftermath callback is used to report the shader hash (Spirv) to the Aftermath library.
@@ -296,13 +331,63 @@ void GltfRenderer::onAttach(nvapp::Application* app)
 
   m_pathTracer.createPipeline(m_resources);
   m_rasterizer.createPipeline(m_resources);
+
+  // ===== Visual Helpers (Grid + Transform Gizmo) =====
+  {
+    VkFormat depthFormat = m_resources.gBuffers.getDepthFormat();
+    VkFormat colorFormat = VK_FORMAT_R8G8B8A8_UNORM;  // Matches eImgTonemapped
+
+    VisualHelpers::Resources helperRes{
+        .app           = m_app,
+        .alloc         = &m_resources.allocator,
+        .uploader      = &m_resources.staging,
+        .device        = m_device,
+        .sampler       = linearSampler,
+        .slangCompiler = &m_resources.slangCompiler,
+        .colorFormat   = colorFormat,
+        .depthFormat   = depthFormat,
+    };
+    m_visualHelpers.init(helperRes);
+
+    m_visualHelpers.transform.setOnTransformBegin([this]() {
+      if(m_gizmoNodeIndex >= 0 && m_resources.getScene())
+      {
+        const auto& node = m_resources.getScene()->editor().getNode(m_gizmoNodeIndex);
+        tinygltf::utils::getNodeTRS(node, m_gizmoSnapshotT, m_gizmoSnapshotR, m_gizmoSnapshotS);
+      }
+    });
+
+    m_visualHelpers.transform.setOnTransformChange([this]() {
+      if(m_gizmoNodeIndex >= 0 && m_resources.getScene())
+      {
+        glm::quat rotation = glm::quat(glm::radians(m_gizmoRotation));
+        m_resources.getScene()->editor().setNodeTRS(m_gizmoNodeIndex, m_gizmoPosition, rotation, m_gizmoScale);
+        resetFrame();
+      }
+    });
+
+    m_visualHelpers.transform.setOnTransformEnd([this]() {
+      if(m_gizmoNodeIndex >= 0 && m_resources.getScene())
+      {
+        glm::vec3   newT, newS;
+        glm::quat   newR;
+        const auto& node = m_resources.getScene()->editor().getNode(m_gizmoNodeIndex);
+        tinygltf::utils::getNodeTRS(node, newT, newR, newS);
+        auto cmd = std::make_unique<SetTransformCommand>(*m_resources.getScene(), m_gizmoNodeIndex, m_gizmoSnapshotT,
+                                                         m_gizmoSnapshotR, m_gizmoSnapshotS, newT, newR, newS);
+        m_undoStack.pushExecuted(std::move(cmd));
+      }
+    });
+  }
 }
 
 //--------------------------------------------------------------------------------------------------
 // Detach the renderers and destroy the resources
 void GltfRenderer::onDetach()
 {
+  // SYNC NOTE: Full device wait during shutdown is the standard Vulkan teardown pattern.
   vkDeviceWaitIdle(m_device);
+  m_visualHelpers.deinit();
   m_pathTracer.onDetach(m_resources);
   m_rasterizer.onDetach(m_resources);
   destroyResources();
@@ -316,6 +401,14 @@ void GltfRenderer::onResize(VkCommandBuffer cmd, const VkExtent2D& size)
   m_pathTracer.onResize(cmd, size, m_resources);
   m_rasterizer.onResize(cmd, size, m_resources);
   m_resources.hdrDome.setOutImage(m_resources.gBuffers.getDescriptorImageInfo(Resources::eImgRendered));
+
+  // Resize visual helpers (depth buffer + scene depth descriptor set)
+  VkSampler sampler = m_resources.gBuffers.getDescriptorImageInfo(Resources::eImgTonemapped).sampler;
+  m_visualHelpers.onResize(cmd, size, m_resources.gBuffers.getDepthImage(), m_resources.gBuffers.getDepthImageView(), sampler);
+
+  // Camera (was handled by ElementCamera, now owned by the renderer)
+  m_cameraManip->setWindowSize({size.width, size.height});
+  m_cameraManip->adjustOrthographicAspect();
 
   resetFrame();  // Reset frame to restart the rendering
 }
@@ -365,7 +458,7 @@ void GltfRenderer::onRender(VkCommandBuffer cmd)
   }
 
   // Empty scene, clear the G-Buffer
-  if(!m_resources.scene.valid())
+  if(!m_resources.getScene() || !m_resources.getScene()->valid())
   {
     clearGbuffer(cmd);
     return;
@@ -406,7 +499,6 @@ void GltfRenderer::onRender(VkCommandBuffer cmd)
         .useSolidBackground = m_resources.settings.useSolidBackground ? 1 : 0,
         .backgroundColor    = m_resources.settings.solidBackgroundColor,
         .environmentType    = (int)m_resources.settings.envSystem,
-        .selectedRenderNode = m_resources.selectedRenderNode,
         .debugMethod        = m_resources.settings.debugMethod,
         .useInfinitePlane = m_resources.settings.useInfinitePlane ? (m_resources.settings.isShadowCatcher ? 2 : 1) : 0,
         .infinitePlaneDistance     = m_resources.settings.infinitePlaneDistance,
@@ -449,6 +541,7 @@ void GltfRenderer::onRender(VkCommandBuffer cmd)
   // Apply the post-processing effects
   tonemap(cmd);
   silhouette(cmd);
+  renderVisualHelpers(cmd);
 }
 
 
@@ -468,27 +561,103 @@ void GltfRenderer::onLastHeadlessFrame()
 }
 
 //--------------------------------------------------------------------------------------------------
+// Merge a glTF scene into the current one. Called from File menu or Shift+drag-drop.
+//
+void GltfRenderer::onMergeScene(const std::filesystem::path& filename)
+{
+  if(!m_resources.getScene() || !m_resources.getScene()->valid())
+  {
+    auto scn = std::make_unique<nvvkgltf::Scene>();
+    scn->supportedExtensions().insert(EXT_TEXTURE_WEBP_EXTENSION_NAME);
+    m_resources.scene = std::move(scn);
+  }
+
+  if(m_busy.isBusy())
+    return;
+
+  // Set busy BEFORE starting the worker thread to prevent UI access during scene modification
+  m_busy.start("Merging Scene");
+
+  std::thread([=, this]() {
+    int wrapperNodeIdx = m_resources.getScene()->mergeScene(filename, static_cast<uint32_t>(m_maxTextures));
+    if(wrapperNodeIdx >= 0)
+    {
+      m_undoStack.clear();
+      rebuildVulkanSceneFull();
+      resetFrame();
+      m_sceneSelection.selectNode(wrapperNodeIdx);
+      m_sceneBrowser.focusOnSelection();
+      LOGI("Scene merged successfully: %s\n", nvutils::utf8FromPath(filename.filename()).c_str());
+    }
+    else
+    {
+      LOGE("Failed to merge scene: %s\n", nvutils::utf8FromPath(filename.filename()).c_str());
+    }
+    m_busy.stop();
+  }).detach();
+}
+
+//--------------------------------------------------------------------------------------------------
 // Load a glTF scene or an HDR file (called from both Load Scene and Load HDR Environment menu items)
+// Shift+drag-drop merges the file into the current scene instead of replacing it.
+//
 void GltfRenderer::onFileDrop(const std::filesystem::path& filename)
 {
+  // SYNC NOTE: User-initiated file load/merge — wait ensures GPU is idle before scene teardown/rebuild.
   vkQueueWaitIdle(m_app->getQueue(0).queue);
 
-  if(nvutils::extensionMatches(filename, ".gltf") || nvutils::extensionMatches(filename, ".glb")
-     || nvutils::extensionMatches(filename, ".obj"))
+  bool isDescriptor = filename.string().ends_with(".scene.json") || nvutils::extensionMatches(filename, ".glxf");
+  if(isDescriptor)
   {
     if(m_busy.isBusy())
       return;
 
-    m_cmdBufferQueue = {};  // Clear the command buffer queue
-    cleanupScene();         // Cleanup current scene
+    m_cmdBufferQueue = {};
+    cleanupScene();
     m_rasterizer.freeRecordCommandBuffer(m_resources);
 
+    m_busy.start("Loading Descriptor");
     std::thread([=, this]() {
-      m_busy.start("Loading");
       m_lastSceneDirectory = filename.parent_path();
-      createScene(filename);
+      createSceneFromDescriptor(filename);
       m_busy.stop();
     }).detach();
+  }
+  else if(nvutils::extensionMatches(filename, ".gltf") || nvutils::extensionMatches(filename, ".glb")
+          || nvutils::extensionMatches(filename, ".obj"))
+  {
+    if(m_busy.isBusy())
+      return;
+
+    // Shift state: when dropping from another app, our window often doesn't have focus so
+    // ImGui/GLFW don't see the key. On Windows use GetKeyState (state when the drop message
+    // was generated) so it works for Explorer, Everything, and other DnD sources.
+    bool shiftHeld = false;
+#if defined(_WIN32)
+    shiftHeld = (GetKeyState(VK_SHIFT) & 0x8000) != 0;
+#else
+    shiftHeld = ImGui::IsKeyDown(ImGuiKey_LeftShift) || ImGui::IsKeyDown(ImGuiKey_RightShift);
+#endif
+
+    if(shiftHeld)
+    {
+      onMergeScene(filename);
+    }
+    else
+    {
+      m_cmdBufferQueue = {};  // Clear the command buffer queue
+      cleanupScene();         // Cleanup current scene
+      m_rasterizer.freeRecordCommandBuffer(m_resources);
+
+      // Set busy BEFORE starting the worker thread to prevent re-entrant drops
+      m_busy.start("Loading");
+
+      std::thread([=, this]() {
+        m_lastSceneDirectory = filename.parent_path();
+        createScene(filename);
+        m_busy.stop();
+      }).detach();
+    }
   }
   else if(nvutils::extensionMatches(filename, ".hdr"))
   {
@@ -505,7 +674,7 @@ void GltfRenderer::onFileDrop(const std::filesystem::path& filename)
 // Save the scene
 bool GltfRenderer::save(const std::filesystem::path& filename)
 {
-  if(m_resources.scene.valid() && !filename.empty())
+  if(m_resources.getScene() && m_resources.getScene()->valid() && !filename.empty())
   {
     std::vector<nvvkgltf::RenderCamera> cameras = nvvkgltf::getCamerasFromWidget();
 
@@ -530,11 +699,11 @@ bool GltfRenderer::save(const std::filesystem::path& filename)
       }
 
       // Set all cameras
-      m_resources.scene.setSceneCameras(cameras);
+      m_resources.getScene()->setSceneCameras(cameras);
     }
 
     // Saving the scene
-    return m_resources.scene.save(filename);
+    return m_resources.getScene()->save(filename);
   }
   return false;
 }
@@ -606,24 +775,162 @@ void GltfRenderer::tonemap(VkCommandBuffer cmd)
 }
 
 //--------------------------------------------------------------------------------------------------
-// Render the silhouette of the selected object
+// Render the silhouette of the selected object(s)
+//
+// Selection visualization uses an ObjectID buffer (R32_UINT, filled on frame 0 by the path tracer
+// with the first-hit render node ID per pixel) and a selection bitmask (one bit per
+// render node). The silhouette compute shader reads ObjectID per pixel, checks the bitmask, and
+// applies a Sobel edge filter where the bit is set, then composites the outline onto the image.
 void GltfRenderer::silhouette(VkCommandBuffer cmd)
 {
-  // Adding the silhouette pass after all rendering passes
-  if(m_resources.selectedRenderNode > -1)
+  // Sync with UI: when selection was cleared in the scene browser (e.g. toggle off), no event
+  // is emitted, so we clear Resources here so the silhouette does not keep drawing.
+  if(!m_sceneSelection.hasSelection())
+    m_resources.selectedRenderNodes.clear();
+
+  // Run the silhouette pass only when something is selected (one primitive or a node and its branch).
+  // We rebuild the CPU bitmask from selectedRenderNodes, upload it, then dispatch the silhouette compute.
+  if(m_sceneSelection.hasSelection())
   {
     NVVK_DBG_SCOPE(cmd);  // <-- Helps to debug in NSight
     auto timerSection = m_profilerGpuTimer.cmdFrameSection(cmd, __FUNCTION__);
+
+    // Rebuild selection bitmask and ensure GPU buffer exists and is up to date.
+    int numRenderNodes = m_resources.getScene() && m_resources.getScene()->valid() ?
+                             static_cast<int>(m_resources.getScene()->getRenderNodes().size()) :
+                             0;
+    m_resources.updateSelectionBitMask(numRenderNodes);
+    const VkDeviceSize bitmaskBytes = m_resources.selectionBitMask.size() * sizeof(uint32_t);
+    if(bitmaskBytes > 0)
+    {
+      // Build or update the selection bitmask buffer
+      if(m_resources.bSelectionBitMask.buffer == VK_NULL_HANDLE || m_resources.bSelectionBitMask.bufferSize < bitmaskBytes)
+      {
+        if(m_resources.bSelectionBitMask.buffer != VK_NULL_HANDLE)
+        {
+          // SYNC NOTE: Wait required before destroying buffer that may be in-flight on the GPU.
+          // This only triggers when node count grows past the current allocation (infrequent).
+          vkQueueWaitIdle(m_app->getQueue(0).queue);
+          m_resources.allocator.destroyBuffer(m_resources.bSelectionBitMask);
+        }
+        NVVK_CHECK(m_resources.allocator.createBuffer(m_resources.bSelectionBitMask, bitmaskBytes,
+                                                      VK_BUFFER_USAGE_2_STORAGE_BUFFER_BIT | VK_BUFFER_USAGE_2_SHADER_DEVICE_ADDRESS_BIT
+                                                          | VK_BUFFER_USAGE_2_TRANSFER_DST_BIT,
+                                                      VMA_MEMORY_USAGE_CPU_TO_GPU));
+        NVVK_DBG_NAME(m_resources.bSelectionBitMask.buffer);
+      }
+
+      // In case the bitmask is too large (> 524,288 render nodes), we need to update it in chunks
+      constexpr VkDeviceSize kMaxCmdUpdateSize = 65536;
+      for(VkDeviceSize offset = 0; offset < bitmaskBytes; offset += kMaxCmdUpdateSize)
+      {
+        const VkDeviceSize chunkSize = std::min(kMaxCmdUpdateSize, bitmaskBytes - offset);
+        vkCmdUpdateBuffer(cmd, m_resources.bSelectionBitMask.buffer, offset, chunkSize,
+                          reinterpret_cast<const uint8_t*>(m_resources.selectionBitMask.data()) + offset);
+      }
+      nvvk::cmdMemoryBarrier(cmd, VK_PIPELINE_STAGE_2_TRANSFER_BIT, VK_PIPELINE_STAGE_2_COMPUTE_SHADER_BIT);
+    }
 
     std::vector<VkDescriptorImageInfo> imageInfos = {
         m_resources.gBuffers.getDescriptorImageInfo(Resources::eImgSelection),
         m_resources.gBuffers.getDescriptorImageInfo(Resources::eImgTonemapped),
     };
-    m_silhouette.dispatch(cmd, m_resources.gBuffers.getSize(), imageInfos);
+    VkDescriptorBufferInfo bitmaskBufferInfo = {m_resources.bSelectionBitMask.buffer, 0, bitmaskBytes};
+    m_silhouette.dispatch(cmd, m_resources.gBuffers.getSize(), imageInfos, bitmaskBufferInfo,
+                          static_cast<uint32_t>(m_resources.selectionBitMask.size()));
     nvvk::cmdMemoryBarrier(cmd, VK_PIPELINE_STAGE_2_COMPUTE_SHADER_BIT, VK_PIPELINE_STAGE_2_FRAGMENT_SHADER_BIT);
   }
 }
 
+//--------------------------------------------------------------------------------------------------
+// Render visual helpers (grid + transform gizmo) onto the tonemapped image
+void GltfRenderer::renderVisualHelpers(VkCommandBuffer cmd)
+{
+  // Sync grid visibility from settings
+  m_visualHelpers.grid.setVisible(m_resources.settings.showGrid);
+
+  // Sync gizmo attachment from selection state
+  updateGizmoAttachment();
+
+  if(!m_visualHelpers.shouldRender())
+    return;
+
+  NVVK_DBG_SCOPE(cmd);
+
+  const VkExtent2D size = m_resources.gBuffers.getSize();
+  glm::vec2        viewportSize(static_cast<float>(size.width), static_cast<float>(size.height));
+  glm::vec2        depthBufferSize = viewportSize;
+#if defined(USE_DLSS)
+  const DlssDenoiser* dlss = m_pathTracer.getDlssDenoiser();
+  if(dlss && dlss->isEnabled())
+  {
+    const VkExtent2D rs = dlss->getRenderSize();
+    depthBufferSize     = {static_cast<float>(rs.width), static_cast<float>(rs.height)};
+  }
+#endif
+
+  m_visualHelpers.render(cmd, m_resources.gBuffers.getColorImage(Resources::eImgTonemapped),
+                         m_resources.gBuffers.getColorImageView(Resources::eImgTonemapped), m_resources.descriptorSet,
+                         m_cameraManip->getViewMatrix(), m_cameraManip->getPerspectiveMatrix(), viewportSize, depthBufferSize);
+}
+
+//--------------------------------------------------------------------------------------------------
+// Update gizmo attachment based on current node selection
+void GltfRenderer::updateGizmoAttachment()
+{
+  if(!m_resources.settings.showGizmo || !m_resources.getScene() || !m_resources.getScene()->valid())
+  {
+    if(m_gizmoNodeIndex >= 0)
+    {
+      m_visualHelpers.transform.clearAttachment();
+      m_gizmoNodeIndex = -1;
+    }
+    return;
+  }
+
+  int nodeIdx = -1;
+  if(m_sceneSelection.hasSelection())
+  {
+    auto sel = m_sceneSelection.getSelection();
+    if(sel.type == SceneSelection::SelectionType::eNode || sel.type == SceneSelection::SelectionType::ePrimitive)
+    {
+      nodeIdx = sel.nodeIndex;
+    }
+  }
+
+  if(nodeIdx < 0)
+  {
+    if(m_gizmoNodeIndex >= 0)
+    {
+      m_visualHelpers.transform.clearAttachment();
+      m_gizmoNodeIndex = -1;
+    }
+    return;
+  }
+
+  // Attach or update if selection changed
+  if(nodeIdx != m_gizmoNodeIndex)
+  {
+    m_gizmoNodeIndex = nodeIdx;
+
+    glm::quat rotation;
+    tinygltf::utils::getNodeTRS(m_resources.getScene()->editor().getNode(nodeIdx), m_gizmoPosition, rotation, m_gizmoScale);
+    m_gizmoRotation = glm::degrees(glm::eulerAngles(rotation));
+
+    int parentIdx = m_resources.getScene()->editor().getNodeParent(nodeIdx);
+    m_gizmoParentWorldMatrix = (parentIdx >= 0) ? m_resources.getScene()->editor().getNodeWorldMatrix(parentIdx) : glm::mat4(1.f);
+
+    m_visualHelpers.transform.attachTransform(&m_gizmoPosition, &m_gizmoRotation, &m_gizmoScale);
+    m_visualHelpers.transform.setParentWorldMatrix(&m_gizmoParentWorldMatrix);
+  }
+  else if(!m_visualHelpers.transform.isDragging())
+  {
+    // Re-read TRS from the scene node so inspector edits are reflected immediately
+    glm::quat rotation;
+    tinygltf::utils::getNodeTRS(m_resources.getScene()->editor().getNode(nodeIdx), m_gizmoPosition, rotation, m_gizmoScale);
+    m_gizmoRotation = glm::degrees(glm::eulerAngles(rotation));
+  }
+}
 
 //--------------------------------------------------------------------------------------------------
 // Set DLSS hardware/extension availability
@@ -638,7 +945,8 @@ void GltfRenderer::setDlssHardwareAvailability(bool available)
 void GltfRenderer::createScene(const std::filesystem::path& sceneFilename)
 {
   nvutils::ScopedTimer st(__FUNCTION__);
-  m_uiSceneGraph.setModel(nullptr);
+  m_sceneSelection.clearSelection();  // Clear selection in new UI system
+  m_resources.selectedRenderNodes.clear();
 
   if(sceneFilename.empty())
   {
@@ -669,7 +977,9 @@ void GltfRenderer::createScene(const std::filesystem::path& sceneFilename)
       TinyConverter   converter;
       tinygltf::Model model;
       converter.convert(model, reader);
-      m_resources.scene.takeModel(std::move(model));
+      auto scn = std::make_unique<nvvkgltf::Scene>();
+      scn->takeModel(std::move(model));
+      m_resources.scene = std::move(scn);
     }
     else
     {
@@ -682,25 +992,36 @@ void GltfRenderer::createScene(const std::filesystem::path& sceneFilename)
   else
   {
     LOGI("Loading scene: %s\n", nvutils::utf8FromPath(filename).c_str());
-    if(!m_resources.scene.load(filename))  // Loading the scene
+    auto scn = std::make_unique<nvvkgltf::Scene>();
+    scn->supportedExtensions().insert(EXT_TEXTURE_WEBP_EXTENSION_NAME);  // Register support for WebP images in glTF (local to this project)
+    if(!scn->load(filename))
     {
       LOGW("Error loading scene: %s\n", nvutils::utf8FromPath(filename).c_str());
       removeFromRecentFiles(filename);
       return;
     }
+    m_resources.scene = std::move(scn);
   }
 
   // Scene is loaded, we can create the Vulkan scene
   createVulkanScene();
 
-  // UI needs to be updated
-  m_uiSceneGraph.setModel(&m_resources.scene.getModel());
-  m_uiSceneGraph.setBbox(m_resources.scene.getSceneBounds());
-  m_resources.settings.infinitePlaneDistance = m_resources.scene.getSceneBounds().min().y;  // Set the infinite plane distance to the bottom of the scene
+  nvvkgltf::Scene* scene = m_resources.getScene();
+  // Scene Browser system
+  m_sceneBrowser.setScene(scene);
+  m_sceneBrowser.setSelection(&m_sceneSelection);
+  m_sceneBrowser.setUndoStack(&m_undoStack);
+  m_sceneBrowser.setBbox(scene->getSceneBounds());
+
+  m_inspector.setScene(scene);
+  m_inspector.setSelection(&m_sceneSelection);
+  m_inspector.setUndoStack(&m_undoStack);
+  m_inspector.setBbox(scene->getSceneBounds());
+
+  m_resources.settings.infinitePlaneDistance = scene->getSceneBounds().min().y;  // Set the infinite plane distance to the bottom of the scene
 
   // Set camera from scene
-  nvvkgltf::addSceneCamerasToWidget(m_cameraManip, filename, m_resources.scene.getRenderCameras(),
-                                    m_resources.scene.getSceneBounds());
+  nvvkgltf::addSceneCamerasToWidget(m_cameraManip, filename, scene->getRenderCameras(), scene->getSceneBounds());
 
   // Default sky parameters
   m_resources.skyParams = {};
@@ -722,23 +1043,185 @@ void GltfRenderer::createScene(const std::filesystem::path& sceneFilename)
 }
 
 //--------------------------------------------------------------------------------------------------
+// Load a .scene.json / .glXf descriptor: merge each model into a single Scene, duplicate for instances.
+//
+void GltfRenderer::createSceneFromDescriptor(const std::filesystem::path& descriptorPath)
+{
+  nvutils::ScopedTimer st(__FUNCTION__);
+  m_sceneSelection.clearSelection();
+  m_resources.selectedRenderNodes.clear();
+
+  SceneDescriptor desc;
+  if(!loadSceneDescriptor(descriptorPath, desc) || desc.models.empty())
+    return;
+
+  // Build the scene locally so it's not visible to the UI thread during construction
+  auto scn = std::make_unique<nvvkgltf::Scene>();
+  scn->supportedExtensions().insert(EXT_TEXTURE_WEBP_EXTENSION_NAME);
+  nvvkgltf::Scene* scene = scn.get();
+
+  auto instancesByModel = desc.getInstancesByModel();
+
+  for(const auto& [modelIdx, instances] : instancesByModel)
+  {
+    const auto& modelEntry     = desc.models[modelIdx];
+    int         wrapperNodeIdx = scene->mergeScene(modelEntry.resolvedPath, static_cast<uint32_t>(m_maxTextures));
+    if(wrapperNodeIdx < 0)
+    {
+      LOGE("Failed to merge model: %s\n", nvutils::utf8FromPath(modelEntry.resolvedPath).c_str());
+      continue;
+    }
+    const auto& firstInst = *instances[0];
+    scene->editor().setNodeTRS(wrapperNodeIdx, firstInst.translation, firstInst.rotation, firstInst.scale);
+    if(!firstInst.name.empty())
+      scene->getModel().nodes[wrapperNodeIdx].name = firstInst.name;
+
+    for(size_t i = 1; i < instances.size(); ++i)
+    {
+      const auto& inst        = *instances[i];
+      int         copyNodeIdx = scene->editor().duplicateNode(wrapperNodeIdx, false);
+      if(copyNodeIdx < 0)
+      {
+        LOGE("Failed to duplicate node for instance: %s\n", nvutils::utf8FromPath(modelEntry.resolvedPath).c_str());
+        continue;
+      }
+      scene->editor().setNodeTRS(copyNodeIdx, inst.translation, inst.rotation, inst.scale);
+      if(!inst.name.empty())
+        scene->getModel().nodes[copyNodeIdx].name = inst.name;
+    }
+  }
+
+  if(!scene->valid())
+  {
+    LOGW("Scene descriptor produced no valid scene\n");
+    return;
+  }
+
+  scene->setCurrentScene(scene->getCurrentScene());  // Final reparse: world matrices + render nodes
+
+  // Publish to resources only when fully constructed (UI thread can now see it)
+  m_resources.scene = std::move(scn);
+  createVulkanScene();
+
+  m_sceneBrowser.setScene(scene);
+  m_sceneBrowser.setSelection(&m_sceneSelection);
+  m_sceneBrowser.setUndoStack(&m_undoStack);
+  m_sceneBrowser.setBbox(scene->getSceneBounds());
+
+  m_inspector.setScene(scene);
+  m_inspector.setSelection(&m_sceneSelection);
+  m_inspector.setUndoStack(&m_undoStack);
+  m_inspector.setBbox(scene->getSceneBounds());
+
+  m_resources.settings.infinitePlaneDistance = scene->getSceneBounds().min().y;
+
+  nvvkgltf::addSceneCamerasToWidget(m_cameraManip, descriptorPath, scene->getRenderCameras(), scene->getSceneBounds());
+
+  m_resources.skyParams = {};
+
+  if(!updateTextures())
+  {
+    LOGE("Failed to update textures from descriptor scene\n");
+    vkDeviceWaitIdle(m_device);
+    cleanupScene();
+    return;
+  }
+
+  addToRecentFiles(descriptorPath);
+}
+
+//--------------------------------------------------------------------------------------------------
 // Helper function to cleanup the current scene
 //
 void GltfRenderer::cleanupScene()
 {
-  m_resources.scene.destroy();
+  m_undoStack.clear();
+  m_resources.scene.reset();
   m_resources.sceneVk.destroy();
   m_resources.sceneRtx.destroy();
-  m_uiSceneGraph.setModel(nullptr);
-  m_resources.selectedRenderNode = -1;
+  m_sceneBrowser.setScene(nullptr);
+  m_inspector.setScene(nullptr);
+  m_sceneSelection.clearSelection();  // Clear selection in new UI system
+  m_resources.selectedRenderNodes.clear();
 
   // Reset animation control to avoid out-of-bounds access when loading a scene with fewer animations
-  m_animControl.currentAnimation = 0;
+  m_sceneBrowser.getAnimationControl().currentAnimation = 0;
 
   // Reset memory statistics for the new scene
   // Keeps lifetime allocation/deallocation counts but resets current and peak values
   m_resources.sceneVk.getMemoryTracker().reset();
   m_resources.sceneRtx.getMemoryTracker().reset();
+}
+
+//--------------------------------------------------------------------------------------------------
+// Unified scene rebuild with optional texture update
+// Internal helper that consolidates the common rebuild logic between geometry-only and full rebuilds
+//
+void GltfRenderer::rebuildVulkanSceneInternal(bool rebuildTextures)
+{
+  // SYNC NOTE: Full scene rebuild (merge/compact/geometry change) — wait ensures GPU is idle.
+  NVVK_CHECK(vkQueueWaitIdle(m_app->getQueue(0).queue));
+
+  // Destroy RTX resources (always)
+  m_resources.sceneRtx.destroy();
+
+  // For geometry-only rebuild: call destroyGeometry
+  // For full rebuild with textures: skip destruction here because create() will call destroy() internally
+  if(!rebuildTextures)
+  {
+    m_resources.sceneVk.destroyGeometry();  // Geometry only for non-texture rebuild
+  }
+
+  // Re-parse the scene to update RenderPrimitives with new accessor counts
+  nvvkgltf::Scene* scene = m_resources.getScene();
+  if(scene)
+    scene->setCurrentScene(scene->getCurrentScene());
+
+  // Recreate geometry resources
+  {
+    VkCommandBuffer cmd{};
+    nvvk::beginSingleTimeCommands(cmd, m_device, m_transientCmdPool);
+
+    if(rebuildTextures)
+    {
+      // Full scene creation including textures
+      m_resources.sceneVk.setImageLoadCallback(webPLoadCallback);
+      m_resources.sceneVk.create(cmd, m_resources.staging, *scene, false);
+    }
+    else
+    {
+      // Geometry only (preserves textures)
+      m_resources.sceneVk.createGeometry(cmd, m_resources.staging, *scene);
+    }
+
+    m_resources.staging.cmdUploadAppended(cmd);
+    {
+      std::lock_guard<std::mutex> lock(m_cmdBufferQueueMutex);
+      m_cmdBufferQueue.push({cmd, false});
+    }
+  }
+
+  // Rebuild acceleration structures
+  buildAccelerationStructures();
+
+  // Update UI system
+  scene = m_resources.getScene();
+  if(scene)
+  {
+    m_sceneBrowser.setScene(scene);
+    m_sceneBrowser.setBbox(scene->getSceneBounds());
+    m_inspector.setScene(scene);
+    m_inspector.setBbox(scene->getSceneBounds());
+  }
+
+  // Update textures if requested
+  if(rebuildTextures)
+  {
+    if(!updateTextures())
+    {
+      LOGE("Failed to update textures - scene may not render correctly\n");
+    }
+  }
 }
 
 //--------------------------------------------------------------------------------------------------
@@ -755,35 +1238,18 @@ void GltfRenderer::cleanupScene()
 //
 void GltfRenderer::rebuildSceneFromModel()
 {
-  vkDeviceWaitIdle(m_device);
+  m_undoStack.clear();
+  rebuildVulkanSceneInternal(false);  // Geometry only, preserve textures
+}
 
-  // Destroy only geometry resources (preserve textures - they didn't change)
-  m_resources.sceneRtx.destroy();
-  m_resources.sceneVk.destroyGeometry();
-
-  // Re-parse the scene to update RenderPrimitives with new accessor counts
-  m_resources.scene.setCurrentScene(m_resources.scene.getCurrentScene());
-
-  // Recreate only geometry resources
-  {
-    VkCommandBuffer cmd{};
-    nvvk::beginSingleTimeCommands(cmd, m_device, m_transientCmdPool);
-    m_resources.sceneVk.createGeometry(cmd, m_resources.staging, m_resources.scene);
-    m_resources.staging.cmdUploadAppended(cmd);
-    {
-      std::lock_guard<std::mutex> lock(m_cmdBufferQueueMutex);
-      m_cmdBufferQueue.push({cmd, false});
-    }
-  }
-
-  // Rebuild acceleration structures
-  buildAccelerationStructures();
-
-  // Update UI with the modified model
-  m_uiSceneGraph.setModel(&m_resources.scene.getModel());
-  m_uiSceneGraph.setBbox(m_resources.scene.getSceneBounds());
-
-  // Note: No updateTextures() needed - textures were preserved
+//--------------------------------------------------------------------------------------------------
+// Full GPU resource rebuild including textures. Used after operations that modify the model
+// structure: merging scenes, compacting resources, etc.
+// Destroys all GPU resources and recreates from the current model.
+//
+void GltfRenderer::rebuildVulkanSceneFull()
+{
+  rebuildVulkanSceneInternal(true);  // Full rebuild with textures
 }
 
 //--------------------------------------------------------------------------------------------------
@@ -801,7 +1267,7 @@ void GltfRenderer::createVulkanScene()
     VkCommandBuffer cmd{};
     nvvk::beginSingleTimeCommands(cmd, m_device, m_transientCmdPool);
 
-    m_resources.sceneVk.create(cmd, m_resources.staging, m_resources.scene, false);  // Creating the scene in Vulkan buffers
+    m_resources.sceneVk.create(cmd, m_resources.staging, *m_resources.getScene(), false);  // Creating the scene in Vulkan buffers
     m_resources.staging.cmdUploadAppended(cmd);
     {
       std::lock_guard<std::mutex> lock(m_cmdBufferQueueMutex);
@@ -820,11 +1286,11 @@ void GltfRenderer::buildAccelerationStructures()
 {
   VkBuildAccelerationStructureFlagsKHR flags = VK_BUILD_ACCELERATION_STRUCTURE_PREFER_FAST_TRACE_BIT_KHR
                                                | VK_BUILD_ACCELERATION_STRUCTURE_ALLOW_COMPACTION_BIT_KHR;
-  if(m_resources.scene.hasAnimation())
+  if(m_resources.getScene() && m_resources.getScene()->animation().hasAnimation())
     flags |= VK_BUILD_ACCELERATION_STRUCTURE_ALLOW_UPDATE_BIT_KHR;
 
   // Create the bottom-level acceleration structure descriptors (no building yet)
-  m_resources.sceneRtx.createBottomLevelAccelerationStructure(m_resources.scene, m_resources.sceneVk, flags);
+  m_resources.sceneRtx.createBottomLevelAccelerationStructure(*m_resources.getScene(), m_resources.sceneVk, flags);
 
   // Build the bottom-level acceleration structure
   // Memory-conscious approach: build within a fixed memory budget using multiple command buffers if needed
@@ -837,8 +1303,8 @@ void GltfRenderer::buildAccelerationStructures()
     {
       VkCommandBuffer cmd{};
       nvvk::beginSingleTimeCommands(cmd, m_device, m_transientCmdPool);
-      // This won't compact the BLAS, but will create the acceleration structure
-      finished = m_resources.sceneRtx.cmdBuildBottomLevelAccelerationStructure(cmd, 512'000'000);
+      constexpr VkDeviceSize kBlasBuildMemoryBudget = 512ULL * 1024 * 1024;  // 512 MB per build pass
+      finished = m_resources.sceneRtx.cmdBuildBottomLevelAccelerationStructure(cmd, kBlasBuildMemoryBudget);
       {
         std::lock_guard<std::mutex> lock(m_cmdBufferQueueMutex);
         m_cmdBufferQueue.push({cmd, true});  // Mark as BLAS build command for immediate compaction
@@ -854,7 +1320,7 @@ void GltfRenderer::buildAccelerationStructures()
     {
       VkCommandBuffer cmd{};
       nvvk::beginSingleTimeCommands(cmd, m_device, m_transientCmdPool);
-      m_resources.sceneRtx.cmdCreateBuildTopLevelAccelerationStructure(cmd, m_resources.staging, m_resources.scene);
+      m_resources.sceneRtx.cmdCreateBuildTopLevelAccelerationStructure(cmd, m_resources.staging, *m_resources.getScene());
       m_resources.staging.cmdUploadAppended(cmd);
       {
         std::lock_guard<std::mutex> lock(m_cmdBufferQueueMutex);
@@ -862,6 +1328,10 @@ void GltfRenderer::buildAccelerationStructures()
       }
     }
   }
+
+  // Avoid double-build: whoever called us (createVulkanScene, rebuildVulkanSceneInternal, or updateSceneChanges) just queued BLAS+TLAS.
+  if(m_resources.getScene())
+    m_resources.getScene()->getDirtyFlags().primitivesChanged = false;
 }
 
 //--------------------------------------------------------------------------------------------------
@@ -906,7 +1376,7 @@ void GltfRenderer::createResourceBuffers()
 // The descriptor set is shared between the two pipelines
 void GltfRenderer::createDescriptorSets()
 {
-  // Reserve 2050 textures (2000 for scene textures + 50 for other purposes like the environment)
+  // Reserve texture descriptors (m_maxTextures from renderer.hpp, clamped to device limits)
   VkPhysicalDeviceProperties deviceProperties;
   vkGetPhysicalDeviceProperties(m_app->getPhysicalDevice(), &deviceProperties);
   m_maxTextures = std::min(m_maxTextures, deviceProperties.limits.maxDescriptorSetSampledImages - 1);  // Set limits of sample textures (defaut: 100 000)
@@ -957,6 +1427,8 @@ void GltfRenderer::createDescriptorSets()
                                               VK_DESCRIPTOR_TYPE_ACCELERATION_STRUCTURE_KHR, 1, VK_SHADER_STAGE_ALL);
   m_resources.descriptorBinding[1].addBinding(shaderio::BindingPoints::eOutImages, VK_DESCRIPTOR_TYPE_STORAGE_IMAGE, 10,
                                               VK_SHADER_STAGE_ALL);
+  m_resources.descriptorBinding[1].addBinding(shaderio::BindingPoints::eOutDepth, VK_DESCRIPTOR_TYPE_STORAGE_IMAGE, 1,
+                                              VK_SHADER_STAGE_ALL);
 
   NVVK_CHECK(m_resources.descriptorBinding[1].createDescriptorSetLayout(m_device, VK_DESCRIPTOR_SET_LAYOUT_CREATE_PUSH_DESCRIPTOR_BIT_KHR,
                                                                         &m_resources.descriptorSetLayout[1]));
@@ -988,7 +1460,7 @@ bool GltfRenderer::updateTextures()
   VkWriteDescriptorSet allTextures = m_resources.descriptorBinding[0].getWriteSet(shaderio::BindingPoints::eTextures);
   allTextures.dstSet               = m_resources.descriptorSet;
 
-  uint32_t sceneTextureCount = m_resources.sceneVk.nbTextures();
+  uint32_t sceneTextureCount = m_resources.sceneVk.textureCount();
 
   if(sceneTextureCount == 0)
     return true;
@@ -1040,6 +1512,12 @@ void GltfRenderer::updateHdrImages()
 void GltfRenderer::resetFrame()
 {
   m_resources.frameCount = -1;
+}
+
+void GltfRenderer::onUndoRedo()
+{
+  resetFrame();
+  m_sceneBrowser.markCachesDirty();
 }
 
 //--------------------------------------------------------------------------------------------------
@@ -1129,6 +1607,8 @@ void GltfRenderer::destroyResources()
 
   m_resources.allocator.destroyBuffer(m_resources.bFrameInfo);
   m_resources.allocator.destroyBuffer(m_resources.bSkyParams);
+  if(m_resources.bSelectionBitMask.buffer != VK_NULL_HANDLE)
+    m_resources.allocator.destroyBuffer(m_resources.bSelectionBitMask);
 
   vkDestroyDescriptorSetLayout(m_device, m_resources.descriptorSetLayout[0], nullptr);
   vkDestroyDescriptorSetLayout(m_device, m_resources.descriptorSetLayout[1], nullptr);
@@ -1160,104 +1640,59 @@ void GltfRenderer::destroyResources()
 //
 bool GltfRenderer::updateAnimation(VkCommandBuffer cmd)
 {
-  nvvkgltf::Scene& scn = m_resources.scene;
+  nvvkgltf::Scene* scnPtr = m_resources.getScene();
+  if(!scnPtr)
+    return false;
+  nvvkgltf::Scene&  scn      = *scnPtr;
+  AnimationControl& animCtrl = m_sceneBrowser.getAnimationControl();
 
 
-  if(scn.hasAnimation() && m_animControl.doAnimation())
+  if(scn.animation().hasAnimation() && animCtrl.doAnimation())
   {
     auto timerSection = m_profilerGpuTimer.cmdFrameSection(cmd, "Update animation");
 
-    NVVK_DBG_SCOPE(cmd);  // <-- Helps to debug in NSight
+    NVVK_DBG_SCOPE(cmd);
     nvvkgltf::SceneVk&  scnVk  = m_resources.sceneVk;
     nvvkgltf::SceneRtx& scnRtx = m_resources.sceneRtx;
 
-    bool hasMorphOrSkin = !scn.getMorphPrimitives().empty() || !scn.getSkinNodes().empty();
-
-    // Find the current animation and update its time
-    float                    deltaTime = m_animControl.deltaTime();
-    nvvkgltf::AnimationInfo& animInfo  = scn.getAnimationInfo(m_animControl.currentAnimation);
-    if(m_animControl.isReset())
-    {
+    float                    deltaTime = animCtrl.deltaTime();
+    nvvkgltf::AnimationInfo& animInfo  = scn.animation().getAnimationInfo(animCtrl.currentAnimation);
+    if(animCtrl.isReset())
       animInfo.reset();
-    }
     else
-    {
       animInfo.incrementTime(deltaTime);
-    }
 
-    // Update the element values: transformation, weights
-    std::unordered_set<int> dirtyNodeIds = scn.updateAnimation(m_animControl.currentAnimation);
+    // Update animation (marks Scene dirty internally: nodes, and renderNodesVk/Rtx for nodes that have meshes)
+    if(!scn.animation().updateAnimation(animCtrl.currentAnimation))
+      return false;
 
-    // KHR_animation_pointer: Check if any materials/lights were animated and need GPU update
-    auto& animPointer = scn.getAnimationPointer();
-    if(animPointer.hasDirty())
-    {
-      // Materials were animated - surgical update only dirty materials
-      if(!animPointer.getDirtyMaterials().empty())
-      {
-        scnVk.updateMaterialBuffer(m_resources.staging, scn, animPointer.getDirtyMaterials());
-      }
+    animCtrl.clearStates();
 
-      // Lights were animated - surgical update only dirty lights
-      if(!animPointer.getDirtyLights().empty())
-      {
-        scnVk.updateRenderLightsBuffer(m_resources.staging, scn, animPointer.getDirtyLights());
-      }
+    scn.updateNodeWorldMatrices();
+    // Expand dirty nodes to all affected render nodes (including descendants). Needed for transform-only
+    // animated nodes; skin mesh nodes are now marked dirty in Scene::updateAnimation when their joints animate.
+    scn.updateRenderNodeDirtyFromNodes(true);
+    (void)scnVk.syncFromScene(m_resources.staging, scn);
 
-      // Animated visibility changes - update TLAS if needed
-      if(!animPointer.getDirtyNodes().empty())
-      {
-        // Currently only visibility is supported for animation pointer, which is why we directly update TLAS here and not matrices.
-        std::unordered_set<int> dirtyRenderNodes;
-        bool updateAllRenderNodes = scn.collectRenderNodeIndices(animPointer.getDirtyNodes(), dirtyRenderNodes, true, 0.5f);
-        if(updateAllRenderNodes)
-          dirtyRenderNodes.clear();  // empty = full update
-        m_resources.sceneRtx.updateTopLevelAS(cmd, m_resources.staging, m_resources.scene, dirtyRenderNodes);
-      }
-
-      // Clear dirty flags after upload
-      animPointer.clearDirty();
-    }
-
-    m_animControl.clearStates();
-
-    // Update the world matrices of the scene nodes
-    scn.updateNodeWorldMatrices(dirtyNodeIds);
-
-    // Surgical update: only update dirty renderNodes
-    std::unordered_set<int> dirtyRenderNodes;
-    bool updateAllRenderNodes = scn.collectRenderNodeIndices(dirtyNodeIds, dirtyRenderNodes, true, 0.5f);
-    if(updateAllRenderNodes)
-      dirtyRenderNodes.clear();  // empty = full update
-
-    // Update to the GPU the matrices of the rendernodes that changed
-    scnVk.updateRenderNodesBuffer(m_resources.staging, scn, dirtyRenderNodes);
-
-
-    // Update the morph and skinning related buffers
+    bool hasMorphOrSkin = scn.animation().hasMorphTargets() || scn.animation().hasSkinning();
     if(hasMorphOrSkin)
     {
-      auto timerSection = m_profilerGpuTimer.cmdFrameSection(cmd, "Morph or Skin");
-      scnVk.updateRenderPrimitivesBuffer(cmd, m_resources.staging, scn);
+      auto timerSectionMorph = m_profilerGpuTimer.cmdFrameSection(cmd, "Morph or Skin");
+      scnVk.uploadPrimitives(cmd, m_resources.staging, scn);
     }
 
-    // Make sure the staging buffers are uploaded before the acceleration structures are updated
     m_resources.staging.cmdUploadAppended(cmd);
-
-    // Ensure all buffer copy operations complete before acceleration structure build begins
     nvvk::cmdMemoryBarrier(cmd, VK_PIPELINE_STAGE_2_COPY_BIT, VK_PIPELINE_STAGE_2_ACCELERATION_STRUCTURE_BUILD_BIT_KHR,
                            VK_ACCESS_2_TRANSFER_WRITE_BIT, VK_ACCESS_2_SHADER_READ_BIT);
 
-    // Update the bottom-level acceleration structures if morphing or skinning is used
     {
-      auto timerSection = m_profilerGpuTimer.cmdFrameSection(cmd, "AS update");
+      auto timerSectionAS = m_profilerGpuTimer.cmdFrameSection(cmd, "AS update");
       if(hasMorphOrSkin)
         scnRtx.updateBottomLevelAS(cmd, scn);
-
-      // Update the top-level acceleration structure
-      scnRtx.updateTopLevelAS(cmd, m_resources.staging, scn, dirtyRenderNodes);
+      (void)scnRtx.syncTopLevelAS(cmd, m_resources.staging, scn);
     }
 
+    scn.clearDirtyFlags();
     return true;
   }
 
@@ -1265,110 +1700,115 @@ bool GltfRenderer::updateAnimation(VkCommandBuffer cmd)
 }
 
 //--------------------------------------------------------------------------------------------------
-// Update the scene based on changes from UI or animation
-// This is a critical synchronization point for changes to scene data, ensuring that:
-// 1. UI modifications to materials, lights, and transformations are propagated to GPU buffers
-// 2. Animation changes are reflected in acceleration structures
-// 3. Vulkan buffers and acceleration structures remain in sync with scene state
-// 4. Frame counter is reset when needed to restart progressive rendering
-// Returns true if any changes were made that require re-rendering
+// updateSceneChanges
+//
+// Syncs CPU scene state (dirty flags) to GPU: SceneVk buffers (materials, lights, render nodes,
+// vertices) and SceneRtx acceleration structures (BLAS/TLAS). Called once per frame before draw.
+//
+//--------------------------------------------------------------------------------------------------
+// updateSceneChanges phase helpers
+//--------------------------------------------------------------------------------------------------
+void GltfRenderer::updateSceneChanges_BlasRebuild(const nvvkgltf::Scene::DirtyFlags& df)
+{
+  if(df.primitivesChanged)
+    buildAccelerationStructures();
+}
+
+void GltfRenderer::updateSceneChanges_NodeTransforms(nvvkgltf::Scene* scene, const nvvkgltf::Scene::DirtyFlags& df)
+{
+  if(df.nodes.empty())
+    return;
+  scene->updateRenderNodeDirtyFromNodes(true);
+  scene->updateNodeWorldMatrices();
+}
+
+uint32_t GltfRenderer::updateSceneChanges_SyncGpuBuffers(VkCommandBuffer cmd, nvvkgltf::Scene* scene)
+{
+  uint32_t synced = m_resources.sceneVk.syncFromScene(m_resources.staging, *scene);
+
+  if(m_resources.sceneVk.flushSceneDescIfDirty(m_resources.staging, *scene))
+    synced |= nvvkgltf::SceneVk::eSyncRenderNodes;
+
+  if(synced != nvvkgltf::SceneVk::eSyncNone)
+  {
+    m_resources.staging.cmdUploadAppended(cmd);
+  }
+  return synced;
+}
+
+void GltfRenderer::updateSceneChanges_TlasUpdate(VkCommandBuffer cmd, nvvkgltf::Scene* scene)
+{
+  (void)m_resources.sceneRtx.syncTopLevelAS(cmd, m_resources.staging, *scene);
+}
+
+void GltfRenderer::updateSceneChanges_RasterizerInvalidate(bool renderNodeOrNodeDirty)
+{
+  if(renderNodeOrNodeDirty)
+    m_rasterizer.freeRecordCommandBuffer(m_resources);
+}
+
+void GltfRenderer::updateSceneChanges_TangentUpload(VkCommandBuffer cmd, nvvkgltf::Scene* scene, bool& changed)
+{
+  (void)cmd;
+  if(m_resources.dirtyFlags.test(DirtyFlags::eDirtyTangents))
+  {
+    m_resources.sceneVk.uploadVertexBuffers(m_resources.staging, *scene);
+    m_resources.dirtyFlags.reset(DirtyFlags::eDirtyTangents);
+    changed = true;
+  }
+}
+
+void GltfRenderer::updateSceneChanges_Finalize(VkCommandBuffer cmd, bool changed, bool stagingFlushed, nvvkgltf::Scene* scene)
+{
+  if(changed && !stagingFlushed)
+    m_resources.staging.cmdUploadAppended(cmd);
+
+  if(m_resources.getScene())
+    m_resources.getScene()->clearDirtyFlags();
+
+#ifndef NDEBUG
+  if(changed && m_validateGpuSync && scene)
+  {
+    auto mismatches = m_resources.sceneVk.validateGpuSync(*scene, m_resources.sceneRtx.getTlasInstances());
+    for(const auto& m : mismatches)
+      LOGE("GPU sync mismatch: %s\n", m.description.c_str());
+    assert(mismatches.empty() && "GPU sync validation failed -- see log for details");
+  }
+#endif
+}
+
+//--------------------------------------------------------------------------------------------------
+// Sync scene dirty state to GPU (materials, lights, render nodes, BLAS/TLAS, rasterizer state).
+// Returns true if any change was applied (caller may reset frame counter for progressive rendering).
+// All dirty state lives in Scene; this function clears dirty flags at the end.
+//--------------------------------------------------------------------------------------------------
 bool GltfRenderer::updateSceneChanges(VkCommandBuffer cmd)
 {
   auto timerSection = m_profilerGpuTimer.cmdFrameSection(cmd, __FUNCTION__);
 
-  bool changed             = false;
-  changed                  = m_uiSceneGraph.hasAnyChanges();  // Will update command buffer for any changes
-  bool stagingUploadIssued = false;
+  nvvkgltf::Scene* scene = m_resources.getScene();
+  if(!scene)
+    return false;
 
-  // Update the materials
-  if(m_uiSceneGraph.hasMaterialChanged())
-  {
-    m_resources.sceneVk.updateMaterialBuffer(m_resources.staging, m_resources.scene, m_uiSceneGraph.getDirtyMaterials());
-  }
+  const auto& df             = scene->getDirtyFlags();
+  bool        changed        = !df.isEmpty();
+  bool        stagingFlushed = false;
 
-  // When alpha or double side change, the TLAS `VK_GEOMETRY_INSTANCE_*` flag change
-  if(m_uiSceneGraph.hasMaterialInstanceFlagChanges())
-  {
-    const auto& dirtyRenderNodes = m_resources.scene.getMaterialRenderNodes(m_uiSceneGraph.getMaterialInstanceFlagsChanged());
-    m_resources.sceneRtx.updateTopLevelAS(cmd, m_resources.staging, m_resources.scene, dirtyRenderNodes);
-  }
+  const bool renderNodeOrNodeDirty = df.allRenderNodesDirty || !df.renderNodesVk.empty() || !df.nodes.empty();
 
-  // Update the lights
-  if(m_uiSceneGraph.hasLightChanged())
-  {
-    m_resources.sceneVk.updateRenderLightsBuffer(m_resources.staging, m_resources.scene, m_uiSceneGraph.getDirtyLights());
-  }
+  updateSceneChanges_BlasRebuild(df);
+  updateSceneChanges_NodeTransforms(scene, df);
 
-  // Update the render nodes for the material variants
-  if(m_resources.dirtyMaterialVariants.size() > 0)
-  {
-    m_resources.sceneVk.updateRenderNodesBuffer(m_resources.staging, m_resources.scene, m_resources.dirtyMaterialVariants);
-    m_resources.dirtyMaterialVariants.clear();
-    m_rasterizer.freeRecordCommandBuffer(m_resources);
-    changed = true;
-  }
+  uint32_t synced = updateSceneChanges_SyncGpuBuffers(cmd, scene);
+  stagingFlushed  = (synced != nvvkgltf::SceneVk::eSyncNone);
 
-  // Recursive visibility update
-  if(m_uiSceneGraph.hasVisibilityChanged())
-  {
-    const auto& dirtyNodes = m_uiSceneGraph.getDirtyVisibilityNodes();
-    for(auto& dirtyNode : dirtyNodes)
-    {
-      m_resources.scene.updateVisibility(dirtyNode);
-    }
+  nvvk::cmdMemoryBarrier(cmd, VK_PIPELINE_STAGE_2_COPY_BIT, VK_PIPELINE_STAGE_2_ACCELERATION_STRUCTURE_BUILD_BIT_KHR,
+                         VK_ACCESS_2_TRANSFER_WRITE_BIT, VK_ACCESS_2_SHADER_READ_BIT);
 
-    // Update for visibility TLAS
-    std::unordered_set<int> dirtyRenderNodes;
-    bool updateAllRenderNodes = m_resources.scene.collectRenderNodeIndices(dirtyNodes, dirtyRenderNodes, true, 0.5f);
-    if(updateAllRenderNodes)
-      dirtyRenderNodes.clear();  // empty = full update
-    m_resources.sceneRtx.updateTopLevelAS(cmd, m_resources.staging, m_resources.scene, dirtyRenderNodes);
-  }
-
-  // Update the transforms
-  if(m_uiSceneGraph.hasTransformChanged())
-  {
-    SCOPED_TIMER("hasTransformChanged");
-
-    // Surgical update: only update dirty renderNodes (empty set during animation = update all)
-    const auto&             dirtyNodes = m_uiSceneGraph.getDirtyNodes();
-    std::unordered_set<int> dirtyRenderNodes;
-    bool                    updateAllRenderNodes = false;
-
-    // Update the world matrices of the scene nodes
-    m_resources.scene.updateNodeWorldMatrices(dirtyNodes);
-
-    // Find which render nodes need to be updated
-    updateAllRenderNodes = m_resources.scene.collectRenderNodeIndices(dirtyNodes, dirtyRenderNodes, true, 0.5f);
-    if(updateAllRenderNodes)
-      dirtyRenderNodes.clear();  // empty = full update
-    m_resources.sceneVk.updateRenderNodesBuffer(m_resources.staging, m_resources.scene, dirtyRenderNodes);
-    m_resources.sceneVk.updateRenderLightsBuffer(m_resources.staging, m_resources.scene);  // Empty set = update all
-
-    // Make sure the staging buffers are uploaded before the acceleration structures are updated
-    m_resources.staging.cmdUploadAppended(cmd);
-    stagingUploadIssued = true;
-
-    // Ensure all buffer copy operations complete before acceleration structure build begins
-    nvvk::cmdMemoryBarrier(cmd, VK_PIPELINE_STAGE_2_COPY_BIT, VK_PIPELINE_STAGE_2_ACCELERATION_STRUCTURE_BUILD_BIT_KHR,
-                           VK_ACCESS_2_TRANSFER_WRITE_BIT, VK_ACCESS_2_SHADER_READ_BIT);
-    m_resources.sceneRtx.updateTopLevelAS(cmd, m_resources.staging, m_resources.scene, dirtyRenderNodes);
-  }
-
-  // Re-pushing the tangents if they were recomputed
-  if(m_resources.dirtyFlags.test(DirtyFlags::eDirtyTangents))
-  {
-    m_resources.sceneVk.updateVertexBuffers(m_resources.staging, m_resources.scene);
-    m_resources.dirtyFlags.reset(DirtyFlags::eDirtyTangents);
-    changed = true;
-  }
-
-  // Update changes if needed
-  if(changed && !stagingUploadIssued)
-  {
-    m_resources.staging.cmdUploadAppended(cmd);
-  }
-  m_uiSceneGraph.resetChanges();
+  updateSceneChanges_TlasUpdate(cmd, scene);
+  updateSceneChanges_RasterizerInvalidate(renderNodeOrNodeDirty);
+  updateSceneChanges_TangentUpload(cmd, scene, changed);
+  updateSceneChanges_Finalize(cmd, changed, stagingFlushed, scene);
 
   return changed;
 }

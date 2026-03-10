@@ -17,6 +17,13 @@
  * SPDX-License-Identifier: Apache-2.0
  */
 
+//
+// Converts OBJ models (via tinyobjloader) into tinygltf::Model format.
+// Maps OBJ geometry, materials, and textures to glTF 2.0 structures
+// so that OBJ files can be loaded through the same rendering pipeline
+// as native glTF/GLB scenes.
+//
+
 #include "tinygltf_converter.hpp"
 
 

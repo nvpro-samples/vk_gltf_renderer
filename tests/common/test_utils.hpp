@@ -15,6 +15,7 @@ class TestResources
 public:
   static std::filesystem::path getResourcePath(const std::string& filename);
   static std::filesystem::path getTempPath(const std::string& filename);
+  static std::filesystem::path getSampleAssetsPath();  // glTF-Sample-Assets path
   static void                  cleanupTempFiles();
 };
 

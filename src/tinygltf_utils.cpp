@@ -18,6 +18,13 @@
  * SPDX-License-Identifier: Apache-2.0
  */
 
+//
+// Utility functions for working with tinygltf models. Provides helpers
+// for extension parsing (KHR_materials_*), morph target processing,
+// mesh attribute access, normal/tangent recomputation, and other
+// common operations on glTF model data.
+//
+
 #include "tinygltf_utils.hpp"
 
 #include <glm/gtx/norm.hpp>
@@ -30,24 +37,18 @@
 KHR_materials_displacement tinygltf::utils::getDisplacement(const tinygltf::Material& tmat)
 {
   KHR_materials_displacement gmat;
-  if(tinygltf::utils::hasElementName(tmat.extensions, KHR_MATERIALS_DISPLACEMENT_EXTENSION_NAME))
+  if(const auto* ext = tinygltf::utils::findExtension(tmat.extensions, KHR_MATERIALS_DISPLACEMENT_EXTENSION_NAME))
   {
-    const tinygltf::Value& ext = tinygltf::utils::getElementValue(tmat.extensions, KHR_MATERIALS_DISPLACEMENT_EXTENSION_NAME);
-    tinygltf::utils::getValue(ext, "displacementGeometryTexture", gmat.displacementGeometryTexture);
-    tinygltf::utils::getValue(ext, "displacementGeometryFactor", gmat.displacementGeometryFactor);
-    tinygltf::utils::getValue(ext, "displacementGeometryOffset", gmat.displacementGeometryOffset);
+    tinygltf::utils::getValue(*ext, "displacementGeometryTexture", gmat.displacementGeometryTexture);
+    tinygltf::utils::getValue(*ext, "displacementGeometryFactor", gmat.displacementGeometryFactor);
+    tinygltf::utils::getValue(*ext, "displacementGeometryOffset", gmat.displacementGeometryOffset);
   }
   return gmat;
 }
 
 void tinygltf::utils::setDisplacement(tinygltf::Material& tmat, const KHR_materials_displacement& displacement)
 {
-  if(!tinygltf::utils::hasElementName(tmat.extensions, KHR_MATERIALS_DISPLACEMENT_EXTENSION_NAME))
-  {
-    tmat.extensions[KHR_MATERIALS_DISPLACEMENT_EXTENSION_NAME] = tinygltf::Value(tinygltf::Value::Object());
-  }
-
-  tinygltf::Value& ext = tmat.extensions[KHR_MATERIALS_DISPLACEMENT_EXTENSION_NAME];
+  tinygltf::Value& ext = tinygltf::utils::ensureExtension(tmat.extensions, KHR_MATERIALS_DISPLACEMENT_EXTENSION_NAME);
   tinygltf::utils::setValue(ext, "displacementGeometryTexture", displacement.displacementGeometryTexture);
   tinygltf::utils::setValue(ext, "displacementGeometryFactor", displacement.displacementGeometryFactor);
   tinygltf::utils::setValue(ext, "displacementGeometryOffset", displacement.displacementGeometryOffset);
@@ -56,22 +57,16 @@ void tinygltf::utils::setDisplacement(tinygltf::Material& tmat, const KHR_materi
 KHR_materials_emissive_strength tinygltf::utils::getEmissiveStrength(const tinygltf::Material& tmat)
 {
   KHR_materials_emissive_strength gmat;
-  if(tinygltf::utils::hasElementName(tmat.extensions, KHR_MATERIALS_EMISSIVE_STRENGTH_EXTENSION_NAME))
+  if(const auto* ext = tinygltf::utils::findExtension(tmat.extensions, KHR_MATERIALS_EMISSIVE_STRENGTH_EXTENSION_NAME))
   {
-    const tinygltf::Value& ext = tinygltf::utils::getElementValue(tmat.extensions, KHR_MATERIALS_EMISSIVE_STRENGTH_EXTENSION_NAME);
-    tinygltf::utils::getValue(ext, "emissiveStrength", gmat.emissiveStrength);
+    tinygltf::utils::getValue(*ext, "emissiveStrength", gmat.emissiveStrength);
   }
   return gmat;
 }
 
 void tinygltf::utils::setEmissiveStrength(tinygltf::Material& tmat, const KHR_materials_emissive_strength& emissiveStrength)
 {
-  if(!tinygltf::utils::hasElementName(tmat.extensions, KHR_MATERIALS_EMISSIVE_STRENGTH_EXTENSION_NAME))
-  {
-    tmat.extensions[KHR_MATERIALS_EMISSIVE_STRENGTH_EXTENSION_NAME] = tinygltf::Value(tinygltf::Value::Object());
-  }
-
-  tinygltf::Value& ext = tmat.extensions[KHR_MATERIALS_EMISSIVE_STRENGTH_EXTENSION_NAME];
+  tinygltf::Value& ext = tinygltf::utils::ensureExtension(tmat.extensions, KHR_MATERIALS_EMISSIVE_STRENGTH_EXTENSION_NAME);
   tinygltf::utils::setValue(ext, "emissiveStrength", emissiveStrength.emissiveStrength);
 }
 
@@ -79,25 +74,19 @@ void tinygltf::utils::setEmissiveStrength(tinygltf::Material& tmat, const KHR_ma
 KHR_materials_volume tinygltf::utils::getVolume(const tinygltf::Material& tmat)
 {
   KHR_materials_volume gmat;
-  if(tinygltf::utils::hasElementName(tmat.extensions, KHR_MATERIALS_VOLUME_EXTENSION_NAME))
+  if(const auto* ext = tinygltf::utils::findExtension(tmat.extensions, KHR_MATERIALS_VOLUME_EXTENSION_NAME))
   {
-    const tinygltf::Value& ext = tinygltf::utils::getElementValue(tmat.extensions, KHR_MATERIALS_VOLUME_EXTENSION_NAME);
-    tinygltf::utils::getValue(ext, "thicknessFactor", gmat.thicknessFactor);
-    tinygltf::utils::getValue(ext, "thicknessTexture", gmat.thicknessTexture);
-    tinygltf::utils::getValue(ext, "attenuationDistance", gmat.attenuationDistance);
-    tinygltf::utils::getArrayValue(ext, "attenuationColor", gmat.attenuationColor);
+    tinygltf::utils::getValue(*ext, "thicknessFactor", gmat.thicknessFactor);
+    tinygltf::utils::getValue(*ext, "thicknessTexture", gmat.thicknessTexture);
+    tinygltf::utils::getValue(*ext, "attenuationDistance", gmat.attenuationDistance);
+    tinygltf::utils::getArrayValue(*ext, "attenuationColor", gmat.attenuationColor);
   }
   return gmat;
 }
 
 void tinygltf::utils::setVolume(tinygltf::Material& tmat, const KHR_materials_volume& volume)
 {
-  if(!tinygltf::utils::hasElementName(tmat.extensions, KHR_MATERIALS_VOLUME_EXTENSION_NAME))
-  {
-    tmat.extensions[KHR_MATERIALS_VOLUME_EXTENSION_NAME] = tinygltf::Value(tinygltf::Value::Object());
-  }
-
-  tinygltf::Value& ext = tmat.extensions[KHR_MATERIALS_VOLUME_EXTENSION_NAME];
+  tinygltf::Value& ext = tinygltf::utils::ensureExtension(tmat.extensions, KHR_MATERIALS_VOLUME_EXTENSION_NAME);
   tinygltf::utils::setValue(ext, "thicknessFactor", volume.thicknessFactor);
   tinygltf::utils::setValue(ext, "thicknessTexture", volume.thicknessTexture);
   tinygltf::utils::setValue(ext, "attenuationDistance", volume.attenuationDistance);
@@ -107,11 +96,10 @@ void tinygltf::utils::setVolume(tinygltf::Material& tmat, const KHR_materials_vo
 KHR_materials_volume_scatter tinygltf::utils::getVolumeScatter(const tinygltf::Material& tmat)
 {
   KHR_materials_volume_scatter gmat;
-  if(tinygltf::utils::hasElementName(tmat.extensions, KHR_MATERIALS_VOLUME_SCATTER_EXTENSION_NAME))
+  if(const auto* ext = tinygltf::utils::findExtension(tmat.extensions, KHR_MATERIALS_VOLUME_SCATTER_EXTENSION_NAME))
   {
-    const tinygltf::Value& ext = tinygltf::utils::getElementValue(tmat.extensions, KHR_MATERIALS_VOLUME_SCATTER_EXTENSION_NAME);
-    tinygltf::utils::getArrayValue(ext, "multiscatterColor", gmat.multiscatterColor);
-    tinygltf::utils::getValue(ext, "scatterAnisotropy", gmat.scatterAnisotropy);
+    tinygltf::utils::getArrayValue(*ext, "multiscatterColor", gmat.multiscatterColor);
+    tinygltf::utils::getValue(*ext, "scatterAnisotropy", gmat.scatterAnisotropy);
     gmat.scatterAnisotropy = std::clamp(gmat.scatterAnisotropy, -0.999f, 0.999f);
   }
   return gmat;
@@ -119,12 +107,7 @@ KHR_materials_volume_scatter tinygltf::utils::getVolumeScatter(const tinygltf::M
 
 void tinygltf::utils::setVolumeScatter(tinygltf::Material& tmat, const KHR_materials_volume_scatter& scatter)
 {
-  if(!tinygltf::utils::hasElementName(tmat.extensions, KHR_MATERIALS_VOLUME_SCATTER_EXTENSION_NAME))
-  {
-    tmat.extensions[KHR_MATERIALS_VOLUME_SCATTER_EXTENSION_NAME] = tinygltf::Value(tinygltf::Value::Object());
-  }
-
-  tinygltf::Value& ext = tmat.extensions[KHR_MATERIALS_VOLUME_SCATTER_EXTENSION_NAME];
+  tinygltf::Value& ext = tinygltf::utils::ensureExtension(tmat.extensions, KHR_MATERIALS_VOLUME_SCATTER_EXTENSION_NAME);
   tinygltf::utils::setArrayValue(ext, "multiscatterColor", 3, glm::value_ptr(scatter.multiscatterColor));
   tinygltf::utils::setValue(ext, "scatterAnisotropy", scatter.scatterAnisotropy);
 }
@@ -132,7 +115,7 @@ void tinygltf::utils::setVolumeScatter(tinygltf::Material& tmat, const KHR_mater
 KHR_materials_unlit tinygltf::utils::getUnlit(const tinygltf::Material& tmat)
 {
   KHR_materials_unlit gmat;
-  if(tinygltf::utils::hasElementName(tmat.extensions, KHR_MATERIALS_UNLIT_EXTENSION_NAME))
+  if(tinygltf::utils::findExtension(tmat.extensions, KHR_MATERIALS_UNLIT_EXTENSION_NAME))
   {
     gmat.active = 1;
   }
@@ -141,12 +124,7 @@ KHR_materials_unlit tinygltf::utils::getUnlit(const tinygltf::Material& tmat)
 
 void tinygltf::utils::setUnlit(tinygltf::Material& tmat, const KHR_materials_unlit& unlit)
 {
-  if(!tinygltf::utils::hasElementName(tmat.extensions, KHR_MATERIALS_UNLIT_EXTENSION_NAME))
-  {
-    tmat.extensions[KHR_MATERIALS_UNLIT_EXTENSION_NAME] = tinygltf::Value(tinygltf::Value::Object());
-  }
-
-  tinygltf::Value& ext = tmat.extensions[KHR_MATERIALS_UNLIT_EXTENSION_NAME];
+  tinygltf::Value& ext = tinygltf::utils::ensureExtension(tmat.extensions, KHR_MATERIALS_UNLIT_EXTENSION_NAME);
   tinygltf::utils::setValue(ext, "unlit", true);
 }
 
@@ -154,25 +132,19 @@ void tinygltf::utils::setUnlit(tinygltf::Material& tmat, const KHR_materials_unl
 KHR_materials_specular tinygltf::utils::getSpecular(const tinygltf::Material& tmat)
 {
   KHR_materials_specular gmat;
-  if(tinygltf::utils::hasElementName(tmat.extensions, KHR_MATERIALS_SPECULAR_EXTENSION_NAME))
+  if(const auto* ext = tinygltf::utils::findExtension(tmat.extensions, KHR_MATERIALS_SPECULAR_EXTENSION_NAME))
   {
-    const tinygltf::Value& ext = tinygltf::utils::getElementValue(tmat.extensions, KHR_MATERIALS_SPECULAR_EXTENSION_NAME);
-    tinygltf::utils::getValue(ext, "specularFactor", gmat.specularFactor);
-    tinygltf::utils::getValue(ext, "specularTexture", gmat.specularTexture);
-    tinygltf::utils::getArrayValue(ext, "specularColorFactor", gmat.specularColorFactor);
-    tinygltf::utils::getValue(ext, "specularColorTexture", gmat.specularColorTexture);
+    tinygltf::utils::getValue(*ext, "specularFactor", gmat.specularFactor);
+    tinygltf::utils::getValue(*ext, "specularTexture", gmat.specularTexture);
+    tinygltf::utils::getArrayValue(*ext, "specularColorFactor", gmat.specularColorFactor);
+    tinygltf::utils::getValue(*ext, "specularColorTexture", gmat.specularColorTexture);
   }
   return gmat;
 }
 
 void tinygltf::utils::setSpecular(tinygltf::Material& tmat, const KHR_materials_specular& specular)
 {
-  if(!tinygltf::utils::hasElementName(tmat.extensions, KHR_MATERIALS_SPECULAR_EXTENSION_NAME))
-  {
-    tmat.extensions[KHR_MATERIALS_SPECULAR_EXTENSION_NAME] = tinygltf::Value(tinygltf::Value::Object());
-  }
-
-  tinygltf::Value& ext = tmat.extensions[KHR_MATERIALS_SPECULAR_EXTENSION_NAME];
+  tinygltf::Value& ext = tinygltf::utils::ensureExtension(tmat.extensions, KHR_MATERIALS_SPECULAR_EXTENSION_NAME);
   tinygltf::utils::setValue(ext, "specularFactor", specular.specularFactor);
   tinygltf::utils::setValue(ext, "specularTexture", specular.specularTexture);
   tinygltf::utils::setValue(ext, "specularColorTexture", specular.specularColorTexture);
@@ -183,26 +155,20 @@ void tinygltf::utils::setSpecular(tinygltf::Material& tmat, const KHR_materials_
 KHR_materials_clearcoat tinygltf::utils::getClearcoat(const tinygltf::Material& tmat)
 {
   KHR_materials_clearcoat gmat;
-  if(tinygltf::utils::hasElementName(tmat.extensions, KHR_MATERIALS_CLEARCOAT_EXTENSION_NAME))
+  if(const auto* ext = tinygltf::utils::findExtension(tmat.extensions, KHR_MATERIALS_CLEARCOAT_EXTENSION_NAME))
   {
-    const tinygltf::Value& ext = tinygltf::utils::getElementValue(tmat.extensions, KHR_MATERIALS_CLEARCOAT_EXTENSION_NAME);
-    tinygltf::utils::getValue(ext, "clearcoatFactor", gmat.factor);
-    tinygltf::utils::getValue(ext, "clearcoatTexture", gmat.texture);
-    tinygltf::utils::getValue(ext, "clearcoatRoughnessFactor", gmat.roughnessFactor);
-    tinygltf::utils::getValue(ext, "clearcoatRoughnessTexture", gmat.roughnessTexture);
-    tinygltf::utils::getValue(ext, "clearcoatNormalTexture", gmat.normalTexture);
+    tinygltf::utils::getValue(*ext, "clearcoatFactor", gmat.factor);
+    tinygltf::utils::getValue(*ext, "clearcoatTexture", gmat.texture);
+    tinygltf::utils::getValue(*ext, "clearcoatRoughnessFactor", gmat.roughnessFactor);
+    tinygltf::utils::getValue(*ext, "clearcoatRoughnessTexture", gmat.roughnessTexture);
+    tinygltf::utils::getValue(*ext, "clearcoatNormalTexture", gmat.normalTexture);
   }
   return gmat;
 }
 
 void tinygltf::utils::setClearcoat(tinygltf::Material& tmat, const KHR_materials_clearcoat& clearcoat)
 {
-  if(!tinygltf::utils::hasElementName(tmat.extensions, KHR_MATERIALS_CLEARCOAT_EXTENSION_NAME))
-  {
-    tmat.extensions[KHR_MATERIALS_CLEARCOAT_EXTENSION_NAME] = tinygltf::Value(tinygltf::Value::Object());
-  }
-
-  tinygltf::Value& ext = tmat.extensions[KHR_MATERIALS_CLEARCOAT_EXTENSION_NAME];
+  tinygltf::Value& ext = tinygltf::utils::ensureExtension(tmat.extensions, KHR_MATERIALS_CLEARCOAT_EXTENSION_NAME);
   tinygltf::utils::setValue(ext, "clearcoatFactor", clearcoat.factor);
   tinygltf::utils::setValue(ext, "clearcoatRoughnessFactor", clearcoat.roughnessFactor);
   tinygltf::utils::setValue(ext, "clearcoatTexture", clearcoat.texture);
@@ -213,25 +179,19 @@ void tinygltf::utils::setClearcoat(tinygltf::Material& tmat, const KHR_materials
 KHR_materials_sheen tinygltf::utils::getSheen(const tinygltf::Material& tmat)
 {
   KHR_materials_sheen gmat;
-  if(tinygltf::utils::hasElementName(tmat.extensions, KHR_MATERIALS_SHEEN_EXTENSION_NAME))
+  if(const auto* ext = tinygltf::utils::findExtension(tmat.extensions, KHR_MATERIALS_SHEEN_EXTENSION_NAME))
   {
-    const tinygltf::Value& ext = tinygltf::utils::getElementValue(tmat.extensions, KHR_MATERIALS_SHEEN_EXTENSION_NAME);
-    tinygltf::utils::getArrayValue(ext, "sheenColorFactor", gmat.sheenColorFactor);
-    tinygltf::utils::getValue(ext, "sheenColorTexture", gmat.sheenColorTexture);
-    tinygltf::utils::getValue(ext, "sheenRoughnessFactor", gmat.sheenRoughnessFactor);
-    tinygltf::utils::getValue(ext, "sheenRoughnessTexture", gmat.sheenRoughnessTexture);
+    tinygltf::utils::getArrayValue(*ext, "sheenColorFactor", gmat.sheenColorFactor);
+    tinygltf::utils::getValue(*ext, "sheenColorTexture", gmat.sheenColorTexture);
+    tinygltf::utils::getValue(*ext, "sheenRoughnessFactor", gmat.sheenRoughnessFactor);
+    tinygltf::utils::getValue(*ext, "sheenRoughnessTexture", gmat.sheenRoughnessTexture);
   }
   return gmat;
 }
 
 void tinygltf::utils::setSheen(tinygltf::Material& tmat, const KHR_materials_sheen& sheen)
 {
-  if(!tinygltf::utils::hasElementName(tmat.extensions, KHR_MATERIALS_SHEEN_EXTENSION_NAME))
-  {
-    tmat.extensions[KHR_MATERIALS_SHEEN_EXTENSION_NAME] = tinygltf::Value(tinygltf::Value::Object());
-  }
-
-  tinygltf::Value& ext = tmat.extensions[KHR_MATERIALS_SHEEN_EXTENSION_NAME];
+  tinygltf::Value& ext = tinygltf::utils::ensureExtension(tmat.extensions, KHR_MATERIALS_SHEEN_EXTENSION_NAME);
   tinygltf::utils::setArrayValue(ext, "sheenColorFactor", 3, glm::value_ptr(sheen.sheenColorFactor));
   tinygltf::utils::setValue(ext, "sheenColorTexture", sheen.sheenColorTexture);
   tinygltf::utils::setValue(ext, "sheenRoughnessFactor", sheen.sheenRoughnessFactor);
@@ -242,23 +202,17 @@ void tinygltf::utils::setSheen(tinygltf::Material& tmat, const KHR_materials_she
 KHR_materials_transmission tinygltf::utils::getTransmission(const tinygltf::Material& tmat)
 {
   KHR_materials_transmission gmat;
-  if(tinygltf::utils::hasElementName(tmat.extensions, KHR_MATERIALS_TRANSMISSION_EXTENSION_NAME))
+  if(const auto* ext = tinygltf::utils::findExtension(tmat.extensions, KHR_MATERIALS_TRANSMISSION_EXTENSION_NAME))
   {
-    const tinygltf::Value& ext = tinygltf::utils::getElementValue(tmat.extensions, KHR_MATERIALS_TRANSMISSION_EXTENSION_NAME);
-    tinygltf::utils::getValue(ext, "transmissionFactor", gmat.factor);
-    tinygltf::utils::getValue(ext, "transmissionTexture", gmat.texture);
+    tinygltf::utils::getValue(*ext, "transmissionFactor", gmat.factor);
+    tinygltf::utils::getValue(*ext, "transmissionTexture", gmat.texture);
   }
   return gmat;
 }
 
 void tinygltf::utils::setTransmission(tinygltf::Material& tmat, const KHR_materials_transmission& transmission)
 {
-  if(!tinygltf::utils::hasElementName(tmat.extensions, KHR_MATERIALS_TRANSMISSION_EXTENSION_NAME))
-  {
-    tmat.extensions[KHR_MATERIALS_TRANSMISSION_EXTENSION_NAME] = tinygltf::Value(tinygltf::Value::Object());
-  }
-
-  tinygltf::Value& ext = tmat.extensions[KHR_MATERIALS_TRANSMISSION_EXTENSION_NAME];
+  tinygltf::Value& ext = tinygltf::utils::ensureExtension(tmat.extensions, KHR_MATERIALS_TRANSMISSION_EXTENSION_NAME);
   tinygltf::utils::setValue(ext, "transmissionFactor", transmission.factor);
   tinygltf::utils::setValue(ext, "transmissionTexture", transmission.texture);
 }
@@ -266,24 +220,18 @@ void tinygltf::utils::setTransmission(tinygltf::Material& tmat, const KHR_materi
 KHR_materials_anisotropy tinygltf::utils::getAnisotropy(const tinygltf::Material& tmat)
 {
   KHR_materials_anisotropy gmat;
-  if(tinygltf::utils::hasElementName(tmat.extensions, KHR_MATERIALS_ANISOTROPY_EXTENSION_NAME))
+  if(const auto* ext = tinygltf::utils::findExtension(tmat.extensions, KHR_MATERIALS_ANISOTROPY_EXTENSION_NAME))
   {
-    const tinygltf::Value& ext = tinygltf::utils::getElementValue(tmat.extensions, KHR_MATERIALS_ANISOTROPY_EXTENSION_NAME);
-    tinygltf::utils::getValue(ext, "anisotropyStrength", gmat.anisotropyStrength);
-    tinygltf::utils::getValue(ext, "anisotropyRotation", gmat.anisotropyRotation);
-    tinygltf::utils::getValue(ext, "anisotropyTexture", gmat.anisotropyTexture);
+    tinygltf::utils::getValue(*ext, "anisotropyStrength", gmat.anisotropyStrength);
+    tinygltf::utils::getValue(*ext, "anisotropyRotation", gmat.anisotropyRotation);
+    tinygltf::utils::getValue(*ext, "anisotropyTexture", gmat.anisotropyTexture);
   }
   return gmat;
 }
 
 void tinygltf::utils::setAnisotropy(tinygltf::Material& tmat, const KHR_materials_anisotropy& anisotropy)
 {
-  if(!tinygltf::utils::hasElementName(tmat.extensions, KHR_MATERIALS_ANISOTROPY_EXTENSION_NAME))
-  {
-    tmat.extensions[KHR_MATERIALS_ANISOTROPY_EXTENSION_NAME] = tinygltf::Value(tinygltf::Value::Object());
-  }
-
-  tinygltf::Value& ext = tmat.extensions[KHR_MATERIALS_ANISOTROPY_EXTENSION_NAME];
+  tinygltf::Value& ext = tinygltf::utils::ensureExtension(tmat.extensions, KHR_MATERIALS_ANISOTROPY_EXTENSION_NAME);
   tinygltf::utils::setValue(ext, "anisotropyStrength", anisotropy.anisotropyStrength);
   tinygltf::utils::setValue(ext, "anisotropyRotation", anisotropy.anisotropyRotation);
   tinygltf::utils::setValue(ext, "anisotropyTexture", anisotropy.anisotropyTexture);
@@ -292,22 +240,16 @@ void tinygltf::utils::setAnisotropy(tinygltf::Material& tmat, const KHR_material
 KHR_materials_ior tinygltf::utils::getIor(const tinygltf::Material& tmat)
 {
   KHR_materials_ior gmat;
-  if(tinygltf::utils::hasElementName(tmat.extensions, KHR_MATERIALS_IOR_EXTENSION_NAME))
+  if(const auto* ext = tinygltf::utils::findExtension(tmat.extensions, KHR_MATERIALS_IOR_EXTENSION_NAME))
   {
-    const tinygltf::Value& ext = tinygltf::utils::getElementValue(tmat.extensions, KHR_MATERIALS_IOR_EXTENSION_NAME);
-    tinygltf::utils::getValue(ext, "ior", gmat.ior);
+    tinygltf::utils::getValue(*ext, "ior", gmat.ior);
   }
   return gmat;
 }
 
 void tinygltf::utils::setIor(tinygltf::Material& tmat, const KHR_materials_ior& ior)
 {
-  if(!tinygltf::utils::hasElementName(tmat.extensions, KHR_MATERIALS_IOR_EXTENSION_NAME))
-  {
-    tmat.extensions[KHR_MATERIALS_IOR_EXTENSION_NAME] = tinygltf::Value(tinygltf::Value::Object());
-  }
-
-  tinygltf::Value& ext = tmat.extensions[KHR_MATERIALS_IOR_EXTENSION_NAME];
+  tinygltf::Value& ext = tinygltf::utils::ensureExtension(tmat.extensions, KHR_MATERIALS_IOR_EXTENSION_NAME);
   tinygltf::utils::setValue(ext, "ior", ior.ior);
 }
 
@@ -315,28 +257,21 @@ void tinygltf::utils::setIor(tinygltf::Material& tmat, const KHR_materials_ior& 
 KHR_materials_iridescence tinygltf::utils::getIridescence(const tinygltf::Material& tmat)
 {
   KHR_materials_iridescence gmat;
-  if(tinygltf::utils::hasElementName(tmat.extensions, KHR_MATERIALS_IRIDESCENCE_EXTENSION_NAME))
+  if(const auto* ext = tinygltf::utils::findExtension(tmat.extensions, KHR_MATERIALS_IRIDESCENCE_EXTENSION_NAME))
   {
-    const tinygltf::Value& ext = tinygltf::utils::getElementValue(tmat.extensions, KHR_MATERIALS_IRIDESCENCE_EXTENSION_NAME);
-
-    tinygltf::utils::getValue(ext, "iridescenceFactor", gmat.iridescenceFactor);
-    tinygltf::utils::getValue(ext, "iridescenceTexture", gmat.iridescenceTexture);
-    tinygltf::utils::getValue(ext, "iridescenceIor", gmat.iridescenceIor);
-    tinygltf::utils::getValue(ext, "iridescenceThicknessMinimum", gmat.iridescenceThicknessMinimum);
-    tinygltf::utils::getValue(ext, "iridescenceThicknessMaximum", gmat.iridescenceThicknessMaximum);
-    tinygltf::utils::getValue(ext, "iridescenceThicknessTexture", gmat.iridescenceThicknessTexture);
+    tinygltf::utils::getValue(*ext, "iridescenceFactor", gmat.iridescenceFactor);
+    tinygltf::utils::getValue(*ext, "iridescenceTexture", gmat.iridescenceTexture);
+    tinygltf::utils::getValue(*ext, "iridescenceIor", gmat.iridescenceIor);
+    tinygltf::utils::getValue(*ext, "iridescenceThicknessMinimum", gmat.iridescenceThicknessMinimum);
+    tinygltf::utils::getValue(*ext, "iridescenceThicknessMaximum", gmat.iridescenceThicknessMaximum);
+    tinygltf::utils::getValue(*ext, "iridescenceThicknessTexture", gmat.iridescenceThicknessTexture);
   }
   return gmat;
 }
 
 void tinygltf::utils::setIridescence(tinygltf::Material& tmat, const KHR_materials_iridescence& iridescence)
 {
-  if(!tinygltf::utils::hasElementName(tmat.extensions, KHR_MATERIALS_IRIDESCENCE_EXTENSION_NAME))
-  {
-    tmat.extensions[KHR_MATERIALS_IRIDESCENCE_EXTENSION_NAME] = tinygltf::Value(tinygltf::Value::Object());
-  }
-
-  tinygltf::Value& ext = tmat.extensions[KHR_MATERIALS_IRIDESCENCE_EXTENSION_NAME];
+  tinygltf::Value& ext = tinygltf::utils::ensureExtension(tmat.extensions, KHR_MATERIALS_IRIDESCENCE_EXTENSION_NAME);
   tinygltf::utils::setValue(ext, "iridescenceFactor", iridescence.iridescenceFactor);
   tinygltf::utils::setValue(ext, "iridescenceTexture", iridescence.iridescenceTexture);
   tinygltf::utils::setValue(ext, "iridescenceIor", iridescence.iridescenceIor);
@@ -349,71 +284,52 @@ void tinygltf::utils::setIridescence(tinygltf::Material& tmat, const KHR_materia
 KHR_materials_dispersion tinygltf::utils::getDispersion(const tinygltf::Material& tmat)
 {
   KHR_materials_dispersion gmat;
-  if(tinygltf::utils::hasElementName(tmat.extensions, KHR_MATERIALS_DISPERSION_EXTENSION_NAME))
+  if(const auto* ext = tinygltf::utils::findExtension(tmat.extensions, KHR_MATERIALS_DISPERSION_EXTENSION_NAME))
   {
-    const tinygltf::Value& ext = tinygltf::utils::getElementValue(tmat.extensions, KHR_MATERIALS_DISPERSION_EXTENSION_NAME);
-    tinygltf::utils::getValue(ext, "dispersion", gmat.dispersion);
+    tinygltf::utils::getValue(*ext, "dispersion", gmat.dispersion);
   }
   return gmat;
 }
 
 void tinygltf::utils::setDispersion(tinygltf::Material& tmat, const KHR_materials_dispersion& dispersion)
 {
-  if(!tinygltf::utils::hasElementName(tmat.extensions, KHR_MATERIALS_DISPERSION_EXTENSION_NAME))
-  {
-    tmat.extensions[KHR_MATERIALS_DISPERSION_EXTENSION_NAME] = tinygltf::Value(tinygltf::Value::Object());
-  }
-
-  tinygltf::Value& ext = tmat.extensions[KHR_MATERIALS_DISPERSION_EXTENSION_NAME];
+  tinygltf::Value& ext = tinygltf::utils::ensureExtension(tmat.extensions, KHR_MATERIALS_DISPERSION_EXTENSION_NAME);
   tinygltf::utils::setValue(ext, "dispersion", dispersion.dispersion);
 }
 
 KHR_node_visibility tinygltf::utils::getNodeVisibility(const tinygltf::Node& node)
 {
   KHR_node_visibility gnode;
-  if(tinygltf::utils::hasElementName(node.extensions, KHR_NODE_VISIBILITY_EXTENSION_NAME))
+  if(const auto* ext = tinygltf::utils::findExtension(node.extensions, KHR_NODE_VISIBILITY_EXTENSION_NAME))
   {
-    const tinygltf::Value& ext = tinygltf::utils::getElementValue(node.extensions, KHR_NODE_VISIBILITY_EXTENSION_NAME);
-    tinygltf::utils::getValue(ext, "visible", gnode.visible);
+    tinygltf::utils::getValue(*ext, "visible", gnode.visible);
   }
   return gnode;
 }
 
 void tinygltf::utils::setNodeVisibility(tinygltf::Node& node, const KHR_node_visibility& visibility)
 {
-  if(!tinygltf::utils::hasElementName(node.extensions, KHR_NODE_VISIBILITY_EXTENSION_NAME))
-  {
-    node.extensions[KHR_NODE_VISIBILITY_EXTENSION_NAME] = tinygltf::Value(tinygltf::Value::Object());
-  }
-
-  tinygltf::Value& ext = node.extensions[KHR_NODE_VISIBILITY_EXTENSION_NAME];
+  tinygltf::Value& ext = tinygltf::utils::ensureExtension(node.extensions, KHR_NODE_VISIBILITY_EXTENSION_NAME);
   tinygltf::utils::setValue(ext, "visible", visibility.visible);
 }
 
 KHR_materials_pbrSpecularGlossiness tinygltf::utils::getPbrSpecularGlossiness(const tinygltf::Material& tmat)
 {
   KHR_materials_pbrSpecularGlossiness gmat;
-  if(tinygltf::utils::hasElementName(tmat.extensions, KHR_MATERIALS_PBR_SPECULAR_GLOSSINESS_EXTENSION_NAME))
+  if(const auto* ext = tinygltf::utils::findExtension(tmat.extensions, KHR_MATERIALS_PBR_SPECULAR_GLOSSINESS_EXTENSION_NAME))
   {
-    const tinygltf::Value& ext =
-        tinygltf::utils::getElementValue(tmat.extensions, KHR_MATERIALS_PBR_SPECULAR_GLOSSINESS_EXTENSION_NAME);
-    tinygltf::utils::getArrayValue(ext, "diffuseFactor", gmat.diffuseFactor);
-    tinygltf::utils::getValue(ext, "diffuseTexture", gmat.diffuseTexture);
-    tinygltf::utils::getArrayValue(ext, "specularFactor", gmat.specularFactor);
-    tinygltf::utils::getValue(ext, "glossinessFactor", gmat.glossinessFactor);
-    tinygltf::utils::getValue(ext, "specularGlossinessTexture", gmat.specularGlossinessTexture);
+    tinygltf::utils::getArrayValue(*ext, "diffuseFactor", gmat.diffuseFactor);
+    tinygltf::utils::getValue(*ext, "diffuseTexture", gmat.diffuseTexture);
+    tinygltf::utils::getArrayValue(*ext, "specularFactor", gmat.specularFactor);
+    tinygltf::utils::getValue(*ext, "glossinessFactor", gmat.glossinessFactor);
+    tinygltf::utils::getValue(*ext, "specularGlossinessTexture", gmat.specularGlossinessTexture);
   }
   return gmat;
 }
 
 void tinygltf::utils::setPbrSpecularGlossiness(tinygltf::Material& tmat, const KHR_materials_pbrSpecularGlossiness& pbr)
 {
-  if(!tinygltf::utils::hasElementName(tmat.extensions, KHR_MATERIALS_PBR_SPECULAR_GLOSSINESS_EXTENSION_NAME))
-  {
-    tmat.extensions[KHR_MATERIALS_PBR_SPECULAR_GLOSSINESS_EXTENSION_NAME] = tinygltf::Value(tinygltf::Value::Object());
-  }
-
-  tinygltf::Value& ext = tmat.extensions[KHR_MATERIALS_PBR_SPECULAR_GLOSSINESS_EXTENSION_NAME];
+  tinygltf::Value& ext = tinygltf::utils::ensureExtension(tmat.extensions, KHR_MATERIALS_PBR_SPECULAR_GLOSSINESS_EXTENSION_NAME);
   tinygltf::utils::setArrayValue(ext, "diffuseFactor", 4, glm::value_ptr(pbr.diffuseFactor));
   tinygltf::utils::setArrayValue(ext, "specularFactor", 3, glm::value_ptr(pbr.specularFactor));
   tinygltf::utils::setValue(ext, "glossinessFactor", pbr.glossinessFactor);
@@ -429,26 +345,19 @@ void tinygltf::utils::setPbrSpecularGlossiness(tinygltf::Material& tmat, const K
 KHR_materials_diffuse_transmission tinygltf::utils::getDiffuseTransmission(const tinygltf::Material& tmat)
 {
   KHR_materials_diffuse_transmission gmat;
-  if(tinygltf::utils::hasElementName(tmat.extensions, KHR_MATERIALS_DIFFUSE_TRANSMISSION_EXTENSION_NAME))
+  if(const auto* ext = tinygltf::utils::findExtension(tmat.extensions, KHR_MATERIALS_DIFFUSE_TRANSMISSION_EXTENSION_NAME))
   {
-    const tinygltf::Value& ext =
-        tinygltf::utils::getElementValue(tmat.extensions, KHR_MATERIALS_DIFFUSE_TRANSMISSION_EXTENSION_NAME);
-    tinygltf::utils::getValue(ext, "diffuseTransmissionFactor", gmat.diffuseTransmissionFactor);
-    tinygltf::utils::getValue(ext, "diffuseTransmissionTexture", gmat.diffuseTransmissionTexture);
-    tinygltf::utils::getArrayValue(ext, "diffuseTransmissionColor", gmat.diffuseTransmissionColor);
-    tinygltf::utils::getValue(ext, "diffuseTransmissionColorTexture", gmat.diffuseTransmissionColorTexture);
+    tinygltf::utils::getValue(*ext, "diffuseTransmissionFactor", gmat.diffuseTransmissionFactor);
+    tinygltf::utils::getValue(*ext, "diffuseTransmissionTexture", gmat.diffuseTransmissionTexture);
+    tinygltf::utils::getArrayValue(*ext, "diffuseTransmissionColor", gmat.diffuseTransmissionColor);
+    tinygltf::utils::getValue(*ext, "diffuseTransmissionColorTexture", gmat.diffuseTransmissionColorTexture);
   }
   return gmat;
 }
 
 void tinygltf::utils::setDiffuseTransmission(tinygltf::Material& tmat, const KHR_materials_diffuse_transmission& diffuseTransmission)
 {
-  if(!tinygltf::utils::hasElementName(tmat.extensions, KHR_MATERIALS_DIFFUSE_TRANSMISSION_EXTENSION_NAME))
-  {
-    tmat.extensions[KHR_MATERIALS_DIFFUSE_TRANSMISSION_EXTENSION_NAME] = tinygltf::Value(tinygltf::Value::Object());
-  }
-
-  tinygltf::Value& ext = tmat.extensions[KHR_MATERIALS_DIFFUSE_TRANSMISSION_EXTENSION_NAME];
+  tinygltf::Value& ext = tinygltf::utils::ensureExtension(tmat.extensions, KHR_MATERIALS_DIFFUSE_TRANSMISSION_EXTENSION_NAME);
   tinygltf::utils::setValue(ext, "diffuseTransmissionFactor", diffuseTransmission.diffuseTransmissionFactor);
   tinygltf::utils::setValue(ext, "diffuseTransmissionTexture", diffuseTransmission.diffuseTransmissionTexture);
   tinygltf::utils::setArrayValue(ext, "diffuseTransmissionColor", 3, glm::value_ptr(diffuseTransmission.diffuseTransmissionColor));
@@ -459,23 +368,24 @@ void tinygltf::utils::setDiffuseTransmission(tinygltf::Material& tmat, const KHR
 //
 //
 
-bool tinygltf::utils::getMeshoptCompression(const tinygltf::BufferView& bview, EXT_meshopt_compression& mcomp)
+bool tinygltf::utils::getMeshoptCompression(const tinygltf::BufferView& bview, KHR_meshopt_compression& mcomp)
 {
   mcomp = {};
 
-  const char* meshoptExtName = nullptr;
-  if(tinygltf::utils::hasElementName(bview.extensions, EXT_MESHOPT_COMPRESSION_EXTENSION_NAME))
+  // Support both KHR and EXT variants of meshopt compression (identical data format)
+  const char* extName = nullptr;
+  if(tinygltf::utils::hasElementName(bview.extensions, KHR_MESHOPT_COMPRESSION_EXTENSION_NAME))
   {
-    meshoptExtName = EXT_MESHOPT_COMPRESSION_EXTENSION_NAME;
+    extName = KHR_MESHOPT_COMPRESSION_EXTENSION_NAME;
   }
-  else if(tinygltf::utils::hasElementName(bview.extensions, KHR_MESHOPT_COMPRESSION_EXTENSION_NAME))
+  else if(tinygltf::utils::hasElementName(bview.extensions, EXT_MESHOPT_COMPRESSION_EXTENSION_NAME))
   {
-    meshoptExtName = KHR_MESHOPT_COMPRESSION_EXTENSION_NAME;
+    extName = EXT_MESHOPT_COMPRESSION_EXTENSION_NAME;
   }
 
-  if(meshoptExtName)
+  if(extName)
   {
-    const tinygltf::Value& ext = tinygltf::utils::getElementValue(bview.extensions, meshoptExtName);
+    const tinygltf::Value& ext = tinygltf::utils::getElementValue(bview.extensions, extName);
     tinygltf::utils::getValue(ext, "buffer", mcomp.buffer);
     int64_t byteOffset{0};
     int64_t byteLength{0};
@@ -494,19 +404,19 @@ bool tinygltf::utils::getMeshoptCompression(const tinygltf::BufferView& bview, E
     tinygltf::utils::getValue(ext, "filter", filter);
     if(filter == "NONE")
     {
-      mcomp.compressionFilter = EXT_meshopt_compression::MESHOPT_COMPRESSION_FILTER_NONE;
+      mcomp.compressionFilter = KHR_meshopt_compression::MESHOPT_COMPRESSION_FILTER_NONE;
     }
     else if(filter == "OCTAHEDRAL")
     {
-      mcomp.compressionFilter = EXT_meshopt_compression::MESHOPT_COMPRESSION_FILTER_OCTAHEDRAL;
+      mcomp.compressionFilter = KHR_meshopt_compression::MESHOPT_COMPRESSION_FILTER_OCTAHEDRAL;
     }
     else if(filter == "QUATERNION")
     {
-      mcomp.compressionFilter = EXT_meshopt_compression::MESHOPT_COMPRESSION_FILTER_QUATERNION;
+      mcomp.compressionFilter = KHR_meshopt_compression::MESHOPT_COMPRESSION_FILTER_QUATERNION;
     }
     else if(filter == "EXPONENTIAL")
     {
-      mcomp.compressionFilter = EXT_meshopt_compression::MESHOPT_COMPRESSION_FILTER_EXPONENTIAL;
+      mcomp.compressionFilter = KHR_meshopt_compression::MESHOPT_COMPRESSION_FILTER_EXPONENTIAL;
     }
 
 
@@ -514,15 +424,15 @@ bool tinygltf::utils::getMeshoptCompression(const tinygltf::BufferView& bview, E
     tinygltf::utils::getValue(ext, "mode", mode);
     if(mode == "ATTRIBUTES")
     {
-      mcomp.compressionMode = EXT_meshopt_compression::MESHOPT_COMPRESSION_MODE_ATTRIBUTES;
+      mcomp.compressionMode = KHR_meshopt_compression::MESHOPT_COMPRESSION_MODE_ATTRIBUTES;
     }
     else if(mode == "TRIANGLES")
     {
-      mcomp.compressionMode = EXT_meshopt_compression::MESHOPT_COMPRESSION_MODE_TRIANGLES;
+      mcomp.compressionMode = KHR_meshopt_compression::MESHOPT_COMPRESSION_MODE_TRIANGLES;
     }
     else if(mode == "INDICES")
     {
-      mcomp.compressionMode = EXT_meshopt_compression::MESHOPT_COMPRESSION_MODE_INDICES;
+      mcomp.compressionMode = KHR_meshopt_compression::MESHOPT_COMPRESSION_MODE_INDICES;
     }
     return true;
   }

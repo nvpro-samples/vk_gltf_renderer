@@ -17,9 +17,18 @@
  * SPDX-License-Identifier: Apache-2.0
  */
 
+//
+// Core Scene class: loads glTF files (via tinygltf), flattens the node
+// hierarchy into render instances, computes bounding boxes, optimizes
+// meshes (meshoptimizer), generates tangents, and provides the host-side
+// data model that SceneVk uploads to the GPU for rendering.
+//
+
 #include <algorithm>
 #include <execution>
 #include <filesystem>
+#include <set>
+#include <unordered_map>
 #include <unordered_set>
 
 #include <glm/gtx/norm.hpp>
@@ -32,13 +41,122 @@
 #include <nvutils/timers.hpp>
 
 #include "gltf_scene.hpp"
+#include "gltf_scene_animation.hpp"
+#include "gltf_scene_editor.hpp"
+#include "gltf_scene_validator.hpp"
 #include "gltf_animation_pointer.hpp"
+#include "gltf_scene_merger.hpp"
+#include "gltf_compact_model.hpp"
+#include "version.hpp"
+
+namespace {
 
 //--------------------------------------------------------------------------------------------------
-// Constructor
-//
+// Load .gltf or .glb into model using shared TinyGLTF config (no external file limit, image bytes stored raw).
+// Returns true on success. On failure, outError and outWarn are set for caller to log.
+//--------------------------------------------------------------------------------------------------
+bool loadGltfFile(const std::filesystem::path& filename, tinygltf::Model& model, std::string* outError, std::string* outWarn)
+{
+  const std::string  filenameUtf8 = nvutils::utf8FromPath(filename);
+  tinygltf::TinyGLTF tcontext;
+  std::string        warn;
+  std::string        error;
+  tcontext.SetMaxExternalFileSize(-1);
+  tcontext.SetImageLoader(
+      [](tinygltf::Image* image, const int /* image_idx */, std::string* /* err */, std::string* /* warn */,
+         int /* req_width */, int /* req_height */, const unsigned char* bytes, int size, void* /*user_data */) {
+        if(bytes != nullptr && size > 0)
+        {
+          image->image.assign(bytes, bytes + size);
+        }
+        return true;
+      },
+      nullptr);
+
+  const std::string ext    = nvutils::utf8FromPath(filename.extension());
+  bool              result = false;
+  if(ext == ".gltf")
+  {
+    result = tcontext.LoadASCIIFromFile(&model, &error, &warn, filenameUtf8);
+  }
+  else if(ext == ".glb")
+  {
+    result = tcontext.LoadBinaryFromFile(&model, &error, &warn, filenameUtf8);
+  }
+
+  if(outError)
+    *outError = std::move(error);
+  if(outWarn)
+    *outWarn = std::move(warn);
+  return result;
+}
+
+}  // namespace
+
+//--------------------------------------------------------------------------------------------------
+// RenderNodeRegistry
+//--------------------------------------------------------------------------------------------------
+
+const std::vector<int> nvvkgltf::RenderNodeRegistry::s_emptyRenderNodes;
+
+int nvvkgltf::RenderNodeRegistry::addRenderNode(const RenderNode& node, int nodeID, int primIndex)
+{
+  const int renderNodeID = static_cast<int>(m_renderNodes.size());
+  m_renderNodes.push_back(node);
+  m_renderNodeToNodeAndPrim.emplace_back(nodeID, primIndex);
+  // Only store first occurrence of (nodeID, primIndex) for getRenderNodeID (GPU instancing adds multiple per prim)
+  m_nodeAndPrimToRenderNode.try_emplace(makeKey(nodeID, primIndex), renderNodeID);
+  m_nodeToRenderNodes[nodeID].push_back(renderNodeID);
+  return renderNodeID;
+}
+
+int nvvkgltf::RenderNodeRegistry::getRenderNodeID(int nodeID, int primIndex) const
+{
+  auto it = m_nodeAndPrimToRenderNode.find(makeKey(nodeID, primIndex));
+  if(it == m_nodeAndPrimToRenderNode.end())
+    return -1;
+  return it->second;
+}
+
+std::optional<std::pair<int, int>> nvvkgltf::RenderNodeRegistry::getNodeAndPrim(int renderNodeID) const
+{
+  if(renderNodeID < 0 || static_cast<size_t>(renderNodeID) >= m_renderNodeToNodeAndPrim.size())
+    return std::nullopt;
+  return m_renderNodeToNodeAndPrim[renderNodeID];
+}
+
+const std::vector<int>& nvvkgltf::RenderNodeRegistry::getRenderNodesForNode(int nodeID) const
+{
+  auto it = m_nodeToRenderNodes.find(nodeID);
+  if(it == m_nodeToRenderNodes.end())
+    return s_emptyRenderNodes;
+  return it->second;
+}
+
+void nvvkgltf::RenderNodeRegistry::getAllRenderNodesForNodeRecursive(int                                  nodeID,
+                                                                     std::function<std::vector<int>(int)> getChildren,
+                                                                     std::vector<int>& outRenderNodeIDs) const
+{
+  const std::vector<int>& direct = getRenderNodesForNode(nodeID);
+  for(int rnID : direct)
+    outRenderNodeIDs.push_back(rnID);
+  for(int childID : getChildren(nodeID))
+    getAllRenderNodesForNodeRecursive(childID, getChildren, outRenderNodeIDs);
+}
+
+void nvvkgltf::RenderNodeRegistry::clear()
+{
+  m_renderNodes.clear();
+  m_nodeAndPrimToRenderNode.clear();
+  m_renderNodeToNodeAndPrim.clear();
+  m_nodeToRenderNodes.clear();
+}
+
+//--------------------------------------------------------------------------------------------------
+// CONSTRUCTION / DESTRUCTION
+//--------------------------------------------------------------------------------------------------
+
 nvvkgltf::Scene::Scene()
-    : m_animationPointer(m_model)
 {
   // Base list of supported extensions; samples can add onto this for custom
   // image formats.
@@ -67,8 +185,8 @@ nvvkgltf::Scene::Scene()
       "MSFT_texture_dds",
       "KHR_materials_pbrSpecularGlossiness",
       "KHR_materials_diffuse_transmission",
-      "EXT_meshopt_compression",
       "KHR_meshopt_compression",
+      "EXT_meshopt_compression",
 #ifdef USE_DRACO
       "KHR_draco_mesh_compression",
 #endif
@@ -78,251 +196,267 @@ nvvkgltf::Scene::Scene()
   };
 }
 
+nvvkgltf::Scene::~Scene() = default;
+
+nvvkgltf::SceneEditor& nvvkgltf::Scene::editor()
+{
+  if(!m_editor)
+    m_editor = std::make_unique<SceneEditor>(*this);
+  return *m_editor;
+}
+
+nvvkgltf::AnimationSystem& nvvkgltf::Scene::animation()
+{
+  if(!m_animation)
+    m_animation = std::make_unique<AnimationSystem>(*this);
+  return *m_animation;
+}
+
+const nvvkgltf::AnimationSystem& nvvkgltf::Scene::animation() const
+{
+  if(!m_animation)
+    m_animation = std::make_unique<AnimationSystem>(const_cast<Scene&>(*this));
+  return *m_animation;
+}
+
+nvvkgltf::SceneValidator& nvvkgltf::Scene::validator()
+{
+  if(!m_validator)
+    m_validator = std::make_unique<SceneValidator>(*this);
+  return *m_validator;
+}
+
+const nvvkgltf::SceneValidator& nvvkgltf::Scene::validator() const
+{
+  if(!m_validator)
+    m_validator = std::make_unique<SceneValidator>(*this);
+  return *m_validator;
+}
+
 //--------------------------------------------------------------------------------------------------
-// Loading a GLTF file and extracting all information
-//
+// FILE I/O
+//--------------------------------------------------------------------------------------------------
+
 bool nvvkgltf::Scene::load(const std::filesystem::path& filename)
 {
   nvutils::ScopedTimer st(std::string(__FUNCTION__) + "\n");
   const std::string    filenameUtf8 = nvutils::utf8FromPath(filename);
-  LOGI("%s%s\n", nvutils::ScopedTimer::indent().c_str(), filenameUtf8.c_str());
 
   m_validSceneParsed = false;
 
-  m_filename = filename;
-  m_model    = {};
-  tinygltf::TinyGLTF tcontext;
-  std::string        warn;
-  std::string        error;
-  tcontext.SetMaxExternalFileSize(-1);  // No limit for external files (images, buffers, etc.)
-  // We want to delay image loading until SceneVk::createTextureImages, so that
-  // we can support DDS, KTX, and load images in parallel.
-  // To do this, we give TinyGLTF a load callback that stores raw bytes without decoding.
-  // This is especially important for data URIs (base64-encoded images in JSON), where
-  // TinyGLTF decodes the base64 and passes the raw image bytes to this callback.
-  tcontext.SetImageLoader(
-      [](tinygltf::Image* image, const int /* image_idx */, std::string* /* err */, std::string* /* warn */,
-         int /* req_width */, int /* req_height */, const unsigned char* bytes, int size, void* /*user_data */) {
-        if(bytes != nullptr && size > 0)
-        {
-          image->image.assign(bytes, bytes + size);
-        }
-        return true;
-      },
-      nullptr);
-  const std::string ext = nvutils::utf8FromPath(filename.extension());
-  bool              result{false};
-  if(ext == ".gltf")
+  std::error_code ec;
+  m_filename = std::filesystem::absolute(filename, ec);
+  if(ec)
+    m_filename = filename;
+  m_model = {};
+
+  std::string error, warn;
+  if(!loadGltfFile(filename, m_model, &error, &warn))
   {
-    result = tcontext.LoadASCIIFromFile(&m_model, &error, &warn, filenameUtf8);
-  }
-  else if(ext == ".glb")
-  {
-    result = tcontext.LoadBinaryFromFile(&m_model, &error, &warn, filenameUtf8);
-  }
-  else
-  {
-    LOGE("%sUnknown file extension: %s\n", st.indent().c_str(), ext.c_str());
+    if(error.empty())
+      LOGW("%sUnknown file extension: %s\n", st.indent().c_str(), nvutils::utf8FromPath(filename.extension()).c_str());
+    else
+    {
+      LOGW("%sError loading file: %s\n", st.indent().c_str(), filenameUtf8.c_str());
+      LOGW("%s%s\n", st.indent().c_str(), warn.c_str());
+      LOGW("%s%s\n", st.indent().c_str(), error.c_str());
+    }
+    clearParsedData();
     return false;
   }
 
-  if(!result)
+  if(!validator().validateModelExtensions(m_model, nullptr))
   {
-    LOGW("%sError loading file: %s\n", st.indent().c_str(), filenameUtf8.c_str());
-    LOGW("%s%s\n", st.indent().c_str(), warn.c_str());
-    // This is LOGE because the user requested to load a (probably valid)
-    // glTF file, but this loader can't do what the user asked it to.
-    // Only the last one is LOGE so that all the messages print before the
-    // breakpoint.
-    LOGE("%s%s\n", st.indent().c_str(), error.c_str());
     clearParsedData();
-    //assert(!"Error while loading scene");
-    return result;
+    return false;
   }
 
-  // Check for required extensions
-  for(auto& extension : m_model.extensionsRequired)
+  if(!decompressMeshoptExtension())
   {
-    if(m_supportedExtensions.find(extension) == m_supportedExtensions.end())
-    {
-      LOGE("%sRequired extension unsupported : %s\n", st.indent().c_str(), extension.c_str());
-      clearParsedData();
-      return false;
-    }
-  }
-
-  // Check for used extensions
-  for(auto& extension : m_model.extensionsUsed)
-  {
-    if(m_supportedExtensions.find(extension) == m_supportedExtensions.end())
-    {
-      LOGW("%sUsed extension unsupported : %s\n", st.indent().c_str(), extension.c_str());
-    }
-  }
-
-  // Handle EXT_meshopt_compression / KHR_meshopt_compression by decompressing all buffer data at once
-  const char* meshoptExtName = nullptr;
-  if(std::find(m_model.extensionsUsed.begin(), m_model.extensionsUsed.end(), EXT_MESHOPT_COMPRESSION_EXTENSION_NAME)
-     != m_model.extensionsUsed.end())
-  {
-    meshoptExtName = EXT_MESHOPT_COMPRESSION_EXTENSION_NAME;
-  }
-  else if(std::find(m_model.extensionsUsed.begin(), m_model.extensionsUsed.end(), KHR_MESHOPT_COMPRESSION_EXTENSION_NAME)
-          != m_model.extensionsUsed.end())
-  {
-    meshoptExtName = KHR_MESHOPT_COMPRESSION_EXTENSION_NAME;
-  }
-  if(meshoptExtName)
-  {
-    for(tinygltf::Buffer& buffer : m_model.buffers)
-    {
-      if(buffer.data.empty())
-      {
-        buffer.data.resize(buffer.byteLength);
-        buffer.extensions.erase(meshoptExtName);
-      }
-    }
-
-    // first used to tag buffers that can be removed after decompression
-    std::vector<int> isFullyCompressedBuffer(m_model.buffers.size(), 1);
-
-    for(auto& bufferView : m_model.bufferViews)
-    {
-      if(bufferView.buffer < 0)
-        continue;
-
-      bool warned = false;
-
-      EXT_meshopt_compression mcomp;
-      if(tinygltf::utils::getMeshoptCompression(bufferView, mcomp))
-      {
-        // this decoding logic was derived from `decompressMeshopt`
-        // in https://github.com/zeux/meshoptimizer/blob/master/gltf/parsegltf.cpp
-
-
-        const tinygltf::Buffer& sourceBuffer = m_model.buffers[mcomp.buffer];
-        const unsigned char*    source       = &sourceBuffer.data[mcomp.byteOffset];
-        assert(mcomp.byteOffset + mcomp.byteLength <= sourceBuffer.data.size());
-
-        tinygltf::Buffer& resultBuffer = m_model.buffers[bufferView.buffer];
-        unsigned char*    result       = &resultBuffer.data[bufferView.byteOffset];
-        assert(bufferView.byteOffset + bufferView.byteLength <= resultBuffer.data.size());
-
-        int  rc   = -1;
-        bool warn = false;
-
-        switch(mcomp.compressionMode)
-        {
-          case EXT_meshopt_compression::MESHOPT_COMPRESSION_MODE_ATTRIBUTES:
-            warn = meshopt_decodeVertexVersion(source, mcomp.byteLength) < 0;
-            rc   = meshopt_decodeVertexBuffer(result, mcomp.count, mcomp.byteStride, source, mcomp.byteLength);
-            break;
-
-          case EXT_meshopt_compression::MESHOPT_COMPRESSION_MODE_TRIANGLES:
-            warn = meshopt_decodeIndexVersion(source, mcomp.byteLength) < 0;
-            rc   = meshopt_decodeIndexBuffer(result, mcomp.count, mcomp.byteStride, source, mcomp.byteLength);
-            break;
-
-          case EXT_meshopt_compression::MESHOPT_COMPRESSION_MODE_INDICES:
-            warn = meshopt_decodeIndexVersion(source, mcomp.byteLength) < 0;
-            rc   = meshopt_decodeIndexSequence(result, mcomp.count, mcomp.byteStride, source, mcomp.byteLength);
-            break;
-
-          default:
-            break;
-        }
-
-        if(rc != 0)
-        {
-          LOGW("%s decompression failed\n", meshoptExtName);
-          clearParsedData();
-          return false;
-        }
-
-        if(warn && !warned)
-        {
-          LOGW("Warning: %s data uses an unsupported or invalid encoding version\n", meshoptExtName);
-          warned = true;
-        }
-
-        switch(mcomp.compressionFilter)
-        {
-          case EXT_meshopt_compression::MESHOPT_COMPRESSION_FILTER_OCTAHEDRAL:
-            meshopt_decodeFilterOct(result, mcomp.count, mcomp.byteStride);
-            break;
-
-          case EXT_meshopt_compression::MESHOPT_COMPRESSION_FILTER_QUATERNION:
-            meshopt_decodeFilterQuat(result, mcomp.count, mcomp.byteStride);
-            break;
-
-          case EXT_meshopt_compression::MESHOPT_COMPRESSION_FILTER_EXPONENTIAL:
-            meshopt_decodeFilterExp(result, mcomp.count, mcomp.byteStride);
-            break;
-
-          default:
-            break;
-        }
-
-        // remove extension for saving uncompressed
-        bufferView.extensions.erase(meshoptExtName);
-      }
-
-      isFullyCompressedBuffer[bufferView.buffer] = 0;
-    }
-
-    // remove fully compressed buffers
-    // isFullyCompressedBuffer is repurposed as buffer index remap table
-    size_t writeIndex = 0;
-    for(size_t readIndex = 0; readIndex < m_model.buffers.size(); readIndex++)
-    {
-      if(isFullyCompressedBuffer[readIndex])
-      {
-        // buffer is removed
-        isFullyCompressedBuffer[readIndex] = -1;
-      }
-      else
-      {
-        // compacted index of buffer
-        isFullyCompressedBuffer[readIndex] = int(writeIndex);
-
-        if(readIndex != writeIndex)
-        {
-          m_model.buffers[writeIndex] = std::move(m_model.buffers[readIndex]);
-        }
-        writeIndex++;
-      }
-    }
-    m_model.buffers.resize(writeIndex);
-
-    // remap existing buffer views
-    for(auto& bufferView : m_model.bufferViews)
-    {
-      if(bufferView.buffer < 0)
-        continue;
-
-      bufferView.buffer = isFullyCompressedBuffer[bufferView.buffer];
-    }
-
-    // remove extension
-    std::erase(m_model.extensionsRequired, std::string(meshoptExtName));
-    std::erase(m_model.extensionsUsed, std::string(meshoptExtName));
+    return false;
   }
 
   m_currentScene   = m_model.defaultScene > -1 ? m_model.defaultScene : 0;
-  m_currentVariant = 0;        // Default KHR_materials_variants
-  m_animationPointer.reset();  // Clear cached state from previous model
+  m_currentVariant = 0;
+  if(m_animation)
+    m_animation->resetPointer();
   parseScene();
 
-  m_validSceneParsed = !m_renderNodes.empty();
+  m_validSceneParsed = !m_model.nodes.empty();
+
+  std::error_code pathEc;
+  m_imageSearchPaths = {std::filesystem::absolute(m_filename.parent_path(), pathEc)};
+  if(pathEc)
+    m_imageSearchPaths = {m_filename.parent_path()};
+
+  resolveImageURIs();
 
   return m_validSceneParsed;
 }
 
+//--------------------------------------------------------------------------------------------------
+// Decompress KHR/EXT_meshopt_compression buffer views in-place; remove extension when done.
+// Returns true if extension was not used or decompression succeeded, false on failure.
+//--------------------------------------------------------------------------------------------------
+bool nvvkgltf::Scene::decompressMeshoptExtension()
+{
+  bool hasKHR = std::find(m_model.extensionsUsed.begin(), m_model.extensionsUsed.end(), KHR_MESHOPT_COMPRESSION_EXTENSION_NAME)
+                != m_model.extensionsUsed.end();
+  bool hasEXT = std::find(m_model.extensionsUsed.begin(), m_model.extensionsUsed.end(), EXT_MESHOPT_COMPRESSION_EXTENSION_NAME)
+                != m_model.extensionsUsed.end();
+  if(!hasKHR && !hasEXT)
+  {
+    return true;
+  }
+
+  for(tinygltf::Buffer& buffer : m_model.buffers)
+  {
+    if(buffer.data.empty())
+    {
+      buffer.data.resize(buffer.byteLength);
+      buffer.extensions.erase(KHR_MESHOPT_COMPRESSION_EXTENSION_NAME);
+      buffer.extensions.erase(EXT_MESHOPT_COMPRESSION_EXTENSION_NAME);
+    }
+  }
+
+  // First used to tag buffers that can be removed after decompression
+  std::vector<int> isFullyCompressedBuffer(m_model.buffers.size(), 1);
+
+  for(auto& bufferView : m_model.bufferViews)
+  {
+    if(bufferView.buffer < 0)
+      continue;
+
+    bool warned = false;
+
+    KHR_meshopt_compression mcomp;
+    if(tinygltf::utils::getMeshoptCompression(bufferView, mcomp))
+    {
+      // Decoding logic derived from `decompressMeshopt` in meshoptimizer/gltf/parsegltf.cpp
+
+      const tinygltf::Buffer& sourceBuffer = m_model.buffers[mcomp.buffer];
+      const unsigned char*    source       = &sourceBuffer.data[mcomp.byteOffset];
+      assert(mcomp.byteOffset + mcomp.byteLength <= sourceBuffer.data.size());
+
+      tinygltf::Buffer& resultBuffer = m_model.buffers[bufferView.buffer];
+      unsigned char*    result       = &resultBuffer.data[bufferView.byteOffset];
+      assert(bufferView.byteOffset + bufferView.byteLength <= resultBuffer.data.size());
+
+      int  rc   = -1;
+      bool warn = false;
+
+      switch(mcomp.compressionMode)
+      {
+        case KHR_meshopt_compression::MESHOPT_COMPRESSION_MODE_ATTRIBUTES:
+          warn = meshopt_decodeVertexVersion(source, mcomp.byteLength) < 0;
+          rc   = meshopt_decodeVertexBuffer(result, mcomp.count, mcomp.byteStride, source, mcomp.byteLength);
+          break;
+
+        case KHR_meshopt_compression::MESHOPT_COMPRESSION_MODE_TRIANGLES:
+          warn = meshopt_decodeIndexVersion(source, mcomp.byteLength) < 0;
+          rc   = meshopt_decodeIndexBuffer(result, mcomp.count, mcomp.byteStride, source, mcomp.byteLength);
+          break;
+
+        case KHR_meshopt_compression::MESHOPT_COMPRESSION_MODE_INDICES:
+          warn = meshopt_decodeIndexVersion(source, mcomp.byteLength) < 0;
+          rc   = meshopt_decodeIndexSequence(result, mcomp.count, mcomp.byteStride, source, mcomp.byteLength);
+          break;
+
+        default:
+          break;
+      }
+
+      if(rc != 0)
+      {
+        LOGW("meshopt_compression decompression failed\n");
+        clearParsedData();
+        return false;
+      }
+
+      if(warn && !warned)
+      {
+        LOGW("Warning: meshopt_compression data uses an unsupported or invalid encoding version\n");
+        warned = true;
+      }
+
+      switch(mcomp.compressionFilter)
+      {
+        case KHR_meshopt_compression::MESHOPT_COMPRESSION_FILTER_OCTAHEDRAL:
+          meshopt_decodeFilterOct(result, mcomp.count, mcomp.byteStride);
+          break;
+
+        case KHR_meshopt_compression::MESHOPT_COMPRESSION_FILTER_QUATERNION:
+          meshopt_decodeFilterQuat(result, mcomp.count, mcomp.byteStride);
+          break;
+
+        case KHR_meshopt_compression::MESHOPT_COMPRESSION_FILTER_EXPONENTIAL:
+          meshopt_decodeFilterExp(result, mcomp.count, mcomp.byteStride);
+          break;
+
+        default:
+          break;
+      }
+
+      bufferView.extensions.erase(KHR_MESHOPT_COMPRESSION_EXTENSION_NAME);
+      bufferView.extensions.erase(EXT_MESHOPT_COMPRESSION_EXTENSION_NAME);
+    }
+
+    isFullyCompressedBuffer[bufferView.buffer] = 0;
+  }
+
+  // Remove fully compressed buffers; isFullyCompressedBuffer is repurposed as buffer index remap table
+  size_t writeIndex = 0;
+  for(size_t readIndex = 0; readIndex < m_model.buffers.size(); readIndex++)
+  {
+    if(isFullyCompressedBuffer[readIndex])
+    {
+      isFullyCompressedBuffer[readIndex] = -1;
+    }
+    else
+    {
+      isFullyCompressedBuffer[readIndex] = static_cast<int>(writeIndex);
+      if(readIndex != writeIndex)
+      {
+        m_model.buffers[writeIndex] = std::move(m_model.buffers[readIndex]);
+      }
+      writeIndex++;
+    }
+  }
+  m_model.buffers.resize(writeIndex);
+
+  for(auto& bufferView : m_model.bufferViews)
+  {
+    if(bufferView.buffer >= 0)
+    {
+      bufferView.buffer = isFullyCompressedBuffer[bufferView.buffer];
+    }
+  }
+
+  std::erase(m_model.extensionsRequired, KHR_MESHOPT_COMPRESSION_EXTENSION_NAME);
+  std::erase(m_model.extensionsUsed, KHR_MESHOPT_COMPRESSION_EXTENSION_NAME);
+  std::erase(m_model.extensionsRequired, EXT_MESHOPT_COMPRESSION_EXTENSION_NAME);
+  std::erase(m_model.extensionsUsed, EXT_MESHOPT_COMPRESSION_EXTENSION_NAME);
+  return true;
+}
+
+//--------------------------------------------------------------------------------------------------
+// Save scene to glTF/GLB file with validation
+//
 bool nvvkgltf::Scene::save(const std::filesystem::path& filename)
 {
   namespace fs = std::filesystem;
 
   nvutils::ScopedTimer st(std::string(__FUNCTION__) + "\n");
+
+  // VALIDATE BEFORE SAVE
+  auto validation = validator().validateBeforeSave();
+  validation.print();
+
+  if(!validation.valid)
+  {
+    LOGW("Cannot save - validation failed\n");
+    return false;  // STRICT: refuse to save invalid model
+  }
 
   std::filesystem::path saveFilename = filename;
 
@@ -335,39 +469,63 @@ bool nvvkgltf::Scene::save(const std::filesystem::path& filename)
 
   const bool saveBinary = nvutils::extensionMatches(filename, ".glb");
 
-  // Copy the images to the destination folder
-  if(!m_model.images.empty() && !saveBinary)
+  // Copy the images to the destination folder using the same search paths as for loading.
+  if(!m_model.images.empty() && !saveBinary && !getImageSearchPaths().empty())
   {
-    fs::path srcPath   = m_filename.parent_path();
-    fs::path dstPath   = filename.parent_path();
-    int      numCopied = 0;
-    for(auto& image : m_model.images)
+    const std::vector<fs::path>&    searchPaths = getImageSearchPaths();
+    fs::path                        dstPath     = filename.parent_path();
+    int                             numCopied   = 0;
+    std::unordered_set<std::string> usedRelativeNames;
+    for(size_t i = 0; i < m_model.images.size(); i++)
     {
+      auto& image = m_model.images[i];
       if(image.uri.empty())
         continue;
+      if(image.uri.size() >= 5 && image.uri.compare(0, 5, "data:") == 0)
+        continue;  // data URI: no file to copy
       std::string uri_decoded;
-      tinygltf::URIDecode(image.uri, &uri_decoded, nullptr);  // ex. whitespace may be represented as %20
-
-      fs::path srcFile = srcPath / uri_decoded;
-      fs::path dstFile = dstPath / uri_decoded;
+      tinygltf::URIDecode(image.uri, &uri_decoded, nullptr);
+      fs::path pathDecoded = nvutils::pathFromUtf8(uri_decoded);
+      fs::path srcFile     = nvutils::findFile(pathDecoded, searchPaths, false);
+      if(srcFile.empty())
+        continue;
+      std::string name      = pathDecoded.filename().string();
+      std::string base      = pathDecoded.stem().string();
+      std::string ext       = pathDecoded.extension().string();
+      std::string candidate = "images/" + name;
+      int         suffix    = 0;
+      while(usedRelativeNames.count(candidate))
+        candidate = "images/" + base + "_" + std::to_string(++suffix) + ext;
+      usedRelativeNames.insert(candidate);
+      fs::path dstRelative = fs::path(candidate);
+      fs::path dstFile     = dstPath / dstRelative;
       if(srcFile != dstFile)
       {
-        // Create the parent directory of the destination file if it doesn't exist
         fs::create_directories(dstFile.parent_path());
-
         try
         {
-          if(fs::copy_file(srcFile, dstFile, fs::copy_options::update_existing))
+          if(fs::copy_file(srcFile, dstFile, fs::copy_options::overwrite_existing))
             numCopied++;
         }
         catch(const fs::filesystem_error& e)
         {
           LOGW("%sError copying image: %s\n", st.indent().c_str(), e.what());
+          continue;
         }
       }
+      image.uri = dstRelative.generic_string();  // forward slashes for glTF
     }
     if(numCopied > 0)
       LOGI("%sImages copied: %d\n", st.indent().c_str(), numCopied);
+  }
+
+  // Append generator tag if not already present
+  constexpr const char* generatorPrefix = "NVIDIA vk_gltf_renderer";
+  if(m_model.asset.generator.find(generatorPrefix) == std::string::npos)
+  {
+    if(!m_model.asset.generator.empty())
+      m_model.asset.generator += " + ";
+    m_model.asset.generator += std::string(generatorPrefix) + " " APP_VERSION_STRING;
   }
 
   // Save the glTF file
@@ -375,16 +533,134 @@ bool nvvkgltf::Scene::save(const std::filesystem::path& filename)
   const std::string  saveFilenameUtf8 = nvutils::utf8FromPath(saveFilename);
   bool result = tcontext.WriteGltfSceneToFile(&m_model, saveFilenameUtf8, saveBinary, saveBinary, true, saveBinary);
   LOGI("%sSaved: %s\n", st.indent().c_str(), saveFilenameUtf8.c_str());
+
+  // After a successful .gltf save, treat the save location as the new canonical home of the scene.
+  // This ensures that subsequent operations (e.g. merging another scene) can resolve images that
+  // were copied into the save directory's "images/" subfolder.
+  if(result)
+  {
+    std::error_code pathEc;
+    fs::path        saveDir = fs::absolute(saveFilename.parent_path(), pathEc);
+    if(pathEc)
+      saveDir = saveFilename.parent_path();
+    m_filename = saveFilename;
+    if(std::find(m_imageSearchPaths.begin(), m_imageSearchPaths.end(), saveDir) == m_imageSearchPaths.end())
+      m_imageSearchPaths.push_back(saveDir);
+  }
+
   return result;
 }
 
+//--------------------------------------------------------------------------------------------------
+// Try alternative image extensions when the original URI doesn't resolve on disk.
+// Updates m_model image URIs in-place so all consumers (Vulkan upload, save, display) stay in sync.
+//
+void nvvkgltf::Scene::resolveImageURIs()
+{
+  static constexpr std::string_view kFallbackExtensions[] = {".dds", ".ktx2", ".ktx", ".png", ".jpg", ".jpeg"};
 
+  for(auto& image : m_model.images)
+  {
+    if(image.uri.empty() || image.bufferView >= 0)
+      continue;
+    if(image.uri.size() >= 5 && image.uri.compare(0, 5, "data:") == 0)
+      continue;
+
+    std::string uriDecoded;
+    tinygltf::URIDecode(image.uri, &uriDecoded, nullptr);
+
+    if(!nvutils::findFile(nvutils::pathFromUtf8(uriDecoded), m_imageSearchPaths, false).empty())
+      continue;
+
+    std::filesystem::path origPath(uriDecoded);
+    std::string           origExt = origPath.extension().string();
+
+    for(auto ext : kFallbackExtensions)
+    {
+      if(ext == origExt)
+        continue;
+      std::string candidate = std::filesystem::path(uriDecoded).replace_extension(ext).string();
+      if(!nvutils::findFile(nvutils::pathFromUtf8(candidate), m_imageSearchPaths, false).empty())
+      {
+        LOGW("Image \"%s\" not found on disk; using \"%s\" instead.\n", image.uri.c_str(), candidate.c_str());
+        image.uri = candidate;
+        break;
+      }
+    }
+  }
+}
+
+
+//--------------------------------------------------------------------------------------------------
+// Take ownership of a pre-loaded model
+//
 void nvvkgltf::Scene::takeModel(tinygltf::Model&& model)
 {
   m_model = std::move(model);
-  m_animationPointer.reset();  // Clear cached state from previous model
+  m_imageSearchPaths.clear();
+  if(m_animation)
+    m_animation->resetPointer();
   parseScene();
 }
+
+//--------------------------------------------------------------------------------------------------
+// Merge another glTF scene into this one. The imported scene is wrapped under a new root node.
+// If maxTextureCount is set and the combined textures would exceed it, returns false.
+// Returns true on success, false on failure.
+//
+int nvvkgltf::Scene::mergeScene(const std::filesystem::path& filename, std::optional<uint32_t> maxTextureCount)
+{
+  nvutils::ScopedTimer st(std::string(__FUNCTION__) + "\n");
+  const std::string    filenameUtf8 = nvutils::utf8FromPath(filename);
+
+  // Invalidate current scene until we know the merge succeeded
+  m_validSceneParsed = false;
+
+  tinygltf::Model importedModel;
+  std::string     error, warn;
+  if(!loadGltfFile(filename, importedModel, &error, &warn))
+  {
+    if(error.empty())
+      LOGW("%sUnknown file extension: %s\n", st.indent().c_str(), nvutils::utf8FromPath(filename.extension()).c_str());
+    else
+    {
+      LOGW("%sError loading file for merge: %s\n", st.indent().c_str(), filenameUtf8.c_str());
+      LOGW("%s%s\n", st.indent().c_str(), error.c_str());
+    }
+    return -1;
+  }
+
+  if(!validator().validateModelExtensions(importedModel, "imported scene"))
+  {
+    return -1;
+  }
+
+  int wrapperNodeIdx = SceneMerger::merge(m_model, importedModel, filename.stem().string(), maxTextureCount);
+  if(wrapperNodeIdx < 0)
+  {
+    return -1;
+  }
+
+  std::error_code       pathEc;
+  std::filesystem::path importDir = std::filesystem::absolute(filename.parent_path(), pathEc);
+  if(pathEc)
+    importDir = filename.parent_path();
+  m_imageSearchPaths.push_back(importDir);
+  resolveImageURIs();
+
+  if(!decompressMeshoptExtension())
+  {
+    return -1;
+  }
+
+  parseScene();
+  m_validSceneParsed = !m_model.nodes.empty();
+  return wrapperNodeIdx;
+}
+
+//--------------------------------------------------------------------------------------------------
+// SCENE MANAGEMENT
+//--------------------------------------------------------------------------------------------------
 
 void nvvkgltf::Scene::setCurrentScene(int sceneID)
 {
@@ -393,16 +669,50 @@ void nvvkgltf::Scene::setCurrentScene(int sceneID)
   parseScene();
 }
 
-// Parses the scene from the glTF model, initializing and setting up scene elements, materials, animations, and the camera.
+//--------------------------------------------------------------------------------------------------
+// SCENE PARSING (PRIVATE)
+//--------------------------------------------------------------------------------------------------
+
 void nvvkgltf::Scene::parseScene()
 {
   // Ensure there are nodes in the glTF model and the current scene ID is valid
   assert(m_model.nodes.size() > 0 && "No nodes in the glTF file");
   assert(m_currentScene >= 0 && m_currentScene < static_cast<int>(m_model.scenes.size()) && "Invalid scene ID");
 
+  // Snapshot state before rebuild so we can diff afterward and set precise dirty flags.
+  // Full state (worldMatrix, materialID, renderPrimID, visible) is captured because
+  // clearParsedData() wipes pre-existing dirty flags -- the diff must detect everything.
+  struct RenderNodeSnapshot
+  {
+    glm::mat4 worldMatrix;
+    int       materialID;
+    int       renderPrimID;
+    bool      visible;
+  };
+  const auto&                     prevRNList = m_renderNodeRegistry.getRenderNodes();
+  std::vector<RenderNodeSnapshot> prevRN;
+  prevRN.reserve(prevRNList.size());
+  for(const auto& rn : prevRNList)
+    prevRN.push_back({rn.worldMatrix, rn.materialID, rn.renderPrimID, rn.visible});
+  const size_t prevMatCount   = m_model.materials.size();
+  const size_t prevPrimCount  = m_renderPrimitives.size();
+  const size_t prevLightCount = m_lights.size();
+
+  m_validSceneParsed = false;
+
   // Clear previous scene data and initialize scene elements
   clearParsedData();
   setSceneElementsDefaultNames();
+  // Create tangents from model meshes so primitive keys are stable (no render nodes yet).
+  createMissingTangentsForModel();
+
+  // Build the list of unique RenderPrimitives in deterministic order (by mesh index, then primitive index).
+  // CRITICAL: There is a direct correlation between BLAS and primitive index. BLAS are built once
+  // using this order (m_blasAccel[renderPrimID]). The TLAS references BLAS by object.renderPrimID.
+  // If primitive order ever changed without rebuilding BLAS, the TLAS would reference the wrong BLAS.
+  // So we must never let primitive registration run only during traversal (visit order would vary).
+  PrimitiveKeyMap primMap = buildPrimitiveKeyMap();
+
 
   // There must be at least one material in the scene
   if(m_model.materials.empty())
@@ -411,13 +721,13 @@ void nvvkgltf::Scene::parseScene()
   }
 
   // Collect all draw objects; RenderNode and RenderPrimitive
-  // Also it will be used  to compute the scene bounds for the camera
+  // Also it will be used to compute the scene bounds for the camera
   for(auto& sceneNode : m_model.scenes[m_currentScene].nodes)
   {
     tinygltf::utils::traverseSceneGraph(
         m_model, sceneNode, glm::mat4(1), nullptr,
         [this](int nodeID, const glm::mat4& worldMat) { return handleLightTraversal(nodeID, worldMat); },
-        [this](int nodeID, const glm::mat4& worldMat) { return handleRenderNode(nodeID, worldMat); });
+        [this, &primMap](int nodeID, const glm::mat4& worldMat) { return handleRenderNode(nodeID, worldMat, primMap); });
   }
 
   // Search for the first camera in the scene and exit traversal upon finding it
@@ -440,40 +750,118 @@ void nvvkgltf::Scene::parseScene()
 
   // Parse various scene components
   parseVariants();
-  parseAnimations();
-  createMissingTangents();
+  animation().parseAnimations();
 
   // We are updating the scene to the first state, animation, skinning, morph, ..
   updateRenderNodesFull();
+
+  // Diff: compare rebuilt state to snapshot and set precise dirty flags.
+  // Two-pass for render nodes: count first, then only populate hash sets if <50% changed.
+  {
+    const auto& newRN = m_renderNodeRegistry.getRenderNodes();
+
+    if(prevRN.size() != newRN.size())
+    {
+      m_dirtyFlags.allRenderNodesDirty = true;
+    }
+    else if(!newRN.empty())
+    {
+      const size_t     fullUpdateThreshold = newRN.size() / 2;
+      std::vector<int> dirtyIndices;
+      dirtyIndices.reserve(std::min(fullUpdateThreshold + 1, newRN.size()));
+
+      for(size_t i = 0; i < newRN.size(); i++)
+      {
+        if(newRN[i].worldMatrix != prevRN[i].worldMatrix || newRN[i].materialID != prevRN[i].materialID
+           || newRN[i].renderPrimID != prevRN[i].renderPrimID || newRN[i].visible != prevRN[i].visible)
+        {
+          dirtyIndices.push_back(static_cast<int>(i));
+          if(dirtyIndices.size() > fullUpdateThreshold)
+          {
+            m_dirtyFlags.allRenderNodesDirty = true;
+            break;
+          }
+        }
+      }
+      if(!m_dirtyFlags.allRenderNodesDirty)
+      {
+        for(int idx : dirtyIndices)
+          markRenderNodeDirty(idx);
+      }
+    }
+
+    for(size_t i = prevMatCount; i < m_model.materials.size(); i++)
+      markMaterialDirty(static_cast<int>(i));
+
+    if(m_renderPrimitives.size() != prevPrimCount)
+      m_dirtyFlags.primitivesChanged = true;
+
+    if(m_lights.size() != prevLightCount)
+    {
+      for(size_t i = 0; i < m_lights.size(); i++)
+        markLightDirty(static_cast<int>(i));
+    }
+  }
+
+  m_validSceneParsed = !m_model.nodes.empty();
 }
 
 
-// This function recursively updates the visibility of nodes in the scene graph.
-// If a node is marked as not visible, all its children will also be marked as not visible,
-// regardless of their individual visibility flags.
-void nvvkgltf::Scene::updateVisibility(int nodeID)
+//--------------------------------------------------------------------------------------------------
+// Dirty Tracking for GPU Updates
+//--------------------------------------------------------------------------------------------------
+
+void nvvkgltf::Scene::markMaterialDirty(int materialIndex)
 {
-  std::function<void(int, bool)> processNode;
-  processNode = [&](int nodeID, bool visible) -> void {
-    const tinygltf::Node& node = m_model.nodes[nodeID];
-    if(visible)
+  if(materialIndex >= 0 && materialIndex < static_cast<int>(m_model.materials.size()))
+    m_dirtyFlags.materials.insert(materialIndex);
+}
+
+void nvvkgltf::Scene::markLightDirty(int lightIndex)
+{
+  if(lightIndex >= 0 && lightIndex < static_cast<int>(m_model.lights.size()))
+    m_dirtyFlags.lights.insert(lightIndex);
+}
+
+void nvvkgltf::Scene::markRenderNodeDirty(int renderNodeIndex, bool forVk, bool forRtx)
+{
+  if(renderNodeIndex >= 0 && renderNodeIndex < static_cast<int>(m_renderNodeRegistry.getRenderNodes().size()))
+  {
+    if(forVk)
+      m_dirtyFlags.renderNodesVk.insert(renderNodeIndex);
+    if(forRtx)
+      m_dirtyFlags.renderNodesRtx.insert(renderNodeIndex);
+  }
+}
+
+void nvvkgltf::Scene::markNodeDirty(int nodeIndex)
+{
+  if(nodeIndex < 0 || nodeIndex >= static_cast<int>(m_model.nodes.size()))
+    return;
+
+  m_dirtyFlags.nodes.insert(nodeIndex);
+
+  const tinygltf::Node& node = m_model.nodes[nodeIndex];
+
+  if(node.light >= 0)
+    markLightDirty(node.light);
+
+  {
+    const std::vector<int>& rnIds = m_renderNodeRegistry.getRenderNodesForNode(nodeIndex);
+    for(int renderNodeIdx : rnIds)
     {
-      // Changing the visibility only if the parent was visible
-      visible = tinygltf::utils::getNodeVisibility(node).visible;
+      m_dirtyFlags.renderNodesVk.insert(renderNodeIdx);
+      m_dirtyFlags.renderNodesRtx.insert(renderNodeIdx);
     }
+  }
+}
 
-    for(auto renderNodeID : m_nodeToRenderNodes[nodeID])
-      m_renderNodes[renderNodeID].visible = visible;
-
-    for(auto& child : node.children)
-    {
-      processNode(child, visible);
-    }
-  };
-
-  const tinygltf::Node& node    = m_model.nodes[nodeID];
-  bool                  visible = tinygltf::utils::getNodeVisibility(node).visible;
-  processNode(nodeID, visible);
+// We mark RenderNodes as dirty for RTX if their materials changes features that affect ray tracing, such as alpha mode or double-sidedness.
+void nvvkgltf::Scene::markRenderNodeRtxDirtyForMaterials(const std::unordered_set<int>& materialIds)
+{
+  std::unordered_set<int> rtxNodes = getMaterialRenderNodes(materialIds);
+  for(int rn : rtxNodes)
+    m_dirtyFlags.renderNodesRtx.insert(rn);
 }
 
 // Set the default names for the scene elements if they are empty
@@ -535,20 +923,20 @@ void nvvkgltf::Scene::createSceneCamera()
   tnode.rotation    = {q.x, q.y, q.z, q.w};
 }
 
-//--------------------------------------------------------------------------------------------
-// This function will update the world matrices of the render nodes
+//--------------------------------------------------------------------------------------------------
+// Update world matrices for dirty nodes (uses internal m_dirtyFlags.nodes)
 //
-void nvvkgltf::Scene::updateNodeWorldMatrices(const std::unordered_set<int>& dirtyNodeIds)
+void nvvkgltf::Scene::updateNodeWorldMatrices()
 {
   const tinygltf::Scene& scene = m_model.scenes[m_currentScene];
   assert(scene.nodes.size() > 0 && "No nodes in the glTF file");
 
-  if(dirtyNodeIds.empty())
+  if(m_dirtyFlags.nodes.empty())
   {
-    // Full update
-    updateRenderNodesFull();
     return;
   }
+
+  const std::unordered_set<int>& dirtyNodeIds = m_dirtyFlags.nodes;
 
   // Partial update
   for(int nodeID : dirtyNodeIds)
@@ -585,9 +973,25 @@ void nvvkgltf::Scene::updateNodeWorldMatrices(const std::unordered_set<int>& dir
     glm::mat4 parentMat  = m_nodeParents[nodeID] >= 0 ? m_nodesWorldMatrices[m_nodeParents[nodeID]] : glm::mat4(1.0f);
     m_nodesWorldMatrices[nodeID] = parentMat * m_nodesLocalMatrices[nodeID];
 
-    for(auto renderNodeID : m_nodeToRenderNodes[nodeID])
+    auto instIt = m_gpuInstanceLocalMatrices.find(nodeID);
+    if(instIt != m_gpuInstanceLocalMatrices.end())
     {
-      m_renderNodes[renderNodeID].worldMatrix = m_nodesWorldMatrices[nodeID];
+      const auto& localMatrices = instIt->second;
+      size_t      numInstances  = localMatrices.size();
+      size_t      idx           = 0;
+      for(int renderNodeID : m_renderNodeRegistry.getRenderNodesForNode(nodeID))
+      {
+        m_renderNodeRegistry.getRenderNodes()[renderNodeID].worldMatrix =
+            m_nodesWorldMatrices[nodeID] * localMatrices[idx % numInstances];
+        idx++;
+      }
+    }
+    else
+    {
+      for(int renderNodeID : m_renderNodeRegistry.getRenderNodesForNode(nodeID))
+      {
+        m_renderNodeRegistry.getRenderNodes()[renderNodeID].worldMatrix = m_nodesWorldMatrices[nodeID];
+      }
     }
 
     if(node.light >= 0)
@@ -608,23 +1012,19 @@ void nvvkgltf::Scene::updateNodeWorldMatrices(const std::unordered_set<int>& dir
 }
 
 //--------------------------------------------------------------------------------------------------
-// Update all the render nodes in the scene and collecting information about
-// the node's parent,  and the render node indices for each node.
-void nvvkgltf::Scene::updateRenderNodesFull()
+// Traverse scene roots computing local/world matrices, visibility, and parent links.
+// Calls callback(nodeID, worldMatrix, visible) for every node in the scene graph.
+//
+void nvvkgltf::Scene::traverseSceneWithVisibility(const std::function<void(int nodeID, const glm::mat4& worldMatrix, bool visible)>& callback)
 {
   const tinygltf::Scene& scene = m_model.scenes[m_currentScene];
   m_nodesLocalMatrices.resize(m_model.nodes.size(), glm::mat4(1.0f));
   m_nodesWorldMatrices.resize(m_model.nodes.size());
   m_nodeParents.resize(m_model.nodes.size());
   m_nodeParents.assign(m_model.nodes.size(), -1);
-  m_nodeToRenderNodes = {};
-  m_nodeToRenderNodes.resize(m_model.nodes.size());
 
-  int32_t renderNodeID = 0;  // Index of the render node
-
-  // Recursive lambda function to traverse the scene nodes
-  std::function<void(int, const glm::mat4&, bool)> traverseNodes;
-  traverseNodes = [&](int nodeID, const glm::mat4& parentMat, bool visible) {
+  std::function<void(int, const glm::mat4&, bool)> traverse;
+  traverse = [&](int nodeID, const glm::mat4& parentMat, bool visible) {
     const tinygltf::Node& node   = m_model.nodes[nodeID];
     m_nodesLocalMatrices[nodeID] = tinygltf::utils::getNodeMatrix(node);
     const glm::mat4 worldMat     = parentMat * m_nodesLocalMatrices[nodeID];
@@ -635,6 +1035,33 @@ void nvvkgltf::Scene::updateRenderNodesFull()
       visible = tinygltf::utils::getNodeVisibility(tnode).visible;
     }
 
+    callback(nodeID, worldMat, visible);
+
+    m_nodesWorldMatrices[nodeID] = worldMat;
+    for(const auto& child : tnode.children)
+    {
+      m_nodeParents[child] = nodeID;
+      traverse(child, worldMat, visible);
+    }
+  };
+
+  for(int sceneNode : scene.nodes)
+  {
+    bool visible = tinygltf::utils::getNodeVisibility(m_model.nodes[sceneNode]).visible;
+    traverse(sceneNode, glm::mat4(1), visible);
+  }
+}
+
+//--------------------------------------------------------------------------------------------------
+// Update all the render nodes in the scene and collecting information about
+// the node's parent,  and the render node indices for each node.
+void nvvkgltf::Scene::updateRenderNodesFull()
+{
+  std::vector<nvvkgltf::RenderNode>& renderNodes = m_renderNodeRegistry.getRenderNodes();
+
+  traverseSceneWithVisibility([&](int nodeID, const glm::mat4& worldMat, bool visible) {
+    tinygltf::Node& tnode = m_model.nodes[nodeID];
+
     if(tnode.light > -1)
     {
       m_lights[tnode.light].worldMatrix = worldMat;
@@ -642,58 +1069,101 @@ void nvvkgltf::Scene::updateRenderNodesFull()
 
     if(tnode.mesh > -1)
     {
-      const tinygltf::Mesh& mesh = m_model.meshes[tnode.mesh];
-      for(const tinygltf::Primitive& primitive : mesh.primitives)
+      const tinygltf::Mesh&   mesh         = m_model.meshes[tnode.mesh];
+      const std::vector<int>& rnIDs        = m_renderNodeRegistry.getRenderNodesForNode(nodeID);
+      auto                    instIt       = m_gpuInstanceLocalMatrices.find(nodeID);
+      size_t                  numInstances = (instIt != m_gpuInstanceLocalMatrices.end()) ? instIt->second.size() : 0;
+      size_t                  instIdx      = 0;
+
+      for(int rnID : rnIDs)
       {
-        nvvkgltf::RenderNode& renderNode = m_renderNodes[renderNodeID];
-        renderNode.worldMatrix           = worldMat;
-        renderNode.materialID            = getMaterialVariantIndex(primitive, m_currentVariant);
-        renderNode.visible               = visible;
-        m_nodeToRenderNodes[nodeID].push_back(renderNodeID);
-        renderNodeID++;
+        if(rnID >= 0 && static_cast<size_t>(rnID) < renderNodes.size())
+        {
+          if(numInstances > 0)
+            renderNodes[rnID].worldMatrix = worldMat * instIt->second[instIdx % numInstances];
+          else
+            renderNodes[rnID].worldMatrix = worldMat;
+
+          renderNodes[rnID].visible = visible;
+          auto nodeAndPrim          = m_renderNodeRegistry.getNodeAndPrim(rnID);
+          if(nodeAndPrim && nodeAndPrim->first == nodeID && nodeAndPrim->second >= 0
+             && static_cast<size_t>(nodeAndPrim->second) < mesh.primitives.size())
+          {
+            renderNodes[rnID].materialID = getMaterialVariantIndex(mesh.primitives[nodeAndPrim->second], m_currentVariant);
+          }
+          instIdx++;
+        }
       }
     }
-
-    m_nodesWorldMatrices[nodeID] = worldMat;
-    for(const auto& child : tnode.children)
-    {
-      m_nodeParents[child] = nodeID;
-      traverseNodes(child, worldMat, visible);
-    }
-  };
-
-  // Traverse the scene nodes and collect the render node indices
-  for(auto& sceneNode : scene.nodes)
-  {
-    bool visible = tinygltf::utils::getNodeVisibility(m_model.nodes[sceneNode]).visible;
-    traverseNodes(sceneNode, glm::mat4(1), visible);
-  }
+  });
 }
 
-//-----------------------------------------------------------
-//
-void nvvkgltf::Scene::setCurrentVariant(int variant, std::unordered_set<int>& dirtyRenderNodes)
+//--------------------------------------------------------------------------------------------------
+// Force rebuild of all render nodes (for debugging/validation). Forwards to rebuildRenderNodesAndLights().
+//--------------------------------------------------------------------------------------------------
+void nvvkgltf::Scene::rebuildRenderNodes()
+{
+  rebuildRenderNodesAndLights();
+}
+
+//--------------------------------------------------------------------------------------------------
+// Rebuild only render nodes and lights (e.g. after node deletion). Does not clear or rebuild
+// primitives, cameras, animations, variants. Use instead of parseScene() when only the node
+// list or hierarchy changed.
+//--------------------------------------------------------------------------------------------------
+void nvvkgltf::Scene::rebuildRenderNodesAndLights()
+{
+  m_renderNodeRegistry.clear();
+  m_lights.clear();
+  m_gpuInstanceLocalMatrices.clear();
+  m_numTriangles = 0;
+
+  PrimitiveKeyMap primMap = buildPrimitiveKeyMap();
+
+  traverseSceneWithVisibility([&](int nodeID, const glm::mat4& worldMat, bool visible) {
+    tinygltf::Node& tnode = m_model.nodes[nodeID];
+
+    if(tnode.light > -1)
+    {
+      handleLightTraversal(nodeID, worldMat);
+    }
+
+    if(tnode.mesh > -1)
+    {
+      createRenderNodesForNode(nodeID, worldMat, visible, primMap);
+    }
+  });
+}
+
+//--------------------------------------------------------------------------------------------------
+// VARIANT MANAGEMENT
+//--------------------------------------------------------------------------------------------------
+
+void nvvkgltf::Scene::setCurrentVariant(int variant)
 {
   m_currentVariant = variant;
-  dirtyRenderNodes.clear();
 
-  for(size_t i = 0; i < m_nodeToRenderNodes.size(); i++)
+  for(int nodeID = 0; nodeID < static_cast<int>(m_model.nodes.size()); nodeID++)
   {
-    if(m_nodeToRenderNodes[i].empty())
+    const std::vector<int>& rnIds = m_renderNodeRegistry.getRenderNodesForNode(nodeID);
+    if(rnIds.empty())
       continue;
-    tinygltf::Node& tnode             = m_model.nodes[i];
-    int             firstRenderNodeID = m_nodeToRenderNodes[i][0];
+    tinygltf::Node& tnode = m_model.nodes[nodeID];
     if(tnode.mesh > -1)
     {
       tinygltf::Mesh& mesh = m_model.meshes[tnode.mesh];
-      for(size_t primID = 0; primID < mesh.primitives.size(); primID++)
+      for(int rnID : rnIds)
       {
-        int renderNodeID = firstRenderNodeID + int(primID);
-        int beforeMatID  = m_renderNodes[renderNodeID].materialID;
-        int newMatId     = getMaterialVariantIndex(mesh.primitives[primID], m_currentVariant);
+        auto nodeAndPrim = m_renderNodeRegistry.getNodeAndPrim(rnID);
+        int  primIdx =
+            (nodeAndPrim && nodeAndPrim->second >= 0 && static_cast<size_t>(nodeAndPrim->second) < mesh.primitives.size()) ?
+                 nodeAndPrim->second :
+                 0;
+        int beforeMatID = m_renderNodeRegistry.getRenderNodes()[rnID].materialID;
+        int newMatId    = getMaterialVariantIndex(mesh.primitives[primIdx], m_currentVariant);
         if(beforeMatID != newMatId)
-          dirtyRenderNodes.insert(renderNodeID);
-        m_renderNodes[firstRenderNodeID + primID].materialID = newMatId;
+          m_dirtyFlags.renderNodesVk.insert(rnID);
+        m_renderNodeRegistry.getRenderNodes()[rnID].materialID = newMatId;
       }
     }
   }
@@ -704,17 +1174,18 @@ void nvvkgltf::Scene::clearParsedData()
 {
   m_cameras.clear();
   m_lights.clear();
-  m_animations.clear();
-  m_renderNodes.clear();
+  if(m_animation)
+    m_animation->clear();
+  m_renderNodeRegistry.clear();
   m_renderPrimitives.clear();
-  m_uniquePrimitiveIndex.clear();
   m_variants.clear();
-  m_nodeToRenderNodes.clear();
   m_nodeParents.clear();
   m_nodesLocalMatrices.clear();
+  m_gpuInstanceLocalMatrices.clear();
   m_numTriangles    = 0;
   m_sceneBounds     = {};
   m_sceneCameraNode = -1;
+  m_dirtyFlags.clear();
 }
 
 void nvvkgltf::Scene::destroy()
@@ -723,30 +1194,34 @@ void nvvkgltf::Scene::destroy()
   m_filename.clear();
   m_validSceneParsed = false;
   m_model            = {};
-  m_animationPointer.reset();  // Clear cached state when destroying the scene
 }
 
 
-// Get the unique index of a primitive, and add it to the list if it is not already there
-int nvvkgltf::Scene::getUniqueRenderPrimitive(tinygltf::Primitive& primitive, int meshID)
+// Build the primitive key map and (re)populate m_renderPrimitives with unique primitives.
+// Iterates meshes in deterministic order so indices match the BLAS build order.
+nvvkgltf::Scene::PrimitiveKeyMap nvvkgltf::Scene::buildPrimitiveKeyMap()
 {
-  const std::string& key = tinygltf::utils::generatePrimitiveKey(primitive);
-
-  // Attempt to insert the key with the next available index if it doesn't exist
-  auto [it, inserted] = m_uniquePrimitiveIndex.try_emplace(key, static_cast<int>(m_uniquePrimitiveIndex.size()));
-
-  // If the primitive was newly inserted, add it to the render primitives list
-  if(inserted)
+  m_renderPrimitives.clear();
+  PrimitiveKeyMap primMap;
+  for(size_t i = 0; i < m_model.meshes.size(); ++i)
   {
-    nvvkgltf::RenderPrimitive renderPrim;
-    renderPrim.pPrimitive  = &primitive;
-    renderPrim.vertexCount = int(tinygltf::utils::getVertexCount(m_model, primitive));
-    renderPrim.indexCount  = int(tinygltf::utils::getIndexCount(m_model, primitive));
-    renderPrim.meshID      = meshID;
-    m_renderPrimitives.push_back(renderPrim);
+    for(size_t j = 0; j < m_model.meshes[i].primitives.size(); ++j)
+    {
+      tinygltf::Primitive& primitive = m_model.meshes[i].primitives[j];
+      const std::string&   key       = tinygltf::utils::generatePrimitiveKey(primitive);
+      auto [it, inserted]            = primMap.try_emplace(key, static_cast<int>(primMap.size()));
+      if(inserted)
+      {
+        nvvkgltf::RenderPrimitive renderPrim;
+        renderPrim.pPrimitive  = &primitive;
+        renderPrim.vertexCount = int(tinygltf::utils::getVertexCount(m_model, primitive));
+        renderPrim.indexCount  = int(tinygltf::utils::getIndexCount(m_model, primitive));
+        renderPrim.meshID      = static_cast<int>(i);
+        m_renderPrimitives.push_back(renderPrim);
+      }
+    }
   }
-
-  return it->second;
+  return primMap;
 }
 
 
@@ -766,18 +1241,21 @@ inline void extractCameraVectors(const glm::mat4& viewMatrix, const glm::vec3& s
 }
 
 
+//--------------------------------------------------------------------------------------------------
+// CAMERA MANAGEMENT
+//--------------------------------------------------------------------------------------------------
+
+
+//----------------------------------------------------------------------------------
 // Retrieve the list of render cameras in the scene.
 // This function returns a vector of render cameras present in the scene. If the `force`
 // parameter is set to true, it clears and regenerates the list of cameras.
 //
 // Parameters:
 // - force: If true, forces the regeneration of the camera list.
-//
-// Returns:
-// - A const reference to the vector of render cameras.
-const std::vector<nvvkgltf::RenderCamera>& nvvkgltf::Scene::getRenderCameras(bool force /*= false*/)
+const std::vector<nvvkgltf::RenderCamera>& nvvkgltf::Scene::getRenderCameras(bool rebuild)
 {
-  if(force)
+  if(rebuild)
   {
     m_cameras.clear();
   }
@@ -847,7 +1325,10 @@ bool nvvkgltf::Scene::handleLightTraversal(int nodeID, const glm::mat4& worldMat
 {
   tinygltf::Node&       node = m_model.nodes[nodeID];
   nvvkgltf::RenderLight renderLight;
-  renderLight.light      = node.light;
+  renderLight.light = node.light;
+  if(node.light < 0 || node.light >= m_model.lights.size())
+    return false;
+
   tinygltf::Light& light = m_model.lights[node.light];
   // Add a default color if the light has no color
   if(light.color.empty())
@@ -873,12 +1354,12 @@ bool nvvkgltf::Scene::handleLightTraversal(int nodeID, const glm::mat4& worldMat
 
 
 // Return the bounding volume of the scene
-nvutils::Bbox nvvkgltf::Scene::getSceneBounds()
+nvutils::Bbox nvvkgltf::Scene::getSceneBounds() const
 {
   if(!m_sceneBounds.isEmpty())
     return m_sceneBounds;
 
-  for(const nvvkgltf::RenderNode& rnode : m_renderNodes)
+  for(const nvvkgltf::RenderNode& rnode : m_renderNodeRegistry.getRenderNodes())
   {
     glm::vec3 minValues = {0.f, 0.f, 0.f};
     glm::vec3 maxValues = {0.f, 0.f, 0.f};
@@ -904,21 +1385,16 @@ nvutils::Bbox nvvkgltf::Scene::getSceneBounds()
   return m_sceneBounds;
 }
 
-// Handles the creation of render nodes for a given primitive in the scene.
-// For each primitive in the node's mesh, it:
-// - Generates a unique render primitive index.
-// - Creates a render node with the appropriate world matrix, material ID, render primitive ID, primitive ID, and reference node ID.
-// If the primitive has the EXT_mesh_gpu_instancing extension, multiple render nodes are created for instancing.
-// Otherwise, a single render node is added to the render nodes list.
-// Returns false to continue traversal of the scene graph.
-bool nvvkgltf::Scene::handleRenderNode(int nodeID, glm::mat4 worldMatrix)
+void nvvkgltf::Scene::createRenderNodesForNode(int nodeID, const glm::mat4& worldMatrix, bool visible, const PrimitiveKeyMap& primMap)
 {
   const tinygltf::Node& node = m_model.nodes[nodeID];
-  tinygltf::Mesh&       mesh = m_model.meshes[node.mesh];
-  for(size_t primID = 0; primID < mesh.primitives.size(); primID++)
+  if(node.mesh < 0)
+    return;
+  tinygltf::Mesh& mesh = m_model.meshes[node.mesh];
+  for(size_t primIdx = 0; primIdx < mesh.primitives.size(); primIdx++)
   {
-    tinygltf::Primitive& primitive    = mesh.primitives[primID];
-    int                  rprimID      = getUniqueRenderPrimitive(primitive, node.mesh);
+    tinygltf::Primitive& primitive    = mesh.primitives[primIdx];
+    int                  rprimID      = primMap.at(tinygltf::utils::generatePrimitiveKey(primitive));
     int                  numTriangles = m_renderPrimitives[rprimID].indexCount / 3;
 
     nvvkgltf::RenderNode renderNode;
@@ -927,85 +1403,114 @@ bool nvvkgltf::Scene::handleRenderNode(int nodeID, glm::mat4 worldMatrix)
     renderNode.renderPrimID = rprimID;
     renderNode.refNodeID    = nodeID;
     renderNode.skinID       = node.skin;
+    renderNode.visible      = visible;
 
     if(tinygltf::utils::hasElementName(node.extensions, EXT_MESH_GPU_INSTANCING_EXTENSION_NAME))
     {
       const tinygltf::Value& ext = tinygltf::utils::getElementValue(node.extensions, EXT_MESH_GPU_INSTANCING_EXTENSION_NAME);
-      const tinygltf::Value& attributes   = ext.Get("attributes");
-      size_t                 numInstances = handleGpuInstancing(attributes, renderNode, worldMatrix);
-      m_numTriangles += numTriangles * static_cast<uint32_t>(numInstances);  // Statistics
+      const tinygltf::Value& attributes = ext.Get("attributes");
+      size_t numInstances = handleGpuInstancing(attributes, renderNode, worldMatrix, nodeID, static_cast<int>(primIdx));
+      m_numTriangles += numTriangles * static_cast<int32_t>(numInstances);
     }
     else
     {
-      m_renderNodes.push_back(renderNode);
-      m_numTriangles += numTriangles;  // Statistics
+      m_renderNodeRegistry.addRenderNode(renderNode, nodeID, static_cast<int>(primIdx));
+      m_numTriangles += numTriangles;
     }
   }
+}
+
+// Handles the creation of render nodes for a given primitive in the scene.
+// Delegates to createRenderNodesForNode with default visible=true (updated later in updateRenderNodesFull).
+bool nvvkgltf::Scene::handleRenderNode(int nodeID, glm::mat4 worldMatrix, const PrimitiveKeyMap& primMap)
+{
+  const tinygltf::Node& node = m_model.nodes[nodeID];
+  if(node.mesh < 0)
+    return true;
+  createRenderNodesForNode(nodeID, worldMatrix, true, primMap);
   return false;  // Continue traversal
 }
 
 // Handle GPU instancing : EXT_mesh_gpu_instancing
-size_t nvvkgltf::Scene::handleGpuInstancing(const tinygltf::Value& attributes, nvvkgltf::RenderNode renderNode, glm::mat4 worldMatrix)
+// Called once per primitive; the per-instance local transforms are shared across primitives
+// of the same node and cached in m_gpuInstanceLocalMatrices for use by updateRenderNodesFull
+// and updateNodeWorldMatrices.
+size_t nvvkgltf::Scene::handleGpuInstancing(const tinygltf::Value& attributes,
+                                            nvvkgltf::RenderNode   renderNode,
+                                            glm::mat4              worldMatrix,
+                                            int                    nodeID,
+                                            int                    primIndex)
 {
-  std::vector<glm::vec3> tStorage;
-  std::vector<glm::quat> rStorage;
-  std::vector<glm::vec3> sStorage;
-  std::span<glm::vec3> translations = tinygltf::utils::getAttributeData3(m_model, attributes, "TRANSLATION", &tStorage);
-  std::span<glm::quat> rotations    = tinygltf::utils::getAttributeData3(m_model, attributes, "ROTATION", &rStorage);
-  std::span<glm::vec3> scales       = tinygltf::utils::getAttributeData3(m_model, attributes, "SCALE", &sStorage);
-
-  size_t numInstances = std::max({translations.size(), rotations.size(), scales.size()});
-
-  // Note: the specification says, that the number of elements in the attributes should be the same if they are present
-  for(size_t i = 0; i < numInstances; i++)
+  // Build the per-instance local matrices once per node (shared across all primitives).
+  auto [it, inserted] = m_gpuInstanceLocalMatrices.try_emplace(nodeID);
+  if(inserted)
   {
-    nvvkgltf::RenderNode instNode    = renderNode;
-    glm::vec3            translation = glm::vec3(0.0f, 0.0f, 0.0f);
-    glm::quat            rotation    = glm::quat(1.0f, 0.0f, 0.0f, 0.0f);
-    glm::vec3            scale       = glm::vec3(1.0f, 1.0f, 1.0f);
-    if(!translations.empty())
-      translation = translations[i];
-    if(!rotations.empty())
-      rotation = rotations[i];
-    if(!scales.empty())
-      scale = scales[i];
+    std::vector<glm::vec3> tStorage, sStorage;
+    std::vector<glm::quat> rStorage;
+    std::span<glm::vec3> translations = tinygltf::utils::getAttributeData3(m_model, attributes, "TRANSLATION", &tStorage);
+    std::span<glm::quat> rotations = tinygltf::utils::getAttributeData3(m_model, attributes, "ROTATION", &rStorage);
+    std::span<glm::vec3> scales    = tinygltf::utils::getAttributeData3(m_model, attributes, "SCALE", &sStorage);
 
-    glm::mat4 mat = glm::translate(glm::mat4(1.0f), translation) * glm::mat4_cast(rotation) * glm::scale(glm::mat4(1.0f), scale);
-
-    instNode.worldMatrix = worldMatrix * mat;
-    m_renderNodes.push_back(instNode);
-  }
-  return numInstances;
-}
-
-//-------------------------------------------------------------------------------------------------
-// Add tangents on primitives that have normal maps but no tangents
-void nvvkgltf::Scene::createMissingTangents()
-{
-  std::vector<int> missTangentPrimitives;
-
-  for(const auto& renderNode : m_renderNodes)
-  {
-    // Check for missing tangents if the primitive has normalmap
-    if(m_model.materials[renderNode.materialID].normalTexture.index >= 0)
+    size_t n = std::max({translations.size(), rotations.size(), scales.size()});
+    it->second.resize(n);
+    for(size_t i = 0; i < n; i++)
     {
-      int                  renderPrimID = renderNode.renderPrimID;
-      tinygltf::Primitive& primitive    = *m_renderPrimitives[renderPrimID].pPrimitive;
-
-      if(primitive.attributes.find("TANGENT") == primitive.attributes.end())
-      {
-        LOGW("Render Primitive %d has a normal map but no tangents. Generating tangents.\n", renderPrimID);
-        tinygltf::utils::createTangentAttribute(m_model, primitive);
-        missTangentPrimitives.push_back(renderPrimID);  // Will generate the tangents later
-      }
+      glm::vec3 t   = i < translations.size() ? translations[i] : glm::vec3(0.0f);
+      glm::quat r   = i < rotations.size() ? rotations[i] : glm::quat(1.0f, 0.0f, 0.0f, 0.0f);
+      glm::vec3 s   = i < scales.size() ? scales[i] : glm::vec3(1.0f);
+      it->second[i] = glm::translate(glm::mat4(1.0f), t) * glm::mat4_cast(r) * glm::scale(glm::mat4(1.0f), s);
     }
   }
 
-  // Generate the tangents in parallel
-  nvutils::parallel_batches<1>(missTangentPrimitives.size(), [&](uint64_t primID) {
-    tinygltf::Primitive& primitive = *m_renderPrimitives[missTangentPrimitives[primID]].pPrimitive;
-    tinygltf::utils::simpleCreateTangents(m_model, primitive);
-  });
+  const std::vector<glm::mat4>& localMatrices = it->second;
+  for(size_t i = 0; i < localMatrices.size(); i++)
+  {
+    nvvkgltf::RenderNode instNode = renderNode;
+    instNode.worldMatrix          = worldMatrix * localMatrices[i];
+    m_renderNodeRegistry.addRenderNode(instNode, nodeID, primIndex);
+  }
+  return localMatrices.size();
+}
+
+//-------------------------------------------------------------------------------------------------
+// Create missing tangents by iterating all meshes/primitives in the model. Used before building
+// the unique-primitive list (when render nodes are empty) so primitive keys are stable across
+// parseScene() runs (e.g. after duplicate node). Prevents BLAS/TLAS index mismatch.
+// Primitives that share the same key (same geometry) get the same TANGENT accessor so they
+// remain deduplicated in the unique-primitive list.
+void nvvkgltf::Scene::createMissingTangentsForModel()
+{
+  std::unordered_map<std::string, std::vector<tinygltf::Primitive*>> keyToPrimitives;
+
+  for(size_t i = 0; i < m_model.meshes.size(); ++i)
+  {
+    for(auto& primitive : m_model.meshes[i].primitives)
+    {
+      const int matId =
+          (primitive.material >= 0 && primitive.material < static_cast<int>(m_model.materials.size())) ? primitive.material : 0;
+      if(matId >= static_cast<int>(m_model.materials.size()))
+        continue;
+      if(m_model.materials[matId].normalTexture.index < 0)
+        continue;
+      if(primitive.attributes.find("TANGENT") != primitive.attributes.end())
+        continue;
+
+      std::string key = tinygltf::utils::generatePrimitiveKey(primitive);
+      keyToPrimitives[key].push_back(&primitive);
+    }
+  }
+
+  for(auto& [key, primitives] : keyToPrimitives)
+  {
+    if(primitives.empty())
+      continue;
+    tinygltf::Primitive* first = primitives[0];
+    tinygltf::utils::createTangentAttribute(m_model, *first);
+    tinygltf::utils::simpleCreateTangents(m_model, *first);
+    const int tangentAccessorIndex = first->attributes["TANGENT"];
+    for(size_t i = 1; i < primitives.size(); ++i)
+      primitives[i]->attributes["TANGENT"] = tangentAccessorIndex;
+  }
 }
 
 //-------------------------------------------------------------------------------------------------
@@ -1014,9 +1519,10 @@ void nvvkgltf::Scene::createMissingTangents()
 std::unordered_set<int> nvvkgltf::Scene::getMaterialRenderNodes(const std::unordered_set<int>& materialVariantNodeIDs) const
 {
   std::unordered_set<int> renderNodes;
-  for(size_t i = 0; i < m_renderNodes.size(); i++)
+  const auto&             rnodes = m_renderNodeRegistry.getRenderNodes();
+  for(size_t i = 0; i < rnodes.size(); i++)
   {
-    if(materialVariantNodeIDs.contains(m_renderNodes[i].materialID))
+    if(materialVariantNodeIDs.contains(rnodes[i].materialID))
     {
       renderNodes.insert(int(i));
     }
@@ -1027,13 +1533,14 @@ std::unordered_set<int> nvvkgltf::Scene::getMaterialRenderNodes(const std::unord
 //-------------------------------------------------------------------------------------------------
 // Find which nodes are solid or translucent, helps for raster rendering
 //
-std::vector<uint32_t> nvvkgltf::Scene::getShadedNodes(PipelineType type)
+std::vector<uint32_t> nvvkgltf::Scene::getShadedNodes(PipelineType type) const
 {
   std::vector<uint32_t> result;
 
-  for(uint32_t i = 0; i < m_renderNodes.size(); i++)
+  const auto& rnodes = m_renderNodeRegistry.getRenderNodes();
+  for(uint32_t i = 0; i < rnodes.size(); i++)
   {
-    const auto& tmat               = m_model.materials[m_renderNodes[i].materialID];
+    const auto& tmat               = m_model.materials[rnodes[i].materialID];
     float       transmissionFactor = 0;
     if(tinygltf::utils::hasElementName(tmat.extensions, KHR_MATERIALS_TRANSMISSION_EXTENSION_NAME))
     {
@@ -1069,6 +1576,7 @@ void applyRenderCameraToNode(tinygltf::Node& tnode, tinygltf::Camera& tcamera, c
   glm::quat q       = glm::quatLookAt(glm::normalize(camera.center - camera.eye), camera.up);
   tnode.translation = {camera.eye.x, camera.eye.y, camera.eye.z};
   tnode.rotation    = {q.x, q.y, q.z, q.w};
+  tnode.matrix      = {};  // Clear the matrix to avoid conflicts with translation/rotation/scale
 
   if(camera.type == nvvkgltf::RenderCamera::CameraType::eOrthographic)
   {
@@ -1152,499 +1660,6 @@ void nvvkgltf::Scene::setSceneCameras(const std::vector<nvvkgltf::RenderCamera>&
   }
 }
 
-// Collects all animation data
-void nvvkgltf::Scene::parseAnimations()
-{
-  m_animations.clear();
-  m_animations.reserve(m_model.animations.size());
-  for(tinygltf::Animation& anim : m_model.animations)
-  {
-    Animation animation;
-    animation.info.name = anim.name;
-    if(animation.info.name.empty())
-    {
-      animation.info.name = "Animation" + std::to_string(m_animations.size());
-    }
-
-    // Samplers
-    for(auto& samp : anim.samplers)
-    {
-      AnimationSampler sampler;
-
-      if(samp.interpolation == "LINEAR")
-      {
-        sampler.interpolation = AnimationSampler::InterpolationType::eLinear;
-      }
-      if(samp.interpolation == "STEP")
-      {
-        sampler.interpolation = AnimationSampler::InterpolationType::eStep;
-      }
-      if(samp.interpolation == "CUBICSPLINE")
-      {
-        sampler.interpolation = AnimationSampler::InterpolationType::eCubicSpline;
-      }
-
-      // Read sampler input time values
-      {
-        const tinygltf::Accessor& accessor = m_model.accessors[samp.input];
-        if(!tinygltf::utils::copyAccessorData(m_model, accessor, sampler.inputs))
-        {
-          LOGE("Invalid data type for animation input");
-          continue;
-        }
-
-        // Protect against invalid values
-        for(auto input : sampler.inputs)
-        {
-          if(input < animation.info.start)
-          {
-            animation.info.start = input;
-          }
-          if(input > animation.info.end)
-          {
-            animation.info.end = input;
-          }
-        }
-      }
-
-      // Read sampler output T/R/S values
-      {
-        const tinygltf::Accessor& accessor = m_model.accessors[samp.output];
-
-        switch(accessor.type)
-        {
-          case TINYGLTF_TYPE_VEC2: {
-            // copyAccessorData handles all cases: normal, sparse, and sparse-only (bufferView == -1)
-            tinygltf::utils::copyAccessorData(m_model, accessor, sampler.outputsVec2);
-            break;
-          }
-          case TINYGLTF_TYPE_VEC3: {
-            tinygltf::utils::copyAccessorData(m_model, accessor, sampler.outputsVec3);
-            break;
-          }
-          case TINYGLTF_TYPE_VEC4: {
-            tinygltf::utils::copyAccessorData(m_model, accessor, sampler.outputsVec4);
-            break;
-          }
-          case TINYGLTF_TYPE_SCALAR: {
-            // This is for `sampler.inputs` vectors of `n` elements
-            sampler.outputsFloat.resize(sampler.inputs.size());
-            const size_t           elemPerKey = accessor.count / sampler.inputs.size();
-            std::vector<float>     storage;
-            std::span<const float> val     = tinygltf::utils::getAccessorData(m_model, accessor, &storage);
-            const float*           dataPtr = val.data();
-
-            for(size_t i = 0; i < sampler.inputs.size(); i++)
-            {
-              for(int j = 0; j < elemPerKey; j++)
-              {
-                sampler.outputsFloat[i].push_back(*dataPtr++);
-              }
-            }
-            break;
-          }
-          default: {
-            LOGW("Unknown animation type: %d\n", accessor.type);
-            break;
-          }
-        }
-      }
-
-      animation.samplers.emplace_back(sampler);
-    }
-
-    // Channels
-    for(auto& source : anim.channels)
-    {
-      AnimationChannel channel;
-
-      if(source.target_path == "rotation")
-      {
-        channel.path = AnimationChannel::PathType::eRotation;
-      }
-      else if(source.target_path == "translation")
-      {
-        channel.path = AnimationChannel::PathType::eTranslation;
-      }
-      else if(source.target_path == "scale")
-      {
-        channel.path = AnimationChannel::PathType::eScale;
-      }
-      else if(source.target_path == "weights")
-      {
-        channel.path = AnimationChannel::PathType::eWeights;
-      }
-      else if(source.target_path == "pointer")
-      {
-        channel.path = AnimationChannel::PathType::ePointer;
-
-        // Parse KHR_animation_pointer extension
-        assert(tinygltf::utils::hasElementName(source.target_extensions, KHR_ANIMATION_POINTER));
-        const tinygltf::Value& ext = tinygltf::utils::getElementValue(source.target_extensions, KHR_ANIMATION_POINTER);
-        tinygltf::utils::getValue(ext, "pointer", channel.pointerPath);
-      }
-      channel.samplerIndex = source.sampler;
-      channel.node         = source.target_node;
-
-      animation.channels.emplace_back(channel);
-    }
-
-    animation.info.reset();
-    m_animations.emplace_back(animation);
-  }
-
-  // Find all animated primitives (morph)
-  m_morphPrimitives.clear();
-  for(size_t renderPrimID = 0; renderPrimID < getRenderPrimitives().size(); renderPrimID++)
-  {
-    const auto&                renderPrimitive = getRenderPrimitive(renderPrimID);
-    const tinygltf::Primitive& primitive       = *renderPrimitive.pPrimitive;
-    const tinygltf::Mesh&      mesh            = getModel().meshes[renderPrimitive.meshID];
-
-    if(!primitive.targets.empty() && !mesh.weights.empty())
-    {
-      m_morphPrimitives.push_back(uint32_t(renderPrimID));
-    }
-  }
-  // Skin animated
-  m_skinNodes.clear();
-  for(size_t renderNodeID = 0; renderNodeID < m_renderNodes.size(); renderNodeID++)
-  {
-    if(m_renderNodes[renderNodeID].skinID > -1)
-    {
-      m_skinNodes.push_back(uint32_t(renderNodeID));
-    }
-  }
-}
-
-//--------------------------------------------------------------------------------------------------
-// Update the animation (index)
-// The value of the animation is updated based on the current time
-// - Node transformations are updated
-// - Morph target weights are updated
-std::unordered_set<int> nvvkgltf::Scene::updateAnimation(uint32_t animationIndex)
-{
-  Animation&              animation = m_animations[animationIndex];
-  float                   time      = animation.info.currentTime;
-  std::unordered_set<int> dirtyNodeIds;
-
-  for(auto& channel : animation.channels)
-  {
-    AnimationSampler& sampler = animation.samplers[channel.samplerIndex];
-
-    // Handle pointer animations (KHR_animation_pointer) - no node required
-    if(channel.path == AnimationChannel::PathType::ePointer)
-    {
-      processAnimationChannel(nullptr, sampler, channel, time);
-      continue;
-    }
-
-    // Standard animations require a valid node
-    if(channel.node < 0 || channel.node >= static_cast<int>(m_model.nodes.size()))
-    {
-      continue;  // Invalid node
-    }
-
-    tinygltf::Node& gltfNode = m_model.nodes[channel.node];
-    processAnimationChannel(&gltfNode, sampler, channel, time);
-    if(channel.path != AnimationChannel::PathType::eWeights)
-    {
-      dirtyNodeIds.insert(channel.node);
-    }
-  }
-
-  // Sync animated properties back to tinygltf::Model (for pointer animations)
-  m_animationPointer.syncToModel();
-  const auto& animDirtyNodes = m_animationPointer.getDirtyNodes();
-  for(int nodeIndex : animDirtyNodes)
-  {
-    dirtyNodeIds.insert(nodeIndex);
-    updateVisibility(nodeIndex);
-  }
-
-  return dirtyNodeIds;
-}
-
-//--------------------------------------------------------------------------------------------------
-// Process the animation channel
-// - Interpolates the keyframes
-// - Updates the node transformation (if gltfNode is not nullptr)
-// - Updates the morph target weights
-// - Handles pointer animations (KHR_animation_pointer) when gltfNode is nullptr
-bool nvvkgltf::Scene::processAnimationChannel(tinygltf::Node* gltfNode, AnimationSampler& sampler, const AnimationChannel& channel, float time)
-{
-  bool animated = false;
-
-  for(size_t i = 0; i < sampler.inputs.size() - 1; i++)
-  {
-    float inputStart = sampler.inputs[i];
-    float inputEnd   = sampler.inputs[i + 1];
-
-    if(inputStart <= time && time <= inputEnd)
-    {
-      float t  = calculateInterpolationFactor(inputStart, inputEnd, time);
-      animated = true;
-
-      switch(sampler.interpolation)
-      {
-        case AnimationSampler::InterpolationType::eLinear:
-          handleLinearInterpolation(gltfNode, sampler, channel, t, i);
-          break;
-        case AnimationSampler::InterpolationType::eStep:
-          handleStepInterpolation(gltfNode, sampler, channel, i);
-          break;
-        case AnimationSampler::InterpolationType::eCubicSpline: {
-          float keyDelta = inputEnd - inputStart;
-          handleCubicSplineInterpolation(gltfNode, sampler, channel, t, keyDelta, i);
-          break;
-        }
-      }
-      break;  // Found the right time segment
-    }
-  }
-
-  return animated;
-}
-
-//--------------------------------------------------------------------------------------------------
-// Calculate the interpolation factor: [0..1] between two keyframes
-float nvvkgltf::Scene::calculateInterpolationFactor(float inputStart, float inputEnd, float time)
-{
-  float keyDelta = inputEnd - inputStart;
-  return std::clamp((time - inputStart) / keyDelta, 0.0f, 1.0f);
-}
-
-//--------------------------------------------------------------------------------------------------
-// Interpolates the keyframes linearly
-void nvvkgltf::Scene::handleLinearInterpolation(tinygltf::Node*         gltfNode,
-                                                AnimationSampler&       sampler,
-                                                const AnimationChannel& channel,
-                                                float                   t,
-                                                size_t                  index)
-{
-  switch(channel.path)
-  {
-    case AnimationChannel::PathType::eRotation: {
-      const glm::quat q1 = glm::make_quat(glm::value_ptr(sampler.outputsVec4[index]));
-      const glm::quat q2 = glm::make_quat(glm::value_ptr(sampler.outputsVec4[index + 1]));
-      glm::quat       q  = glm::normalize(glm::slerp(q1, q2, t));
-      if(gltfNode)
-        gltfNode->rotation = {q.x, q.y, q.z, q.w};
-      break;
-    }
-    case AnimationChannel::PathType::eTranslation: {
-      glm::vec3 trans = glm::mix(sampler.outputsVec3[index], sampler.outputsVec3[index + 1], t);
-      if(gltfNode)
-        gltfNode->translation = {trans.x, trans.y, trans.z};
-      break;
-    }
-    case AnimationChannel::PathType::eScale: {
-      glm::vec3 s = glm::mix(sampler.outputsVec3[index], sampler.outputsVec3[index + 1], t);
-      if(gltfNode)
-        gltfNode->scale = {s.x, s.y, s.z};
-      break;
-    }
-    case AnimationChannel::PathType::eWeights: {
-      // Retrieve the mesh from the node
-      if(gltfNode && gltfNode->mesh >= 0)
-      {
-        tinygltf::Mesh& mesh = m_model.meshes[gltfNode->mesh];
-
-        // Make sure the weights vector is resized to match the number of morph targets
-        if(mesh.weights.size() != sampler.outputsFloat[index].size())
-        {
-          mesh.weights.resize(sampler.outputsFloat[index].size());
-        }
-
-        // Interpolating between weights for morph targets
-        for(size_t j = 0; j < mesh.weights.size(); j++)
-        {
-          float weight1   = sampler.outputsFloat[index][j];
-          float weight2   = sampler.outputsFloat[index + 1][j];
-          mesh.weights[j] = glm::mix(weight1, weight2, t);
-        }
-      }
-      break;
-    }
-    case AnimationChannel::PathType::ePointer: {
-      // Pointer animations (KHR_animation_pointer) - gltfNode should be nullptr
-      if(!sampler.outputsVec4.empty() && index + 1 < sampler.outputsVec4.size())
-      {
-        glm::vec4 value = glm::mix(sampler.outputsVec4[index], sampler.outputsVec4[index + 1], t);
-        m_animationPointer.applyValue(channel.pointerPath, value);
-      }
-      else if(!sampler.outputsVec3.empty() && index + 1 < sampler.outputsVec3.size())
-      {
-        glm::vec3 value = glm::mix(sampler.outputsVec3[index], sampler.outputsVec3[index + 1], t);
-        m_animationPointer.applyValue(channel.pointerPath, value);
-      }
-      else if(!sampler.outputsVec2.empty() && index + 1 < sampler.outputsVec2.size())
-      {
-        glm::vec2 value = glm::mix(sampler.outputsVec2[index], sampler.outputsVec2[index + 1], t);
-        m_animationPointer.applyValue(channel.pointerPath, value);
-      }
-      else if(!sampler.outputsFloat.empty() && index + 1 < sampler.outputsFloat.size() && !sampler.outputsFloat[index].empty())
-      {
-        float value = glm::mix(sampler.outputsFloat[index][0], sampler.outputsFloat[index + 1][0], t);
-        m_animationPointer.applyValue(channel.pointerPath, value);
-      }
-      break;
-    }
-  }
-}
-
-//--------------------------------------------------------------------------------------------------
-// Interpolates the keyframes with a step interpolation
-void nvvkgltf::Scene::handleStepInterpolation(tinygltf::Node* gltfNode, AnimationSampler& sampler, const AnimationChannel& channel, size_t index)
-{
-  switch(channel.path)
-  {
-    case AnimationChannel::PathType::eRotation: {
-      glm::quat q = glm::quat(sampler.outputsVec4[index]);
-      if(gltfNode)
-        gltfNode->rotation = {q.x, q.y, q.z, q.w};
-      break;
-    }
-    case AnimationChannel::PathType::eTranslation: {
-      glm::vec3 trans = glm::vec3(sampler.outputsVec3[index]);
-      if(gltfNode)
-        gltfNode->translation = {trans.x, trans.y, trans.z};
-      break;
-    }
-    case AnimationChannel::PathType::eScale: {
-      glm::vec3 s = glm::vec3(sampler.outputsVec3[index]);
-      if(gltfNode)
-        gltfNode->scale = {s.x, s.y, s.z};
-      break;
-    }
-    case AnimationChannel::PathType::eWeights:
-      // Not implemented for step interpolation
-      break;
-    case AnimationChannel::PathType::ePointer: {
-      // Step interpolation for pointer animations (no blending, use exact value)
-      if(!sampler.outputsVec4.empty() && index < sampler.outputsVec4.size())
-      {
-        m_animationPointer.applyValue(channel.pointerPath, sampler.outputsVec4[index]);
-      }
-      else if(!sampler.outputsVec3.empty() && index < sampler.outputsVec3.size())
-      {
-        m_animationPointer.applyValue(channel.pointerPath, sampler.outputsVec3[index]);
-      }
-      else if(!sampler.outputsVec2.empty() && index < sampler.outputsVec2.size())
-      {
-        m_animationPointer.applyValue(channel.pointerPath, sampler.outputsVec2[index]);
-      }
-      else if(!sampler.outputsFloat.empty() && index < sampler.outputsFloat.size() && !sampler.outputsFloat[index].empty())
-      {
-        m_animationPointer.applyValue(channel.pointerPath, sampler.outputsFloat[index][0]);
-      }
-      break;
-    }
-  }
-}
-
-//--------------------------------------------------------------------------------------------------
-// Implements the logic in
-// https://registry.khronos.org/glTF/specs/2.0/glTF-2.0.html#interpolation-cubic
-// for general vectors. For quaternions, normalize after calling this function.
-template <class T>
-static T computeCubicInterpolation(const T* values, float t, float keyDelta, size_t index)
-{
-  const float tSq = t * t;
-  const float tCb = tSq * t;
-  const float tD  = keyDelta;
-
-  // Compute each of the coefficient terms in the specification
-  const float cV1 = -2 * tCb + 3 * tSq;        // -2 t^3 + 3 t^2
-  const float cV0 = 1 - cV1;                   //  2 t^3 - 3 t^2 + 1
-  const float cA  = tD * (tCb - tSq);          // t_d (t^3 - t^2)
-  const float cB  = tD * (tCb - 2 * tSq + t);  // t_d (t^3 - 2 t^2 + t)
-
-  const size_t prevIndex = index * 3;
-  const size_t nextIndex = (index + 1) * 3;
-  const size_t A         = 0;  // Offset for the in-tangent
-  const size_t V         = 1;  // Offset for the value
-  const size_t B         = 2;  // Offset for the out-tangent
-
-  const T& v0 = values[prevIndex + V];  // v_k
-  const T& a  = values[nextIndex + A];  // a_{k+1}
-  const T& b  = values[prevIndex + B];  // b_k
-  const T& v1 = values[nextIndex + V];  // v_{k+1}
-
-  T result = v0 * cV0 + a * cA + b * cB + v1 * cV1;
-  return result;
-}
-
-//--------------------------------------------------------------------------------------------------
-// Interpolates the keyframes with a cubic spline interpolation
-void nvvkgltf::Scene::handleCubicSplineInterpolation(tinygltf::Node*         gltfNode,
-                                                     AnimationSampler&       sampler,
-                                                     const AnimationChannel& channel,
-                                                     float                   t,
-                                                     float                   keyDelta,
-                                                     size_t                  index)
-{
-  // Implements the logic in
-  // https://registry.khronos.org/glTF/specs/2.0/glTF-2.0.html#interpolation-cubic
-  // for quaternions (first case) and other values (second case).
-
-  // Cubic spline data: each keyframe has 3 values (in-tangent, value, out-tangent)
-  // We need to access up to (index+1)*3+1 (the next keyframe's value)
-  const size_t maxRequiredIndex = (index + 1) * 3 + 1;
-
-  // Handle pointer animations (KHR_animation_pointer extension)
-  if(channel.path == AnimationChannel::PathType::ePointer)
-  {
-    // Pointer animations can use different vector types
-    if(!sampler.outputsVec4.empty() && sampler.outputsVec4.size() > maxRequiredIndex)
-    {
-      glm::vec4 value = computeCubicInterpolation<glm::vec4>(sampler.outputsVec4.data(), t, keyDelta, index);
-      m_animationPointer.applyValue(channel.pointerPath, value);
-    }
-    else if(!sampler.outputsVec3.empty() && sampler.outputsVec3.size() > maxRequiredIndex)
-    {
-      glm::vec3 value = computeCubicInterpolation<glm::vec3>(sampler.outputsVec3.data(), t, keyDelta, index);
-      m_animationPointer.applyValue(channel.pointerPath, value);
-    }
-    else if(!sampler.outputsVec2.empty() && sampler.outputsVec2.size() > maxRequiredIndex)
-    {
-      glm::vec2 value = computeCubicInterpolation<glm::vec2>(sampler.outputsVec2.data(), t, keyDelta, index);
-      m_animationPointer.applyValue(channel.pointerPath, value);
-    }
-    return;
-  }
-
-  // Standard node animations require a valid node
-  if(!gltfNode)
-    return;
-
-  // Handle rotation (quaternion)
-  if(channel.path == AnimationChannel::PathType::eRotation)
-  {
-    if(sampler.outputsVec4.size() > maxRequiredIndex)
-    {
-      glm::vec4 result     = computeCubicInterpolation<glm::vec4>(sampler.outputsVec4.data(), t, keyDelta, index);
-      glm::quat quatResult = glm::make_quat(glm::value_ptr(result));
-      quatResult           = glm::normalize(quatResult);
-      gltfNode->rotation   = {quatResult.x, quatResult.y, quatResult.z, quatResult.w};
-    }
-  }
-  // Handle translation and scale (vec3)
-  else if(sampler.outputsVec3.size() > maxRequiredIndex)
-  {
-    glm::vec3 result = computeCubicInterpolation<glm::vec3>(sampler.outputsVec3.data(), t, keyDelta, index);
-
-    if(channel.path == AnimationChannel::PathType::eTranslation)
-    {
-      gltfNode->translation = {result.x, result.y, result.z};
-    }
-    else if(channel.path == AnimationChannel::PathType::eScale)
-    {
-      gltfNode->scale = {result.x, result.y, result.z};
-    }
-  }
-}
-
 // Parse the variants of the materials
 void nvvkgltf::Scene::parseVariants()
 {
@@ -1689,16 +1704,9 @@ int nvvkgltf::Scene::getMaterialVariantIndex(const tinygltf::Primitive& primitiv
 //--------------------------------------------------------------------------------------------------
 // Get the RenderNode index for a specific primitive within a node
 // Returns -1 if not found
-int nvvkgltf::Scene::getRenderNodeForPrimitive(int nodeId, int primitiveIndex) const
+int nvvkgltf::Scene::getRenderNodeForPrimitive(int nodeIndex, int primitiveIndex) const
 {
-  if(nodeId < 0 || nodeId >= static_cast<int>(m_nodeToRenderNodes.size()))
-    return -1;
-
-  const auto& renderNodes = m_nodeToRenderNodes[nodeId];
-  if(primitiveIndex < 0 || primitiveIndex >= static_cast<int>(renderNodes.size()))
-    return -1;
-
-  return renderNodes[primitiveIndex];
+  return m_renderNodeRegistry.getRenderNodeID(nodeIndex, primitiveIndex);
 }
 
 //--------------------------------------------------------------------------------------------------
@@ -1706,66 +1714,108 @@ int nvvkgltf::Scene::getRenderNodeForPrimitive(int nodeId, int primitiveIndex) c
 // Returns -1 if not found
 int nvvkgltf::Scene::getPrimitiveIndexForRenderNode(int renderNodeIndex) const
 {
-  if(renderNodeIndex < 0 || renderNodeIndex >= static_cast<int>(m_renderNodes.size()))
+  auto nodeAndPrim = m_renderNodeRegistry.getNodeAndPrim(renderNodeIndex);
+  if(!nodeAndPrim)
     return -1;
-
-  const int nodeId = m_renderNodes[renderNodeIndex].refNodeID;
-  if(nodeId < 0 || nodeId >= static_cast<int>(m_nodeToRenderNodes.size()))
-    return -1;
-
-  const auto& renderNodes = m_nodeToRenderNodes[nodeId];
-  for(size_t i = 0; i < renderNodes.size(); ++i)
-  {
-    if(renderNodes[i] == renderNodeIndex)
-      return static_cast<int>(i);
-  }
-  return -1;
+  return nodeAndPrim->second;
 }
 
 //--------------------------------------------------------------------------------------------------
-// Collect the render node indices for the given node IDs
+// Expand a set of node indices to their associated render node IDs, optionally recursing into
+// children. Calls callback(renderNodeID) for each render node found.
 //
-bool nvvkgltf::Scene::collectRenderNodeIndices(const std::unordered_set<int>& nodeIds,
-                                               std::unordered_set<int>&       outRenderNodeIndices,
-                                               bool                           includeDescendants,
-                                               float                          fullUpdateRatio) const
+void nvvkgltf::Scene::expandNodesToRenderNodes(const std::unordered_set<int>&               nodeIndices,
+                                               bool                                         includeDescendants,
+                                               const std::function<void(int renderNodeID)>& callback) const
 {
-  // Update all render nodes if no node IDs are provided
-  if(nodeIds.empty())
-  {
-    return true;
-  }
-
-  // Traverse the node graph and collect the render node indices
-  std::function<void(int)> traverseNode;
-  traverseNode = [&](int nodeId) {
-    for(int rnodeId : m_nodeToRenderNodes.at(nodeId))
+  std::function<void(int)> visitNode;
+  visitNode = [&](int nodeIndex) {
+    for(int rnodeId : m_renderNodeRegistry.getRenderNodesForNode(nodeIndex))
     {
-      outRenderNodeIndices.insert(rnodeId);
+      callback(rnodeId);
     }
 
-    // If including descendants, traverse child nodes
     if(includeDescendants)
     {
-      const tinygltf::Node& node = m_model.nodes[nodeId];
-      for(int childId : node.children)
+      const tinygltf::Node& node = m_model.nodes[nodeIndex];
+      for(int childIdx : node.children)
       {
-        traverseNode(childId);
+        visitNode(childIdx);
       }
     }
   };
 
-  // Add the render node indices for the given node IDs
-  for(int nodeId : nodeIds)
+  for(int nodeIndex : nodeIndices)
   {
-    traverseNode(nodeId);
+    visitNode(nodeIndex);
+  }
+}
+
+//--------------------------------------------------------------------------------------------------
+// Collect the render node indices for the given node indices
+//
+bool nvvkgltf::Scene::collectRenderNodeIndices(const std::unordered_set<int>& nodeIndices,
+                                               std::unordered_set<int>&       outRenderNodeIndices,
+                                               bool                           includeDescendants,
+                                               float                          fullUpdateRatio) const
+{
+  if(nodeIndices.empty())
+  {
+    return true;
   }
 
-  // Check if the update is full
-  if(fullUpdateRatio > float(outRenderNodeIndices.size()) / float(m_renderNodes.size()))
+  expandNodesToRenderNodes(nodeIndices, includeDescendants, [&](int rnodeId) { outRenderNodeIndices.insert(rnodeId); });
+
+  if(fullUpdateRatio > float(outRenderNodeIndices.size()) / float(m_renderNodeRegistry.getRenderNodes().size()))
   {
     return false;
   }
 
   return true;
+}
+
+//--------------------------------------------------------------------------------------------------
+// Populate renderNodesVk/Rtx from m_dirtyFlags.nodes (with optional descendant expansion).
+// When dirty ratio is high, SceneVk/SceneRtx update methods do a full upload (heuristic there).
+//
+void nvvkgltf::Scene::updateRenderNodeDirtyFromNodes(bool includeDescendants)
+{
+  if(m_dirtyFlags.nodes.empty())
+  {
+    return;
+  }
+
+  m_dirtyFlags.renderNodesVk.clear();
+  m_dirtyFlags.renderNodesRtx.clear();
+
+  expandNodesToRenderNodes(m_dirtyFlags.nodes, includeDescendants, [&](int rnodeId) {
+    m_dirtyFlags.renderNodesVk.insert(rnodeId);
+    m_dirtyFlags.renderNodesRtx.insert(rnodeId);
+  });
+}
+
+//--------------------------------------------------------------------------------------------------
+// VALIDATION
+//--------------------------------------------------------------------------------------------------
+
+void nvvkgltf::Scene::ValidationResult::print() const
+{
+  if(valid)
+  {
+    LOGI("[OK] Validation passed\n");
+  }
+  else
+  {
+    LOGE("[FAIL] Validation failed\n");
+  }
+
+  for(const auto& err : errors)
+  {
+    LOGE("  ERROR: %s\n", err.c_str());
+  }
+
+  for(const auto& warn : warnings)
+  {
+    LOGW("  WARNING: %s\n", warn.c_str());
+  }
 }

@@ -17,6 +17,14 @@
  * SPDX-License-Identifier: Apache-2.0
  */
 
+//
+// Vulkan ray tracing path tracer renderer. Builds and dispatches the
+// ray generation / closest-hit / any-hit / miss shader pipeline for
+// progressive path tracing of glTF scenes. Handles accumulation,
+// depth-of-field, and denoiser integration (OptiX / DLSS).
+//
+
+#include <fmt/format.h>
 
 #include <nvapp/elem_dbgprintf.hpp>
 #include <nvvk/check_error.hpp>
@@ -185,7 +193,8 @@ void PathTracer::updateOptiXResources(VkCommandBuffer cmd, Resources& resources)
 bool PathTracer::onUIRender(Resources& resources)
 {
   // Setting the aperture max slider value, based on the scene size
-  float sceneRadius = resources.scene.valid() ? resources.scene.getSceneBounds().radius() : 1.0f;
+  float sceneRadius =
+      (resources.getScene() && resources.getScene()->valid()) ? resources.getScene()->getSceneBounds().radius() : 1.0f;
   float scaleFactor = std::log(sceneRadius);
   scaleFactor       = std::max(scaleFactor, 0.0f);   // Prevent negative values when the scene is small
   float apertureMax = 0.0001f + scaleFactor * 5.0f;  // Minimum max aperture is 0.0001
@@ -214,7 +223,8 @@ bool PathTracer::onUIRender(Resources& resources)
       // Recreate RTX pipeline if SER setting changed
       if(oldUseSER != m_useSER)
       {
-        vkDeviceWaitIdle(m_device);
+        // SYNC NOTE: SER toggle (UI checkbox) — wait before destroying pipeline in use by previous frame.
+        NVVK_CHECK(vkQueueWaitIdle(resources.app->getQueue(0).queue));
         vkDestroyPipeline(m_device, m_rtxPipeline, nullptr);
         m_rtxPipeline = VK_NULL_HANDLE;
       }
@@ -263,11 +273,15 @@ bool PathTracer::onUIRender(Resources& resources)
       }
     }
     // Performance info - always visible
-    ImGui::TextDisabled("Samples: %d/%d (%.1fx)", m_totalSamplesAccumulated, resources.frameCount + 1,
-                        float(m_totalSamplesAccumulated) / float(resources.frameCount + 1));
-
+    const int   frames      = resources.frameCount + 1;
+    const float sppPerFrame = (frames > 0) ? float(m_totalSamplesAccumulated) / float(frames) : 0.f;
+    ImGui::TextDisabled("Samples/pixel: %d", m_totalSamplesAccumulated);
+    ImGui::TextDisabled("Frames: %d (%.1f spp/frame)", frames, sppPerFrame);
     ImGui::TextDisabled("Throughput: %.2f MSPP/s", m_throughputRollingAvg.getAverage());
-    nvgui::tooltip("Mega-sample-pixels per second (rolling average over last %zu frames)", m_throughputRollingAvg.SAMPLE_COUNT);
+    nvgui::tooltip(fmt::format("Mega-sample-pixels per second (rolling average over last {} frames)",
+                               m_throughputRollingAvg.SAMPLE_COUNT)
+                       .c_str(),
+                   true);
 
     PE::end();
   }
@@ -293,7 +307,8 @@ bool PathTracer::onUIRender(Resources& resources)
     if(resources.settings.useInfinitePlane)
     {
       changed |= PE::Checkbox("Shadow Catcher", (bool*)&resources.settings.isShadowCatcher);
-      const float extentY = resources.scene.valid() ? resources.scene.getSceneBounds().extents().y : 10.0f;
+      const float extentY =
+          (resources.getScene() && resources.getScene()->valid()) ? resources.getScene()->getSceneBounds().extents().y : 10.0f;
       if(PE::treeNode("Infinite Plane Settings"))
       {
         changed |= PE::SliderFloat("Height", &resources.settings.infinitePlaneDistance, -extentY, extentY, "%5.9f",
@@ -322,8 +337,8 @@ bool PathTracer::onUIRender(Resources& resources)
     changed |= m_dlss->onUi(resources);
     if(oldTransp != m_dlss->useDlssTransparency())
     {
-      // Need to recompile the shader using the specialization constant
-      vkDeviceWaitIdle(m_device);
+      // SYNC NOTE: DLSS transparency toggle — wait before destroying pipelines compiled with old specialization.
+      NVVK_CHECK(vkQueueWaitIdle(resources.app->getQueue(0).queue));
       vkDestroyPipeline(m_device, m_rtxPipeline, nullptr);
       m_rtxPipeline = VK_NULL_HANDLE;
       vkDestroyPipeline(m_device, m_rqPipeline, nullptr);
@@ -413,18 +428,17 @@ void PathTracer::onRender(VkCommandBuffer cmd, Resources& resources)
 void PathTracer::pushDescriptorSet(VkCommandBuffer cmd, Resources& resources, VkPipelineBindPoint bindPoint) const
 {
   nvvk::WriteSetContainer write{};
-  write.append(resources.descriptorBinding[1].getWriteSet(shaderio::BindingPoints::eTlas), resources.sceneRtx.tlas());
+  write.append(resources.descriptorBinding[1].getWriteSet(shaderio::BindingPoints::eTlas), resources.sceneRtx.topLevelAS());
 
-  // Normal rendering: basic output images
+  // Normal rendering: output images (ObjectID written to eSelectImage slot as float in .r)
   std::vector<VkDescriptorImageInfo> outputImages = {
       resources.gBuffers.getDescriptorImageInfo(Resources::eImgRendered),   // eResultImage
-      resources.gBuffers.getDescriptorImageInfo(Resources::eImgSelection),  // eSelectImage
+      resources.gBuffers.getDescriptorImageInfo(Resources::eImgSelection),  // eSelectImage (ObjectID)
   };
 
 #if defined(USE_DLSS)
   if(getEffectiveDlssEnabled(resources))
   {
-    // With DLSS active, we have 8 output images
     using namespace shaderio;
     outputImages.resize(8);
     outputImages[eResultImage]         = m_dlss->getGBuffers().getDescriptorImageInfo(eResultImage);
@@ -452,6 +466,14 @@ void PathTracer::pushDescriptorSet(VkCommandBuffer cmd, Resources& resources, Vk
   VkWriteDescriptorSet allTextures = resources.descriptorBinding[1].getWriteSet(shaderio::BindingPoints::eOutImages);
   allTextures.descriptorCount      = uint32_t(outputImages.size());
   write.append(allTextures, outputImages.data());
+
+  // Bind GBuffer depth as storage image for writing hardware depth from path tracer (frame 0)
+  VkDescriptorImageInfo depthStorageInfo{
+      .imageView   = resources.gBuffers.getDepthImageView(),
+      .imageLayout = VK_IMAGE_LAYOUT_GENERAL,
+  };
+  write.append(resources.descriptorBinding[1].getWriteSet(shaderio::BindingPoints::eOutDepth), depthStorageInfo);
+
   vkCmdPushDescriptorSetKHR(cmd, bindPoint, m_pipelineLayout, 1, write.size(), write.data());
 }
 
@@ -779,7 +801,7 @@ void PathTracer::updateStatistics(Resources& resources)
   // Update rolling average throughput calculation using wall-clock time
   {
     // Time elapsed for this frame (wall-clock time from user perspective)
-    float wallClockFrameTime = ImGui::GetIO().DeltaTime;
+    float wallClockFrameTime = std::max(ImGui::GetIO().DeltaTime, 1e-6f);
 
     // Total number of pixels in the image
     VkExtent2D imageSize   = resources.gBuffers.getSize();
@@ -811,7 +833,6 @@ void PathTracer::renderRayQuery(VkCommandBuffer cmd, VkExtent2D renderingSize, R
 
   // Bind the shader to use
   VkShaderStageFlagBits stage = VK_SHADER_STAGE_COMPUTE_BIT;
-  //vkCmdBindShadersEXT(cmd, 1, &stage, &m_shader);
   vkCmdBindPipeline(cmd, VK_PIPELINE_BIND_POINT_COMPUTE, m_rqPipeline);
 
 
@@ -883,7 +904,7 @@ void PathTracer::denoiseDlss(VkCommandBuffer cmd, Resources& resources)
     };
     vkCmdBlitImage(cmd, m_dlss->getGBuffers().getColorImage(shaderio::OutputImage::eSelectImage),
                    VK_IMAGE_LAYOUT_GENERAL, resources.gBuffers.getColorImage(Resources::eImgSelection),
-                   VK_IMAGE_LAYOUT_GENERAL, 1, &blitRegions, VK_FILTER_LINEAR);
+                   VK_IMAGE_LAYOUT_GENERAL, 1, &blitRegions, VK_FILTER_NEAREST);  // ObjectID in .r, no interpolation
 
     // Ensure the blit operation completes before any subsequent reads from this image
     nvvk::cmdMemoryBarrier(cmd, VK_PIPELINE_STAGE_2_BLIT_BIT, VK_PIPELINE_STAGE_2_COMPUTE_SHADER_BIT,
@@ -914,9 +935,9 @@ void PathTracer::setupPushConstant(VkCommandBuffer cmd, Resources& resources)
   static uint32_t haltonIndex = 0;
 
   // Set useDlss based on EFFECTIVE state (false when both enabled and frameCount > 0)
-  m_pushConst.useDlss = getEffectiveDlssEnabled(resources);
+  bool useDlss = getEffectiveDlssEnabled(resources);
 
-  if(m_pushConst.useDlss)
+  if(useDlss)
   {
     // When DLSS is enabled, force numSamples to 1
     m_pushConst.numSamples = 1;
@@ -931,17 +952,24 @@ void PathTracer::setupPushConstant(VkCommandBuffer cmd, Resources& resources)
 
 #if defined(USE_OPTIX_DENOISER)
   // Set useOptixDenoiser based on EFFECTIVE state (false when both enabled and frameCount == 0)
-  m_pushConst.useOptixDenoiser = getEffectiveOptixEnabled(resources);
+  bool useOptixDenoiser = getEffectiveOptixEnabled(resources);
 #endif
-  static int lastRenderedObject = -1;
-  m_pushConst.renderSelection   = resources.selectedRenderNode != lastRenderedObject || resources.frameCount == 0;
-  lastRenderedObject            = resources.selectedRenderNode;
-  m_pushConst.frameCount        = frameCount;
-  m_pushConst.totalSamples      = m_totalSamplesAccumulated;
-  m_pushConst.frameInfo         = (shaderio::SceneFrameInfo*)resources.bFrameInfo.address;
-  m_pushConst.skyParams         = (shaderio::SkyPhysicalParameters*)resources.bSkyParams.address;
-  m_pushConst.gltfScene         = (shaderio::GltfScene*)resources.sceneVk.sceneDesc().address;
-  m_pushConst.mouseCoord        = nvapp::ElementDbgPrintf::getMouseCoord();  // Use for debugging: printf in shader
+  m_pushConst.frameCount = frameCount;
+  // First-frame flag must use resources.frameCount so depth and ObjectID are written on app frame 0 and after
+  // every reset (camera/scene change). The local frameCount can be overridden to a Halton index when DLSS
+  // is on and never resets; using it for ePtFirstFrame would only write depth once and break selection/depth.
+  m_pushConst.flags = (resources.frameCount == 0 ? shaderio::ePtFirstFrame : 0);
+#if defined(USE_DLSS)
+  m_pushConst.flags |= useDlss ? shaderio::ePtUseDlss : 0;
+#endif
+#if defined(USE_OPTIX_DENOISER)
+  m_pushConst.flags |= useOptixDenoiser ? shaderio::ePtUseOptixDenoiser : 0;
+#endif
+  m_pushConst.totalSamples = m_totalSamplesAccumulated;
+  m_pushConst.frameInfo    = (shaderio::SceneFrameInfo*)resources.bFrameInfo.address;
+  m_pushConst.skyParams    = (shaderio::SkyPhysicalParameters*)resources.bSkyParams.address;
+  m_pushConst.gltfScene    = (shaderio::GltfScene*)resources.sceneVk.sceneDesc().address;
+  m_pushConst.mouseCoord   = nvapp::ElementDbgPrintf::getMouseCoord();  // Use for debugging: printf in shader
   vkCmdPushConstants(cmd, m_pipelineLayout, VK_SHADER_STAGE_ALL, 0, sizeof(shaderio::PathtracePushConstant), &m_pushConst);
 }
 

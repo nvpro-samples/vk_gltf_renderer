@@ -17,6 +17,13 @@
  * SPDX-License-Identifier: Apache-2.0
  */
 
+//
+// Abstract base class for renderers (path tracer, rasterizer, etc.).
+// Defines the virtual interface for attach/detach, resize, render,
+// shader compilation, and pipeline creation that each concrete
+// renderer implementation must provide.
+//
+
 #pragma once
 #include <nvapp/application.hpp>
 #include <nvvk/profiler_vk.hpp>

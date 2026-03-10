@@ -17,9 +17,12 @@
  * SPDX-License-Identifier: Apache-2.0
  */
 
-// Various Application utilities
-// - Display a menu with File/Quit
-// - Display basic information in the window title
+//
+// Camera conversion utilities for glTF scenes. Extracts camera parameters
+// (eye, center, up, FOV, clip planes) from glTF camera nodes and converts
+// between the glTF RenderCamera representation and the application's
+// CameraManipulator system. Also handles viewport-dependent adjustments.
+//
 
 #pragma once
 
