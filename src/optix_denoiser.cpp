@@ -181,7 +181,7 @@ bool OptiXDenoiser::initOptiXDenoiser()
 
   // Use AOV model kind - since OptiX r575+, HDR/LDR models are internally mapped to AOV
   // using kernel prediction, making AOV the recommended model for all use cases
-  OptixDenoiserModelKind modelKind = OPTIX_DENOISER_MODEL_KIND_AOV;
+  OptixDenoiserModelKind modelKind = OPTIX_DENOISER_MODEL_KIND_AOV;  // OPTIX_DENOISER_MODEL_KIND_UPSCALE2X
 
   // Create denoiser
   OPTIX_CHECK(optixDenoiserCreate(m_optixContext, modelKind, &m_denoiserOptions, &m_denoiser));

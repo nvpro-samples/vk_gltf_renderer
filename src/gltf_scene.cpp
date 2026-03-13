@@ -755,8 +755,9 @@ void nvvkgltf::Scene::parseScene()
   // We are updating the scene to the first state, animation, skinning, morph, ..
   updateRenderNodesFull();
 
-  // Diff: compare rebuilt state to snapshot and set precise dirty flags.
-  // Two-pass for render nodes: count first, then only populate hash sets if <50% changed.
+  // Marking GPU elements dirty is deferred until the end of parseScene so that we can diff against the rebuilt state and set precise dirty flags.
+  // Compare rebuilt state to snapshot and set precise dirty flags.
+  // Two-pass for render nodes: count first, then only populate hash sets if below kFullUpdateRatio changed.
   {
     const auto& newRN = m_renderNodeRegistry.getRenderNodes();
 
@@ -766,7 +767,7 @@ void nvvkgltf::Scene::parseScene()
     }
     else if(!newRN.empty())
     {
-      const size_t     fullUpdateThreshold = newRN.size() / 2;
+      const size_t     fullUpdateThreshold = static_cast<size_t>(float(newRN.size()) * kFullUpdateRatio);
       std::vector<int> dirtyIndices;
       dirtyIndices.reserve(std::min(fullUpdateThreshold + 1, newRN.size()));
 
@@ -845,15 +846,6 @@ void nvvkgltf::Scene::markNodeDirty(int nodeIndex)
 
   if(node.light >= 0)
     markLightDirty(node.light);
-
-  {
-    const std::vector<int>& rnIds = m_renderNodeRegistry.getRenderNodesForNode(nodeIndex);
-    for(int renderNodeIdx : rnIds)
-    {
-      m_dirtyFlags.renderNodesVk.insert(renderNodeIdx);
-      m_dirtyFlags.renderNodesRtx.insert(renderNodeIdx);
-    }
-  }
 }
 
 // We mark RenderNodes as dirty for RTX if their materials changes features that affect ray tracing, such as alpha mode or double-sidedness.
@@ -924,7 +916,14 @@ void nvvkgltf::Scene::createSceneCamera()
 }
 
 //--------------------------------------------------------------------------------------------------
-// Update world matrices for dirty nodes (uses internal m_dirtyFlags.nodes)
+// Update world matrices for dirty nodes and populate render-node dirty flags.
+//
+// Uses a parallel level-by-level walk that propagates dirty flags through the tree hierarchy
+// and only computes matrix multiplications for nodes in dirty subtrees. Falls back to a serial
+// filtered-root recursive walk when topological levels aren't built yet.
+//
+// Both paths insert affected render nodes into renderNodesVk/Rtx (preserving pre-existing
+// flags from other sources), so callers never need a separate updateRenderNodeDirtyFromNodes().
 //
 void nvvkgltf::Scene::updateNodeWorldMatrices()
 {
@@ -932,28 +931,42 @@ void nvvkgltf::Scene::updateNodeWorldMatrices()
   assert(scene.nodes.size() > 0 && "No nodes in the glTF file");
 
   if(m_dirtyFlags.nodes.empty())
-  {
     return;
-  }
 
-  const std::unordered_set<int>& dirtyNodeIds = m_dirtyFlags.nodes;
+  for(int nodeID : m_dirtyFlags.nodes)
+    m_nodesLocalMatrices[nodeID] = tinygltf::utils::getNodeMatrix(m_model.nodes[nodeID]);
 
-  // Partial update
-  for(int nodeID : dirtyNodeIds)
-  {
-    tinygltf::Node& node         = m_model.nodes[nodeID];
-    m_nodesLocalMatrices[nodeID] = tinygltf::utils::getNodeMatrix(node);
-  }
+  // Use parallel level-by-level path when topological levels are available.
+  // Falls back to serial recursive walk before first scene load.
+  if(!m_topoLevels.nodeOrder.empty())
+    updateWorldMatricesParallel();
+  else
+    updateWorldMatricesSerial();
+}
 
-  std::unordered_set<int> filteredDirtyNodes;
-  filteredDirtyNodes.reserve(dirtyNodeIds.size());
-  for(int nodeID : dirtyNodeIds)
+//--------------------------------------------------------------------------------------------------
+// Serial path: filtered-root recursive walk. Best for small dirty sets (leaf moves, editor).
+//
+void nvvkgltf::Scene::updateWorldMatricesSerial()
+{
+  const size_t numNodes = m_model.nodes.size();
+
+  // Convert unordered_set to flat bit vector for O(1) parent-chain lookups
+  std::vector<bool> isDirty(numNodes, false);
+  for(int nodeID : m_dirtyFlags.nodes)
+    isDirty[nodeID] = true;
+
+  // Filter to root dirty nodes (skip nodes whose ancestor is also dirty), because updating a parent
+  // implicitly updates the whole subtree and we want to avoid redundant updates.
+  std::vector<int> filteredDirtyNodes;
+  filteredDirtyNodes.reserve(m_dirtyFlags.nodes.size());
+  for(int nodeID : m_dirtyFlags.nodes)
   {
     bool hasParentInDirty = false;
     int  currentParent    = m_nodeParents[nodeID];
     while(currentParent >= 0)
     {
-      if(dirtyNodeIds.contains(currentParent))
+      if(isDirty[currentParent])
       {
         hasParentInDirty = true;
         break;
@@ -962,59 +975,204 @@ void nvvkgltf::Scene::updateNodeWorldMatrices()
     }
 
     if(!hasParentInDirty)
-    {
-      filteredDirtyNodes.insert(nodeID);
-    }
+      filteredDirtyNodes.push_back(nodeID);
   }
 
+  const bool hasGpuInstancing = !m_gpuInstanceLocalMatrices.empty();  // Special case (KHR_instancing)
+
+  // Lambda for recursive world matrix update walk. Captures filteredDirtyNodes by reference and walks the entire subtree of each entry.
   std::function<void(int)> updateMatrix;
-  updateMatrix = [&](int nodeID) -> void {
-    tinygltf::Node& node = m_model.nodes[nodeID];
-    glm::mat4 parentMat  = m_nodeParents[nodeID] >= 0 ? m_nodesWorldMatrices[m_nodeParents[nodeID]] : glm::mat4(1.0f);
+  updateMatrix = [&](int nodeID) {
+    const tinygltf::Node& node = m_model.nodes[nodeID];
+    // Root node has no parent matrix, so use identity. Otherwise, multiply parent's world matrix by local matrix.
+    glm::mat4 parentMat = m_nodeParents[nodeID] >= 0 ? m_nodesWorldMatrices[m_nodeParents[nodeID]] : glm::mat4(1.0f);
     m_nodesWorldMatrices[nodeID] = parentMat * m_nodesLocalMatrices[nodeID];
 
-    auto instIt = m_gpuInstanceLocalMatrices.find(nodeID);
-    if(instIt != m_gpuInstanceLocalMatrices.end())
+    // Only look up render nodes for mesh-bearing nodes (most skeleton joints have no mesh,
+    // so this avoids expensive hash-map lookups for the vast majority of nodes)
+    if(node.mesh >= 0)
     {
-      const auto& localMatrices = instIt->second;
-      size_t      numInstances  = localMatrices.size();
-      size_t      idx           = 0;
+      const glm::mat4* instMatrices = nullptr;
+      size_t           instCount    = 0;
+
+      // Special case for KHR_instancing: look up instance matrices for this node if they exist, and apply them to each render node.
+      if(hasGpuInstancing)
+      {
+        auto instIt = m_gpuInstanceLocalMatrices.find(nodeID);
+        if(instIt != m_gpuInstanceLocalMatrices.end() && !instIt->second.empty())
+        {
+          instMatrices = instIt->second.data();
+          instCount    = instIt->second.size();
+        }
+      }
+
+      // Find all render nodes for this node and update their world matrices.
+      // If "instance matrices" exist, multiply them with the node's world matrix; otherwise use the node's world matrix directly.
+      size_t idx = 0;
       for(int renderNodeID : m_renderNodeRegistry.getRenderNodesForNode(nodeID))
       {
         m_renderNodeRegistry.getRenderNodes()[renderNodeID].worldMatrix =
-            m_nodesWorldMatrices[nodeID] * localMatrices[idx % numInstances];
+            (instMatrices && instCount > 0) ? m_nodesWorldMatrices[nodeID] * instMatrices[idx % instCount] :
+                                              m_nodesWorldMatrices[nodeID];
+        m_dirtyFlags.renderNodesVk.insert(renderNodeID);
+        m_dirtyFlags.renderNodesRtx.insert(renderNodeID);
         idx++;
-      }
-    }
-    else
-    {
-      for(int renderNodeID : m_renderNodeRegistry.getRenderNodesForNode(nodeID))
-      {
-        m_renderNodeRegistry.getRenderNodes()[renderNodeID].worldMatrix = m_nodesWorldMatrices[nodeID];
       }
     }
 
     if(node.light >= 0)
-    {
       m_lights[node.light].worldMatrix = m_nodesWorldMatrices[nodeID];
-    }
 
-    for(const auto& child : node.children)
-    {
+    for(int child : node.children)
       updateMatrix(child);
-    }
   };
 
-  for(auto nodeID : filteredDirtyNodes)
-  {
+  for(int nodeID : filteredDirtyNodes)
     updateMatrix(nodeID);
+}
+
+//--------------------------------------------------------------------------------------------------
+// Parallel path: level-by-level with dirty-subtree propagation. Best for large dirty sets
+// Processes all nodes but only does matrix math for dirty subtrees.
+// This is the same algorithm as for GPU in compute shader.
+//
+// Serial processes : 0 → 1 → 3 → 4 → 2 → 5 → 6(depth - first, one at a time)
+//
+// Parallel processes :
+// Level 0 : [0]            (1 node, serial)
+// Level 1 : [ 1, 2 ]       (2 nodes in parallel)
+// Level 2 : [ 3, 4, 5, 6 ] (4 nodes in parallel)
+//
+// topoOrder = [ 0, 1, 2, 3, 4, 5, 6 ]      (sorted by depth)
+// levels    = [(0, 1), (1, 2), (3, 4)]     ((offset, count) per level)
+//
+void nvvkgltf::Scene::updateWorldMatricesParallel()
+{
+  const size_t numNodes       = m_model.nodes.size();
+  const size_t numRenderNodes = m_renderNodeRegistry.getRenderNodes().size();
+
+  // Using uint8_t instead of bool: std::vector<bool> packs 8 bits per byte, so concurrent
+  // writes to different indices can race on the same byte. uint8_t gives one byte per element,
+  // making concurrent writes to different indices safe without synchronization.
+  std::vector<uint8_t> isDirty(numNodes, 0);
+  for(int nodeID : m_dirtyFlags.nodes)
+    isDirty[nodeID] = 1;
+
+  std::vector<uint8_t> subtreeDirty(numNodes, 0);
+  std::vector<uint8_t> rnDirtyBits(numRenderNodes, 0);
+
+  const bool hasGpuInstancing = !m_gpuInstanceLocalMatrices.empty();
+
+  for(const auto& [offset, count] : m_topoLevels.levels)
+  {
+    nvutils::parallel_batches(static_cast<uint64_t>(count), [&](uint64_t i) {
+      int                   nodeID = m_topoLevels.nodeOrder[offset + i];
+      int                   parent = m_nodeParents[nodeID];
+      const tinygltf::Node& node   = m_model.nodes[nodeID];
+
+      bool dirty           = isDirty[nodeID] || (parent >= 0 && subtreeDirty[parent]);
+      subtreeDirty[nodeID] = dirty ? 1 : 0;
+
+      if(!dirty)
+        return;
+
+      glm::mat4 parentMat          = parent >= 0 ? m_nodesWorldMatrices[parent] : glm::mat4(1.0f);
+      m_nodesWorldMatrices[nodeID] = parentMat * m_nodesLocalMatrices[nodeID];
+
+      if(node.mesh >= 0)
+      {
+        const glm::mat4* instMatrices = nullptr;
+        size_t           instCount    = 0;
+
+        if(hasGpuInstancing)  // Special case for KHR_instancing: look up instance matrices for this node if they exist, and apply them to each render node.
+        {
+          auto instIt = m_gpuInstanceLocalMatrices.find(nodeID);
+          if(instIt != m_gpuInstanceLocalMatrices.end() && !instIt->second.empty())
+          {
+            instMatrices = instIt->second.data();
+            instCount    = instIt->second.size();
+          }
+        }
+
+        // Find all render nodes for this node and update their world matrices.
+        size_t idx = 0;
+        for(int renderNodeID : m_renderNodeRegistry.getRenderNodesForNode(nodeID))
+        {
+          m_renderNodeRegistry.getRenderNodes()[renderNodeID].worldMatrix =
+              (instMatrices && instCount > 0) ? m_nodesWorldMatrices[nodeID] * instMatrices[idx % instCount] :
+                                                m_nodesWorldMatrices[nodeID];
+          rnDirtyBits[renderNodeID] = 1;
+          idx++;
+        }
+      }
+
+      if(node.light >= 0)
+        m_lights[node.light].worldMatrix = m_nodesWorldMatrices[nodeID];
+    });
+  }
+
+  // Convert dirty bits to dirty sets (preserving pre-existing flags).
+  // The downstream syncFromScene/syncTopLevelAS decide bulk vs surgical upload
+  // based on the dirty ratio
+  for(size_t i = 0; i < numRenderNodes; ++i)
+  {
+    if(rnDirtyBits[i])
+    {
+      m_dirtyFlags.renderNodesVk.insert(static_cast<int>(i));
+      m_dirtyFlags.renderNodesRtx.insert(static_cast<int>(i));
+    }
+  }
+}
+
+//--------------------------------------------------------------------------------------------------
+// Build topological levels for parallel world-matrix propagation in the scene graph.
+// Uses BFS from scene root nodes: level 0 = roots, level 1 = their children, and so on.
+// The resulting topoOrder is a flat ordering of nodes grouped by depth;
+// levels records (offset, count) pairs marking each level's range in topoOrder.
+//
+// Example:
+//   topoOrder = [0, 1, 2, 3, 4, 5, 6]         // sorted by increasing depth
+//   levels    = [(0, 1), (1, 2), (3, 4)]      // (offset, count) per level
+void nvvkgltf::Scene::buildTopologicalLevels()
+{
+  const tinygltf::Scene& scene    = m_model.scenes[m_currentScene];
+  const size_t           numNodes = m_model.nodes.size();
+
+  m_topoLevels.nodeOrder.clear();
+  m_topoLevels.nodeOrder.reserve(numNodes);
+  m_topoLevels.levels.clear();
+
+  // Perform breadth-first search (BFS) from each scene root to determine node levels.
+  // Multiple scene roots are possible; we must visit all to correctly assign topological levels.
+  // Level 0: roots; Level 1: their children; Level 2: grandchildren; etc.
+  std::vector<int> currentLevel;
+  currentLevel.reserve(numNodes);
+  for(int rootID : scene.nodes)
+    currentLevel.push_back(rootID);
+
+  // Process current level: add to topological levels, and generate next level.
+  while(!currentLevel.empty())
+  {
+    int offset = static_cast<int>(m_topoLevels.nodeOrder.size());
+    int count  = static_cast<int>(currentLevel.size());
+    m_topoLevels.levels.push_back({offset, count});
+    m_topoLevels.nodeOrder.insert(m_topoLevels.nodeOrder.end(), currentLevel.begin(), currentLevel.end());
+
+    // Generate next level: all children of current level nodes.
+    std::vector<int> nextLevel;
+    for(int nodeID : currentLevel)
+    {
+      const tinygltf::Node& node = m_model.nodes[nodeID];
+      for(int childID : node.children)
+        nextLevel.push_back(childID);
+    }
+    currentLevel = std::move(nextLevel);
   }
 }
 
 //--------------------------------------------------------------------------------------------------
 // Traverse scene roots computing local/world matrices, visibility, and parent links.
 // Calls callback(nodeID, worldMatrix, visible) for every node in the scene graph.
-//
 void nvvkgltf::Scene::traverseSceneWithVisibility(const std::function<void(int nodeID, const glm::mat4& worldMatrix, bool visible)>& callback)
 {
   const tinygltf::Scene& scene = m_model.scenes[m_currentScene];
@@ -1050,6 +1208,8 @@ void nvvkgltf::Scene::traverseSceneWithVisibility(const std::function<void(int n
     bool visible = tinygltf::utils::getNodeVisibility(m_model.nodes[sceneNode]).visible;
     traverse(sceneNode, glm::mat4(1), visible);
   }
+
+  buildTopologicalLevels();
 }
 
 //--------------------------------------------------------------------------------------------------

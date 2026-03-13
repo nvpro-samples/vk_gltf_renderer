@@ -32,3 +32,5 @@ tests/build/
 tests/resources/temp/
 *.test
 *.benchmark
+
+_package/

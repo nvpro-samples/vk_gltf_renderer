@@ -21,8 +21,7 @@
 
 #include <memory>
 #include <string>
-#include <queue>
-#include <mutex>
+#include <vector>
 
 #include <vulkan/vulkan_core.h>
 #include <glm/glm.hpp>
@@ -54,6 +53,7 @@
 #include "ui_inspector.hpp"
 #include "scene_selection.hpp"
 #include "gizmo_visuals_vk.hpp"
+#include "timeline_pipeline.hpp"
 #include "undo_redo.hpp"
 
 class GltfRenderer : public nvapp::IAppElement
@@ -83,7 +83,6 @@ private:
 
   bool save(const std::filesystem::path& filename);
   bool updateFrameCounter();
-  bool processQueuedCommandBuffers();
 
   void clearGbuffer(VkCommandBuffer cmd);
   void cleanupScene();           // Helper to cleanup current scene
@@ -202,14 +201,9 @@ private:
   glm::quat m_gizmoSnapshotR{1, 0, 0, 0};
   glm::vec3 m_gizmoSnapshotS{1.f};
 
-  // Command buffer queue for deferred submission
-  struct CommandBufferInfo
-  {
-    VkCommandBuffer cmdBuffer{};
-    bool            isBlasBuild{false};  // Indicates if this is a BLAS build command
-  };
-  std::queue<CommandBufferInfo> m_cmdBufferQueue;
-  std::mutex                    m_cmdBufferQueueMutex;
+  // Non-blocking GPU loading pipeline (see timeline_pipeline.hpp for details).
+  // Worker threads enqueue command buffers; the main thread calls poll() each frame.
+  TimelinePipeline m_loadPipeline;
 
   glm::mat4 m_prevMVP{1.f};  // Previous MVP matrix for motion vectors
 

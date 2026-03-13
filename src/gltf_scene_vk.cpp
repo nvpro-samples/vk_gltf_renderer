@@ -187,10 +187,12 @@ void nvvkgltf::SceneVk::deinit()
 
 //--------------------------------------------------------------------------------------------------
 // Create all Vulkan resources for the given scene: materials, render nodes, vertex/index buffers,
-// textures, lights, primitives, and scene descriptor. Calls destroy() first to ensure a clean state.
+// textures, lights, and scene descriptor. Calls destroy() first to ensure a clean state.
+// Note: does NOT apply morph/skinning deformation to vertex buffers. The caller is responsible
+// for running the initial animation pass (GPU compute or CPU fallback) after creation.
 void nvvkgltf::SceneVk::create(VkCommandBuffer        cmd,
                                nvvk::StagingUploader& staging,
-                               nvvkgltf::Scene&       scn,
+                               const nvvkgltf::Scene& scn,
                                bool                   generateMipmaps /*= true*/,
                                bool                   enableRayTracing /*= true*/)
 {
@@ -215,9 +217,6 @@ void nvvkgltf::SceneVk::create(VkCommandBuffer        cmd,
   createTextureImages(cmd, staging, scn, imageSearchPaths);
   uploadLights(staging, scn);
 
-  // Update the buffers for morph and skinning
-  uploadPrimitives(cmd, staging, scn);
-
   (void)flushSceneDescIfDirty(staging, scn);
 }
 
@@ -231,7 +230,7 @@ uint32_t nvvkgltf::SceneVk::syncFromScene(nvvk::StagingUploader& staging, nvvkgl
   uint32_t result = eSyncNone;
   auto&    df     = scn.getDirtyFlags();
 
-  constexpr float fullUpdateRatio = 0.5f;
+  constexpr float fullUpdateRatio = nvvkgltf::kFullUpdateRatio;
 
   if(mask & eSyncMaterials)
   {
@@ -284,13 +283,12 @@ uint32_t nvvkgltf::SceneVk::syncFromScene(nvvk::StagingUploader& staging, nvvkgl
 }
 
 //--------------------------------------------------------------------------------------------------
-// Recreate only geometry (vertex/index buffers, primitives). Call after destroyGeometry();
-// preserves textures and materials.
-void nvvkgltf::SceneVk::createGeometry(VkCommandBuffer cmd, nvvk::StagingUploader& staging, nvvkgltf::Scene& scn)
+// Recreate only geometry (vertex/index buffers). Call after destroyGeometry(); preserves textures
+// and materials. The caller is responsible for running the initial animation pass after this.
+void nvvkgltf::SceneVk::createGeometry(VkCommandBuffer cmd, nvvk::StagingUploader& staging, const nvvkgltf::Scene& scn)
 {
   m_sceneDescDirty = true;  // Geometry buffers may be recreated below.
   createVertexBuffers(cmd, staging, scn);
-  uploadPrimitives(cmd, staging, scn);
   (void)flushSceneDescIfDirty(staging, scn);
 }
 
@@ -376,8 +374,7 @@ void nvvkgltf::SceneVk::uploadMaterials(nvvk::StagingUploader& staging, const nv
     return resized;
   };
 
-  // If more than half of materials are dirty, a full update is faster (fewer staging calls)
-  const bool doFullUpdate = dirtyIndices.empty() || dirtyIndices.size() > materials.size() / 2;
+  const bool doFullUpdate = dirtyIndices.empty() || float(dirtyIndices.size()) / float(materials.size()) >= nvvkgltf::kFullUpdateRatio;
 
   // Rebuild all materials and texture infos into cache
   if(doFullUpdate)

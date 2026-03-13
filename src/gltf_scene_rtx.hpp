@@ -65,6 +65,9 @@ public:
   [[nodiscard]] VkAccelerationStructureKHR topLevelAS();
 
   // ---------- Sync / Update ----------
+  // Update the per-material instance flags cache. Call before syncFromScene() clears df.materials,
+  // so that dirty material indices are still available for surgical cache updates.
+  void updateInstanceFlagsCache(const nvvkgltf::Scene& scene);
   // Sync TLAS from Scene dirty flags (reads + clears renderNodesRtx). Returns true if TLAS was updated.
   [[nodiscard]] bool syncTopLevelAS(VkCommandBuffer cmd, nvvk::StagingUploader& staging, nvvkgltf::Scene& scene);
   // Rebuild or update TLAS. dirtyRenderNodes empty = full update.
@@ -115,6 +118,8 @@ protected:
   nvvk::Buffer m_instancesBuffer;
 
   int32_t m_numVisibleElement = 0;  // Keep track of the number of visible elements in the TLAS
+
+  std::vector<VkGeometryInstanceFlagsKHR> m_instanceFlagsCache;  // Per-material TLAS instance flags (opaque/double-sided)
 
   DeferredFreeFunc m_deferredFree;   // Optional: schedules deferred GPU resource destruction
   GpuMemoryTracker m_memoryTracker;  // GPU memory tracking

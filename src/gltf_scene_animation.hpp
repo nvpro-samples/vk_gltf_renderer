@@ -35,9 +35,8 @@ struct SkinningResult
 };
 
 // Per-primitive skinning task with cached static data (read once at parse time).
-// The cached vertex attributes and inverse bind matrices are exactly the data a future
-// compute shader would upload as GPU SSBOs. The result vectors are pre-allocated and
-// rewritten in-place each frame (no per-frame allocation).
+// The cached vertex attributes and inverse bind matrices are uploaded as GPU SSBOs
+// by AnimationVk, and also used by the CPU fallback path in computeSkinning().
 struct SkinTask
 {
   int renderPrimID;
@@ -52,8 +51,12 @@ struct SkinTask
   std::vector<glm::vec4>  baseTangents;         // TANGENT (empty if absent)
   std::vector<glm::mat4>  inverseBindMatrices;  // IBM for this skin
 
-  // Pre-allocated output (sized once, rewritten each frame)
+  // CPU fallback output (deferred allocation -- only sized when the CPU path runs).
   SkinningResult result;
+
+  // Allocate CPU output vectors if not already sized. Called by computeSkinning();
+  // the GPU compute path never calls this, avoiding the memory cost.
+  void ensureCpuOutput();
 };
 
 struct MorphResult
@@ -62,9 +65,13 @@ struct MorphResult
   std::vector<glm::vec3> basePositions;     // Cached at parse time
   std::vector<glm::vec3> baseNormals;       // Cached at parse time (empty if absent)
   std::vector<glm::vec4> baseTangents;      // Cached at parse time (empty if absent)
-  std::vector<glm::vec3> blendedPositions;  // Rewritten each frame
-  std::vector<glm::vec3> blendedNormals;    // Rewritten each frame (empty if no normal targets)
-  std::vector<glm::vec4> blendedTangents;   // Rewritten each frame (empty if no tangent targets)
+  std::vector<glm::vec3> blendedPositions;  // CPU fallback output (deferred allocation)
+  std::vector<glm::vec3> blendedNormals;    // CPU fallback output (deferred allocation)
+  std::vector<glm::vec4> blendedTangents;   // CPU fallback output (deferred allocation)
+
+  // Allocate CPU blended output vectors if not already sized. Called by computeMorphTargets();
+  // the GPU compute path never calls this, avoiding the memory cost.
+  void ensureCpuOutput();
 };
 
 /*-------------------------------------------------------------------------------------------------
@@ -156,6 +163,15 @@ private:
   // Reused across skin tasks each frame (only normalMatrices and jointMatrices need per-frame workspace)
   std::vector<glm::mat3> m_normalMatrices;
   std::vector<glm::mat4> m_jointMatrices;
+
+  // Precomputed reverse map: skinID → node indices that reference that skin.
+  // Built once in parseSkinTasks() to replace the O(skins*nodes) scan in updateAnimation().
+  std::vector<std::vector<int>> m_skinToNodeIndices;
+
+  void parseSamplersAndChannels();
+  void parseMorphPrimitives();
+  void parseSkinTasks();
+  void buildSkinToNodeMap();
 
   bool processAnimationChannel(tinygltf::Node* gltfNode, AnimationSampler& sampler, const AnimationChannel& channel, float time);
   float calculateInterpolationFactor(float inputStart, float inputEnd, float time);

@@ -65,7 +65,7 @@ auto main(int argc, char** argv) -> int
   nvvk::ContextInitInfo        vkSetup;
   nvutils::Logger&             logger   = nvutils::Logger::getInstance();
   nvutils::Logger::LogLevel    logLevel = nvutils::Logger::LogLevel::eINFO;
-  nvutils::Logger::ShowFlags   logShow  = nvutils::Logger::ShowBits::eSHOW_NONE;
+  nvutils::Logger::ShowFlags   logShow  = nvutils::Logger::ShowBits::eSHOW_TIME;
 #if NDEBUG
   logger.breakOnError(false);
 #endif
@@ -150,6 +150,9 @@ auto main(int argc, char** argv) -> int
       {VK_EXT_NESTED_COMMAND_BUFFER_EXTENSION_NAME, &nestedCmdFeature},
       {VK_NV_RAY_TRACING_INVOCATION_REORDER_EXTENSION_NAME, &reorderFeature, false},
   };
+
+  // Only request the graphics queue
+  vkSetup.queues = {{VK_QUEUE_GRAPHICS_BIT}};
 
   // If not headless, add the surface extensions for both instance and device (i.e swapchain)
   if(!appInfo.headless)

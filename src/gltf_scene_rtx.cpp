@@ -281,14 +281,16 @@ void nvvkgltf::SceneRtx::cmdCreateBuildTopLevelAccelerationStructure(VkCommandBu
 
   const uint32_t instanceCount = static_cast<uint32_t>(drawObjects.size());
 
+  // Rebuild the full instance flags cache (initial build or size-mismatch rebuild).
+  m_instanceFlagsCache.resize(materials.size());
+  for(size_t i = 0; i < materials.size(); i++)
+    m_instanceFlagsCache[i] = getInstanceFlag(materials[i]);
+
   m_tlasInstances.clear();
   m_tlasInstances.reserve(instanceCount);
   m_numVisibleElement = 0;
   for(const auto& object : drawObjects)
   {
-    const tinygltf::Material&  mat           = materials[object.materialID];
-    VkGeometryInstanceFlagsKHR instanceFlags = getInstanceFlag(mat);
-
     VkDeviceAddress blasAddress = m_blasAccel[object.renderPrimID].address;
     if(!object.visible)
       blasAddress = 0;
@@ -301,7 +303,7 @@ void nvvkgltf::SceneRtx::cmdCreateBuildTopLevelAccelerationStructure(VkCommandBu
     asInstance.accelerationStructureReference         = blasAddress;
     asInstance.instanceShaderBindingTableRecordOffset = 0;
     asInstance.mask                                   = 0x01;
-    asInstance.flags                                  = instanceFlags;
+    asInstance.flags                                  = m_instanceFlagsCache[object.materialID];
 
     m_tlasInstances.push_back(asInstance);
   }
@@ -360,6 +362,31 @@ void nvvkgltf::SceneRtx::cmdCreateBuildTopLevelAccelerationStructure(VkCommandBu
 //========== Sync / Update ==========
 
 //--------------------------------------------------------------------------------------------------
+// Update the per-material instance flags cache. Uses df.materials for surgical updates when only
+// a few materials changed; falls back to full rebuild when the material count changes.
+// Must be called before syncFromScene() clears df.materials.
+void nvvkgltf::SceneRtx::updateInstanceFlagsCache(const nvvkgltf::Scene& scene)
+{
+  const auto& materials = scene.getModel().materials;
+  const auto& dirtyMats = scene.getDirtyFlags().materials;
+
+  if(m_instanceFlagsCache.size() != materials.size())
+  {
+    m_instanceFlagsCache.resize(materials.size());
+    for(size_t i = 0; i < materials.size(); i++)
+      m_instanceFlagsCache[i] = getInstanceFlag(materials[i]);
+  }
+  else if(!dirtyMats.empty())
+  {
+    for(int idx : dirtyMats)
+    {
+      if(idx >= 0 && idx < static_cast<int>(materials.size()))
+        m_instanceFlagsCache[idx] = getInstanceFlag(materials[idx]);
+    }
+  }
+}
+
+//--------------------------------------------------------------------------------------------------
 // Rebuild or update TLAS. dirtyRenderNodes empty = full rebuild from scratch.
 void nvvkgltf::SceneRtx::rebuildTopLevelAS(VkCommandBuffer                cmd,
                                            nvvk::StagingUploader&         staging,
@@ -367,10 +394,13 @@ void nvvkgltf::SceneRtx::rebuildTopLevelAS(VkCommandBuffer                cmd,
                                            const std::unordered_set<int>& dirtyRenderNodes)
 {
   const auto& drawObjects = scene.getRenderNodes();
-  const auto& materials   = scene.getModel().materials;
 
   int32_t numVisibleElement = dirtyRenderNodes.empty() ? 0 : m_numVisibleElement;
 
+  // If the number of render nodes changed, we need to recreate the TLAS from scratch,
+  // as well as the instance buffer.
+  // This is because the TLAS build requires a contiguous array of instances, and we don't
+  // want to manage holes in that array from removed nodes.
   if(m_tlasInstances.size() != drawObjects.size())
   {
     destroyTlasResourcesDeferred();
@@ -378,15 +408,15 @@ void nvvkgltf::SceneRtx::rebuildTopLevelAS(VkCommandBuffer                cmd,
     return;
   }
 
+  // Lambda to update a single instance in the TLAS instance array and return its previous and current visibility.
   auto updateInstance = [&](int idx) {
-    const auto&               object      = drawObjects[idx];
-    const tinygltf::Material& mat         = materials[object.materialID];
-    VkDeviceAddress           blasAddress = m_blasAccel[object.renderPrimID].address;
-    const bool                isVisible   = object.visible && (blasAddress != 0);
-    const bool                wasVisible  = (m_tlasInstances[idx].accelerationStructureReference != 0);
+    const auto&     object      = drawObjects[idx];
+    VkDeviceAddress blasAddress = m_blasAccel[object.renderPrimID].address;
+    const bool      isVisible   = object.visible && (blasAddress != 0);
+    const bool      wasVisible  = (m_tlasInstances[idx].accelerationStructureReference != 0);
 
     m_tlasInstances[idx].transform                      = nvvk::toTransformMatrixKHR(object.worldMatrix);
-    m_tlasInstances[idx].flags                          = getInstanceFlag(mat);
+    m_tlasInstances[idx].flags                          = m_instanceFlagsCache[object.materialID];
     m_tlasInstances[idx].accelerationStructureReference = isVisible ? blasAddress : 0;
     m_tlasInstances[idx].instanceCustomIndex            = object.renderPrimID;
 
@@ -457,11 +487,14 @@ bool nvvkgltf::SceneRtx::syncTopLevelAS(VkCommandBuffer cmd, nvvk::StagingUpload
   if(!df.allRenderNodesDirty && dirty.empty() && m_tlasInstances.size() == renderNodes.size())
     return false;
 
-  constexpr float fullUpdateRatio = 0.5f;
-  const bool      useFullUpdate   = df.allRenderNodesDirty || renderNodes.empty()
-                             || float(dirty.size()) / float(renderNodes.size()) >= fullUpdateRatio;
+  // Check if we need to do a full update (rebuild) or if we can do a surgical update of the existing TLAS.
+  // If the ratio of dirty nodes is high, it's more efficient to do a full rebuild.
+  const bool useFullUpdate = df.allRenderNodesDirty || renderNodes.empty()
+                             || float(dirty.size()) / float(renderNodes.size()) >= nvvkgltf::kFullUpdateRatio;
+
   rebuildTopLevelAS(cmd, staging, scene, useFullUpdate ? std::unordered_set<int>{} : dirty);
   df.renderNodesRtx.clear();
+
   return true;
 }
 
@@ -528,6 +561,7 @@ void nvvkgltf::SceneRtx::destroy()
 
   m_blasAccel     = {};
   m_blasBuildData = {};
+  m_instanceFlagsCache = {};
   if(m_blasBuilder)
   {
     m_blasBuilder->deinit();

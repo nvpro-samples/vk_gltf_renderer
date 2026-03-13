@@ -415,6 +415,7 @@ void PathTracer::onRender(VkCommandBuffer cmd, Resources& resources)
   // Update OptiX auto-denoiser (only when effectively enabled)
   if(getEffectiveOptixEnabled(resources))
   {
+    auto timerSection = m_profiler->cmdFrameSection(cmd, "Optix denoiser");
     m_optix->updateDenoiser(resources);
   }
 #endif

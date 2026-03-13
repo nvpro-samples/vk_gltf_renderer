@@ -27,6 +27,7 @@
 #include "gltf_scene_animation.hpp"
 #include "gltf_scene_editor.hpp"
 
+#include <algorithm>
 #include <cmath>
 #include <limits>
 #include <span>
@@ -40,27 +41,57 @@
 
 namespace nvvkgltf {
 
+//--------------------------------------------------------------------------------------------------
+// Construct the animation system bound to a scene. Initializes the animation pointer subsystem
+// for KHR_animation_pointer support.
 AnimationSystem::AnimationSystem(Scene& scene)
     : m_scene(scene)
     , m_animationPointer(scene.getModel())
 {
 }
 
+//--------------------------------------------------------------------------------------------------
+// Release all parsed animation data, morph targets, skin tasks, and reset the animation pointer.
 void AnimationSystem::clear()
 {
   m_animations.clear();
   m_morphPrimitives.clear();
   m_skinTasks.clear();
   m_morphResults.clear();
+  m_skinToNodeIndices.clear();
   m_animationPointer.reset();
 }
 
+//--------------------------------------------------------------------------------------------------
+// Reset the animation pointer subsystem without clearing parsed animations.
 void AnimationSystem::resetPointer()
 {
   m_animationPointer.reset();
 }
 
+//--------------------------------------------------------------------------------------------------
+// Parse all animations from the glTF model into internal structures.
+//
+// For each glTF animation, extracts samplers (keyframe times + output values) and channels
+// (target node/path bindings). Supports translation, rotation, scale, weights, and
+// KHR_animation_pointer channels. Sampler outputs are stored typed (vec2/vec3/vec4/float)
+// based on the accessor type.
+//
+// Also scans all render primitives to identify morph target and skinning work:
+//  - Morph: caches base geometry and allocates blending output for primitives with morph targets.
+//  - Skin:  caches static vertex attributes (weights, joints, positions, normals, tangents)
+//           and inverse bind matrices, then pre-allocates output vectors for each skinned primitive.
 void AnimationSystem::parseAnimations()
+{
+  parseSamplersAndChannels();
+  parseMorphPrimitives();
+  parseSkinTasks();
+}
+
+//--------------------------------------------------------------------------------------------------
+// Parse all glTF animation samplers (keyframe times + output values) and channels
+// (target node/path bindings) into internal Animation structs.
+void AnimationSystem::parseSamplersAndChannels()
 {
   tinygltf::Model& m_model = m_scene.getModel();
 
@@ -163,7 +194,13 @@ void AnimationSystem::parseAnimations()
     animation.info.reset();
     m_animations.emplace_back(animation);
   }
+}
 
+//--------------------------------------------------------------------------------------------------
+// Scan all render primitives for morph targets. For each primitive that has targets and
+// mesh weights, cache the base positions/normals/tangents for blending.
+void AnimationSystem::parseMorphPrimitives()
+{
   m_morphPrimitives.clear();
   m_morphResults.clear();
   for(size_t renderPrimID = 0; renderPrimID < m_scene.getRenderPrimitives().size(); renderPrimID++)
@@ -185,7 +222,6 @@ void AnimationSystem::parseAnimations()
         std::vector<glm::vec3> tempStorage;
         const std::span<const glm::vec3> posData = tinygltf::utils::getAccessorData(mdl, mdl.accessors[posIt->second], &tempStorage);
         mr.basePositions.assign(posData.begin(), posData.end());
-        mr.blendedPositions.resize(posData.size());
       }
 
       bool hasNormalTargets  = false;
@@ -207,7 +243,6 @@ void AnimationSystem::parseAnimations()
           const std::span<const glm::vec3> nrmData =
               tinygltf::utils::getAccessorData(mdl, mdl.accessors[nrmIt->second], &tempStorage);
           mr.baseNormals.assign(nrmData.begin(), nrmData.end());
-          mr.blendedNormals.resize(nrmData.size());
         }
       }
 
@@ -220,83 +255,120 @@ void AnimationSystem::parseAnimations()
           const std::span<const glm::vec4> tanData =
               tinygltf::utils::getAccessorData(mdl, mdl.accessors[tanIt->second], &tempStorage);
           mr.baseTangents.assign(tanData.begin(), tanData.end());
-          mr.blendedTangents.resize(tanData.size());
         }
       }
 
       m_morphResults.push_back(std::move(mr));
     }
   }
+}
 
+//--------------------------------------------------------------------------------------------------
+// Scan all render nodes for skinned primitives. For each unique skinned primitive, cache the
+// static vertex attributes (weights, joints, positions, normals, tangents) and inverse bind
+// matrices for use by both the GPU compute path and the CPU fallback.
+void AnimationSystem::parseSkinTasks()
+{
   m_skinTasks.clear();
+
+  std::unordered_set<int> seenPrimIDs;
+  const auto&             rnodes = m_scene.getRenderNodeRegistry().getRenderNodes();
+  const tinygltf::Model&  model  = m_scene.getModel();
+  for(size_t rnID = 0; rnID < rnodes.size(); rnID++)
   {
-    std::unordered_set<int> seenPrimIDs;
-    const auto&             rnodes = m_scene.getRenderNodeRegistry().getRenderNodes();
-    const tinygltf::Model&  model  = m_scene.getModel();
-    for(size_t rnID = 0; rnID < rnodes.size(); rnID++)
+    const auto& rn = rnodes[rnID];
+    if(rn.skinID < 0 || !seenPrimIDs.insert(rn.renderPrimID).second)
+      continue;
+
+    SkinTask task;
+    task.renderPrimID = rn.renderPrimID;
+    task.skinID       = rn.skinID;
+    task.refNodeID    = rn.refNodeID;
+
+    const tinygltf::Primitive& primitive = *m_scene.getRenderPrimitive(rn.renderPrimID).pPrimitive;
+
+    std::vector<glm::vec4> tempW;
+    auto                   wSpan = tinygltf::utils::getAttributeData3(model, primitive, "WEIGHTS_0", &tempW);
+    task.weights.assign(wSpan.begin(), wSpan.end());
+    std::vector<glm::ivec4> tempJ;
+    auto                    jSpan = tinygltf::utils::getAttributeData3(model, primitive, "JOINTS_0", &tempJ);
+    task.joints.assign(jSpan.begin(), jSpan.end());
+    std::vector<glm::vec3> tempP;
+    auto                   pSpan = tinygltf::utils::getAttributeData3(model, primitive, "POSITION", &tempP);
+    task.basePositions.assign(pSpan.begin(), pSpan.end());
+    std::vector<glm::vec3> tempN;
+    auto                   nSpan = tinygltf::utils::getAttributeData3(model, primitive, "NORMAL", &tempN);
+    task.baseNormals.assign(nSpan.begin(), nSpan.end());
+    std::vector<glm::vec4> tempT;
+    auto                   tSpan = tinygltf::utils::getAttributeData3(model, primitive, "TANGENT", &tempT);
+    task.baseTangents.assign(tSpan.begin(), tSpan.end());
+
+    if(rn.skinID >= 0 && rn.skinID < static_cast<int>(model.skins.size()))
     {
-      const auto& rn = rnodes[rnID];
-      if(rn.skinID < 0 || !seenPrimIDs.insert(rn.renderPrimID).second)
-        continue;
-
-      SkinTask task;
-      task.renderPrimID = rn.renderPrimID;
-      task.skinID       = rn.skinID;
-      task.refNodeID    = rn.refNodeID;
-
-      const tinygltf::Primitive& primitive = *m_scene.getRenderPrimitive(rn.renderPrimID).pPrimitive;
-
-      // Cache static vertex attributes (read once, reused every frame)
-      std::vector<glm::vec4> tempW;
-      auto                   wSpan = tinygltf::utils::getAttributeData3(model, primitive, "WEIGHTS_0", &tempW);
-      task.weights.assign(wSpan.begin(), wSpan.end());
-      std::vector<glm::ivec4> tempJ;
-      auto                    jSpan = tinygltf::utils::getAttributeData3(model, primitive, "JOINTS_0", &tempJ);
-      task.joints.assign(jSpan.begin(), jSpan.end());
-      std::vector<glm::vec3> tempP;
-      auto                   pSpan = tinygltf::utils::getAttributeData3(model, primitive, "POSITION", &tempP);
-      task.basePositions.assign(pSpan.begin(), pSpan.end());
-      std::vector<glm::vec3> tempN;
-      auto                   nSpan = tinygltf::utils::getAttributeData3(model, primitive, "NORMAL", &tempN);
-      task.baseNormals.assign(nSpan.begin(), nSpan.end());
-      std::vector<glm::vec4> tempT;
-      auto                   tSpan = tinygltf::utils::getAttributeData3(model, primitive, "TANGENT", &tempT);
-      task.baseTangents.assign(tSpan.begin(), tSpan.end());
-
-      // Cache inverse bind matrices
-      if(rn.skinID >= 0 && rn.skinID < static_cast<int>(model.skins.size()))
+      const tinygltf::Skin& skin = model.skins[rn.skinID];
+      if(skin.inverseBindMatrices >= 0 && skin.inverseBindMatrices < static_cast<int>(model.accessors.size()))
       {
-        const tinygltf::Skin& skin = model.skins[rn.skinID];
-        if(skin.inverseBindMatrices >= 0 && skin.inverseBindMatrices < static_cast<int>(model.accessors.size()))
-        {
-          std::vector<glm::mat4>     ibmStorage;
-          std::span<const glm::mat4> ibm =
-              tinygltf::utils::getAccessorData(model, model.accessors[skin.inverseBindMatrices], &ibmStorage);
-          task.inverseBindMatrices.assign(ibm.begin(), ibm.end());
-        }
+        std::vector<glm::mat4>     ibmStorage;
+        std::span<const glm::mat4> ibm =
+            tinygltf::utils::getAccessorData(model, model.accessors[skin.inverseBindMatrices], &ibmStorage);
+        task.inverseBindMatrices.assign(ibm.begin(), ibm.end());
       }
-
-      // Pre-allocate output vectors
-      size_t vertexCount = task.weights.size();
-      task.result.positions.resize(vertexCount);
-      if(!task.baseNormals.empty())
-        task.result.normals.resize(vertexCount);
-      if(!task.baseTangents.empty())
-        task.result.tangents.resize(vertexCount);
-
-      m_skinTasks.push_back(std::move(task));
     }
+
+    m_skinTasks.push_back(std::move(task));
+  }
+
+  buildSkinToNodeMap();
+}
+
+//--------------------------------------------------------------------------------------------------
+// Build reverse lookup: skinID → list of node indices that reference that skin.
+// Replaces the O(skins * nodes) brute-force scan in updateAnimation().
+void AnimationSystem::buildSkinToNodeMap()
+{
+  const tinygltf::Model& model = m_scene.getModel();
+  m_skinToNodeIndices.clear();
+  m_skinToNodeIndices.resize(model.skins.size());
+  for(int nodeIdx = 0; nodeIdx < static_cast<int>(model.nodes.size()); ++nodeIdx)
+  {
+    int skinIdx = model.nodes[nodeIdx].skin;
+    if(skinIdx >= 0 && skinIdx < static_cast<int>(model.skins.size()))
+      m_skinToNodeIndices[skinIdx].push_back(nodeIdx);
   }
 }
 
+//--------------------------------------------------------------------------------------------------
+// Advance a single animation and apply its results to the scene.
+//
+// Evaluates all channels of the given animation at its current time, writing interpolated
+// values back to glTF node transforms and mesh weights. Pointer channels are forwarded to
+// the AnimationPointerSystem for material/light property animation.
+//
+// After channel evaluation, propagates dirty state: nodes whose joints moved are marked
+// dirty (triggering world matrix recomputation), and animated materials/lights are flagged
+// for GPU re-upload.
+//
+// Returns true if any scene state changed (nodes, materials, lights, or morph weights).
 bool AnimationSystem::updateAnimation(uint32_t animationIndex)
 {
-  tinygltf::Model& m_model = m_scene.getModel();
+  tinygltf::Model& m_model  = m_scene.getModel();
+  const size_t     numNodes = m_model.nodes.size();
 
-  Animation&              animation = m_animations[animationIndex];
-  float                   time      = animation.info.currentTime;
-  std::unordered_set<int> dirtyNodeIds;
-  bool                    hadWeightsChannel = false;
+  Animation& animation = m_animations[animationIndex];
+  float      time      = animation.info.currentTime;
+
+  // Flat bit vector for O(1) dirty checks, with companion list for O(dirty) iteration
+  std::vector<bool> dirtyBits(numNodes, false);
+  std::vector<int>  dirtyList;
+  bool              hadWeightsChannel = false;
+
+  auto setDirty = [&](int idx) {
+    if(!dirtyBits[idx])
+    {
+      dirtyBits[idx] = true;
+      dirtyList.push_back(idx);
+    }
+  };
 
   for(auto& channel : animation.channels)
   {
@@ -308,12 +380,12 @@ bool AnimationSystem::updateAnimation(uint32_t animationIndex)
       continue;
     }
 
-    if(channel.node < 0 || channel.node >= static_cast<int>(m_model.nodes.size()))
+    if(channel.node < 0 || channel.node >= static_cast<int>(numNodes))
       continue;
 
     tinygltf::Node& gltfNode = m_model.nodes[channel.node];
     processAnimationChannel(&gltfNode, sampler, channel, time);
-    dirtyNodeIds.insert(channel.node);
+    setDirty(channel.node);
     if(channel.path == AnimationChannel::PathType::eWeights)
       hadWeightsChannel = true;
   }
@@ -322,17 +394,19 @@ bool AnimationSystem::updateAnimation(uint32_t animationIndex)
   const auto& animDirtyNodes = m_animationPointer.getDirtyNodes();
   for(int nodeIndex : animDirtyNodes)
   {
-    dirtyNodeIds.insert(nodeIndex);
+    if(nodeIndex >= 0 && static_cast<size_t>(nodeIndex) < numNodes)
+      setDirty(nodeIndex);
     m_scene.editor().updateVisibility(nodeIndex);
   }
 
+  // Use precomputed skin-to-node map instead of O(skins*nodes) brute-force scan
   for(size_t skinIdx = 0; skinIdx < m_model.skins.size(); ++skinIdx)
   {
     const auto& skin          = m_model.skins[skinIdx];
     bool        jointAnimated = false;
     for(int jointNodeId : skin.joints)
     {
-      if(dirtyNodeIds.count(jointNodeId))
+      if(jointNodeId >= 0 && static_cast<size_t>(jointNodeId) < numNodes && dirtyBits[jointNodeId])
       {
         jointAnimated = true;
         break;
@@ -340,15 +414,15 @@ bool AnimationSystem::updateAnimation(uint32_t animationIndex)
     }
     if(!jointAnimated)
       continue;
-    for(int nodeIdx = 0; nodeIdx < static_cast<int>(m_model.nodes.size()); ++nodeIdx)
+    if(skinIdx < m_skinToNodeIndices.size())
     {
-      if(m_model.nodes[nodeIdx].skin == static_cast<int>(skinIdx))
-        dirtyNodeIds.insert(nodeIdx);
+      for(int nodeIdx : m_skinToNodeIndices[skinIdx])
+        setDirty(nodeIdx);
     }
   }
 
-  for(int nodeId : dirtyNodeIds)
-    m_scene.markNodeDirty(nodeId);
+  for(int nodeIdx : dirtyList)
+    m_scene.markNodeDirty(nodeIdx);
 
   bool hadPointerDirty = m_animationPointer.hasDirty();
   if(hadPointerDirty)
@@ -360,43 +434,52 @@ bool AnimationSystem::updateAnimation(uint32_t animationIndex)
     m_animationPointer.clearDirty();
   }
 
-  return !dirtyNodeIds.empty() || hadPointerDirty || hadWeightsChannel;
+  return !dirtyList.empty() || hadPointerDirty || hadWeightsChannel;
 }
 
+//--------------------------------------------------------------------------------------------------
+// Evaluate a single animation channel at the given time. Finds the keyframe segment that
+// contains `time`, computes the interpolation factor, and dispatches to the appropriate
+// interpolation handler (linear, step, or cubic spline). Returns true if the channel was
+// animated (i.e. time fell within the sampler's keyframe range).
 bool AnimationSystem::processAnimationChannel(tinygltf::Node* gltfNode, AnimationSampler& sampler, const AnimationChannel& channel, float time)
 {
-  bool animated = false;
-  // Guard against empty or single-element sampler (avoid size()-1 underflow and ensure we have a segment)
   if(sampler.inputs.size() < 2)
     return false;
-  for(size_t i = 0; i + 1 < sampler.inputs.size(); i++)
+
+  // Binary search: find first keyframe strictly after `time`
+  auto it = std::upper_bound(sampler.inputs.begin(), sampler.inputs.end(), time);
+  if(it == sampler.inputs.begin())
+    return false;
+
+  size_t i = static_cast<size_t>(std::distance(sampler.inputs.begin(), it)) - 1;
+  if(i + 1 >= sampler.inputs.size())
+    i = sampler.inputs.size() - 2;
+
+  float inputStart = sampler.inputs[i];
+  float inputEnd   = sampler.inputs[i + 1];
+  if(time < inputStart || time > inputEnd)
+    return false;
+
+  float t = calculateInterpolationFactor(inputStart, inputEnd, time);
+  switch(sampler.interpolation)
   {
-    float inputStart = sampler.inputs[i];
-    float inputEnd   = sampler.inputs[i + 1];
-    if(inputStart <= time && time <= inputEnd)
-    {
-      float t  = calculateInterpolationFactor(inputStart, inputEnd, time);
-      animated = true;
-      switch(sampler.interpolation)
-      {
-        case AnimationSampler::InterpolationType::eLinear:
-          handleLinearInterpolation(gltfNode, sampler, channel, t, i);
-          break;
-        case AnimationSampler::InterpolationType::eStep:
-          handleStepInterpolation(gltfNode, sampler, channel, i);
-          break;
-        case AnimationSampler::InterpolationType::eCubicSpline: {
-          float keyDelta = inputEnd - inputStart;
-          handleCubicSplineInterpolation(gltfNode, sampler, channel, t, keyDelta, i);
-          break;
-        }
-      }
+    case AnimationSampler::InterpolationType::eLinear:
+      handleLinearInterpolation(gltfNode, sampler, channel, t, i);
       break;
-    }
+    case AnimationSampler::InterpolationType::eStep:
+      handleStepInterpolation(gltfNode, sampler, channel, i);
+      break;
+    case AnimationSampler::InterpolationType::eCubicSpline:
+      handleCubicSplineInterpolation(gltfNode, sampler, channel, t, inputEnd - inputStart, i);
+      break;
   }
-  return animated;
+  return true;
 }
 
+//--------------------------------------------------------------------------------------------------
+// Compute the normalized interpolation factor t in [0,1] for a time within a keyframe segment.
+// Returns 0 if the segment duration is effectively zero.
 float AnimationSystem::calculateInterpolationFactor(float inputStart, float inputEnd, float time)
 {
   float keyDelta = inputEnd - inputStart;
@@ -405,6 +488,10 @@ float AnimationSystem::calculateInterpolationFactor(float inputStart, float inpu
   return std::clamp((time - inputStart) / keyDelta, 0.0f, 1.0f);
 }
 
+//--------------------------------------------------------------------------------------------------
+// Cubic Hermite spline interpolation as defined by glTF 2.0 spec section 3.8.4.4.
+// Each keyframe stores three values: in-tangent (A), value (V), and out-tangent (B).
+// The formula evaluates: v0*cV0 + a*cA + b*cB + v1*cV1 using Hermite basis functions.
 namespace {
 template <class T>
 T computeCubicInterpolation(const T* values, float t, float keyDelta, size_t index)
@@ -427,6 +514,10 @@ T computeCubicInterpolation(const T* values, float t, float keyDelta, size_t ind
 }
 }  // namespace
 
+//--------------------------------------------------------------------------------------------------
+// Apply linear interpolation for a channel at the given keyframe index with factor t.
+// Rotation uses quaternion slerp; translation, scale, and weights use component-wise lerp.
+// Pointer channels delegate to the AnimationPointerSystem based on output dimensionality.
 void AnimationSystem::handleLinearInterpolation(tinygltf::Node*         gltfNode,
                                                 AnimationSampler&       sampler,
                                                 const AnimationChannel& channel,
@@ -494,6 +585,8 @@ void AnimationSystem::handleLinearInterpolation(tinygltf::Node*         gltfNode
   }
 }
 
+//--------------------------------------------------------------------------------------------------
+// Apply step interpolation: use the value at the start of the keyframe segment without blending.
 void AnimationSystem::handleStepInterpolation(tinygltf::Node* gltfNode, AnimationSampler& sampler, const AnimationChannel& channel, size_t index)
 {
   switch(channel.path)
@@ -538,6 +631,9 @@ void AnimationSystem::handleStepInterpolation(tinygltf::Node* gltfNode, Animatio
   }
 }
 
+//--------------------------------------------------------------------------------------------------
+// Apply cubic spline interpolation using the Hermite basis. Rotation results are re-normalized
+// to maintain unit quaternion validity. Pointer channels are dispatched by output dimensionality.
 void AnimationSystem::handleCubicSplineInterpolation(tinygltf::Node*         gltfNode,
                                                      AnimationSampler&       sampler,
                                                      const AnimationChannel& channel,
@@ -584,6 +680,47 @@ void AnimationSystem::handleCubicSplineInterpolation(tinygltf::Node*         glt
   }
 }
 
+//========== Deferred CPU Output Allocation ==========
+
+//--------------------------------------------------------------------------------------------------
+// Allocate the CPU-side skinning output vectors (positions, normals, tangents) if not already
+// sized. Only called by the CPU fallback path (computeSkinning); the GPU compute path skips
+// this entirely, avoiding the memory cost of duplicate vertex data.
+void SkinTask::ensureCpuOutput()
+{
+  size_t vertexCount = weights.size();
+  if(result.positions.size() == vertexCount)
+    return;
+  result.positions.resize(vertexCount);
+  if(!baseNormals.empty())
+    result.normals.resize(vertexCount);
+  if(!baseTangents.empty())
+    result.tangents.resize(vertexCount);
+}
+
+//--------------------------------------------------------------------------------------------------
+// Allocate the CPU-side morph blending output vectors if not already sized. Only called by
+// the CPU fallback path (computeMorphTargets); the GPU compute path skips this entirely.
+void MorphResult::ensureCpuOutput()
+{
+  if(blendedPositions.size() == basePositions.size())
+    return;
+  blendedPositions.resize(basePositions.size());
+  if(!baseNormals.empty())
+    blendedNormals.resize(baseNormals.size());
+  if(!baseTangents.empty())
+    blendedTangents.resize(baseTangents.size());
+}
+
+//========== CPU Fallback Animation ==========
+
+//--------------------------------------------------------------------------------------------------
+// CPU skinning fallback: transform vertices by their joint influences for all skinned primitives.
+//
+// For each SkinTask, computes per-joint matrices as: inverse(nodeWorld) * jointWorld * IBM,
+// then derives normal matrices via inverse-transpose of the upper 3x3.  Vertices are
+// transformed in parallel batches using up to 4 joint influences per vertex.  Results are
+// written directly into the SkinTask::result vectors.
 void AnimationSystem::computeSkinning()
 {
   const tinygltf::Model&        model        = m_scene.getModel();
@@ -595,6 +732,8 @@ void AnimationSystem::computeSkinning()
       continue;
     if(task.refNodeID < 0 || task.refNodeID >= static_cast<int>(nodeMatrices.size()))
       continue;
+
+    task.ensureCpuOutput();
 
     const tinygltf::Skin& skin        = model.skins[task.skinID];
     const size_t          numJoints   = skin.joints.size();
@@ -662,11 +801,20 @@ void AnimationSystem::computeSkinning()
   }
 }
 
+//--------------------------------------------------------------------------------------------------
+// Return the skinning result (positions, normals, tangents) for the given skin task index.
 const SkinningResult& AnimationSystem::getSkinningResult(size_t skinTaskIndex) const
 {
   return m_skinTasks[skinTaskIndex].result;
 }
 
+//--------------------------------------------------------------------------------------------------
+// CPU morph target blending fallback: accumulate weighted deltas from all active morph targets.
+//
+// For each morph primitive, starts from the cached base geometry and adds position, normal,
+// and tangent deltas scaled by their respective mesh weights. Deltas are read directly from
+// glTF accessors; blending is parallelized per-vertex. Normals are re-normalized after
+// accumulation. Results are stored in MorphResult::blendedPositions/Normals/Tangents.
 void AnimationSystem::computeMorphTargets()
 {
   const tinygltf::Model& model = m_scene.getModel();
@@ -676,6 +824,8 @@ void AnimationSystem::computeMorphTargets()
     MorphResult& mr = m_morphResults[mi];
     if(mr.renderPrimID < 0 || mr.basePositions.empty())
       continue;
+
+    mr.ensureCpuOutput();
 
     const RenderPrimitive& renderPrimitive = m_scene.getRenderPrimitive(mr.renderPrimID);
     if(renderPrimitive.meshID < 0 || renderPrimitive.meshID >= static_cast<int>(model.meshes.size()))
@@ -758,6 +908,8 @@ void AnimationSystem::computeMorphTargets()
   }
 }
 
+//--------------------------------------------------------------------------------------------------
+// Return the morph blending result (base + blended geometry) for the given morph task index.
 const MorphResult& AnimationSystem::getMorphResult(size_t morphTaskIndex) const
 {
   return m_morphResults[morphTaskIndex];

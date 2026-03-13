@@ -593,6 +593,7 @@ void SceneEditor::setNodeParent(int childIndex, int newParentIndex)
   }
 
   m_scene.m_nodeParents[childIndex] = newParentIndex;
+  m_scene.buildTopologicalLevels();
 
   m_scene.markNodeDirty(childIndex);
   m_scene.updateNodeWorldMatrices();

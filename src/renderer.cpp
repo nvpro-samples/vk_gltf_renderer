@@ -221,6 +221,8 @@ void GltfRenderer::onAttach(nvapp::Application* app)
   m_transientCmdPool = nvvk::createTransientCommandPool(m_device, app->getQueue(0).familyIndex);
   NVVK_DBG_NAME(m_transientCmdPool);
 
+  m_loadPipeline.init(m_device, app->getQueue(0).queue, m_transientCmdPool);
+
   // Staging buffer uploader
   m_resources.staging.init(&m_resources.allocator, true);
 
@@ -267,14 +269,8 @@ void GltfRenderer::onAttach(nvapp::Application* app)
   m_silhouette.init(m_resources);
 
   // ===== Scene & Acceleration Structure =====
-  m_resources.sceneVk.init(&m_resources.allocator, &m_resources.samplerPool);
-  m_resources.sceneVk.setGraphicsQueue(m_app->getQueue(0).queue);
-  m_resources.sceneVk.setDeferredFree([app](std::function<void()>&& fn) { app->submitResourceFree(std::move(fn)); });
-  m_resources.sceneVk.setImageLoadCallback(webPLoadCallback);
-
-  m_resources.sceneRtx.init(&m_resources.allocator);
-  m_resources.sceneRtx.setGraphicsQueue(m_app->getQueue(0).queue);
-  m_resources.sceneRtx.setDeferredFree([app](std::function<void()>&& fn) { app->submitResourceFree(std::move(fn)); });
+  m_resources.sceneGpu.init(&m_resources.allocator, &m_resources.samplerPool, m_app->getQueue(0).queue,
+                            [app](std::function<void()>&& fn) { app->submitResourceFree(std::move(fn)); });
 
   // ===== Profiling & Performance =====
   {
@@ -448,14 +444,11 @@ void GltfRenderer::onRender(VkCommandBuffer cmd)
     m_busy.consumeDone();
   }
 
-  // Process queued command buffers in FIFO order
-  while(processQueuedCommandBuffers())
-  {
-    // In headless, process all command buffers, don't give back control to the UI
-    // so everything is ready for the first frame
-    if(!m_app->isHeadless())
-      return;  // Give back control to the UI if not headless
-  }
+  // Loading pipeline: submit queued work, poll completion, run callbacks
+  if(m_app->isHeadless())
+    m_loadPipeline.drain();
+  else if(m_loadPipeline.poll())
+    return;  // Still loading -- give control back to the UI
 
   // Empty scene, clear the G-Buffer
   if(!m_resources.getScene() || !m_resources.getScene()->valid())
@@ -612,7 +605,7 @@ void GltfRenderer::onFileDrop(const std::filesystem::path& filename)
     if(m_busy.isBusy())
       return;
 
-    m_cmdBufferQueue = {};
+    m_loadPipeline.clear();
     cleanupScene();
     m_rasterizer.freeRecordCommandBuffer(m_resources);
 
@@ -645,8 +638,8 @@ void GltfRenderer::onFileDrop(const std::filesystem::path& filename)
     }
     else
     {
-      m_cmdBufferQueue = {};  // Clear the command buffer queue
-      cleanupScene();         // Cleanup current scene
+      m_loadPipeline.clear();
+      cleanupScene();  // Cleanup current scene
       m_rasterizer.freeRecordCommandBuffer(m_resources);
 
       // Set busy BEFORE starting the worker thread to prevent re-entrant drops
@@ -1137,8 +1130,7 @@ void GltfRenderer::cleanupScene()
 {
   m_undoStack.clear();
   m_resources.scene.reset();
-  m_resources.sceneVk.destroy();
-  m_resources.sceneRtx.destroy();
+  m_resources.sceneGpu.destroy();
   m_sceneBrowser.setScene(nullptr);
   m_inspector.setScene(nullptr);
   m_sceneSelection.clearSelection();  // Clear selection in new UI system
@@ -1159,49 +1151,26 @@ void GltfRenderer::cleanupScene()
 //
 void GltfRenderer::rebuildVulkanSceneInternal(bool rebuildTextures)
 {
-  // SYNC NOTE: Full scene rebuild (merge/compact/geometry change) — wait ensures GPU is idle.
+  // SYNC NOTE: Full scene rebuild (merge/compact/geometry change) -- wait ensures GPU is idle.
   NVVK_CHECK(vkQueueWaitIdle(m_app->getQueue(0).queue));
-
-  // Destroy RTX resources (always)
-  m_resources.sceneRtx.destroy();
-
-  // For geometry-only rebuild: call destroyGeometry
-  // For full rebuild with textures: skip destruction here because create() will call destroy() internally
-  if(!rebuildTextures)
-  {
-    m_resources.sceneVk.destroyGeometry();  // Geometry only for non-texture rebuild
-  }
 
   // Re-parse the scene to update RenderPrimitives with new accessor counts
   nvvkgltf::Scene* scene = m_resources.getScene();
   if(scene)
     scene->setCurrentScene(scene->getCurrentScene());
 
-  // Recreate geometry resources
   {
+    // Add WebP loading support to SceneVk (only needed for full rebuild with textures)
+    if(rebuildTextures)
+      m_resources.sceneVk.setImageLoadCallback(webPLoadCallback);
+
     VkCommandBuffer cmd{};
     nvvk::beginSingleTimeCommands(cmd, m_device, m_transientCmdPool);
-
-    if(rebuildTextures)
-    {
-      // Full scene creation including textures
-      m_resources.sceneVk.setImageLoadCallback(webPLoadCallback);
-      m_resources.sceneVk.create(cmd, m_resources.staging, *scene, false);
-    }
-    else
-    {
-      // Geometry only (preserves textures)
-      m_resources.sceneVk.createGeometry(cmd, m_resources.staging, *scene);
-    }
-
-    m_resources.staging.cmdUploadAppended(cmd);
-    {
-      std::lock_guard<std::mutex> lock(m_cmdBufferQueueMutex);
-      m_cmdBufferQueue.push({cmd, false});
-    }
+    m_resources.sceneGpu.rebuild(cmd, *scene, rebuildTextures);
+    NVVK_CHECK(vkEndCommandBuffer(cmd));
+    m_loadPipeline.enqueue(cmd);
   }
 
-  // Rebuild acceleration structures
   buildAccelerationStructures();
 
   // Update UI system
@@ -1266,13 +1235,9 @@ void GltfRenderer::createVulkanScene()
     // This work happens asynchronously via the command buffer queue
     VkCommandBuffer cmd{};
     nvvk::beginSingleTimeCommands(cmd, m_device, m_transientCmdPool);
-
-    m_resources.sceneVk.create(cmd, m_resources.staging, *m_resources.getScene(), false);  // Creating the scene in Vulkan buffers
-    m_resources.staging.cmdUploadAppended(cmd);
-    {
-      std::lock_guard<std::mutex> lock(m_cmdBufferQueueMutex);
-      m_cmdBufferQueue.push({cmd, false});  // Not a BLAS build command
-    }
+    m_resources.sceneGpu.create(cmd, *m_resources.getScene(), false);
+    NVVK_CHECK(vkEndCommandBuffer(cmd));
+    m_loadPipeline.enqueue(cmd);
   }
 
   buildAccelerationStructures();
@@ -1305,10 +1270,14 @@ void GltfRenderer::buildAccelerationStructures()
       nvvk::beginSingleTimeCommands(cmd, m_device, m_transientCmdPool);
       constexpr VkDeviceSize kBlasBuildMemoryBudget = 512ULL * 1024 * 1024;  // 512 MB per build pass
       finished = m_resources.sceneRtx.cmdBuildBottomLevelAccelerationStructure(cmd, kBlasBuildMemoryBudget);
-      {
-        std::lock_guard<std::mutex> lock(m_cmdBufferQueueMutex);
-        m_cmdBufferQueue.push({cmd, true});  // Mark as BLAS build command for immediate compaction
-      }
+      NVVK_CHECK(vkEndCommandBuffer(cmd));
+      m_loadPipeline.enqueue(cmd, [this] {
+        VkCommandBuffer compactCmd{};
+        nvvk::beginSingleTimeCommands(compactCmd, m_device, m_transientCmdPool);
+        m_resources.sceneRtx.cmdCompactBlas(compactCmd);
+        NVVK_CHECK(vkEndCommandBuffer(compactCmd));
+        m_loadPipeline.enqueue(compactCmd);
+      });
 
     } while(!finished);
 
@@ -1322,10 +1291,8 @@ void GltfRenderer::buildAccelerationStructures()
       nvvk::beginSingleTimeCommands(cmd, m_device, m_transientCmdPool);
       m_resources.sceneRtx.cmdCreateBuildTopLevelAccelerationStructure(cmd, m_resources.staging, *m_resources.getScene());
       m_resources.staging.cmdUploadAppended(cmd);
-      {
-        std::lock_guard<std::mutex> lock(m_cmdBufferQueueMutex);
-        m_cmdBufferQueue.push({cmd, false});  // Not a BLAS build command
-      }
+      NVVK_CHECK(vkEndCommandBuffer(cmd));
+      m_loadPipeline.enqueue(cmd, [this] { m_resources.staging.releaseStaging(true); });
     }
   }
 
@@ -1594,16 +1561,7 @@ void GltfRenderer::createHDR(const std::filesystem::path& hdrFilename)
 // This ensures proper synchronization and prevents use-after-free errors
 void GltfRenderer::destroyResources()
 {
-  // Process any remaining command buffers in the queue
-  {
-    std::lock_guard<std::mutex> lock(m_cmdBufferQueueMutex);
-    while(!m_cmdBufferQueue.empty())
-    {
-      CommandBufferInfo cmdInfo = m_cmdBufferQueue.front();
-      m_cmdBufferQueue.pop();
-      nvvk::endSingleTimeCommands(cmdInfo.cmdBuffer, m_device, m_transientCmdPool, m_app->getQueue(0).queue);
-    }
-  }
+  m_loadPipeline.destroy();
 
   m_resources.allocator.destroyBuffer(m_resources.bFrameInfo);
   m_resources.allocator.destroyBuffer(m_resources.bSkyParams);
@@ -1621,8 +1579,7 @@ void GltfRenderer::destroyResources()
 
   m_resources.tonemapper.deinit();
   m_resources.gBuffers.deinit();
-  m_resources.sceneVk.deinit();
-  m_resources.sceneRtx.deinit();
+  m_resources.sceneGpu.deinit();
   m_resources.hdrIbl.deinit();
   m_resources.hdrDome.deinit();
   m_resources.samplerPool.deinit();
@@ -1662,28 +1619,46 @@ bool GltfRenderer::updateAnimation(VkCommandBuffer cmd)
     else
       animInfo.incrementTime(deltaTime);
 
-    // Update animation (marks Scene dirty internally: nodes, and renderNodesVk/Rtx for nodes that have meshes)
-    if(!scn.animation().updateAnimation(animCtrl.currentAnimation))
-      return false;
+    // Evaluate animation channels (marks Scene nodes dirty internally; also marks
+    // render nodes for skins whose joints moved, and materials/lights for pointer channels)
+    {
+      auto t = m_profilerGpuTimer.cmdFrameSection(cmd, "Eval channels");
+      if(!scn.animation().updateAnimation(animCtrl.currentAnimation))
+        return false;
+    }
 
     animCtrl.clearStates();
 
-    scn.updateNodeWorldMatrices();
-    // Expand dirty nodes to all affected render nodes (including descendants). Needed for transform-only
-    // animated nodes; skin mesh nodes are now marked dirty in Scene::updateAnimation when their joints animate.
-    scn.updateRenderNodeDirtyFromNodes(true);
-    (void)scnVk.syncFromScene(m_resources.staging, scn);
+    // Recompute world matrices for dirty nodes and expand dirty flags to all affected
+    // render nodes (including descendants needed for transform-only animated nodes).
+    {
+      auto t = m_profilerGpuTimer.cmdFrameSection(cmd, "World matrices + dirty");
+      scn.updateNodeWorldMatrices();
+    }
+
+    scnRtx.updateInstanceFlagsCache(scn);
+
+    {
+      auto t = m_profilerGpuTimer.cmdFrameSection(cmd, "Sync to GPU");
+      (void)scnVk.syncFromScene(m_resources.staging, scn);
+    }
 
     bool hasMorphOrSkin = scn.animation().hasMorphTargets() || scn.animation().hasSkinning();
     if(hasMorphOrSkin)
     {
       auto timerSectionMorph = m_profilerGpuTimer.cmdFrameSection(cmd, "Morph or Skin");
-      scnVk.uploadPrimitives(cmd, m_resources.staging, scn);
+      m_resources.sceneGpu.applyAnimation(cmd, scn);
     }
 
-    m_resources.staging.cmdUploadAppended(cmd);
-    nvvk::cmdMemoryBarrier(cmd, VK_PIPELINE_STAGE_2_COPY_BIT, VK_PIPELINE_STAGE_2_ACCELERATION_STRUCTURE_BUILD_BIT_KHR,
-                           VK_ACCESS_2_TRANSFER_WRITE_BIT, VK_ACCESS_2_SHADER_READ_BIT);
+    {
+      auto t = m_profilerGpuTimer.cmdFrameSection(cmd, "Staging flush");
+      m_resources.staging.cmdUploadAppended(cmd);
+      nvvk::cmdMemoryBarrier(cmd, VK_PIPELINE_STAGE_2_COPY_BIT | VK_PIPELINE_STAGE_2_COMPUTE_SHADER_BIT,
+                             VK_PIPELINE_STAGE_2_VERTEX_INPUT_BIT | VK_PIPELINE_STAGE_2_ACCELERATION_STRUCTURE_BUILD_BIT_KHR,
+                             VK_ACCESS_2_TRANSFER_WRITE_BIT | VK_ACCESS_2_SHADER_WRITE_BIT,
+                             VK_ACCESS_2_VERTEX_ATTRIBUTE_READ_BIT | VK_ACCESS_2_SHADER_READ_BIT
+                                 | VK_ACCESS_2_ACCELERATION_STRUCTURE_READ_BIT_KHR);
+    }
 
     {
       auto timerSectionAS = m_profilerGpuTimer.cmdFrameSection(cmd, "AS update");
@@ -1718,7 +1693,6 @@ void GltfRenderer::updateSceneChanges_NodeTransforms(nvvkgltf::Scene* scene, con
 {
   if(df.nodes.empty())
     return;
-  scene->updateRenderNodeDirtyFromNodes(true);
   scene->updateNodeWorldMatrices();
 }
 
@@ -1731,6 +1705,7 @@ uint32_t GltfRenderer::updateSceneChanges_SyncGpuBuffers(VkCommandBuffer cmd, nv
 
   if(synced != nvvkgltf::SceneVk::eSyncNone)
   {
+    auto timerSection = m_profilerGpuTimer.cmdFrameSection(cmd, "SyncGpuBuffers");
     m_resources.staging.cmdUploadAppended(cmd);
   }
   return synced;
@@ -1738,6 +1713,7 @@ uint32_t GltfRenderer::updateSceneChanges_SyncGpuBuffers(VkCommandBuffer cmd, nv
 
 void GltfRenderer::updateSceneChanges_TlasUpdate(VkCommandBuffer cmd, nvvkgltf::Scene* scene)
 {
+  auto timerSection = m_profilerGpuTimer.cmdFrameSection(cmd, "SyncTopLevelAS");
   (void)m_resources.sceneRtx.syncTopLevelAS(cmd, m_resources.staging, *scene);
 }
 
@@ -1798,6 +1774,7 @@ bool GltfRenderer::updateSceneChanges(VkCommandBuffer cmd)
 
   updateSceneChanges_BlasRebuild(df);
   updateSceneChanges_NodeTransforms(scene, df);
+  m_resources.sceneRtx.updateInstanceFlagsCache(*scene);
 
   uint32_t synced = updateSceneChanges_SyncGpuBuffers(cmd, scene);
   stagingFlushed  = (synced != nvvkgltf::SceneVk::eSyncNone);
@@ -1811,45 +1788,4 @@ bool GltfRenderer::updateSceneChanges(VkCommandBuffer cmd)
   updateSceneChanges_Finalize(cmd, changed, stagingFlushed, scene);
 
   return changed;
-}
-
-
-//--------------------------------------------------------------------------------------------------
-// Process queued command buffers in FIFO order
-// Those command buffers are created in worker threads while loading or processing a scene
-// It will process one command buffer at a time, then give back control to the UI
-// Command buffers can be of two types:
-// 1. Regular command buffers (isBlasBuild=false): These execute scene creation, texture uploads, etc.
-// 2. BLAS build command buffers (isBlasBuild=true): These build bottom-level acceleration structures
-//    and are immediately followed by BLAS compaction to optimize memory usage
-//
-bool GltfRenderer::processQueuedCommandBuffers()
-{
-  std::lock_guard<std::mutex> lock(m_cmdBufferQueueMutex);
-  if(!m_cmdBufferQueue.empty())
-  {
-    SCOPED_TIMER("Processing queued command buffer\n");
-
-    // Get the command buffer information from the queue
-    CommandBufferInfo cmdInfo = m_cmdBufferQueue.front();
-    m_cmdBufferQueue.pop();
-
-    // Execute the command buffer
-    nvvk::endSingleTimeCommands(cmdInfo.cmdBuffer, m_device, m_transientCmdPool, m_app->getQueue(0).queue);
-
-    // If this was a BLAS build command, immediately compact after it
-    if(cmdInfo.isBlasBuild)
-    {
-      // Create a command buffer for compaction
-      VkCommandBuffer cmd{};
-      nvvk::beginSingleTimeCommands(cmd, m_device, m_transientCmdPool);
-      m_resources.sceneRtx.cmdCompactBlas(cmd);
-      // Submit the compaction command buffer immediately
-      nvvk::endSingleTimeCommands(cmd, m_device, m_transientCmdPool, m_app->getQueue(0).queue);
-    }
-    if(m_cmdBufferQueue.empty())
-      m_resources.staging.releaseStaging(true);
-    return true;  // Command buffer was processed
-  }
-  return false;  // No command buffer was processed
 }

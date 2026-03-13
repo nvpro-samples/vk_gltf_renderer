@@ -82,7 +82,7 @@ public:
 
   virtual void create(VkCommandBuffer        cmd,
                       nvvk::StagingUploader& staging,
-                      nvvkgltf::Scene&       scn,
+                      const nvvkgltf::Scene& scn,
                       bool                   generateMipmaps  = true,
                       bool                   enableRayTracing = true);
 
@@ -111,7 +111,7 @@ public:
 
   // Geometry-only recreation (preserves textures) - useful after tangent generation or mesh optimization
   void destroyGeometry();
-  void createGeometry(VkCommandBuffer cmd, nvvk::StagingUploader& staging, nvvkgltf::Scene& scn);
+  void createGeometry(VkCommandBuffer cmd, nvvk::StagingUploader& staging, const nvvkgltf::Scene& scn);
 
   // Getters
   const nvvk::Buffer&               material() const { return m_bMaterial; }

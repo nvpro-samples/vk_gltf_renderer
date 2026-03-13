@@ -46,8 +46,7 @@
 #include <nvvk/resource_allocator.hpp>
 #include <nvvk/sampler_pool.hpp>
 #include "gltf_scene.hpp"
-#include "gltf_scene_rtx.hpp"
-#include "gltf_scene_vk.hpp"
+#include "gltf_scene_gpu.hpp"
 #include <nvapp/application.hpp>
 
 
@@ -186,6 +185,8 @@ struct Resources
   std::unique_ptr<nvvkgltf::Scene> scene;
   nvvkgltf::SceneVk                sceneVk;
   nvvkgltf::SceneRtx               sceneRtx;
+  nvvkgltf::AnimationVk            animationVk;
+  nvvkgltf::SceneGpu sceneGpu{sceneVk, animationVk, sceneRtx, staging};  // Must be declared after its reference dependencies
 
   nvvkgltf::Scene*       getScene() { return scene.get(); }
   const nvvkgltf::Scene* getScene() const { return scene.get(); }

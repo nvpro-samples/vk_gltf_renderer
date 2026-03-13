@@ -30,6 +30,16 @@
 #include <nvvk/check_error.hpp>
 #include <nvutils/logger.hpp>
 
+// Patch a perspectiveRH_ZO projection matrix to use extreme near/far planes,
+// so the gizmo is never depth-clipped regardless of the scene camera settings.
+static glm::mat4 makeUnclippedProjection(const glm::mat4& proj, float zNear = 0.001f, float zFar = 1e8f)
+{
+  glm::mat4 p = proj;
+  p[2][2]     = zFar / (zNear - zFar);
+  p[3][2]     = -(zFar * zNear) / (zFar - zNear);
+  return p;
+}
+
 //--------------------------------------------------------------------------------------------------
 // Lifecycle
 //--------------------------------------------------------------------------------------------------
@@ -152,11 +162,13 @@ void VisualHelpers::render(VkCommandBuffer  cmd,
   VkRect2D scissor{{0, 0}, viewportExtent};
   vkCmdSetScissorWithCount(cmd, 1, &scissor);
 
+  const glm::mat4 unclippedProj = makeUnclippedProjection(projMatrix);
+
   // Grid renders behind gizmo
-  grid.renderRaster(cmd, m_helperDescriptorSet, viewMatrix, projMatrix, viewportSize, depthBufferSize);
+  grid.renderRaster(cmd, m_helperDescriptorSet, viewMatrix, unclippedProj, viewportSize, depthBufferSize);
 
   // Gizmo renders on top
-  transform.renderRaster(cmd, m_helperDescriptorSet, viewMatrix, projMatrix, viewportSize, depthBufferSize);
+  transform.renderRaster(cmd, m_helperDescriptorSet, viewMatrix, unclippedProj, viewportSize, depthBufferSize);
 
   vkCmdEndRendering(cmd);
 

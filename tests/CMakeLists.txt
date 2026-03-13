@@ -37,6 +37,8 @@ set(TEST_SOURCES
     test_material_cache.cpp
     # Animation update, time advancement, wrapping, stability
     test_animation_update.cpp
+    # Compute animation: deferred CPU allocation, CPU skinning, CPU morph targets
+    test_compute_animation.cpp
     # Need tinygltf implementation
     ${CMAKE_SOURCE_DIR}/src/tiny_stb_implementation.cpp
     # Local glTF scene implementation

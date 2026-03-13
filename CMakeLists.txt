@@ -310,3 +310,12 @@ file(GLOB CMAKE_FILES CMakeLists.txt cmake/*.cmake)
 target_sources(${PROJECT_NAME} PRIVATE ${CMAKE_FILES})
 source_group("cmake" FILES ${CMAKE_FILES})
 
+#####################################################################################
+# CPack packaging
+set(CPACK_PACKAGE_NAME "${PROJECT_NAME}")
+set(CPACK_PACKAGE_VERSION "${APP_VERSION_STRING}")
+set(CPACK_PACKAGE_VENDOR "NVIDIA")
+set(CPACK_GENERATOR "ZIP")
+set(CPACK_PACKAGE_DIRECTORY "${CMAKE_SOURCE_DIR}/_package")
+include(CPack)
+

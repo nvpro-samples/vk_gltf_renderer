@@ -53,8 +53,8 @@ void GltfRenderer::mouseClickedInViewport()
 {
   static UiMouseState s_mouseClickState;  // Mouse click state
 
-  // The mouse click state is only updated when the "Viewport" window is hovered.
-  if(!ImGui::IsWindowHovered(ImGuiFocusedFlags_RootWindow))
+  // Allow input when hovered, or when the gizmo is mid-drag (mouse may have left the viewport).
+  if(!ImGui::IsWindowHovered(ImGuiFocusedFlags_RootWindow) && !m_visualHelpers.transform.isDragging())
     return;
 
   // Do not pick if the scene is not valid or the renderer is busy

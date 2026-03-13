@@ -42,6 +42,10 @@
 
 namespace nvvkgltf {
 
+// When the ratio of dirty elements to total elements exceeds this threshold,
+// a full GPU buffer upload is used instead of individual per-element updates.
+constexpr float kFullUpdateRatio = 0.3f;
+
 // The render node is the instance of a primitive in the scene that will be rendered
 struct RenderNode
 {
@@ -267,7 +271,7 @@ public:
   void                          setCurrentScene(int sceneID);  // Parse scene and create render nodes
   [[nodiscard]] int             getCurrentScene() const { return m_currentScene; }
   const std::vector<glm::mat4>& getNodesWorldMatrices() const { return m_nodesWorldMatrices; }
-  void                          updateNodeWorldMatrices();  // Uses internal dirty node tracking (m_dirtyFlags.nodes)
+  void                          updateNodeWorldMatrices();
 
   //--------------------------------------------------------------------------------------------------
   // Variant Management
@@ -303,7 +307,7 @@ public:
   [[nodiscard]] bool                       collectRenderNodeIndices(const std::unordered_set<int>& nodeIndices,
                                                                     std::unordered_set<int>&       outRenderNodeIndices,
                                                                     bool                           includeDescendants = true,
-                                                                    float                          fullUpdateRatio = 0.5f) const;
+                                                                    float                          fullUpdateRatio = kFullUpdateRatio) const;
   // Uses m_dirtyFlags.nodes to populate renderNodesVk/Rtx
   void              updateRenderNodeDirtyFromNodes(bool includeDescendants = true);
   [[nodiscard]] int getRenderNodeForPrimitive(int nodeIndex, int primitiveIndex) const;
@@ -383,7 +387,7 @@ public:
   void markMaterialDirty(int materialIndex);
   void markLightDirty(int lightIndex);
   void markRenderNodeDirty(int renderNodeIndex, bool forVk = true, bool forRtx = true);
-  void markNodeDirty(int nodeIndex);  // Converts node to renderNodes and marks them
+  void markNodeDirty(int nodeIndex);
   void markRenderNodeRtxDirtyForMaterials(const std::unordered_set<int>& materialIds);  // For TLAS instance flags
 
 private:
@@ -475,6 +479,18 @@ private:
   std::vector<glm::mat4> m_nodesLocalMatrices;  // Per-node local transforms
   std::vector<glm::mat4> m_nodesWorldMatrices;  // Per-node world transforms
   std::vector<int>       m_nodeParents;         // Parent index for each node
+
+  // Topological levels for parallel world-matrix propagation.
+  // Built by buildTopologicalLevels() at scene load and on re-parent.
+  struct TopoLevels
+  {
+    std::vector<int>                 nodeOrder;  // Node indices sorted by tree depth
+    std::vector<std::pair<int, int>> levels;     // Per-level (offset, count) into nodeOrder
+  };
+  TopoLevels m_topoLevels;
+  void       buildTopologicalLevels();
+  void       updateWorldMatricesSerial();    // Filtered-root recursive walk (small dirty sets)
+  void       updateWorldMatricesParallel();  // Level-by-level parallel (large dirty sets)
 
   std::unordered_map<int, std::vector<glm::mat4>> m_gpuInstanceLocalMatrices;  // nodeID -> per-instance local transforms (EXT_mesh_gpu_instancing)
 
