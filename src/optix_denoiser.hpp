@@ -75,6 +75,27 @@
 // 7. Cleanup:
 //    denoiser.deinit(resources);
 //
+// Timing / one-frame lag:
+//
+// denoiseOneShot() is called from the renderer's onRender(), which is in the middle of
+// recording the frame's main command buffer.  The ray tracing commands for the current
+// frame are recorded but NOT yet submitted, so denoiseOneShot — which creates its own
+// temporary command buffers, calls vkQueueWaitIdle, and reads the GBuffer — always
+// operates on the *previous* frame's data.
+//
+// Eliminating this one-frame lag would require one of:
+//   (a) Splitting the command buffer: submit ray tracing, wait, denoise, then start a
+//       new command buffer for post-processing.  The application framework does not
+//       support restarting the command buffer mid-frame.
+//   (b) Timeline semaphores: insert the denoiser between GPU passes.  However, the
+//       OptiX denoiser runs on CUDA, not Vulkan, so this would require Vulkan-CUDA
+//       interop semaphores (VK_KHR_external_semaphore) to synchronize the two APIs —
+//       adding significant complexity for a marginal visual improvement.
+//
+// In practice, the lag is only visible on the first frame after a camera change.  The
+// upscale-mode code works around it by denoising on both frame 0 (stale but immediate)
+// and frame 1 (correct data).
+//
 // Requirements:
 // - OptiX 7.x or later
 // - CUDA-enabled GPU with compute capability 5.0+
@@ -92,6 +113,12 @@ public:
     eGBufferAlbedoNormal = 1,  // Albedo+Normal guide buffer
   };
 
+  // Staging GBuffer indices (half-res copies for upscale blit)
+  enum StagingIndex
+  {
+    eStagingSelection = 0,  // Copy of selection ID at render resolution
+  };
+
   enum class Availability
   {
     eNotChecked,   // Haven't attempted initialization yet
@@ -99,11 +126,18 @@ public:
     eAvailable,    // Fully checked and ready to use
   };
 
+  enum class ModelKind
+  {
+    eAOV,        // Standard denoise at native resolution
+    eUpscale2X,  // Denoise + 2x upscale (renders at half resolution)
+  };
+
   struct Settings
   {
-    bool enable              = false;
-    bool autoDenoiseEnabled  = true;  // Automatically denoise every N frames
-    int  autoDenoiseInterval = 50;    // Denoise at frames 50, 100, 150, etc.
+    bool      enable              = false;
+    bool      autoDenoiseEnabled  = true;  // Automatically denoise every N frames
+    int       autoDenoiseInterval = 50;    // Denoise at frames 50, 100, 150, etc.
+    ModelKind modelKind           = ModelKind::eAOV;
   };
 
   // Input images for denoising
@@ -136,8 +170,18 @@ public:
   // Check if denoiser is enabled
   bool isEnabled() const { return m_settings.enable && (m_availability != Availability::eUnavailable); }
 
+  // Check if using UPSCALE2X model (renders at half resolution)
+  bool isUpscaleMode() const { return m_settings.modelKind == ModelKind::eUpscale2X; }
+
+  // Return the render resolution (half of display for upscale mode, full otherwise)
+  VkExtent2D getRenderSize() const { return m_inputSize; }
+
   // Get the descriptor for the denoised output
   VkDescriptorImageInfo getDescriptorImageInfo(GBufferIndex index) const;
+
+  // Staging images at render (half) resolution for upscale blit of selection/depth
+  VkImage getStagingSelectionImage() const { return m_upscaleStaging.getColorImage(eStagingSelection); }
+  VkImage getStagingDepthImage() const { return m_upscaleStaging.getDepthImage(); }
 
   // Update size when rendering resolution changes
   void updateSize(VkCommandBuffer cmd, VkExtent2D size);
@@ -175,6 +219,9 @@ private:
   // Create compute pipeline for image-to-buffer copy
   void createComputePipeline();
 
+  // Recreate the OptiX denoiser (after model kind change)
+  bool recreateDenoiser();
+
   // Cleanup OptiX resources
   void cleanupOptiX();
 
@@ -183,14 +230,17 @@ private:
 
 private:
   Settings     m_settings{};
-  VkExtent2D   m_outputSize{};
+  VkExtent2D   m_outputSize{};  // Display/output resolution (always full size)
+  VkExtent2D   m_inputSize{};   // Render/input resolution (half for upscale, full for AOV)
   Availability m_availability         = Availability::eNotChecked;
   bool         m_hasValidOutput       = false;
-  uint64_t     m_lastAutoDenoiseFrame = 0;  // Track last frame we auto-denoised
+  bool         m_needModelRecreate    = false;  // Denoiser must be destroyed and recreated
+  uint64_t     m_lastAutoDenoiseFrame = 0;      // Track last frame we auto-denoised
 
   // OptiX context and denoiser
-  OptixDeviceContext m_optixContext = nullptr;
-  OptixDenoiser      m_denoiser     = nullptr;
+  OptixDeviceContext m_optixContext     = nullptr;
+  OptixDenoiser      m_denoiser         = nullptr;
+  ModelKind          m_createdModelKind = ModelKind::eAOV;  // Model kind the denoiser was created with
 
   // Buffers
   bool       m_needRebuildBuffers = true;
@@ -232,6 +282,7 @@ private:
 
   // Output image
   nvvk::GBuffer m_inputOutputGbuffers;  // See GBufferIndex
+  nvvk::GBuffer m_upscaleStaging;       // Half-res staging for selection/depth upscale blit (see StagingIndex)
   VkSampler     m_linearSampler{};
 
 

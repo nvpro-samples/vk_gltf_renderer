@@ -389,6 +389,12 @@ void PathTracer::onRender(VkCommandBuffer cmd, Resources& resources)
     renderingSize = m_dlss->getRenderSize();
   }
 #endif
+#if defined(USE_OPTIX_DENOISER)
+  if(getEffectiveOptixEnabled(resources) && m_optix->isUpscaleMode())
+  {
+    renderingSize = m_optix->getRenderSize();
+  }
+#endif
 
   // Tracing the rays: Ray Query or Ray Tracing
   if(m_renderTechnique == RenderTechnique::RayQuery)
@@ -417,10 +423,60 @@ void PathTracer::onRender(VkCommandBuffer cmd, Resources& resources)
   {
     auto timerSection = m_profiler->cmdFrameSection(cmd, "Optix denoiser");
     m_optix->updateDenoiser(resources);
+
+    if(m_optix->isUpscaleMode() && resources.frameCount == 0)
+    {
+      upscaleSelectionAndDepth(cmd, resources);
+    }
   }
 #endif
 
   updateStatistics(resources);
+}
+
+//--------------------------------------------------------------------------------------------------
+// Upscale selection ID and depth from render resolution (half) to display resolution (full).
+// In OptiX 2x upscale mode the shader writes into the top-left corner of the full-res GBuffer.
+// vkCmdBlitImage cannot blit an image to itself with overlapping regions, so we copy the
+// half-res data to a staging image first, then blit it back at full resolution.
+void PathTracer::upscaleSelectionAndDepth(VkCommandBuffer cmd, Resources& resources)
+{
+#if defined(USE_OPTIX_DENOISER)
+  VkExtent2D srcSize = m_optix->getRenderSize();
+  VkExtent2D dstSize = resources.gBuffers.getSize();
+
+  // Copy half-res region to staging, then blit staging back to full-res destination.
+  auto copyAndBlit = [cmd, &srcSize, &dstSize](VkImage image, VkImage staging, VkImageAspectFlags aspect) {
+    VkImageSubresourceLayers subresource = {.aspectMask = aspect, .layerCount = 1};
+
+    VkImageCopy copy{
+        .srcSubresource = subresource,
+        .dstSubresource = subresource,
+        .extent         = {srcSize.width, srcSize.height, 1},
+    };
+    vkCmdCopyImage(cmd, image, VK_IMAGE_LAYOUT_GENERAL, staging, VK_IMAGE_LAYOUT_GENERAL, 1, &copy);
+
+    nvvk::cmdMemoryBarrier(cmd, VK_PIPELINE_STAGE_2_COPY_BIT, VK_PIPELINE_STAGE_2_BLIT_BIT,
+                           VK_ACCESS_2_TRANSFER_WRITE_BIT, VK_ACCESS_2_TRANSFER_READ_BIT);
+
+    VkOffset3D srcExtent = {int(srcSize.width), int(srcSize.height), 1};
+    VkOffset3D dstExtent = {int(dstSize.width), int(dstSize.height), 1};
+
+    VkImageBlit blit{
+        .srcSubresource = subresource,
+        .srcOffsets     = {{0, 0, 0}, srcExtent},
+        .dstSubresource = subresource,
+        .dstOffsets     = {{0, 0, 0}, dstExtent},
+    };
+    vkCmdBlitImage(cmd, staging, VK_IMAGE_LAYOUT_GENERAL, image, VK_IMAGE_LAYOUT_GENERAL, 1, &blit, VK_FILTER_NEAREST);
+  };
+
+  copyAndBlit(resources.gBuffers.getColorImage(Resources::eImgSelection), m_optix->getStagingSelectionImage(), VK_IMAGE_ASPECT_COLOR_BIT);
+  copyAndBlit(resources.gBuffers.getDepthImage(), m_optix->getStagingDepthImage(), VK_IMAGE_ASPECT_DEPTH_BIT);
+
+  nvvk::cmdMemoryBarrier(cmd, VK_PIPELINE_STAGE_2_BLIT_BIT, VK_PIPELINE_STAGE_2_COMPUTE_SHADER_BIT,
+                         VK_ACCESS_2_TRANSFER_WRITE_BIT, VK_ACCESS_2_SHADER_READ_BIT);
+#endif
 }
 
 //--------------------------------------------------------------------------------------------------

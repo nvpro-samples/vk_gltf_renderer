@@ -178,4 +178,7 @@ private:
 
   // Determine if OptiX should actively denoise this frame
   bool getEffectiveOptixEnabled(const Resources& resources) const;
+
+  // Upscale selection ID and depth from render resolution to display resolution (OptiX 2x mode)
+  void upscaleSelectionAndDepth(VkCommandBuffer cmd, Resources& resources);
 };

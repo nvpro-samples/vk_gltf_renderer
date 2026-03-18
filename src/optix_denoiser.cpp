@@ -26,6 +26,8 @@
 
 #include "optix_denoiser.hpp"
 
+#include <algorithm>
+
 // Define OptiX function table (must be in exactly one translation unit)
 #include <optix_function_table_definition.h>
 
@@ -94,6 +96,13 @@ void OptiXDenoiser::init(Resources& resources)
                                   },
                               .imageSampler   = m_linearSampler,
                               .descriptorPool = resources.descriptorPool});
+
+  // Staging GBuffer at render (half) resolution for upscale blit of selection/depth
+  m_upscaleStaging.init({.allocator      = &resources.allocator,
+                         .colorFormats   = {VK_FORMAT_R32_SFLOAT},
+                         .depthFormat    = resources.gBuffers.getDepthFormat(),
+                         .imageSampler   = m_linearSampler,
+                         .descriptorPool = resources.descriptorPool});
 
 
   // Create export allocator for Vulkan-CUDA interop
@@ -179,55 +188,81 @@ bool OptiXDenoiser::initOptiXDenoiser()
   m_denoiserOptions.guideNormal  = 1;
   m_denoiserOptions.denoiseAlpha = OPTIX_DENOISER_ALPHA_MODE_COPY;
 
-  // Use AOV model kind - since OptiX r575+, HDR/LDR models are internally mapped to AOV
-  // using kernel prediction, making AOV the recommended model for all use cases
-  OptixDenoiserModelKind modelKind = OPTIX_DENOISER_MODEL_KIND_AOV;  // OPTIX_DENOISER_MODEL_KIND_UPSCALE2X
+  // Choose denoiser model kind based on settings
+  OptixDenoiserModelKind modelKind =
+      (m_settings.modelKind == ModelKind::eUpscale2X) ? OPTIX_DENOISER_MODEL_KIND_UPSCALE2X : OPTIX_DENOISER_MODEL_KIND_AOV;
 
   // Create denoiser
   OPTIX_CHECK(optixDenoiserCreate(m_optixContext, modelKind, &m_denoiserOptions, &m_denoiser));
+  m_createdModelKind = m_settings.modelKind;
 
-  // Get denoiser memory requirements
+  // Memory resources are computed against the OUTPUT (full) resolution
   OPTIX_CHECK(optixDenoiserComputeMemoryResources(m_denoiser, m_outputSize.width, m_outputSize.height, &m_denoiserSizes));
 
   // Set denoiser parameters
-  m_denoiserParams.blendFactor = 0;  //m_settings.blendFactor;
+  m_denoiserParams.blendFactor = 0;
 
+  return true;
+}
+
+bool OptiXDenoiser::recreateDenoiser()
+{
+  m_needModelRecreate = false;
+  m_hasValidOutput    = false;
+
+  // Destroy only the denoiser and buffers, keep the OptiX context and CUDA stream
+  if(m_denoiser)
+  {
+    optixDenoiserDestroy(m_denoiser);
+    m_denoiser = nullptr;
+  }
+  cleanupBuffers();
+
+  if(!initOptiXDenoiser())
+  {
+    LOGE("OptiXDenoiser::recreateDenoiser(): Failed to recreate denoiser with model kind %d\n",
+         static_cast<int>(m_settings.modelKind));
+    m_availability = Availability::eUnavailable;
+    return false;
+  }
+
+  m_needRebuildBuffers = true;
   return true;
 }
 
 bool OptiXDenoiser::createSharedBuffers()
 {
-  SCOPED_TIMER("Optix: Create buffers");
   if(m_outputSize.width == 0 || m_outputSize.height == 0)
   {
     return true;  // Not an error, just nothing to do yet
   }
 
   // Calculate buffer sizes
-  size_t pixelSize  = sizeof(float) * 4;  // RGBA float
-  size_t bufferSize = m_outputSize.width * m_outputSize.height * pixelSize;
+  size_t pixelSize        = sizeof(float) * 4;  // RGBA float
+  size_t inputBufferSize  = m_inputSize.width * m_inputSize.height * pixelSize;
+  size_t outputBufferSize = m_outputSize.width * m_outputSize.height * pixelSize;
 
   // Create shared buffers with export flags and DEDICATED memory to ensure each gets its own memory block
   VkBufferUsageFlags2KHR usage =
       VK_BUFFER_USAGE_2_STORAGE_BUFFER_BIT | VK_BUFFER_USAGE_2_TRANSFER_SRC_BIT | VK_BUFFER_USAGE_2_TRANSFER_DST_BIT;
 
-  // RGB buffer
-  m_allocExport.createBufferExport(m_rgbBuffer.vkBuffer, bufferSize, usage);
+  // Input buffers at render (input) resolution
+  m_allocExport.createBufferExport(m_rgbBuffer.vkBuffer, inputBufferSize, usage);
   m_rgbBuffer.cudaBuffer = vkcuda::createCudaBuffer(m_allocExport, m_rgbBuffer.vkBuffer);
   NVVK_DBG_NAME_STR(m_rgbBuffer.vkBuffer.buffer, "Optix::m_rgbBuffer");
 
   // Albedo buffer
-  m_allocExport.createBufferExport(m_albedoBuffer.vkBuffer, bufferSize, usage);
+  m_allocExport.createBufferExport(m_albedoBuffer.vkBuffer, inputBufferSize, usage);
   m_albedoBuffer.cudaBuffer = vkcuda::createCudaBuffer(m_allocExport, m_albedoBuffer.vkBuffer);
   NVVK_DBG_NAME_STR(m_albedoBuffer.vkBuffer.buffer, "Optix::m_albedoBuffer");
 
   // Normal buffer
-  m_allocExport.createBufferExport(m_normalBuffer.vkBuffer, bufferSize, usage);
+  m_allocExport.createBufferExport(m_normalBuffer.vkBuffer, inputBufferSize, usage);
   m_normalBuffer.cudaBuffer = vkcuda::createCudaBuffer(m_allocExport, m_normalBuffer.vkBuffer);
   NVVK_DBG_NAME_STR(m_normalBuffer.vkBuffer.buffer, "Optix::m_normalBuffer");
 
-  // Output buffer
-  m_allocExport.createBufferExport(m_outputBuffer.vkBuffer, bufferSize, usage);
+  // Output buffer at display (output) resolution
+  m_allocExport.createBufferExport(m_outputBuffer.vkBuffer, outputBufferSize, usage);
   m_outputBuffer.cudaBuffer = vkcuda::createCudaBuffer(m_allocExport, m_outputBuffer.vkBuffer);
   NVVK_DBG_NAME_STR(m_outputBuffer.vkBuffer.buffer, "Optix::m_outputBuffer");
 
@@ -235,15 +270,16 @@ bool OptiXDenoiser::createSharedBuffers()
   CUDA_CHECK_BOOL(m_stateBuffer.allocate(m_denoiserSizes.stateSizeInBytes));
   CUDA_CHECK_BOOL(m_scratchBuffer.allocate(m_denoiserSizes.withoutOverlapScratchSizeInBytes));
 
-  // Setup the denoiser with the allocated buffers
   if(!m_denoiser)
   {
     LOGE("ERROR: Cannot setup denoiser - denoiser is null!\n");
     return false;
   }
 
-  // Setup denoiser with maximum scratch size (for both intensity and denoising operations)
-  OPTIX_CHECK(optixDenoiserSetup(m_denoiser, m_cudaStream, m_outputSize.width, m_outputSize.height, m_stateBuffer.ptr,
+  // optixDenoiserSetup takes INPUT dimensions for UPSCALE2X, output dimensions for AOV
+  uint32_t setupWidth  = isUpscaleMode() ? m_inputSize.width : m_outputSize.width;
+  uint32_t setupHeight = isUpscaleMode() ? m_inputSize.height : m_outputSize.height;
+  OPTIX_CHECK(optixDenoiserSetup(m_denoiser, m_cudaStream, setupWidth, setupHeight, m_stateBuffer.ptr,
                                  m_stateBuffer.size, m_scratchBuffer.ptr, m_scratchBuffer.size));
 
   // Wait for the setup to complete - it's asynchronous!
@@ -253,36 +289,56 @@ bool OptiXDenoiser::createSharedBuffers()
 }
 
 //---------------------------------------------------------
-// Called by the application when the window size changes
+// Called by the application when the window size changes.
+// `size` is always the display/output resolution.
 void OptiXDenoiser::updateSize(VkCommandBuffer cmd, VkExtent2D size)
 {
   if(m_settings.enable)
   {
-    // If the denoiser is active, it needs the guide buffer albedo/normal to be updated
-    // Also update the output buffer
+    // GBuffer images are always at display resolution
     m_inputOutputGbuffers.update(cmd, size);
     NVVK_DBG_NAME_STR(m_inputOutputGbuffers.getColorImage(), "Optix::m_outputImage");
   }
 
-  // If the buffer size has changed, we will need to rebuild the OptiX buffers before denoising.
+  // Compute input (render) resolution based on model kind
+  VkExtent2D inputSize = isUpscaleMode() ? VkExtent2D{std::max(size.width / 2, 1u), std::max(size.height / 2, 1u)} : size;
+
+  // Staging images for upscale blit (selection + depth at render resolution)
+  if(m_settings.enable && isUpscaleMode())
+  {
+    m_upscaleStaging.update(cmd, inputSize);
+    NVVK_DBG_NAME_STR(m_upscaleStaging.getColorImage(eStagingSelection), "Optix::m_stagingSelection");
+  }
+
   if(m_bufferSize.width != size.width || m_bufferSize.height != size.height)
   {
     m_bufferSize         = size;
     m_needRebuildBuffers = true;
   }
+
+  m_inputSize = inputSize;
 }
 
 //---------------------------------------------------------
-// Called when the buffer size has changed, we will need to rebuild the OptiX buffers before denoising.
+// Called when the buffer size has changed or model needs recreation.
 void OptiXDenoiser::rebuiltBuffers()
 {
   m_needRebuildBuffers = false;
   m_outputSize         = m_bufferSize;
+  m_inputSize = isUpscaleMode() ? VkExtent2D{std::max(m_bufferSize.width / 2, 1u), std::max(m_bufferSize.height / 2, 1u)} : m_bufferSize;
 
   if(isAvailable())
   {
-    // Compute denoiser memory requirements BEFORE creating buffers
-    // The buffer allocation sizes depend on m_denoiserSizes
+    // Recreate the OptiX denoiser if the model kind changed
+    // (also catches settings loaded after init via setSettingsHandler)
+    if(m_needModelRecreate || m_createdModelKind != m_settings.modelKind)
+    {
+      m_needModelRecreate = true;
+      if(!recreateDenoiser())
+        return;
+    }
+
+    // Compute denoiser memory requirements at OUTPUT (full) resolution
     if(m_denoiser)
     {
       OptixResult res = optixDenoiserComputeMemoryResources(m_denoiser, m_outputSize.width, m_outputSize.height, &m_denoiserSizes);
@@ -307,7 +363,6 @@ void OptiXDenoiser::rebuiltBuffers()
 
 bool OptiXDenoiser::denoiseOneShot(Resources& resources)
 {
-  SCOPED_TIMER("Optix: Denoise");
   if(!isEnabled())
   {
     return false;
@@ -321,7 +376,6 @@ bool OptiXDenoiser::denoiseOneShot(Resources& resources)
   {
     // SYNC NOTE: Required for Vulkan→CUDA interop — ensures all GPU rendering is complete
     // before CUDA reads the images. Cannot be replaced with a fence without changing the interop model.
-    SCOPED_TIMER("OptiX: wait");
     vkQueueWaitIdle(resources.app->getQueue(0).queue);
   }
 
@@ -340,8 +394,6 @@ bool OptiXDenoiser::denoiseOneShot(Resources& resources)
 
   // Prepare denoising inputs
   {
-    SCOPED_TIMER("OptiX: prepareDenoisingInputs");
-
     VkCommandBuffer cmd = resources.app->createTempCmdBuffer();
 
     DenoisingInputs inputs = {
@@ -358,8 +410,6 @@ bool OptiXDenoiser::denoiseOneShot(Resources& resources)
 
   // Execute OptiX denoising
   {
-    SCOPED_TIMER("OptiX: executeDenoising");
-
     if(!executeDenoising())
     {
       return false;
@@ -368,8 +418,6 @@ bool OptiXDenoiser::denoiseOneShot(Resources& resources)
 
   // Finalize denoised output
   {
-    SCOPED_TIMER("OptiX: finalizeDenoisedOutput");
-
     VkCommandBuffer cmd = resources.app->createTempCmdBuffer();
 
     DenoisingOutputs outputs = {.outputImage = m_inputOutputGbuffers.getColorImage(eGBufferDenoised)};
@@ -412,11 +460,10 @@ bool OptiXDenoiser::prepareDenoisingInputs(VkCommandBuffer cmd, const DenoisingI
   vkCmdPushDescriptorSetKHR(cmd, VK_PIPELINE_BIND_POINT_COMPUTE, m_computePipelineLayout, 0,
                             static_cast<uint32_t>(writeContainer.size()), writeContainer.data());
 
-  // Push constants (image size)
-  vkCmdPushConstants(cmd, m_computePipelineLayout, VK_SHADER_STAGE_COMPUTE_BIT, 0, sizeof(VkExtent2D), &m_outputSize);
+  // Push constants: dispatch at input (render) resolution
+  vkCmdPushConstants(cmd, m_computePipelineLayout, VK_SHADER_STAGE_COMPUTE_BIT, 0, sizeof(VkExtent2D), &m_inputSize);
 
-  // Dispatch compute shader
-  VkExtent2D groupCounts = nvvk::getGroupCounts(m_outputSize, VkExtent2D{16, 16});
+  VkExtent2D groupCounts = nvvk::getGroupCounts(m_inputSize, VkExtent2D{16, 16});
   vkCmdDispatch(cmd, groupCounts.width, groupCounts.height, 1);
 
   return true;
@@ -435,8 +482,18 @@ bool OptiXDenoiser::executeDenoising()
     OptixDenoiserLayer      layers = {};
     OptixDenoiserGuideLayer guide  = {};
 
-    // Pixel format and stride
-    OptixImage2D commonFormat = {
+    // Input format at render (input) resolution
+    OptixImage2D inputFormat = {
+        .data               = 0,
+        .width              = m_inputSize.width,
+        .height             = m_inputSize.height,
+        .rowStrideInBytes   = static_cast<unsigned int>(sizeof(float) * 4 * m_inputSize.width),
+        .pixelStrideInBytes = sizeof(float) * 4,
+        .format             = OPTIX_PIXEL_FORMAT_FLOAT4,
+    };
+
+    // Output format at display (output) resolution
+    OptixImage2D outputFormat = {
         .data               = 0,
         .width              = m_outputSize.width,
         .height             = m_outputSize.height,
@@ -446,25 +503,25 @@ bool OptiXDenoiser::executeDenoising()
     };
 
     // RGB input
-    layers.input      = commonFormat;
+    layers.input      = inputFormat;
     layers.input.data = (CUdeviceptr)m_rgbBuffer.cudaBuffer.cuPtr;
 
     // Albedo input (only if guideAlbedo is enabled)
     if(m_denoiserOptions.guideAlbedo != 0u)
     {
-      guide.albedo      = commonFormat;
+      guide.albedo      = inputFormat;
       guide.albedo.data = (CUdeviceptr)m_albedoBuffer.cudaBuffer.cuPtr;
     }
 
     // Normal input (only if guideNormal is enabled)
     if(m_denoiserOptions.guideNormal != 0u)
     {
-      guide.normal      = commonFormat;
+      guide.normal      = inputFormat;
       guide.normal.data = (CUdeviceptr)m_normalBuffer.cudaBuffer.cuPtr;
     }
 
     // Output buffer
-    layers.output      = commonFormat;
+    layers.output      = outputFormat;
     layers.output.data = (CUdeviceptr)m_outputBuffer.cudaBuffer.cuPtr;
 
     // Configure denoiser parameters
@@ -616,6 +673,7 @@ void OptiXDenoiser::cleanupOptiX()
   m_allocExport.deinit();
 
   m_inputOutputGbuffers.deinit();
+  m_upscaleStaging.deinit();
 
   m_availability = Availability::eNotChecked;
 }
@@ -649,6 +707,7 @@ void OptiXDenoiser::registerParameters(nvutils::ParameterRegistry* paramReg)
   paramReg->add({"optixEnable", "OptiX Denoiser: Enable OptiX denoiser"}, &m_settings.enable);
   paramReg->add({"optixAutoDenoiseEnabled", "OptiX Denoiser: Auto-denoise every N frames"}, &m_settings.autoDenoiseEnabled);
   paramReg->add({"optixAutoDenoiseInterval", "OptiX Denoiser: Auto-denoise interval (frames)"}, &m_settings.autoDenoiseInterval);
+  paramReg->add({"optixModelKind", "OptiX Denoiser: Model [AOV:0, Upscale2X:1]"}, (int*)&m_settings.modelKind);
 }
 
 void OptiXDenoiser::setSettingsHandler(nvgui::SettingsHandler* settingsHandler)
@@ -656,12 +715,28 @@ void OptiXDenoiser::setSettingsHandler(nvgui::SettingsHandler* settingsHandler)
   settingsHandler->setSetting("optixEnable", &m_settings.enable);
   settingsHandler->setSetting("optixAutoDenoiseEnabled", &m_settings.autoDenoiseEnabled);
   settingsHandler->setSetting("optixAutoDenoiseInterval", &m_settings.autoDenoiseInterval);
+  settingsHandler->setSetting("optixModelKind", (int*)&m_settings.modelKind);
 }
 
 void OptiXDenoiser::updateDenoiser(Resources& resources)
 {
   if(!m_settings.enable)
   {
+    return;
+  }
+
+  // In upscale mode, denoise on frames 0 and 1 for immediate interactive feedback.
+  // The denoiser is always one frame behind because denoiseOneShot reads the GBuffer
+  // via temp command buffers while the current frame's ray tracing is still recorded
+  // (not yet submitted) in the main command buffer. Frame 0 denoises stale data from
+  // the previous camera position; frame 1 denoises frame 0's correct data.
+  if(isUpscaleMode() && resources.frameCount <= 1)
+  {
+    if(denoiseOneShot(resources))
+    {
+      m_lastAutoDenoiseFrame           = resources.frameCount;
+      resources.settings.displayBuffer = DisplayBuffer::eOptixDenoised;
+    }
     return;
   }
 
@@ -753,9 +828,28 @@ bool OptiXDenoiser::onUi(Resources& resources)
         }
       }
 
-      // Auto-denoise settings
       namespace PE = nvgui::PropertyEditor;
       PE::begin(__FUNCTION__);
+
+      // Model selection
+      {
+        static const char* s_modelNames[] = {"Denoise (AOV)", "Denoise + Upscale 2X"};
+        int                currentModel   = static_cast<int>(m_settings.modelKind);
+        if(PE::Combo("Model", &currentModel, s_modelNames, IM_ARRAYSIZE(s_modelNames)))
+        {
+          m_settings.modelKind = static_cast<ModelKind>(currentModel);
+          m_needModelRecreate  = true;
+          m_needRebuildBuffers = true;
+          m_hasValidOutput     = false;
+          changed              = true;
+
+          // Force size update to recompute input/output sizes
+          VkCommandBuffer cmd = resources.app->createTempCmdBuffer();
+          updateSize(cmd, resources.gBuffers.getSize());
+          resources.app->submitAndWaitTempCmdBuffer(cmd);
+        }
+      }
+
       changed |= PE::Checkbox("Auto-Denoise", &m_settings.autoDenoiseEnabled);
       if(m_settings.autoDenoiseEnabled)
       {
