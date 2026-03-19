@@ -25,15 +25,33 @@
 // Hit state information
 struct HitState
 {
-  float3 pos;        // World-space hit position
-  float3 nrm;        // Shading normal (interpolated and transformed)
-  float4 color;      // Vertex color
-  float3 geonrm;     // Geometric normal (face normal, for back-face detection)
-  float3 shadowPos;  // Shadow position
-  float2 uv[2];      // UV0 and UV1
-  float3 tangent;    // Tangent
-  float3 bitangent;  // Bitangent
+  float3 pos;                 // World-space hit position
+  float3 nrm;                 // Shading normal (interpolated and transformed)
+  float4 color;               // Vertex color
+  float3 geonrm;              // Geometric normal (face normal, for back-face detection)
+  float3 shadowPos;           // Shadow position
+  float2 uv[2];               // UV0 and UV1
+  float3 tangent;             // Tangent
+  float3 bitangent;           // Bitangent
+  float  texelDensity = 0.0;  // UV-to-world area ratio for ray-footprint texture LOD (0 if no UVs)
 };
+
+//-----------------------------------------------------------------------
+// Compute the texel density of a triangle: the ratio of UV-space area to world-space area.
+// Returns sqrt(uvArea / worldArea). When multiplied by a world-space footprint
+// (hitT * pixelAngle), gives the UV-space gradient magnitude for SampleGrad().
+float computeTexelDensity(float3 pos0, float3 pos1, float3 pos2, float2 uv0, float2 uv1, float2 uv2, float4x3 objectToWorld)
+{
+  float3 we1   = mul(float4(pos1 - pos0, 0.0), objectToWorld).xyz;
+  float3 we2   = mul(float4(pos2 - pos0, 0.0), objectToWorld).xyz;
+  float  wArea = length(cross(we1, we2));
+
+  float2 duv1   = uv1 - uv0;
+  float2 duv2   = uv2 - uv0;
+  float  uvArea = abs(duv1.x * duv2.y - duv1.y * duv2.x);
+
+  return sqrt(max(uvArea, 1e-20) / max(wArea, 1e-20));
+}
 
 //-----------------------------------------------------------------------
 // Return hit information: position, normal, geonormal, uv, tangent, bitangent
@@ -81,6 +99,20 @@ HitState getHitState(GltfRenderPrimitive renderPrim,  //
   // TexCoord
   hit.uv[0] = getInterpolatedVertexTexCoord0(renderPrim, triangleIndex, barycentrics);
   hit.uv[1] = getInterpolatedVertexTexCoord1(renderPrim, triangleIndex, barycentrics);
+
+  // Texel density for ray-footprint texture LOD (geometry-only; used by path tracer)
+  if(hasVertexTexCoord0(renderPrim))
+  {
+    float2* texCoords0 = renderPrim.vertexBuffer.texCoords0;
+    float2  uv0        = texCoords0[triangleIndex.x];
+    float2  uv1        = texCoords0[triangleIndex.y];
+    float2  uv2        = texCoords0[triangleIndex.z];
+    hit.texelDensity   = computeTexelDensity(pos0, pos1, pos2, uv0, uv1, uv2, objectToWorld);
+  }
+  else
+  {
+    hit.texelDensity = 0.0;
+  }
 
   // Color
   hit.color = getInterpolatedVertexColor(renderPrim, triangleIndex, barycentrics);

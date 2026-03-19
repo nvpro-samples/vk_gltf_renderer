@@ -480,20 +480,22 @@ void GltfRenderer::onRender(VkCommandBuffer cmd)
 
     // Update the scene frame information uniform buffer
     shaderio::SceneFrameInfo finfo{
-        .viewMatrix         = m_cameraManip->getViewMatrix(),
-        .projInv            = glm::inverse(m_cameraManip->getPerspectiveMatrix()),
-        .viewInv            = glm::inverse(m_cameraManip->getViewMatrix()),
-        .viewProjMatrix     = m_cameraManip->getPerspectiveMatrix() * m_cameraManip->getViewMatrix(),
-        .prevMVP            = m_prevMVP,
-        .isOrthographic     = (m_cameraManip->getProjectionType() == nvutils::CameraManipulator::Orthographic) ? 1 : 0,
-        .envRotation        = m_resources.settings.hdrEnvRotation,
-        .envBlur            = m_resources.settings.hdrBlur,
-        .envIntensity       = m_resources.settings.hdrEnvIntensity,
-        .useSolidBackground = m_resources.settings.useSolidBackground ? 1 : 0,
-        .backgroundColor    = m_resources.settings.solidBackgroundColor,
-        .environmentType    = (int)m_resources.settings.envSystem,
-        .debugMethod        = m_resources.settings.debugMethod,
-        .useInfinitePlane = m_resources.settings.useInfinitePlane ? (m_resources.settings.isShadowCatcher ? 2 : 1) : 0,
+        .viewMatrix     = m_cameraManip->getViewMatrix(),
+        .projInv        = glm::inverse(m_cameraManip->getPerspectiveMatrix()),
+        .viewInv        = glm::inverse(m_cameraManip->getViewMatrix()),
+        .viewProjMatrix = m_cameraManip->getPerspectiveMatrix() * m_cameraManip->getViewMatrix(),
+        .prevMVP        = m_prevMVP,
+        .flags = ((m_cameraManip->getProjectionType() == nvutils::CameraManipulator::Orthographic) ? shaderio::eSceneIsOrthographic : 0)
+                 | (m_resources.settings.useSolidBackground ? shaderio::eSceneUseSolidBackground : 0)
+                 | ((m_resources.settings.envSystem == shaderio::EnvSystem::eHdr) ? shaderio::eSceneUseHdrEnvironment : 0)
+                 | (m_resources.settings.useInfinitePlane ? shaderio::eSceneUseInfinitePlane : 0)
+                 | ((m_resources.settings.useInfinitePlane && m_resources.settings.isShadowCatcher) ? shaderio::eSceneInfinitePlaneShadowCatcher :
+                                                                                                      0),
+        .envRotation               = m_resources.settings.hdrEnvRotation,
+        .envBlur                   = m_resources.settings.hdrBlur,
+        .envIntensity              = m_resources.settings.hdrEnvIntensity,
+        .backgroundColor           = m_resources.settings.solidBackgroundColor,
+        .debugMethod               = m_resources.settings.debugMethod,
         .infinitePlaneDistance     = m_resources.settings.infinitePlaneDistance,
         .infinitePlaneBaseColor    = m_resources.settings.infinitePlaneBaseColor,
         .infinitePlaneMetallic     = m_resources.settings.infinitePlaneMetallic,
@@ -1235,7 +1237,7 @@ void GltfRenderer::createVulkanScene()
     // This work happens asynchronously via the command buffer queue
     VkCommandBuffer cmd{};
     nvvk::beginSingleTimeCommands(cmd, m_device, m_transientCmdPool);
-    m_resources.sceneGpu.create(cmd, *m_resources.getScene(), false);
+    m_resources.sceneGpu.create(cmd, *m_resources.getScene(), true);
     NVVK_CHECK(vkEndCommandBuffer(cmd));
     m_loadPipeline.enqueue(cmd);
   }

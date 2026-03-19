@@ -78,7 +78,7 @@ void SceneGpu::rebuild(VkCommandBuffer cmd, Scene& scn, bool rebuildTextures)
 
   if(rebuildTextures)
   {
-    m_sceneVk.create(cmd, m_staging, scn, false);
+    m_sceneVk.create(cmd, m_staging, scn, true);
   }
   else
   {

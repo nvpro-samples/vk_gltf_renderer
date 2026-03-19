@@ -19,6 +19,9 @@
 
 // #define USE_NSIGHT_AFTERMATH
 
+// #define USE_DBG_PRINTF
+
+
 #include <fmt/format.h>
 #include <stb/stb_image.h>
 #include <GLFW/glfw3.h>
@@ -26,6 +29,7 @@
 
 #include <nvaftermath/aftermath.hpp>
 #include <nvapp/application.hpp>
+#include <nvapp/elem_dbgprintf.hpp>
 #include <nvapp/elem_logger.hpp>
 #include <nvapp/elem_profiler.hpp>
 #include <nvgpu_monitor/elem_gpu_monitor.hpp>
@@ -105,6 +109,9 @@ auto main(int argc, char** argv) -> int
   auto elemProfiler     = std::make_shared<nvapp::ElementProfiler>(&g_profilerManager, profilerSettings);
   auto elemLogger       = std::make_shared<nvapp::ElementLogger>(false);
 
+#ifdef USE_DBG_PRINTF
+  auto elemDbgPrintf = std::make_shared<nvapp::ElementDbgPrintf>();
+#endif
 
   // Adding an element logger (UI), where all log will be redirected to
   elemLogger->setLevelFilter(nvapp::ElementLogger::eBitERROR | nvapp::ElementLogger::eBitWARNING | nvapp::ElementLogger::eBitINFO);
@@ -190,7 +197,13 @@ auto main(int argc, char** argv) -> int
 #endif
 
   nvvk::ValidationSettings validation{};
+#ifdef USE_DBG_PRINTF
+  validation.setPreset(nvvk::ValidationSettings::LayerPresets::eDebugPrintf);
+  validation.printf_to_stdout = VK_FALSE;  // Different from default to capture output
+
+#else
   validation.setPreset(nvvk::ValidationSettings::LayerPresets::eStandard);
+#endif
 
   // Optimize VVL for fast pipeline creation while keeping critical validation
   if(vkSetup.enableValidationLayers)
@@ -316,6 +329,9 @@ auto main(int argc, char** argv) -> int
   app.addElement(elemLogger);
   app.addElement(elemGpuMonitor);
   app.addElement(elemProfiler);
+#ifdef USE_DBG_PRINTF
+  app.addElement(elemDbgPrintf);
+#endif
 
   // Loading the scene and the HDR
 #ifdef USE_DEFAULT_SCENE

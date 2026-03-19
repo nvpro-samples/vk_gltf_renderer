@@ -794,7 +794,7 @@ bool OptiXDenoiser::onUi(Resources& resources)
 
   {
     bool wasEnabled = m_settings.enable;
-    changed |= ImGui::Checkbox("OptiX Denoiser", &m_settings.enable);
+    ImGui::Checkbox("OptiX Denoiser", &m_settings.enable);
 
     // When enabling the denoiser, ensure buffers are properly sized
     if(m_settings.enable && !wasEnabled)
@@ -818,9 +818,7 @@ bool OptiXDenoiser::onUi(Resources& resources)
       {
         if(denoiseOneShot(resources))
         {
-          // Automatically switch to display the denoised result
           resources.settings.displayBuffer = DisplayBuffer::eOptixDenoised;
-          changed                          = true;
         }
         else
         {
@@ -841,8 +839,7 @@ bool OptiXDenoiser::onUi(Resources& resources)
           m_needModelRecreate  = true;
           m_needRebuildBuffers = true;
           m_hasValidOutput     = false;
-          changed              = true;
-
+          
           // Force size update to recompute input/output sizes
           VkCommandBuffer cmd = resources.app->createTempCmdBuffer();
           updateSize(cmd, resources.gBuffers.getSize());
@@ -850,10 +847,10 @@ bool OptiXDenoiser::onUi(Resources& resources)
         }
       }
 
-      changed |= PE::Checkbox("Auto-Denoise", &m_settings.autoDenoiseEnabled);
+      PE::Checkbox("Auto-Denoise", &m_settings.autoDenoiseEnabled);
       if(m_settings.autoDenoiseEnabled)
       {
-        changed |= PE::SliderInt("Interval (frames)", &m_settings.autoDenoiseInterval, 1, 500);
+        PE::SliderInt("Interval (frames)", &m_settings.autoDenoiseInterval, 1, 500);
         if(m_settings.autoDenoiseInterval > 1)
         {
           ImGui::Text("Next denoise at frame: %llu",
@@ -883,7 +880,6 @@ bool OptiXDenoiser::onUi(Resources& resources)
         if(ImGui::ImageButton("OptiXDenoised", ImTextureID(m_inputOutputGbuffers.getDescriptorSet(eGBufferDenoised)), thumbnailSize))
         {
           resources.settings.displayBuffer = isActive ? DisplayBuffer::eRendered : DisplayBuffer::eOptixDenoised;
-          changed                          = true;
         }
 
         if(isActive)

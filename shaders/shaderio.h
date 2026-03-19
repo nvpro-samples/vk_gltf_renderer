@@ -103,6 +103,16 @@ enum DebugMethod
 };
 
 
+// Bit flags for SceneFrameInfo::flags
+enum SceneFrameInfoFlags
+{
+  eSceneIsOrthographic             = 1 << 0,
+  eSceneUseSolidBackground         = 1 << 1,
+  eSceneUseHdrEnvironment          = 1 << 2,
+  eSceneUseInfinitePlane           = 1 << 3,
+  eSceneInfinitePlaneShadowCatcher = 1 << 4,
+};
+
 // Camera info
 struct SceneFrameInfo
 {
@@ -111,15 +121,12 @@ struct SceneFrameInfo
   float4x4    viewInv;                        // Inverse view matrix
   float4x4    viewProjMatrix;                 // View-projection matrix (P*V)
   float4x4    prevMVP;                        // Previous view-projection matrix
-  int         isOrthographic = 0;             // 1 if orthographic projection
+  int         flags = 0;                      // Bit flags: see SceneFrameInfoFlags
   float       envRotation;                    // Environment rotation (used for the HDR)
   float       envBlur;                        // Level of blur for the environment map (0.0: no blur, 1.0: full blur)
   float       envIntensity = 1.f;             // Environment intensity
-  int         useSolidBackground;             // Use solid background color (0==false, 1==true)
   float3      backgroundColor;                // Background color when using solid background
-  int         environmentType           = 0;  // Environment type; 0: sky, 1: environment map
   DebugMethod debugMethod               = DebugMethod::eNone;  // Debug method
-  int         useInfinitePlane          = 0;
   float       infinitePlaneDistance     = 0;
   float3      infinitePlaneBaseColor    = float3(0.5, 0.5, 0.5);  // Default gray color
   float       infinitePlaneMetallic     = 0.0;                    // Default non-metallic

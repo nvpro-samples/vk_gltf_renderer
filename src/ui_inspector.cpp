@@ -1595,7 +1595,12 @@ bool UiInspector::materialVolumeScatter(tinygltf::Material& material)
           PE::end();
         }
         if(modif)
+        {
+          // ImGui's triangle HSV picker clamps S,V to 0.0001, preventing exact black
+          if(glm::all(glm::lessThan(volumeScatter.multiscatterColor, glm::vec3(0.001f))))
+            volumeScatter.multiscatterColor = glm::vec3(0.0f);
           tinygltf::utils::setVolumeScatter(material, volumeScatter);
+        }
         return modif;
       },
       [&material]() { tinygltf::utils::setVolumeScatter(material, {}); });

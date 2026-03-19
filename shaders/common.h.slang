@@ -20,28 +20,36 @@
 
 float3 debugValue(PbrMaterial pbrMat, HitState hit, DebugMethod dbgMethod)
 {
-    switch (dbgMethod)
-    {
+  switch(dbgMethod)
+  {
     case DebugMethod::eBaseColor:
-        return float3(pbrMat.baseColor);
+      return float3(pbrMat.baseColor);
     case DebugMethod::eMetallic:
-        return float3(pbrMat.metallic);
+      return float3(pbrMat.metallic);
     case DebugMethod::eRoughness:
-        return float3(pbrMat.roughness.xyx);
+      return float3(pbrMat.roughness.xyx);
     case DebugMethod::eNormal:
-        return float3(pbrMat.N * .5 + .5);
+      return float3(pbrMat.N * .5 + .5);
     case DebugMethod::eTangent:
-        return pbrMat.T * .5 + .5;
+      return pbrMat.T * .5 + .5;
     case DebugMethod::eBitangent:
-        return pbrMat.B * .5 + .5;
+      return pbrMat.B * .5 + .5;
     case DebugMethod::eEmissive:
-        return float3(pbrMat.emissive);
+      return float3(pbrMat.emissive);
     case DebugMethod::eOpacity:
-        return float3(pbrMat.opacity * (1.0 - pbrMat.transmission));
+      return float3(pbrMat.opacity * (1.0 - pbrMat.transmission));
     case DebugMethod::eTexCoord0:
-        return float3(fract(hit.uv[0]), 0);
+      return float3(fract(hit.uv[0]), 0);
     case DebugMethod::eTexCoord1:
-        return float3(fract(hit.uv[1]), 0);
-    }
-    return float3(0);
+      return float3(fract(hit.uv[1]), 0);
+  }
+  return float3(0);
+}
+
+//-----------------------------------------------------------------------
+// Check if a flag is set
+//-----------------------------------------------------------------------
+bool hasFlag(int flags, int bit)
+{
+  return (flags & bit) != 0;
 }

@@ -58,6 +58,7 @@ struct ShadowPayload
 interface IRaytracer
 {
   void   Trace(RayDesc ray, inout HitPayload payload, inout uint seed);
+  void   TraceLow(RayDesc ray, inout HitPayload payload);
   float3 TraceShadow(RayDesc ray, inout uint seed);
 }
 
@@ -114,6 +115,21 @@ struct RayQueryRaytracer : IRaytracer
       payload.rprimID  = renderPrimID;
       payload.rnodeID  = instanceID;
       payload.hitState = hit;
+    }
+  }
+
+  void TraceLow(RayDesc ray, inout HitPayload payload)
+  {
+    payload.hitT = INFINITE;
+    RayQuery rayQuery;
+    rayQuery.TraceRayInline(topLevelAS, RAY_FLAG_FORCE_OPAQUE, 0xFF, ray);
+    while(rayQuery.Proceed())
+    {
+    }  // All geometry treated as opaque, nothing to process
+    if(rayQuery.CommittedStatus() == COMMITTED_TRIANGLE_HIT)
+    {
+      payload.hitT    = rayQuery.CommittedRayT();
+      payload.rnodeID = rayQuery.CommittedInstanceIndex();
     }
   }
 
@@ -221,6 +237,27 @@ struct TraditionalRaytracer : IRaytracer
     seed = payload.seed;
   }
 
+  void TraceLow(RayDesc ray, inout HitPayload payload)
+  {
+    if(USE_SER == 1 && AVAILABLE_SER == 1)
+    {
+      HitObject hitObj = HitObject::TraceRay(topLevelAS, RAY_FLAG_FORCE_OPAQUE, 0xFF, 0, 0, 0, ray, payload);
+      if(hitObj.IsMiss())
+      {
+        payload.hitT = INFINITE;
+        return;
+      }
+      payload.hitT    = hitObj.GetRayDesc().TMax;
+      payload.rnodeID = hitObj.GetInstanceIndex();
+    }
+    else
+    {
+      // Accepted trade-off: this dispatches rchitMain which does full getHitState(),
+      // but only hitT/rnodeID are used. A dedicated minimal CHS would require an
+      // extra SBT entry. The SER path above already avoids this overhead.
+      TraceRay(topLevelAS, RAY_FLAG_FORCE_OPAQUE | RAY_FLAG_CULL_BACK_FACING_TRIANGLES, 0xFF, 0, 0, 0, ray, payload);
+    }
+  }
 
   float3 TraceShadow(RayDesc ray, inout uint seed)
   {

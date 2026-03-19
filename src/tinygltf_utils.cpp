@@ -101,6 +101,12 @@ KHR_materials_volume_scatter tinygltf::utils::getVolumeScatter(const tinygltf::M
     tinygltf::utils::getArrayValue(*ext, "multiscatterColor", gmat.multiscatterColor);
     tinygltf::utils::getValue(*ext, "scatterAnisotropy", gmat.scatterAnisotropy);
     gmat.scatterAnisotropy = std::clamp(gmat.scatterAnisotropy, -0.999f, 0.999f);
+
+    // If multiscatterColorFactor is present, prefer it over multiscatterColor
+    if(ext->Has("multiscatterColorFactor"))
+    {
+      tinygltf::utils::getArrayValue(*ext, "multiscatterColorFactor", gmat.multiscatterColor);
+    }
   }
   return gmat;
 }

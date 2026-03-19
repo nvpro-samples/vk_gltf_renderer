@@ -169,7 +169,7 @@ PixelOutput fragmentMain(VertexOutput input, uint primitiveID: SV_PrimitiveID, f
   float3 cameraPos =
       float3(pushConst.frameInfo.viewInv[3].x, pushConst.frameInfo.viewInv[3].y, pushConst.frameInfo.viewInv[3].z);
   float3 worldRayDirection;
-  if(pushConst.frameInfo.isOrthographic != 0)
+  if(hasFlag(pushConst.frameInfo.flags, SceneFrameInfoFlags::eSceneIsOrthographic))
   {
     worldRayDirection = normalize(mul(float4(0, 0, -1, 0), pushConst.frameInfo.viewInv).xyz);
   }
@@ -182,7 +182,7 @@ PixelOutput fragmentMain(VertexOutput input, uint primitiveID: SV_PrimitiveID, f
                              float4x3(renderNode.objectToWorld), primitiveID, worldRayDirection);
 
   // Evaluate the material at the hit point
-  MeshState   mesh   = MeshState(hit.nrm, hit.tangent, hit.bitangent, hit.geonrm, hit.uv, false);
+  MeshState   mesh   = MeshState(hit.nrm, hit.tangent, hit.bitangent, hit.geonrm, hit.uv, false, 0.0f);
   PbrMaterial pbrMat = evaluateMaterial(material, mesh, allTextures, pushConst.gltfScene->textureInfos);
 
   output.color.xyz = pbrMat.baseColor;
@@ -212,7 +212,7 @@ PixelOutput fragmentMain(VertexOutput input, uint primitiveID: SV_PrimitiveID, f
 
   float3 f0            = lerp(float3(0.04), pbrMat.baseColor, pbrMat.metallic);
   float  ambientFactor = 0.3;
-  if(pushConst.frameInfo.environmentType == EnvSystem::eSky)
+  if(!hasFlag(pushConst.frameInfo.flags, SceneFrameInfoFlags::eSceneUseHdrEnvironment))
   {
     float3 ambientColor = lerp(float3(0.4F), float3(0.17F, 0.37F, 0.65F), pbrMat.N.y * 0.5 + 0.5) * ambientFactor;
     contribution += ambientColor * pbrMat.baseColor * f0;
