@@ -54,6 +54,29 @@
 #include "nvutils/parallel_work.hpp"
 #include "nvvk/helpers.hpp"
 
+namespace nvvkgltf {
+namespace {
+
+// After images are decoded for upload, mirror width/height into tinygltf::Image for UI/tools (same
+// path as loadFromMemory: DDS, KTX, WebP callback, stb, etc.).
+void syncTinyGltfImageDimensionsFromLoadedImages(tinygltf::Model& model, const std::vector<SceneVk::SceneImage>& images)
+{
+  if(model.images.size() != images.size())
+    return;
+  for(size_t i = 0; i < model.images.size(); ++i)
+  {
+    const VkExtent2D& ext = images[i].size;
+    if(ext.width > 0 && ext.height > 0)
+    {
+      model.images[i].width  = static_cast<int>(ext.width);
+      model.images[i].height = static_cast<int>(ext.height);
+    }
+  }
+}
+
+}  // namespace
+}  // namespace nvvkgltf
+
 // GPU memory category names for scene resources
 namespace {
 constexpr std::string_view kMemCategoryGeometry  = "Geometry";
@@ -192,7 +215,7 @@ void nvvkgltf::SceneVk::deinit()
 // for running the initial animation pass (GPU compute or CPU fallback) after creation.
 void nvvkgltf::SceneVk::create(VkCommandBuffer        cmd,
                                nvvk::StagingUploader& staging,
-                               const nvvkgltf::Scene& scn,
+                               nvvkgltf::Scene&       scn,
                                bool                   generateMipmaps /*= true*/,
                                bool                   enableRayTracing /*= true*/)
 {
@@ -913,7 +936,7 @@ static VkSamplerCreateInfo getSampler(const tinygltf::Model& model, int index)
 // Create GPU images for all textures referenced by the scene. Loads from disk or embedded data.
 void nvvkgltf::SceneVk::createTextureImages(VkCommandBuffer                           cmd,
                                             nvvk::StagingUploader&                    staging,
-                                            const nvvkgltf::Scene&                    scn,
+                                            nvvkgltf::Scene&                          scn,
                                             const std::vector<std::filesystem::path>& imageSearchPaths)
 {
   nvutils::ScopedTimer   st(std::string(__FUNCTION__) + "\n");
@@ -1011,6 +1034,8 @@ void nvvkgltf::SceneVk::createTextureImages(VkCommandBuffer                     
   {
     LOGW("%" PRIu32 " of %zu image(s) failed to load.\n", failedImageCount.load(), imageLoadItems.size());
   }
+
+  syncTinyGltfImageDimensionsFromLoadedImages(scn.getModel(), m_images);
 
   // Create Vulkan images
   for(size_t i = 0; i < m_images.size(); i++)

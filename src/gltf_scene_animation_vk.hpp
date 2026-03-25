@@ -25,6 +25,7 @@
 
 #include "gltf_scene.hpp"
 #include "gltf_scene_vk.hpp"
+#include "gpu_memory_tracker.hpp"
 #include "shaders/animation_io.h.slang"
 
 /*-------------------------------------------------------------------------------------------------
@@ -63,6 +64,9 @@ public:
   void dispatchAnimation(VkCommandBuffer cmd, nvvk::StagingUploader& staging, Scene& scn, const SceneVk& scnVk);
 
   [[nodiscard]] bool isInitialized() const { return m_alloc != nullptr && m_skinPipeline != VK_NULL_HANDLE; }
+
+  const GpuMemoryTracker& getMemoryTracker() const { return m_memoryTracker; }
+  GpuMemoryTracker&       getMemoryTracker() { return m_memoryTracker; }
 
 private:
   nvvk::ResourceAllocator* m_alloc = nullptr;
@@ -105,6 +109,8 @@ private:
   nvvk::Buffer m_jointMatricesBuffer;
   nvvk::Buffer m_normalMatricesBuffer;
   nvvk::Buffer m_morphWeightsBuffer;
+
+  GpuMemoryTracker m_memoryTracker;
 
   void createPipelines();
   void destroyPipelines();

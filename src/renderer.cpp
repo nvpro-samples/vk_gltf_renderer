@@ -86,6 +86,7 @@
 #include "gltf_camera_utils.hpp"
 #include "gltf_scene_editor.hpp"
 #include "gltf_scene_animation.hpp"
+#include "gltf_scene_transform_vk.hpp"
 
 #include <glm/gtc/quaternion.hpp>
 
@@ -239,6 +240,9 @@ void GltfRenderer::onAttach(nvapp::Application* app)
   m_resources.hdrIbl.init(&m_resources.allocator, &m_resources.samplerPool);
   m_resources.hdrDome.init(&m_resources.allocator, &m_resources.samplerPool, m_app->getQueue(0));
 
+  // Application-level memory tracker (GBuffers, DLSS, OptiX images)
+  m_resources.appMemoryTracker.init(&m_resources.allocator);
+
   // G-Buffer
   m_resources.gBuffers.init({.allocator = &m_resources.allocator,
                              .colorFormats =
@@ -255,6 +259,7 @@ void GltfRenderer::onAttach(nvapp::Application* app)
     nvvk::beginSingleTimeCommands(cmd, m_device, m_transientCmdPool);
     m_resources.gBuffers.update(cmd, {100, 100});
     nvvk::endSingleTimeCommands(cmd, m_device, m_transientCmdPool, m_app->getQueue(0).queue);
+    m_resources.appMemoryTracker.track("GBuffers", m_resources.gBuffers, 3);
   }
 
   // ===== Rendering Utilities =====
@@ -271,6 +276,10 @@ void GltfRenderer::onAttach(nvapp::Application* app)
   // ===== Scene & Acceleration Structure =====
   m_resources.sceneGpu.init(&m_resources.allocator, &m_resources.samplerPool, m_app->getQueue(0).queue,
                             [app](std::function<void()>&& fn) { app->submitResourceFree(std::move(fn)); });
+  m_resources.transformCompute.init(&m_resources.allocator);
+  m_resources.transformCompute.setGraphicsQueue(m_app->getQueue(0).queue);
+  m_resources.transformCompute.setDeferredFree(
+      [app](std::function<void()>&& fn) { app->submitResourceFree(std::move(fn)); });
 
   // ===== Profiling & Performance =====
   {
@@ -393,7 +402,9 @@ void GltfRenderer::onDetach()
 // Resize the G-Buffer and the renderers
 void GltfRenderer::onResize(VkCommandBuffer cmd, const VkExtent2D& size)
 {
+  m_resources.appMemoryTracker.untrack("GBuffers", m_resources.gBuffers, 3);
   m_resources.gBuffers.update(cmd, size);
+  m_resources.appMemoryTracker.track("GBuffers", m_resources.gBuffers, 3);
   m_pathTracer.onResize(cmd, size, m_resources);
   m_rasterizer.onResize(cmd, size, m_resources);
   m_resources.hdrDome.setOutImage(m_resources.gBuffers.getDescriptorImageInfo(Resources::eImgRendered));
@@ -449,6 +460,9 @@ void GltfRenderer::onRender(VkCommandBuffer cmd)
     m_loadPipeline.drain();
   else if(m_loadPipeline.poll())
     return;  // Still loading -- give control back to the UI
+
+  // Begin the frame for the staging uploader, using the semaphore from the current frame to clear and synchronize
+  m_resources.staging.beginFrame(m_app->getFrameSignalSemaphore());
 
   // Empty scene, clear the G-Buffer
   if(!m_resources.getScene() || !m_resources.getScene()->valid())
@@ -913,7 +927,7 @@ void GltfRenderer::updateGizmoAttachment()
     m_gizmoRotation = glm::degrees(glm::eulerAngles(rotation));
 
     int parentIdx = m_resources.getScene()->editor().getNodeParent(nodeIdx);
-    m_gizmoParentWorldMatrix = (parentIdx >= 0) ? m_resources.getScene()->editor().getNodeWorldMatrix(parentIdx) : glm::mat4(1.f);
+    m_gizmoParentWorldMatrix = (parentIdx >= 0) ? m_resources.getScene()->computeNodeWorldMatrix(parentIdx) : glm::mat4(1.f);
 
     m_visualHelpers.transform.attachTransform(&m_gizmoPosition, &m_gizmoRotation, &m_gizmoScale);
     m_visualHelpers.transform.setParentWorldMatrix(&m_gizmoParentWorldMatrix);
@@ -1131,6 +1145,8 @@ void GltfRenderer::createSceneFromDescriptor(const std::filesystem::path& descri
 void GltfRenderer::cleanupScene()
 {
   m_undoStack.clear();
+  if(m_resources.getScene())
+    m_resources.transformCompute.destroyGpuBuffers();
   m_resources.scene.reset();
   m_resources.sceneGpu.destroy();
   m_sceneBrowser.setScene(nullptr);
@@ -1145,23 +1161,36 @@ void GltfRenderer::cleanupScene()
   // Keeps lifetime allocation/deallocation counts but resets current and peak values
   m_resources.sceneVk.getMemoryTracker().reset();
   m_resources.sceneRtx.getMemoryTracker().reset();
+  m_resources.transformCompute.getMemoryTracker().reset();
+  m_resources.animationVk.getMemoryTracker().reset();
+}
+
+//--------------------------------------------------------------------------------------------------
+void GltfRenderer::refreshCpuSceneGraphFromModel()
+{
+  nvvkgltf::Scene* scene = m_resources.getScene();
+  if(scene)
+    scene->setCurrentScene(scene->getCurrentScene());
 }
 
 //--------------------------------------------------------------------------------------------------
 // Unified scene rebuild with optional texture update
 // Internal helper that consolidates the common rebuild logic between geometry-only and full rebuilds
 //
+// Does not call parseScene — callers that modified the glTF without mergeScene/parseScene must call
+// refreshCpuSceneGraphFromModel() first (e.g. compact, rebuildSceneFromModel).
+//
 void GltfRenderer::rebuildVulkanSceneInternal(bool rebuildTextures)
 {
   // SYNC NOTE: Full scene rebuild (merge/compact/geometry change) -- wait ensures GPU is idle.
   NVVK_CHECK(vkQueueWaitIdle(m_app->getQueue(0).queue));
 
-  // Re-parse the scene to update RenderPrimitives with new accessor counts
   nvvkgltf::Scene* scene = m_resources.getScene();
-  if(scene)
-    scene->setCurrentScene(scene->getCurrentScene());
 
   {
+    if(scene)
+      m_resources.transformCompute.destroyGpuBuffers();  // Before scene RTX rebuild
+
     // Add WebP loading support to SceneVk (only needed for full rebuild with textures)
     if(rebuildTextures)
       m_resources.sceneVk.setImageLoadCallback(webPLoadCallback);
@@ -1183,6 +1212,22 @@ void GltfRenderer::rebuildVulkanSceneInternal(bool rebuildTextures)
     m_sceneBrowser.setBbox(scene->getSceneBounds());
     m_inspector.setScene(scene);
     m_inspector.setBbox(scene->getSceneBounds());
+
+    // After merge: select the merged file's first animation clip (appended after base clips).
+    // Otherwise currentAnimation often stays on a base-scene clip and merged motion appears "stuck".
+    AnimationControl& animCtrl = m_sceneBrowser.getAnimationControl();
+    if(int prefer = scene->takeMergePreferredAnimationIndex(); prefer >= 0)
+    {
+      const int nAnim = scene->animation().getNumAnimations();
+      if(nAnim > 0 && prefer < nAnim)
+        animCtrl.currentAnimation = prefer;
+    }
+    else if(scene->animation().hasAnimation())
+    {
+      const int nAnim = scene->animation().getNumAnimations();
+      if(nAnim > 0 && (animCtrl.currentAnimation < 0 || animCtrl.currentAnimation >= nAnim))
+        animCtrl.currentAnimation = 0;
+    }
   }
 
   // Update textures if requested
@@ -1210,6 +1255,7 @@ void GltfRenderer::rebuildVulkanSceneInternal(bool rebuildTextures)
 void GltfRenderer::rebuildSceneFromModel()
 {
   m_undoStack.clear();
+  refreshCpuSceneGraphFromModel();
   rebuildVulkanSceneInternal(false);  // Geometry only, preserve textures
 }
 
@@ -1220,7 +1266,7 @@ void GltfRenderer::rebuildSceneFromModel()
 //
 void GltfRenderer::rebuildVulkanSceneFull()
 {
-  rebuildVulkanSceneInternal(true);  // Full rebuild with textures
+  rebuildVulkanSceneInternal(true);
 }
 
 //--------------------------------------------------------------------------------------------------
@@ -1301,6 +1347,17 @@ void GltfRenderer::buildAccelerationStructures()
   // Avoid double-build: whoever called us (createVulkanScene, rebuildVulkanSceneInternal, or updateSceneChanges) just queued BLAS+TLAS.
   if(m_resources.getScene())
     m_resources.getScene()->getDirtyFlags().primitivesChanged = false;
+
+  // GPU transform SSBOs (static hierarchy + render-node mappings). Requires TLAS instance buffer to exist.
+  if(m_resources.getScene())
+  {
+    m_resources.transformCompute.createGpuBuffers(m_resources.staging, *m_resources.getScene());
+    VkCommandBuffer upCmd{};
+    nvvk::beginSingleTimeCommands(upCmd, m_device, m_transientCmdPool);
+    m_resources.staging.cmdUploadAppended(upCmd);
+    NVVK_CHECK(vkEndCommandBuffer(upCmd));
+    m_loadPipeline.enqueue(upCmd);
+  }
 }
 
 //--------------------------------------------------------------------------------------------------
@@ -1580,7 +1637,9 @@ void GltfRenderer::destroyResources()
   m_silhouette.deinit(m_resources);
 
   m_resources.tonemapper.deinit();
+  m_resources.appMemoryTracker.untrack("GBuffers", m_resources.gBuffers, 3);
   m_resources.gBuffers.deinit();
+  m_resources.transformCompute.deinit();
   m_resources.sceneGpu.deinit();
   m_resources.hdrIbl.deinit();
   m_resources.hdrDome.deinit();
@@ -1608,6 +1667,12 @@ bool GltfRenderer::updateAnimation(VkCommandBuffer cmd)
 
   if(scn.animation().hasAnimation() && animCtrl.doAnimation())
   {
+    const int nAnim = scn.animation().getNumAnimations();
+    if(nAnim <= 0)
+      return false;
+    if(animCtrl.currentAnimation < 0 || animCtrl.currentAnimation >= nAnim)
+      animCtrl.currentAnimation = 0;
+
     auto timerSection = m_profilerGpuTimer.cmdFrameSection(cmd, "Update animation");
 
     NVVK_DBG_SCOPE(cmd);
@@ -1640,9 +1705,20 @@ bool GltfRenderer::updateAnimation(VkCommandBuffer cmd)
 
     scnRtx.updateInstanceFlagsCache(scn);
 
+    const bool gpuTransform = m_resources.sceneGpu.shouldUseGpuTransform(scn);
+
     {
       auto t = m_profilerGpuTimer.cmdFrameSection(cmd, "Sync to GPU");
-      (void)scnVk.syncFromScene(m_resources.staging, scn);
+      if(gpuTransform)
+      {
+        (void)scnVk.syncFromScene(m_resources.staging, scn, nvvkgltf::SceneVk::eSyncMaterials | nvvkgltf::SceneVk::eSyncLights);
+        (void)scnVk.flushSceneDescIfDirty(m_resources.staging, scn);
+      }
+      else
+      {
+        m_resources.transformCompute.markGpuStale();
+        (void)scnVk.syncFromScene(m_resources.staging, scn);
+      }
     }
 
     bool hasMorphOrSkin = scn.animation().hasMorphTargets() || scn.animation().hasSkinning();
@@ -1666,7 +1742,14 @@ bool GltfRenderer::updateAnimation(VkCommandBuffer cmd)
       auto timerSectionAS = m_profilerGpuTimer.cmdFrameSection(cmd, "AS update");
       if(hasMorphOrSkin)
         scnRtx.updateBottomLevelAS(cmd, scn);
-      (void)scnRtx.syncTopLevelAS(cmd, m_resources.staging, scn);
+      if(gpuTransform)
+      {
+        m_resources.transformCompute.dispatchTransformUpdate(cmd, m_resources.staging, scn, scnVk, scnRtx);
+      }
+      else
+      {
+        (void)scnRtx.syncTopLevelAS(cmd, m_resources.staging, scn);
+      }
     }
 
     scn.clearDirtyFlags();
@@ -1691,10 +1774,12 @@ void GltfRenderer::updateSceneChanges_BlasRebuild(const nvvkgltf::Scene::DirtyFl
     buildAccelerationStructures();
 }
 
-void GltfRenderer::updateSceneChanges_NodeTransforms(nvvkgltf::Scene* scene, const nvvkgltf::Scene::DirtyFlags& df)
+void GltfRenderer::updateSceneChanges_NodeTransforms(VkCommandBuffer cmd, nvvkgltf::Scene* scene, const nvvkgltf::Scene::DirtyFlags& df)
 {
   if(df.nodes.empty())
     return;
+
+  auto timerSection = m_profilerGpuTimer.cmdFrameSection(cmd, "UpdateNodeWorldMatrices");
   scene->updateNodeWorldMatrices();
 }
 
@@ -1745,7 +1830,7 @@ void GltfRenderer::updateSceneChanges_Finalize(VkCommandBuffer cmd, bool changed
     m_resources.getScene()->clearDirtyFlags();
 
 #ifndef NDEBUG
-  if(changed && m_validateGpuSync && scene)
+  if(changed && m_validateGpuSync && scene && !m_skipGpuSyncValidation)
   {
     auto mismatches = m_resources.sceneVk.validateGpuSync(*scene, m_resources.sceneRtx.getTlasInstances());
     for(const auto& m : mismatches)
@@ -1768,6 +1853,10 @@ bool GltfRenderer::updateSceneChanges(VkCommandBuffer cmd)
   if(!scene)
     return false;
 
+#ifndef NDEBUG
+  m_skipGpuSyncValidation = false;
+#endif
+
   const auto& df             = scene->getDirtyFlags();
   bool        changed        = !df.isEmpty();
   bool        stagingFlushed = false;
@@ -1775,16 +1864,60 @@ bool GltfRenderer::updateSceneChanges(VkCommandBuffer cmd)
   const bool renderNodeOrNodeDirty = df.allRenderNodesDirty || !df.renderNodesVk.empty() || !df.nodes.empty();
 
   updateSceneChanges_BlasRebuild(df);
-  updateSceneChanges_NodeTransforms(scene, df);
   m_resources.sceneRtx.updateInstanceFlagsCache(*scene);
 
-  uint32_t synced = updateSceneChanges_SyncGpuBuffers(cmd, scene);
-  stagingFlushed  = (synced != nvvkgltf::SceneVk::eSyncNone);
+  const bool gpuTransform = m_resources.sceneGpu.shouldUseGpuTransform(*scene);
 
-  nvvk::cmdMemoryBarrier(cmd, VK_PIPELINE_STAGE_2_COPY_BIT, VK_PIPELINE_STAGE_2_ACCELERATION_STRUCTURE_BUILD_BIT_KHR,
-                         VK_ACCESS_2_TRANSFER_WRITE_BIT, VK_ACCESS_2_SHADER_READ_BIT);
+  if(gpuTransform)
+  {
+    // GPU handles world-matrix propagation, render-node updates, and TLAS rebuild.
+    // CPU only refreshes local matrices (for staging upload) and light world matrices.
+    if(!df.nodes.empty())
+    {
+      auto timerSection = m_profilerGpuTimer.cmdFrameSection(cmd, "UpdateLocalMatrices");
+      scene->updateLocalMatricesAndLights();
+    }
 
-  updateSceneChanges_TlasUpdate(cmd, scene);
+    uint32_t synced = m_resources.sceneVk.syncFromScene(m_resources.staging, *scene,
+                                                        nvvkgltf::SceneVk::eSyncMaterials | nvvkgltf::SceneVk::eSyncLights);
+    if(m_resources.sceneVk.flushSceneDescIfDirty(m_resources.staging, *scene))
+      synced |= nvvkgltf::SceneVk::eSyncRenderNodes;
+
+    if(synced != nvvkgltf::SceneVk::eSyncNone)
+    {
+      auto timerSectionSync = m_profilerGpuTimer.cmdFrameSection(cmd, "SyncGpuBuffers");
+      m_resources.staging.cmdUploadAppended(cmd);
+    }
+    stagingFlushed = (synced != nvvkgltf::SceneVk::eSyncNone);
+
+    nvvk::cmdMemoryBarrier(cmd, VK_PIPELINE_STAGE_2_COPY_BIT, VK_PIPELINE_STAGE_2_COMPUTE_SHADER_BIT,
+                           VK_ACCESS_2_TRANSFER_WRITE_BIT, VK_ACCESS_2_SHADER_READ_BIT);
+
+    {
+      auto timerSectionGpu = m_profilerGpuTimer.cmdFrameSection(cmd, "GPU transform + TLAS update");
+      m_resources.transformCompute.dispatchTransformUpdate(cmd, m_resources.staging, *scene, m_resources.sceneVk,
+                                                           m_resources.sceneRtx);
+    }
+#ifndef NDEBUG
+    m_skipGpuSyncValidation = true;
+#endif
+  }
+  else
+  {
+    updateSceneChanges_NodeTransforms(cmd, scene, df);
+
+    if(!df.isEmpty())
+      m_resources.transformCompute.markGpuStale();
+
+    uint32_t synced = updateSceneChanges_SyncGpuBuffers(cmd, scene);
+    stagingFlushed  = (synced != nvvkgltf::SceneVk::eSyncNone);
+
+    nvvk::cmdMemoryBarrier(cmd, VK_PIPELINE_STAGE_2_COPY_BIT, VK_PIPELINE_STAGE_2_ACCELERATION_STRUCTURE_BUILD_BIT_KHR,
+                           VK_ACCESS_2_TRANSFER_WRITE_BIT, VK_ACCESS_2_SHADER_READ_BIT);
+
+    updateSceneChanges_TlasUpdate(cmd, scene);
+  }
+
   updateSceneChanges_RasterizerInvalidate(renderNodeOrNodeDirty);
   updateSceneChanges_TangentUpload(cmd, scene, changed);
   updateSceneChanges_Finalize(cmd, changed, stagingFlushed, scene);

@@ -202,7 +202,25 @@ nvutils::Bbox GltfRenderer::getRenderNodeBbox(int renderNodeIndex)
   if(!accessor.maxValues.empty())
     maxValues = glm::vec3(accessor.maxValues[0], accessor.maxValues[1], accessor.maxValues[2]);
   nvutils::Bbox objBbox(minValues, maxValues);
-  worldBbox = objBbox.transform(renderNode.worldMatrix);
+
+  glm::mat4 nodeWorld = scene->computeNodeWorldMatrix(renderNode.refNodeID);
+
+  // Extension: Instance local matrices for KHR_mesh_gpu_instancing
+  const auto& gpuInstMap = scene->getGpuInstanceLocalMatrices();
+  auto        instIt     = gpuInstMap.find(renderNode.refNodeID);
+  if(instIt != gpuInstMap.end() && !instIt->second.empty())
+  {
+    const auto& rnList = scene->getRenderNodeRegistry().getRenderNodesForNode(renderNode.refNodeID);
+    for(size_t k = 0; k < rnList.size(); ++k)
+    {
+      if(rnList[k] == renderNodeIndex)
+      {
+        nodeWorld = nodeWorld * instIt->second[k % instIt->second.size()];
+        break;
+      }
+    }
+  }
+  worldBbox = objBbox.transform(nodeWorld);
 
   return worldBbox;
 }
@@ -617,6 +635,9 @@ void GltfRenderer::renderDebugMenu()
   {
     ImGui::MenuItem("Grid Style", nullptr, &m_resources.settings.showGridStyleWindow);
     ImGui::MenuItem("Gizmo Style", nullptr, &m_resources.settings.showGizmoStyleWindow);
+    ImGui::Separator();
+    ImGui::MenuItem("GPU Compute Animation", nullptr, &m_resources.sceneGpu.useComputeAnimation);
+    ImGui::MenuItem("GPU Compute Transformation", nullptr, &m_resources.sceneGpu.useComputeTransformation);
     ImGui::EndMenu();
   }
 #endif
@@ -865,7 +886,8 @@ void GltfRenderer::renderMenu()
     SCOPED_BANNER("Compact Scene");
     if(m_resources.getScene()->compactModel())
     {
-      // Model compacted - need full GPU rebuild including textures
+      // Compact rewires accessors — re-parse so render nodes / dirty flags match before GPU rebuild.
+      refreshCpuSceneGraphFromModel();
       rebuildVulkanSceneFull();
       resetFrame();  // Reset path tracer accumulation
     }
@@ -1143,9 +1165,14 @@ void GltfRenderer::renderMemoryStatistics()
     return fmt::format("{} B", bytes);
   };
 
-  // Get memory trackers from scene
-  const auto& vkTracker  = m_resources.sceneVk.getMemoryTracker();
-  const auto& rtxTracker = m_resources.sceneRtx.getMemoryTracker();
+  // Get memory trackers from subsystems
+  const auto& vkTracker        = m_resources.sceneVk.getMemoryTracker();
+  const auto& rtxTracker       = m_resources.sceneRtx.getMemoryTracker();
+  const auto& transformTracker = m_resources.transformCompute.getMemoryTracker();
+  const auto& animationTracker = m_resources.animationVk.getMemoryTracker();
+  const auto& appTracker       = m_resources.appMemoryTracker;
+
+  const OptiXDenoiser* optix = m_pathTracer.getOptiXDenoiser();
 
   // Create sortable table with memory statistics
   ImGuiTableFlags tableFlags = ImGuiTableFlags_Borders | ImGuiTableFlags_RowBg | ImGuiTableFlags_SizingFixedFit | ImGuiTableFlags_Sortable;
@@ -1230,13 +1257,130 @@ void GltfRenderer::renderMemoryStatistics()
       ImGui::TextColored(ImVec4(1.0f, 0.7f, 0.7f, 1.0f), "%u", totalRtx.currentCount);
     }
 
+    // --- Transform (GPU compute) Section ---
+    auto totalTransform = transformTracker.getTotalStats();
+    if(totalTransform.currentBytes > 0)
+    {
+      ImGui::TableNextRow();
+      ImGui::TableNextColumn();
+      ImGui::TextColored(ImVec4(0.5f, 1.0f, 0.5f, 1.0f), "TRANSFORM (GPU)");
+      ImGui::TableNextColumn();
+      ImGui::TableNextColumn();
+
+      for(const auto& categoryName : transformTracker.getActiveCategories(sortBy, ascending))
+      {
+        GpuMemoryStats stats = transformTracker.getStats(categoryName);
+        ImGui::TableNextRow();
+        ImGui::TableNextColumn();
+        ImGui::Text("  %s", categoryName.c_str());
+        ImGui::TableNextColumn();
+        ImGui::Text("%s", formatBytes(stats.currentBytes).c_str());
+        ImGui::TableNextColumn();
+        ImGui::Text("%u", stats.currentCount);
+      }
+
+      ImGui::TableNextRow();
+      ImGui::TableNextColumn();
+      ImGui::TextColored(ImVec4(0.7f, 1.0f, 0.7f, 1.0f), "  Transform Subtotal");
+      ImGui::TableNextColumn();
+      ImGui::TextColored(ImVec4(0.7f, 1.0f, 0.7f, 1.0f), "%s", formatBytes(totalTransform.currentBytes).c_str());
+      ImGui::TableNextColumn();
+      ImGui::TextColored(ImVec4(0.7f, 1.0f, 0.7f, 1.0f), "%u", totalTransform.currentCount);
+    }
+
+    // --- Animation (GPU compute) Section ---
+    auto totalAnimation = animationTracker.getTotalStats();
+    if(totalAnimation.currentBytes > 0)
+    {
+      ImGui::TableNextRow();
+      ImGui::TableNextColumn();
+      ImGui::TextColored(ImVec4(1.0f, 0.8f, 0.4f, 1.0f), "ANIMATION (GPU)");
+      ImGui::TableNextColumn();
+      ImGui::TableNextColumn();
+
+      for(const auto& categoryName : animationTracker.getActiveCategories(sortBy, ascending))
+      {
+        GpuMemoryStats stats = animationTracker.getStats(categoryName);
+        ImGui::TableNextRow();
+        ImGui::TableNextColumn();
+        ImGui::Text("  %s", categoryName.c_str());
+        ImGui::TableNextColumn();
+        ImGui::Text("%s", formatBytes(stats.currentBytes).c_str());
+        ImGui::TableNextColumn();
+        ImGui::Text("%u", stats.currentCount);
+      }
+
+      ImGui::TableNextRow();
+      ImGui::TableNextColumn();
+      ImGui::TextColored(ImVec4(1.0f, 0.9f, 0.6f, 1.0f), "  Animation Subtotal");
+      ImGui::TableNextColumn();
+      ImGui::TextColored(ImVec4(1.0f, 0.9f, 0.6f, 1.0f), "%s", formatBytes(totalAnimation.currentBytes).c_str());
+      ImGui::TableNextColumn();
+      ImGui::TextColored(ImVec4(1.0f, 0.9f, 0.6f, 1.0f), "%u", totalAnimation.currentCount);
+    }
+
+    // --- Application (GBuffers, Denoisers) Section ---
+    auto totalApp = appTracker.getTotalStats();
+    // Include OptiX export tracker if available
+    GpuMemoryStats totalOptixExport{};
+    if(optix)
+      totalOptixExport = optix->getExportMemoryTracker().getTotalStats();
+
+    uint64_t appCombinedBytes = totalApp.currentBytes + totalOptixExport.currentBytes;
+    uint32_t appCombinedCount = totalApp.currentCount + totalOptixExport.currentCount;
+    if(appCombinedBytes > 0)
+    {
+      ImGui::TableNextRow();
+      ImGui::TableNextColumn();
+      ImGui::TextColored(ImVec4(0.8f, 0.6f, 1.0f, 1.0f), "APPLICATION");
+      ImGui::TableNextColumn();
+      ImGui::TableNextColumn();
+
+      for(const auto& categoryName : appTracker.getActiveCategories(sortBy, ascending))
+      {
+        GpuMemoryStats stats = appTracker.getStats(categoryName);
+        ImGui::TableNextRow();
+        ImGui::TableNextColumn();
+        ImGui::Text("  %s", categoryName.c_str());
+        ImGui::TableNextColumn();
+        ImGui::Text("%s", formatBytes(stats.currentBytes).c_str());
+        ImGui::TableNextColumn();
+        ImGui::Text("%u", stats.currentCount);
+      }
+
+      if(optix)
+      {
+        for(const auto& categoryName : optix->getExportMemoryTracker().getActiveCategories(sortBy, ascending))
+        {
+          GpuMemoryStats stats = optix->getExportMemoryTracker().getStats(categoryName);
+          ImGui::TableNextRow();
+          ImGui::TableNextColumn();
+          ImGui::Text("  %s", categoryName.c_str());
+          ImGui::TableNextColumn();
+          ImGui::Text("%s", formatBytes(stats.currentBytes).c_str());
+          ImGui::TableNextColumn();
+          ImGui::Text("%u", stats.currentCount);
+        }
+      }
+
+      ImGui::TableNextRow();
+      ImGui::TableNextColumn();
+      ImGui::TextColored(ImVec4(0.9f, 0.8f, 1.0f, 1.0f), "  Application Subtotal");
+      ImGui::TableNextColumn();
+      ImGui::TextColored(ImVec4(0.9f, 0.8f, 1.0f, 1.0f), "%s", formatBytes(appCombinedBytes).c_str());
+      ImGui::TableNextColumn();
+      ImGui::TextColored(ImVec4(0.9f, 0.8f, 1.0f, 1.0f), "%u", appCombinedCount);
+    }
+
     // --- Combined Total ---
     ImGui::TableNextRow();
     ImGui::TableNextColumn();
     ImGui::TextColored(ImVec4(1.0f, 1.0f, 0.0f, 1.0f), "TOTAL");
     ImGui::TableNextColumn();
-    auto combinedBytes = totalVk.currentBytes + totalRtx.currentBytes;
-    auto combinedCount = totalVk.currentCount + totalRtx.currentCount;
+    auto combinedBytes = totalVk.currentBytes + totalRtx.currentBytes + totalTransform.currentBytes
+                         + totalAnimation.currentBytes + appCombinedBytes;
+    auto combinedCount = totalVk.currentCount + totalRtx.currentCount + totalTransform.currentCount
+                         + totalAnimation.currentCount + appCombinedCount;
     ImGui::TextColored(ImVec4(1.0f, 1.0f, 0.0f, 1.0f), "%s", formatBytes(combinedBytes).c_str());
     ImGui::TableNextColumn();
     ImGui::TextColored(ImVec4(1.0f, 1.0f, 0.0f, 1.0f), "%u", combinedCount);
@@ -1412,7 +1556,7 @@ void GltfRenderer::renderStatisticsWindow()
     SCOPED_BANNER("Compact Scene");
     if(m_resources.getScene()->compactModel())
     {
-      // Model compacted - need full GPU rebuild including textures
+      refreshCpuSceneGraphFromModel();
       rebuildVulkanSceneFull();
       resetFrame();  // Reset path tracer accumulation
     }

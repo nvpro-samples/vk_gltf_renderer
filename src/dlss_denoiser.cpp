@@ -58,7 +58,8 @@ void DlssDenoiser::init(Resources& resources)
   }
 
   // Create GBuffers (fast operation - only done if hardware available)
-  m_graphicsQueue = resources.app ? resources.app->getQueue(0).queue : VK_NULL_HANDLE;
+  m_appMemoryTracker = &resources.appMemoryTracker;
+  m_graphicsQueue    = resources.app ? resources.app->getQueue(0).queue : VK_NULL_HANDLE;
   resources.samplerPool.acquireSampler(m_linearSampler);
   m_dlssGBuffers.init({.allocator      = &resources.allocator,
                        .colorFormats   = m_bufferInfos,
@@ -73,6 +74,8 @@ void DlssDenoiser::deinit(Resources& resources)
 {
   if(m_state != DlssState::eUnavailable)
   {
+    if(m_appMemoryTracker)
+      m_appMemoryTracker->untrack("DLSS/GBuffers", m_dlssGBuffers, static_cast<uint32_t>(m_bufferInfos.size()));
     resources.samplerPool.releaseSampler(m_linearSampler);
     m_dlssGBuffers.deinit();
     m_dlss.deinit();
@@ -194,7 +197,12 @@ VkExtent2D DlssDenoiser::updateSize(VkCommandBuffer cmd, VkExtent2D size)
   m_dlss.cmdInit(cmd, m_ngx, initInfo);
 
   // Recreate the G-Buffers
+  uint32_t dlssColorCount = static_cast<uint32_t>(m_bufferInfos.size());
+  if(m_appMemoryTracker)
+    m_appMemoryTracker->untrack("DLSS/GBuffers", m_dlssGBuffers, dlssColorCount);
   m_dlssGBuffers.update(cmd, m_renderingSize);
+  if(m_appMemoryTracker)
+    m_appMemoryTracker->track("DLSS/GBuffers", m_dlssGBuffers, dlssColorCount);
 
   return m_renderingSize;
 }

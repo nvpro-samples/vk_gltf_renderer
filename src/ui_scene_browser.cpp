@@ -1305,15 +1305,40 @@ void UiSceneBrowser::renderImagesGroup()
     // Add scrollable child region with max height
     ImGui::BeginChild("ImagesScrollRegion", ImVec2(0, 200), false, ImGuiWindowFlags_HorizontalScrollbar);
 
-    for(int i = 0; i < static_cast<int>(model.images.size()); ++i)
+    static ImGuiTableFlags s_imagesTableFlags = ImGuiTableFlags_ScrollY | ImGuiTableFlags_RowBg | ImGuiTableFlags_BordersOuter
+                                                | ImGuiTableFlags_BordersV | ImGuiTableFlags_Resizable;
+    if(ImGui::BeginTable("ImagesTable", 3, s_imagesTableFlags))
     {
-      const tinygltf::Image& image = model.images[i];
-      std::string label = "[" + std::to_string(i) + "] " + (image.uri.empty() ? "EMB " + std::to_string(i) : image.uri);
-      if(image.width > 0 && image.height > 0)
+      ImGui::TableSetupScrollFreeze(0, 1);
+      ImGui::TableSetupColumn("#", ImGuiTableColumnFlags_WidthFixed, 36.0f);
+      ImGui::TableSetupColumn("Name", ImGuiTableColumnFlags_WidthStretch);
+      ImGui::TableSetupColumn("Resolution", ImGuiTableColumnFlags_WidthFixed, 100.0f);
+      ImGui::TableHeadersRow();
+
+      for(int i = 0; i < static_cast<int>(model.images.size()); i++)
       {
-        label += " (" + std::to_string(image.width) + "x" + std::to_string(image.height) + ")";
+        const tinygltf::Image& image = model.images[i];
+        std::string            displayName;
+        if(!image.uri.empty())
+          displayName = image.uri;
+        else if(!image.name.empty())
+          displayName = image.name;
+        else
+          displayName = "Embedded image " + std::to_string(i);
+
+        ImGui::TableNextRow();
+        ImGui::TableNextColumn();
+        ImGui::Text("%d", i);
+        ImGui::TableNextColumn();
+        ImGui::TextUnformatted(displayName.c_str());
+        ImGui::TableNextColumn();
+        if(image.width > 0 && image.height > 0)
+          ImGui::Text("%dx%d", image.width, image.height);
+        else
+          ImGui::TextDisabled("-");
       }
-      ImGui::BulletText("%s", label.c_str());
+
+      ImGui::EndTable();
     }
 
     ImGui::EndChild();

@@ -86,6 +86,9 @@ void OptiXDenoiser::init(Resources& resources)
     return;
   }
 
+  // Memory tracking: GBuffer images are on the main allocator, export buffers on m_allocExport.
+  m_appMemoryTracker = &resources.appMemoryTracker;
+
   // Create GBuffers for denoiser output and guides
   resources.samplerPool.acquireSampler(m_linearSampler);
   m_inputOutputGbuffers.init({.allocator = &resources.allocator,
@@ -114,6 +117,7 @@ void OptiXDenoiser::init(Resources& resources)
       .vulkanApiVersion = VK_API_VERSION_1_4,
   };
   m_allocExport.init(allocatorInfo);
+  m_exportMemoryTracker.init(&m_allocExport);
 
   // Set CUDA device to match Vulkan device
   if(cudaSuccess != vkcuda::setCudaDevice(physicalDevice))
@@ -266,6 +270,11 @@ bool OptiXDenoiser::createSharedBuffers()
   m_outputBuffer.cudaBuffer = vkcuda::createCudaBuffer(m_allocExport, m_outputBuffer.vkBuffer);
   NVVK_DBG_NAME_STR(m_outputBuffer.vkBuffer.buffer, "Optix::m_outputBuffer");
 
+  m_exportMemoryTracker.track("OptiX/Export", m_rgbBuffer.vkBuffer.allocation);
+  m_exportMemoryTracker.track("OptiX/Export", m_albedoBuffer.vkBuffer.allocation);
+  m_exportMemoryTracker.track("OptiX/Export", m_normalBuffer.vkBuffer.allocation);
+  m_exportMemoryTracker.track("OptiX/Export", m_outputBuffer.vkBuffer.allocation);
+
   // CUDA-only buffers (OptiX internal)
   CUDA_CHECK_BOOL(m_stateBuffer.allocate(m_denoiserSizes.stateSizeInBytes));
   CUDA_CHECK_BOOL(m_scratchBuffer.allocate(m_denoiserSizes.withoutOverlapScratchSizeInBytes));
@@ -295,9 +304,12 @@ void OptiXDenoiser::updateSize(VkCommandBuffer cmd, VkExtent2D size)
 {
   if(m_settings.enable)
   {
-    // GBuffer images are always at display resolution
+    if(m_appMemoryTracker)
+      m_appMemoryTracker->untrack("OptiX/GBuffers", m_inputOutputGbuffers, 2);
     m_inputOutputGbuffers.update(cmd, size);
     NVVK_DBG_NAME_STR(m_inputOutputGbuffers.getColorImage(), "Optix::m_outputImage");
+    if(m_appMemoryTracker)
+      m_appMemoryTracker->track("OptiX/GBuffers", m_inputOutputGbuffers, 2);
   }
 
   // Compute input (render) resolution based on model kind
@@ -306,8 +318,12 @@ void OptiXDenoiser::updateSize(VkCommandBuffer cmd, VkExtent2D size)
   // Staging images for upscale blit (selection + depth at render resolution)
   if(m_settings.enable && isUpscaleMode())
   {
+    if(m_appMemoryTracker)
+      m_appMemoryTracker->untrack("OptiX/Staging", m_upscaleStaging, 1);
     m_upscaleStaging.update(cmd, inputSize);
     NVVK_DBG_NAME_STR(m_upscaleStaging.getColorImage(eStagingSelection), "Optix::m_stagingSelection");
+    if(m_appMemoryTracker)
+      m_appMemoryTracker->track("OptiX/Staging", m_upscaleStaging, 1);
   }
 
   if(m_bufferSize.width != size.width || m_bufferSize.height != size.height)
@@ -672,6 +688,11 @@ void OptiXDenoiser::cleanupOptiX()
 
   m_allocExport.deinit();
 
+  if(m_appMemoryTracker)
+  {
+    m_appMemoryTracker->untrack("OptiX/GBuffers", m_inputOutputGbuffers, 2);
+    m_appMemoryTracker->untrack("OptiX/Staging", m_upscaleStaging, 1);
+  }
   m_inputOutputGbuffers.deinit();
   m_upscaleStaging.deinit();
 
@@ -691,6 +712,11 @@ void OptiXDenoiser::cleanupBuffers()
   vkcuda::destroyCudaBuffer(m_albedoBuffer.cudaBuffer);
   vkcuda::destroyCudaBuffer(m_normalBuffer.cudaBuffer);
   vkcuda::destroyCudaBuffer(m_outputBuffer.cudaBuffer);
+
+  m_exportMemoryTracker.untrack("OptiX/Export", m_rgbBuffer.vkBuffer.allocation);
+  m_exportMemoryTracker.untrack("OptiX/Export", m_albedoBuffer.vkBuffer.allocation);
+  m_exportMemoryTracker.untrack("OptiX/Export", m_normalBuffer.vkBuffer.allocation);
+  m_exportMemoryTracker.untrack("OptiX/Export", m_outputBuffer.vkBuffer.allocation);
 
   m_allocExport.destroyBuffer(m_rgbBuffer.vkBuffer);
   m_allocExport.destroyBuffer(m_albedoBuffer.vkBuffer);
@@ -839,7 +865,7 @@ bool OptiXDenoiser::onUi(Resources& resources)
           m_needModelRecreate  = true;
           m_needRebuildBuffers = true;
           m_hasValidOutput     = false;
-          
+
           // Force size update to recompute input/output sizes
           VkCommandBuffer cmd = resources.app->createTempCmdBuffer();
           updateSize(cmd, resources.gBuffers.getSize());

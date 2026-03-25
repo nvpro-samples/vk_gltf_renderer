@@ -22,6 +22,7 @@
 #include "gltf_scene_vk.hpp"
 #include "gltf_scene_animation_vk.hpp"
 #include "gltf_scene_rtx.hpp"
+#include "gltf_scene_transform_vk.hpp"
 
 /*-------------------------------------------------------------------------------------------------
 # class nvvkgltf::SceneGpu
@@ -49,10 +50,11 @@ namespace nvvkgltf {
 class SceneGpu
 {
 public:
-  SceneGpu(SceneVk& sceneVk, AnimationVk& animationVk, SceneRtx& sceneRtx, nvvk::StagingUploader& staging)
+  SceneGpu(SceneVk& sceneVk, AnimationVk& animationVk, SceneRtx& sceneRtx, TransformComputeVk& transformCompute, nvvk::StagingUploader& staging)
       : m_sceneVk(sceneVk)
       , m_animationVk(animationVk)
       , m_sceneRtx(sceneRtx)
+      , m_transformCompute(transformCompute)
       , m_staging(staging)
   {
   }
@@ -92,12 +94,18 @@ public:
   // No-op if the scene has no morph targets or skinning.
   void applyAnimation(VkCommandBuffer cmd, Scene& scn);
 
-  bool useComputeAnimation = true;
+  // Returns true when the GPU compute transform path should be used this frame.
+  // Checks the user toggle and technical prerequisites (buffers, dirty flags, TLAS state).
+  [[nodiscard]] bool shouldUseGpuTransform(const Scene& scn) const;
+
+  bool useComputeAnimation      = true;
+  bool useComputeTransformation = true;
 
 private:
   SceneVk&               m_sceneVk;
   AnimationVk&           m_animationVk;
   SceneRtx&              m_sceneRtx;
+  TransformComputeVk&    m_transformCompute;
   nvvk::StagingUploader& m_staging;
 };
 

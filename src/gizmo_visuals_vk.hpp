@@ -85,7 +85,7 @@ private:
   VkDescriptorPool m_helperDescriptorPool = VK_NULL_HANDLE;
   VkDescriptorSet  m_helperDescriptorSet  = VK_NULL_HANDLE;
 
-  void initDescriptorSet(VkImage sceneDepth, VkImageView sceneDepthView);
+  void initDescriptorSet(VkImageView sceneDepthView);
   void deinitDescriptorSet();
   void createHelperDepthBuffer(VkCommandBuffer cmd, const VkExtent2D& size);
   void destroyHelperDepthBuffer();

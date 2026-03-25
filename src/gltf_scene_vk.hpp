@@ -82,7 +82,7 @@ public:
 
   virtual void create(VkCommandBuffer        cmd,
                       nvvk::StagingUploader& staging,
-                      const nvvkgltf::Scene& scn,
+                      nvvkgltf::Scene&       scn,
                       bool                   generateMipmaps  = true,
                       bool                   enableRayTracing = true);
 
@@ -164,7 +164,7 @@ protected:
   // imageSearchPaths: directories to search for image files (base first, then imports). Empty or missing files yield default image.
   virtual void createTextureImages(VkCommandBuffer                           cmd,
                                    nvvk::StagingUploader&                    staging,
-                                   const nvvkgltf::Scene&                    scn,
+                                   nvvkgltf::Scene&                          scn,
                                    const std::vector<std::filesystem::path>& imageSearchPaths);
 
   void findSrgbImages(const tinygltf::Model& model);

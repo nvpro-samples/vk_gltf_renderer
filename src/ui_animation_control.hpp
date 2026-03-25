@@ -47,8 +47,12 @@ struct AnimationControl
   void onUI(nvvkgltf::Scene* gltfScene)
   {
     namespace PE = nvgui::PropertyEditor;
+    const int nAnim = gltfScene->animation().getNumAnimations();
+    if(nAnim > 0 && (currentAnimation < 0 || currentAnimation >= nAnim))
+      currentAnimation = 0;
+
     std::vector<const char*> animationNames;
-    for(int i = 0; i < gltfScene->animation().getNumAnimations(); i++)
+    for(int i = 0; i < nAnim; i++)
     {
       animationNames.push_back(gltfScene->animation().getAnimationInfo(i).name.c_str());
     }

@@ -30,6 +30,7 @@
 
 #include "nvvk/gbuffers.hpp"
 #include "nvutils/parameter_registry.hpp"
+#include "gpu_memory_tracker.hpp"
 
 // #DLSS
 #if defined(USE_DLSS)
@@ -137,12 +138,13 @@ private:
       {VK_FORMAT_R16_SFLOAT},           // #DLSS - Specular Hit Dist    : eDlssSpecularHitDist
   };
 
-  nvvk::GBuffer    m_dlssGBuffers{};  // G-Buffers: for denoising
-  VkExtent2D       m_renderingSize{};
-  VkDevice         m_device{};
-  VkQueue          m_graphicsQueue{VK_NULL_HANDLE};  // For queue-based sync (prefer over vkDeviceWaitIdle)
-  VkSampler        m_linearSampler{};
-  bool             m_sizeModeChanged  = false;  // Track if size mode has changed
-  bool             m_forceReset       = false;  // Force reset of the denoiser
-  TransparencyMode m_transparencyMode = TransparencyMode::eDefault;
+  nvvk::GBuffer               m_dlssGBuffers{};  // G-Buffers: for denoising
+  nvvkgltf::GpuMemoryTracker* m_appMemoryTracker = nullptr;
+  VkExtent2D                  m_renderingSize{};
+  VkDevice                    m_device{};
+  VkQueue                     m_graphicsQueue{VK_NULL_HANDLE};  // For queue-based sync (prefer over vkDeviceWaitIdle)
+  VkSampler                   m_linearSampler{};
+  bool                        m_sizeModeChanged  = false;  // Track if size mode has changed
+  bool                        m_forceReset       = false;  // Force reset of the denoiser
+  TransparencyMode            m_transparencyMode = TransparencyMode::eDefault;
 };

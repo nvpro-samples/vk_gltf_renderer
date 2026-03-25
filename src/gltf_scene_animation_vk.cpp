@@ -45,11 +45,17 @@
 
 namespace nvvkgltf {
 
+namespace {
+constexpr const char* kMemCategorySkinning = "Skinning";
+constexpr const char* kMemCategoryMorphing = "Morphing";
+}  // namespace
+
 //--------------------------------------------------------------------------------------------------
 // Initialize compute pipelines for skinning and morph blending.
 void AnimationVk::init(nvvk::ResourceAllocator* alloc)
 {
   m_alloc = alloc;
+  m_memoryTracker.init(alloc);
   createPipelines();
 }
 
@@ -80,17 +86,16 @@ void AnimationVk::createPipelines()
     NVVK_CHECK(vkCreatePipelineLayout(device, &layoutInfo, nullptr, &m_skinPipelineLayout));
     NVVK_DBG_NAME(m_skinPipelineLayout);
 
-    VkShaderModuleCreateInfo shaderInfo{.sType = VK_STRUCTURE_TYPE_SHADER_MODULE_CREATE_INFO};
-    shaderInfo.codeSize = skinning_comp_slang_sizeInBytes;
-    shaderInfo.pCode    = skinning_comp_slang;
+    VkShaderModuleCreateInfo shaderInfo{.sType    = VK_STRUCTURE_TYPE_SHADER_MODULE_CREATE_INFO,
+                                        .codeSize = skinning_comp_slang_sizeInBytes,
+                                        .pCode    = skinning_comp_slang};
 
-    VkComputePipelineCreateInfo pipeInfo{.sType = VK_STRUCTURE_TYPE_COMPUTE_PIPELINE_CREATE_INFO};
-    pipeInfo.stage.sType = VK_STRUCTURE_TYPE_PIPELINE_SHADER_STAGE_CREATE_INFO;
-    pipeInfo.stage.stage = VK_SHADER_STAGE_COMPUTE_BIT;
-    pipeInfo.stage.pName = "main";
-    pipeInfo.stage.pNext = &shaderInfo;
-    pipeInfo.layout      = m_skinPipelineLayout;
-
+    VkComputePipelineCreateInfo pipeInfo{.sType  = VK_STRUCTURE_TYPE_COMPUTE_PIPELINE_CREATE_INFO,
+                                         .stage  = {.sType = VK_STRUCTURE_TYPE_PIPELINE_SHADER_STAGE_CREATE_INFO,
+                                                    .pNext = &shaderInfo,
+                                                    .stage = VK_SHADER_STAGE_COMPUTE_BIT,
+                                                    .pName = "main"},
+                                         .layout = m_skinPipelineLayout};
     NVVK_CHECK(vkCreateComputePipelines(device, nullptr, 1, &pipeInfo, nullptr, &m_skinPipeline));
     NVVK_DBG_NAME(m_skinPipeline);
   }
@@ -104,16 +109,16 @@ void AnimationVk::createPipelines()
     NVVK_CHECK(vkCreatePipelineLayout(device, &layoutInfo, nullptr, &m_morphPipelineLayout));
     NVVK_DBG_NAME(m_morphPipelineLayout);
 
-    VkShaderModuleCreateInfo shaderInfo{.sType = VK_STRUCTURE_TYPE_SHADER_MODULE_CREATE_INFO};
-    shaderInfo.codeSize = morph_comp_slang_sizeInBytes;
-    shaderInfo.pCode    = morph_comp_slang;
+    VkShaderModuleCreateInfo shaderInfo{.sType    = VK_STRUCTURE_TYPE_SHADER_MODULE_CREATE_INFO,
+                                        .codeSize = morph_comp_slang_sizeInBytes,
+                                        .pCode    = morph_comp_slang};
 
-    VkComputePipelineCreateInfo pipeInfo{.sType = VK_STRUCTURE_TYPE_COMPUTE_PIPELINE_CREATE_INFO};
-    pipeInfo.stage.sType = VK_STRUCTURE_TYPE_PIPELINE_SHADER_STAGE_CREATE_INFO;
-    pipeInfo.stage.stage = VK_SHADER_STAGE_COMPUTE_BIT;
-    pipeInfo.stage.pName = "main";
-    pipeInfo.stage.pNext = &shaderInfo;
-    pipeInfo.layout      = m_morphPipelineLayout;
+    VkComputePipelineCreateInfo pipeInfo{.sType  = VK_STRUCTURE_TYPE_COMPUTE_PIPELINE_CREATE_INFO,
+                                         .stage  = {.sType = VK_STRUCTURE_TYPE_PIPELINE_SHADER_STAGE_CREATE_INFO,
+                                                    .pNext = &shaderInfo,
+                                                    .stage = VK_SHADER_STAGE_COMPUTE_BIT,
+                                                    .pName = "main"},
+                                         .layout = m_morphPipelineLayout};
 
     NVVK_CHECK(vkCreateComputePipelines(device, nullptr, 1, &pipeInfo, nullptr, &m_morphPipeline));
     NVVK_DBG_NAME(m_morphPipeline);
@@ -205,6 +210,13 @@ void AnimationVk::createGpuBuffers(nvvk::StagingUploader& staging, const Scene& 
     gpu.joints              = createBufferFromSpan(staging, std::span<const glm::ivec4>(task.joints));
     gpu.inverseBindMatrices = createBufferFromSpan(staging, std::span<const glm::mat4>(task.inverseBindMatrices));
 
+    m_memoryTracker.track(kMemCategorySkinning, gpu.basePositions.allocation);
+    m_memoryTracker.track(kMemCategorySkinning, gpu.baseNormals.allocation);
+    m_memoryTracker.track(kMemCategorySkinning, gpu.baseTangents.allocation);
+    m_memoryTracker.track(kMemCategorySkinning, gpu.weights.allocation);
+    m_memoryTracker.track(kMemCategorySkinning, gpu.joints.allocation);
+    m_memoryTracker.track(kMemCategorySkinning, gpu.inverseBindMatrices.allocation);
+
     gpu.jointMatOffset  = totalJointMatBytes;
     gpu.normalMatOffset = totalNormalMatBytes;
     totalJointMatBytes += numJoints * sizeof(glm::mat4);
@@ -213,9 +225,15 @@ void AnimationVk::createGpuBuffers(nvvk::StagingUploader& staging, const Scene& 
 
   // Pre-allocate packed per-frame buffers for all skin tasks' joint + normal matrices
   if(totalJointMatBytes > 0)
+  {
     NVVK_CHECK(m_alloc->createBuffer(m_jointMatricesBuffer, totalJointMatBytes, kSsboUsage));
+    m_memoryTracker.track(kMemCategorySkinning, m_jointMatricesBuffer.allocation);
+  }
   if(totalNormalMatBytes > 0)
+  {
     NVVK_CHECK(m_alloc->createBuffer(m_normalMatricesBuffer, totalNormalMatBytes, kSsboUsage));
+    m_memoryTracker.track(kMemCategorySkinning, m_normalMatricesBuffer.allocation);
+  }
 
   // Morph GPU buffers: base geometry + packed deltas for all targets per morph primitive.
   // Delta layout in GPU memory: [target0_vertex0..target0_vertexN, target1_vertex0..target1_vertexN, ...]
@@ -230,6 +248,10 @@ void AnimationVk::createGpuBuffers(nvvk::StagingUploader& staging, const Scene& 
     gpu.basePositions = createBufferFromSpan(staging, std::span<const glm::vec3>(mr.basePositions));
     gpu.baseNormals   = createBufferFromSpan(staging, std::span<const glm::vec3>(mr.baseNormals));
     gpu.baseTangents  = createBufferFromSpan(staging, std::span<const glm::vec4>(mr.baseTangents));
+
+    m_memoryTracker.track(kMemCategoryMorphing, gpu.basePositions.allocation);
+    m_memoryTracker.track(kMemCategoryMorphing, gpu.baseNormals.allocation);
+    m_memoryTracker.track(kMemCategoryMorphing, gpu.baseTangents.allocation);
 
     // Pack all morph target deltas sequentially: [target0_v0..target0_vN, target1_v0..target1_vN, ...]
     if(mr.renderPrimID >= 0)
@@ -296,16 +318,26 @@ void AnimationVk::createGpuBuffers(nvvk::StagingUploader& staging, const Scene& 
       gpu.weightsOffset = totalMorphWeightsBytes;
       totalMorphWeightsBytes += numTargets * sizeof(float);
       gpu.positionDeltas = createBufferFromSpan(staging, std::span<const glm::vec3>(allPosDeltas));
+      m_memoryTracker.track(kMemCategoryMorphing, gpu.positionDeltas.allocation);
       if(hasNormalDeltas && !mr.baseNormals.empty())
+      {
         gpu.normalDeltas = createBufferFromSpan(staging, std::span<const glm::vec3>(allNrmDeltas));
+        m_memoryTracker.track(kMemCategoryMorphing, gpu.normalDeltas.allocation);
+      }
       if(hasTangentDeltas && !mr.baseTangents.empty())
+      {
         gpu.tangentDeltas = createBufferFromSpan(staging, std::span<const glm::vec3>(allTanDeltas));
+        m_memoryTracker.track(kMemCategoryMorphing, gpu.tangentDeltas.allocation);
+      }
     }
   }
 
   // Pre-allocate packed per-frame buffer for all morph tasks' weights
   if(totalMorphWeightsBytes > 0)
+  {
     NVVK_CHECK(m_alloc->createBuffer(m_morphWeightsBuffer, totalMorphWeightsBytes, kSsboUsage));
+    m_memoryTracker.track(kMemCategoryMorphing, m_morphWeightsBuffer.allocation);
+  }
 }
 
 //--------------------------------------------------------------------------------------------------
@@ -315,37 +347,49 @@ void AnimationVk::destroyGpuBuffers()
   if(!m_alloc)
     return;
 
-  auto destroy = [this](nvvk::Buffer& buf) {
+  auto destroySkin = [this](nvvk::Buffer& buf) {
     if(buf.buffer != VK_NULL_HANDLE)
+    {
+      m_memoryTracker.untrack(kMemCategorySkinning, buf.allocation);
       m_alloc->destroyBuffer(buf);
+    }
+    buf = {};
+  };
+
+  auto destroyMorph = [this](nvvk::Buffer& buf) {
+    if(buf.buffer != VK_NULL_HANDLE)
+    {
+      m_memoryTracker.untrack(kMemCategoryMorphing, buf.allocation);
+      m_alloc->destroyBuffer(buf);
+    }
     buf = {};
   };
 
   for(auto& gpu : m_skinGpuData)
   {
-    destroy(gpu.basePositions);
-    destroy(gpu.baseNormals);
-    destroy(gpu.baseTangents);
-    destroy(gpu.weights);
-    destroy(gpu.joints);
-    destroy(gpu.inverseBindMatrices);
+    destroySkin(gpu.basePositions);
+    destroySkin(gpu.baseNormals);
+    destroySkin(gpu.baseTangents);
+    destroySkin(gpu.weights);
+    destroySkin(gpu.joints);
+    destroySkin(gpu.inverseBindMatrices);
   }
   m_skinGpuData.clear();
 
   for(auto& gpu : m_morphGpuData)
   {
-    destroy(gpu.basePositions);
-    destroy(gpu.baseNormals);
-    destroy(gpu.baseTangents);
-    destroy(gpu.positionDeltas);
-    destroy(gpu.normalDeltas);
-    destroy(gpu.tangentDeltas);
+    destroyMorph(gpu.basePositions);
+    destroyMorph(gpu.baseNormals);
+    destroyMorph(gpu.baseTangents);
+    destroyMorph(gpu.positionDeltas);
+    destroyMorph(gpu.normalDeltas);
+    destroyMorph(gpu.tangentDeltas);
   }
   m_morphGpuData.clear();
 
-  destroy(m_jointMatricesBuffer);
-  destroy(m_normalMatricesBuffer);
-  destroy(m_morphWeightsBuffer);
+  destroySkin(m_jointMatricesBuffer);
+  destroySkin(m_normalMatricesBuffer);
+  destroyMorph(m_morphWeightsBuffer);
 }
 
 //========== Per-Frame Dispatch ==========

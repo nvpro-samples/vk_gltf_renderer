@@ -37,6 +37,7 @@
 
 namespace nvvk {
 class ResourceAllocator;
+class GBuffer;
 }
 
 namespace nvvkgltf {
@@ -72,137 +73,35 @@ public:
   void init(nvvk::ResourceAllocator* alloc) { m_alloc = alloc; }
 
   // Track an allocation - queries VMA for actual size
-  void track(std::string_view category, VmaAllocation allocation)
-  {
-    if(!m_alloc || !allocation)
-      return;
-
-    VmaAllocationInfo allocInfo;
-    vmaGetAllocationInfo(*m_alloc, allocation, &allocInfo);
-
-    std::lock_guard<std::mutex> lock(m_mutex);
-    std::string categoryStr(category);
-    auto&       stats = m_stats[categoryStr];
-    stats.currentBytes += allocInfo.size;
-    stats.currentCount += 1;
-    stats.totalAllocations += 1;
-
-    // Update peaks
-    if(stats.currentBytes > stats.peakBytes)
-      stats.peakBytes = stats.currentBytes;
-    if(stats.currentCount > stats.peakCount)
-      stats.peakCount = stats.currentCount;
-  }
+  void track(std::string_view category, VmaAllocation allocation);
 
   // Untrack a deallocation - queries VMA for actual size
-  void untrack(std::string_view category, VmaAllocation allocation)
-  {
-    if(!m_alloc || !allocation)
-      return;
+  void untrack(std::string_view category, VmaAllocation allocation);
 
-    VmaAllocationInfo allocInfo;
-    vmaGetAllocationInfo(*m_alloc, allocation, &allocInfo);
+  // Track all allocations (color + depth) in a GBuffer.
+  // colorCount: number of color attachments (GBuffer doesn't expose this).
+  void track(std::string_view category, const nvvk::GBuffer& gbuffer, uint32_t colorCount);
 
-    std::lock_guard<std::mutex> lock(m_mutex);
-    std::string categoryStr(category);
-    auto        it = m_stats.find(categoryStr);
-    if(it == m_stats.end())
-      return;
-
-    auto& stats = it->second;
-    if(stats.currentBytes >= allocInfo.size)
-      stats.currentBytes -= allocInfo.size;
-    if(stats.currentCount > 0)
-      stats.currentCount -= 1;
-    stats.totalDeallocations += 1;
-  }
+  // Untrack all allocations (color + depth) in a GBuffer.
+  void untrack(std::string_view category, const nvvk::GBuffer& gbuffer, uint32_t colorCount);
 
   // Get statistics for a specific category
-  GpuMemoryStats getStats(std::string_view category) const
-  {
-    std::lock_guard<std::mutex> lock(m_mutex);
-    std::string categoryStr(category);
-    auto        it = m_stats.find(categoryStr);
-    if(it != m_stats.end())
-      return it->second;
-    return GpuMemoryStats{};  // Return empty stats if category doesn't exist
-  }
+  GpuMemoryStats getStats(std::string_view category) const;
 
   // Get statistics for all categories combined
-  GpuMemoryStats getTotalStats() const
-  {
-    std::lock_guard<std::mutex> lock(m_mutex);
-    GpuMemoryStats total{};
-    for(const auto& [name, stats] : m_stats)
-    {
-      total.currentBytes += stats.currentBytes;
-      total.currentCount += stats.currentCount;
-      total.totalAllocations += stats.totalAllocations;
-      total.totalDeallocations += stats.totalDeallocations;
-      total.peakBytes += stats.peakBytes;
-      total.peakCount += stats.peakCount;
-    }
-    return total;
-  }
+  GpuMemoryStats getTotalStats() const;
 
   // Get all category names that have non-zero current bytes (for UI iteration)
   // sortBy: How to sort the returned categories
   // ascending: true for ascending order, false for descending (default depends on sort type)
-  std::vector<std::string> getActiveCategories(CategorySortBy sortBy = CategorySortBy::eName, bool ascending = true) const
-  {
-    std::lock_guard<std::mutex> lock(m_mutex);
-    std::vector<std::string> categories;
-    for(const auto& [name, stats] : m_stats)
-    {
-      if(stats.currentBytes > 0)
-        categories.push_back(name);
-    }
-
-    // Sort based on specified criteria
-    switch(sortBy)
-    {
-      case CategorySortBy::eName:
-        std::sort(categories.begin(), categories.end(),
-                  [ascending](const std::string& a, const std::string& b) { return ascending ? (a < b) : (a > b); });
-        break;
-      case CategorySortBy::eCurrentBytes:
-        std::sort(categories.begin(), categories.end(), [this, ascending](const std::string& a, const std::string& b) {
-          return ascending ? (m_stats.at(a).currentBytes < m_stats.at(b).currentBytes) :
-                             (m_stats.at(a).currentBytes > m_stats.at(b).currentBytes);
-        });
-        break;
-      case CategorySortBy::eCurrentCount:
-        std::sort(categories.begin(), categories.end(), [this, ascending](const std::string& a, const std::string& b) {
-          return ascending ? (m_stats.at(a).currentCount < m_stats.at(b).currentCount) :
-                             (m_stats.at(a).currentCount > m_stats.at(b).currentCount);
-        });
-        break;
-    }
-
-    return categories;
-  }
+  std::vector<std::string> getActiveCategories(CategorySortBy sortBy = CategorySortBy::eName, bool ascending = true) const;
 
   // Reset statistics (typically called when loading a new scene)
   // Keeps total allocation/deallocation counts but resets current and peak
-  void reset()
-  {
-    std::lock_guard<std::mutex> lock(m_mutex);
-    for(auto& [name, stats] : m_stats)
-    {
-      stats.currentBytes = 0;
-      stats.currentCount = 0;
-      stats.peakBytes    = 0;
-      stats.peakCount    = 0;
-      // Keep stats.totalAllocations and stats.totalDeallocations for lifetime tracking
-    }
-  }
+  void reset();
 
   // Complete reset - clears all statistics including totals
-  void resetAll()
-  {
-    std::lock_guard<std::mutex> lock(m_mutex);
-    m_stats.clear();
-  }
+  void resetAll();
 
 private:
   nvvk::ResourceAllocator*                        m_alloc = nullptr;

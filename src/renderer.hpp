@@ -66,7 +66,9 @@ public:
   void createSceneFromDescriptor(const std::filesystem::path& descriptorPath);
   void createHDR(const std::filesystem::path& hdrFilename);
   void onMergeScene(const std::filesystem::path& filename);
-  void rebuildVulkanSceneFull();  // Full GPU rebuild including textures (for merge/compact operations)
+  /// Full GPU rebuild (textures + geometry + AS). Only uploads GPU data; CPU side must already be
+  /// parsed (`mergeScene`, `parseScene`, etc., depending on how the model was changed).
+  void                                        rebuildVulkanSceneFull();
   std::shared_ptr<nvutils::CameraManipulator> getCameraManipulator() { return m_cameraManip; }
   void                                        registerRecentFilesHandler();
   void setDlssHardwareAvailability(bool available);  // Set DLSS hardware/extension availability
@@ -87,7 +89,10 @@ private:
   void clearGbuffer(VkCommandBuffer cmd);
   void cleanupScene();           // Helper to cleanup current scene
   void rebuildSceneFromModel();  // Rebuild Vulkan scene after modifying the glTF model in-place (preserves textures)
-  void rebuildVulkanSceneInternal(bool rebuildTextures);  // Internal helper for scene rebuilds
+  /// `setCurrentScene(getCurrentScene())` → `parseScene`. Call before GPU rebuild when the model
+  /// changed without `mergeScene`/`parseScene` (e.g. compact, tangent gen).
+  void refreshCpuSceneGraphFromModel();
+  void rebuildVulkanSceneInternal(bool rebuildTextures);  // GPU upload + AS; CPU scene must already be parsed
   void compileShaders();
   void createDescriptorSets();
   void createResourceBuffers();
@@ -106,8 +111,8 @@ private:
   bool updateAnimation(VkCommandBuffer cmd);
 
   // updateSceneChanges phase helpers (keep main function readable)
-  void     updateSceneChanges_BlasRebuild(const nvvkgltf::Scene::DirtyFlags& df);
-  void     updateSceneChanges_NodeTransforms(nvvkgltf::Scene* scene, const nvvkgltf::Scene::DirtyFlags& df);
+  void updateSceneChanges_BlasRebuild(const nvvkgltf::Scene::DirtyFlags& df);
+  void updateSceneChanges_NodeTransforms(VkCommandBuffer cmd, nvvkgltf::Scene* scene, const nvvkgltf::Scene::DirtyFlags& df);
   uint32_t updateSceneChanges_SyncGpuBuffers(VkCommandBuffer cmd, nvvkgltf::Scene* scene);
   void     updateSceneChanges_TlasUpdate(VkCommandBuffer cmd, nvvkgltf::Scene* scene);
   void     updateSceneChanges_RasterizerInvalidate(bool renderNodeOrNodeDirty);
@@ -170,6 +175,7 @@ private:
   bool                      m_cpuTimePrinted{false};  // Track if CPU time has been printed
 #ifndef NDEBUG
   bool m_validateGpuSync{true};
+  bool m_skipGpuSyncValidation{false};  // GPU transform path skipped uploadRenderNodes / CPU TLAS sync
 #endif
 
   uint32_t m_maxTextures{100'000U};  // Maximum number of textures supported by the descriptor set
@@ -182,9 +188,9 @@ private:
   SceneSelection m_sceneSelection;  // Shared selection state
   UiSceneBrowser m_sceneBrowser;    // New scene browser
   UiInspector    m_inspector;       // New inspector
-  BusyWindow    m_busy;
-  Silhouette    m_silhouette;     // Silhouette renderer
-  VisualHelpers m_visualHelpers;  // Grid + transform gizmo overlay
+  BusyWindow     m_busy;
+  Silhouette     m_silhouette;     // Silhouette renderer
+  VisualHelpers  m_visualHelpers;  // Grid + transform gizmo overlay
 
   // Undo/Redo
   UndoStack m_undoStack;

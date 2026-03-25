@@ -86,6 +86,7 @@ cmake --build build
 - Support for 27 glTF extensions, including anisotropy, clearcoat, transmission, volume, sheen, iridescence, dispersion, diffuse transmission, material variant and scattering.
 - HDR environments, a physical sun and sky model, depth of field, and multiple tone mappers.
 - Animation support includes skeletal, morph targets, and KHR_animation_pointer.
+- GPU compute accelerates both skinning/morphing and per-level world-matrix propagation.
 
 **More features** --> [User Guide](docs/user-guide.md)
  
@@ -151,6 +152,7 @@ For a **full walkthrough** of rendering modes, editor workflows, and feature scr
 - [User Guide](docs/user-guide.md) — ray tracing and rasterizer settings, PBR materials, scene editor, camera, environment, tone mapping, CLI reference, and troubleshooting.
 - [Developer Guide](docs/developer.md) — architecture overview, source structure, Vulkan ray tracing pipeline, testing, and contributor notes.
 - [Rendering Architecture](docs/RENDERING_ARCHITECTURE.md) — data flow from glTF model to GPU, BLAS/TLAS acceleration structures, and render nodes.
+- [glTF Resources](docs/resources.md) — curated collection of glTF models, HDR environments, specifications, and tools.
 
 ## License
 

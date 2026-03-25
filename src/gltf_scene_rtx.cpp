@@ -30,6 +30,7 @@
 #include <nvutils/alignment.hpp>
 #include <nvutils/logger.hpp>
 #include <nvutils/timers.hpp>
+#include <nvvk/barriers.hpp>
 #include <nvvk/check_error.hpp>
 #include <nvvk/debug_util.hpp>
 
@@ -326,7 +327,8 @@ void nvvkgltf::SceneRtx::cmdCreateBuildTopLevelAccelerationStructure(VkCommandBu
   constexpr VmaAllocationCreateFlags instanceAllocFlags   = 0;
   constexpr VkDeviceSize             instanceMinAlignment = 16;
   NVVK_CHECK(m_alloc->createBuffer(m_instancesBuffer, std::span(m_tlasInstances).size_bytes(),
-                                   VK_BUFFER_USAGE_2_SHADER_DEVICE_ADDRESS_BIT | VK_BUFFER_USAGE_2_ACCELERATION_STRUCTURE_BUILD_INPUT_READ_ONLY_BIT_KHR,
+                                   VK_BUFFER_USAGE_2_SHADER_DEVICE_ADDRESS_BIT | VK_BUFFER_USAGE_2_ACCELERATION_STRUCTURE_BUILD_INPUT_READ_ONLY_BIT_KHR
+                                       | VK_BUFFER_USAGE_2_STORAGE_BUFFER_BIT,
                                    VMA_MEMORY_USAGE_AUTO, instanceAllocFlags, instanceMinAlignment));
   NVVK_CHECK(staging.appendBuffer(m_instancesBuffer, 0, std::span(m_tlasInstances)));
   NVVK_DBG_NAME(m_instancesBuffer.buffer);
@@ -477,6 +479,29 @@ void nvvkgltf::SceneRtx::rebuildTopLevelAS(VkCommandBuffer                cmd,
 }
 
 //--------------------------------------------------------------------------------------------------
+// In-place TLAS update after compute wrote instance transforms into `m_instancesBuffer` (CPU shadow vector may be stale).
+void nvvkgltf::SceneRtx::cmdUpdateTlasFromInstanceBuffer(VkCommandBuffer cmd)
+{
+  if(m_tlasAccel.accel == VK_NULL_HANDLE || m_instancesBuffer.buffer == VK_NULL_HANDLE || m_tlasInstances.empty())
+    return;
+
+  if(m_tlasScratchBuffer.buffer == VK_NULL_HANDLE)
+  {
+    NVVK_CHECK(m_alloc->createBuffer(m_tlasScratchBuffer, m_tlasBuildData.sizeInfo.buildScratchSize,
+                                     VK_BUFFER_USAGE_2_SHADER_DEVICE_ADDRESS_BIT | VK_BUFFER_USAGE_2_STORAGE_BUFFER_BIT));
+    NVVK_DBG_NAME(m_tlasScratchBuffer.buffer);
+    m_memoryTracker.track(kMemCategoryScratch, m_tlasScratchBuffer.allocation);
+  }
+
+  nvvk::cmdMemoryBarrier(cmd, VK_PIPELINE_STAGE_2_COMPUTE_SHADER_BIT, VK_PIPELINE_STAGE_2_ACCELERATION_STRUCTURE_BUILD_BIT_KHR,
+                         VK_ACCESS_2_SHADER_WRITE_BIT, VK_ACCESS_2_ACCELERATION_STRUCTURE_READ_BIT_KHR);
+
+  m_tlasBuildData.cmdUpdateAccelerationStructure(cmd, m_tlasAccel.accel, m_tlasScratchBuffer.address);
+
+  nvvk::accelerationStructureBarrier(cmd, VK_ACCESS_ACCELERATION_STRUCTURE_WRITE_BIT_KHR, VK_ACCESS_ACCELERATION_STRUCTURE_READ_BIT_KHR);
+}
+
+//--------------------------------------------------------------------------------------------------
 // Sync TLAS from Scene dirty flags; clears renderNodesRtx. Returns true if TLAS was updated.
 bool nvvkgltf::SceneRtx::syncTopLevelAS(VkCommandBuffer cmd, nvvk::StagingUploader& staging, nvvkgltf::Scene& scene)
 {
@@ -559,8 +584,8 @@ void nvvkgltf::SceneRtx::destroy()
   destroyTlasResources();
   destroyScratchBuffers();
 
-  m_blasAccel     = {};
-  m_blasBuildData = {};
+  m_blasAccel          = {};
+  m_blasBuildData      = {};
   m_instanceFlagsCache = {};
   if(m_blasBuilder)
   {

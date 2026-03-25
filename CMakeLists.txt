@@ -153,6 +153,7 @@ set(SHADER_CAPABILITIES
   spvRayQueryKHR                      # Ray query operations
   spvGroupNonUniformBallot            # Ballot operations for subgroup functionality
   spvGroupNonUniformArithmetic        # Arithmetic operations across subgroups
+  spvImageGatherExtended              # Slang emits this as a transitive dependency of the GLSL450 extended instruction set
 )
 
 # Shader compile options: -O0 for both (driver optimizes SPIR-V when compiling to native; pre-optimization can remove driver opportunities)

@@ -635,6 +635,9 @@ int nvvkgltf::Scene::mergeScene(const std::filesystem::path& filename, std::opti
     return -1;
   }
 
+  const size_t animationCountBeforeMerge = m_model.animations.size();
+  const size_t importedAnimationCount    = importedModel.animations.size();
+
   int wrapperNodeIdx = SceneMerger::merge(m_model, importedModel, filename.stem().string(), maxTextureCount);
   if(wrapperNodeIdx < 0)
   {
@@ -655,7 +658,23 @@ int nvvkgltf::Scene::mergeScene(const std::filesystem::path& filename, std::opti
 
   parseScene();
   m_validSceneParsed = !m_model.nodes.empty();
+
+  // First animation index that belongs to the merged file (clips are appended). Used by the renderer
+  // to select merged motion; otherwise currentAnimation often stays on a base-scene clip (index 0).
+  if(importedAnimationCount > 0 && m_model.animations.size() > animationCountBeforeMerge)
+    m_pendingMergePreferredAnimationIndex = static_cast<int>(animationCountBeforeMerge);
+  else
+    m_pendingMergePreferredAnimationIndex = -1;
+
   return wrapperNodeIdx;
+}
+
+//--------------------------------------------------------------------------------------------------
+int nvvkgltf::Scene::takeMergePreferredAnimationIndex()
+{
+  int v                                 = m_pendingMergePreferredAnimationIndex;
+  m_pendingMergePreferredAnimationIndex = -1;
+  return v;
 }
 
 //--------------------------------------------------------------------------------------------------
@@ -945,6 +964,43 @@ void nvvkgltf::Scene::updateNodeWorldMatrices()
 }
 
 //--------------------------------------------------------------------------------------------------
+// Lightweight update for the GPU transform path: refreshes m_nodesLocalMatrices from TRS for dirty
+// nodes and updates light world matrices. Skips the full world-matrix propagation and render-node
+// dirty marking, which the GPU compute shader handles instead.
+//
+void nvvkgltf::Scene::updateLocalMatricesAndLights()
+{
+  if(m_dirtyFlags.nodes.empty())
+    return;
+
+  for(int nodeID : m_dirtyFlags.nodes)
+    m_nodesLocalMatrices[nodeID] = tinygltf::utils::getNodeMatrix(m_model.nodes[nodeID]);
+
+  for(auto& light : m_lights)
+    light.worldMatrix = computeNodeWorldMatrix(light.nodeID);
+}
+
+//--------------------------------------------------------------------------------------------------
+// Compute a single node's world matrix on demand by walking the parent chain.
+// O(depth) per call; used for gizmo positioning and light updates on the GPU transform path
+// where the full propagation is skipped.
+//
+glm::mat4 nvvkgltf::Scene::computeNodeWorldMatrix(int nodeID) const
+{
+  if(nodeID < 0 || nodeID >= static_cast<int>(m_nodesLocalMatrices.size()))
+    return glm::mat4(1.0f);
+
+  std::vector<int> chain;
+  for(int n = nodeID; n >= 0; n = m_nodeParents[n])
+    chain.push_back(n);
+
+  glm::mat4 world(1.0f);
+  for(auto it = chain.rbegin(); it != chain.rend(); ++it)
+    world = world * m_nodesLocalMatrices[*it];
+  return world;
+}
+
+//--------------------------------------------------------------------------------------------------
 // Serial path: filtered-root recursive walk. Best for small dirty sets (leaf moves, editor).
 //
 void nvvkgltf::Scene::updateWorldMatricesSerial()
@@ -1210,6 +1266,7 @@ void nvvkgltf::Scene::traverseSceneWithVisibility(const std::function<void(int n
   }
 
   buildTopologicalLevels();
+  ++m_sceneGraphRevision;  // GPU transform static buffers must match this graph + render-node registry
 }
 
 //--------------------------------------------------------------------------------------------------
@@ -1303,6 +1360,7 @@ void nvvkgltf::Scene::setCurrentVariant(int variant)
 {
   m_currentVariant = variant;
 
+  bool anyMaterialIdChanged = false;
   for(int nodeID = 0; nodeID < static_cast<int>(m_model.nodes.size()); nodeID++)
   {
     const std::vector<int>& rnIds = m_renderNodeRegistry.getRenderNodesForNode(nodeID);
@@ -1322,11 +1380,16 @@ void nvvkgltf::Scene::setCurrentVariant(int variant)
         int beforeMatID = m_renderNodeRegistry.getRenderNodes()[rnID].materialID;
         int newMatId    = getMaterialVariantIndex(mesh.primitives[primIdx], m_currentVariant);
         if(beforeMatID != newMatId)
+        {
+          anyMaterialIdChanged = true;
           m_dirtyFlags.renderNodesVk.insert(rnID);
+        }
         m_renderNodeRegistry.getRenderNodes()[rnID].materialID = newMatId;
       }
     }
   }
+  if(anyMaterialIdChanged)
+    ++m_sceneGraphRevision;  // GPU RenderNodeGpuMapping SSBO must pick up new material IDs
 }
 
 
@@ -1507,6 +1570,7 @@ bool nvvkgltf::Scene::handleLightTraversal(int nodeID, const glm::mat4& worldMat
     light.extras                   = tinygltf::Value(extras);
   }
   renderLight.worldMatrix = worldMatrix;
+  renderLight.nodeID      = nodeID;
 
   m_lights.push_back(renderLight);
   return false;  // Continue traversal

@@ -99,7 +99,7 @@ void VisualHelpers::onResize(VkCommandBuffer cmd, const VkExtent2D& size, VkImag
   createHelperDepthBuffer(cmd, size);
 
   deinitDescriptorSet();
-  initDescriptorSet(sceneDepth, sceneDepthView);
+  initDescriptorSet(sceneDepthView);
 }
 
 //--------------------------------------------------------------------------------------------------
@@ -134,25 +134,25 @@ void VisualHelpers::render(VkCommandBuffer  cmd,
   nvvk::cmdImageMemoryBarrier(cmd, {targetColorImage, VK_IMAGE_LAYOUT_GENERAL, VK_IMAGE_LAYOUT_COLOR_ATTACHMENT_OPTIMAL});
 
   // Begin dynamic rendering onto the target image
-  VkRenderingAttachmentInfo colorAttachment = {VK_STRUCTURE_TYPE_RENDERING_ATTACHMENT_INFO};
-  colorAttachment.imageView                 = targetColorImageView;
-  colorAttachment.imageLayout               = VK_IMAGE_LAYOUT_COLOR_ATTACHMENT_OPTIMAL;
-  colorAttachment.loadOp                    = VK_ATTACHMENT_LOAD_OP_LOAD;
-  colorAttachment.storeOp                   = VK_ATTACHMENT_STORE_OP_STORE;
+  VkRenderingAttachmentInfo colorAttachment = {.sType       = VK_STRUCTURE_TYPE_RENDERING_ATTACHMENT_INFO,
+                                               .imageView   = targetColorImageView,
+                                               .imageLayout = VK_IMAGE_LAYOUT_COLOR_ATTACHMENT_OPTIMAL,
+                                               .loadOp      = VK_ATTACHMENT_LOAD_OP_LOAD,
+                                               .storeOp     = VK_ATTACHMENT_STORE_OP_STORE};
 
-  VkRenderingAttachmentInfo depthAttachment = {VK_STRUCTURE_TYPE_RENDERING_ATTACHMENT_INFO};
-  depthAttachment.imageView                 = m_helperDepthImageView;
-  depthAttachment.imageLayout               = VK_IMAGE_LAYOUT_DEPTH_STENCIL_ATTACHMENT_OPTIMAL;
-  depthAttachment.loadOp                    = VK_ATTACHMENT_LOAD_OP_CLEAR;
-  depthAttachment.storeOp                   = VK_ATTACHMENT_STORE_OP_STORE;
-  depthAttachment.clearValue.depthStencil   = {1.0f, 0};
+  VkRenderingAttachmentInfo depthAttachment = {.sType       = VK_STRUCTURE_TYPE_RENDERING_ATTACHMENT_INFO,
+                                               .imageView   = m_helperDepthImageView,
+                                               .imageLayout = VK_IMAGE_LAYOUT_DEPTH_STENCIL_ATTACHMENT_OPTIMAL,
+                                               .loadOp      = VK_ATTACHMENT_LOAD_OP_CLEAR,
+                                               .storeOp     = VK_ATTACHMENT_STORE_OP_STORE,
+                                               .clearValue  = {.depthStencil = {1.0f, 0}}};
 
-  VkRenderingInfo renderingInfo      = {VK_STRUCTURE_TYPE_RENDERING_INFO};
-  renderingInfo.renderArea           = {{0, 0}, viewportExtent};
-  renderingInfo.layerCount           = 1;
-  renderingInfo.colorAttachmentCount = 1;
-  renderingInfo.pColorAttachments    = &colorAttachment;
-  renderingInfo.pDepthAttachment     = &depthAttachment;
+  VkRenderingInfo renderingInfo = {.sType                = VK_STRUCTURE_TYPE_RENDERING_INFO,
+                                   .renderArea           = {{0, 0}, viewportExtent},
+                                   .layerCount           = 1,
+                                   .colorAttachmentCount = 1,
+                                   .pColorAttachments    = &colorAttachment,
+                                   .pDepthAttachment     = &depthAttachment};
 
   vkCmdBeginRendering(cmd, &renderingInfo);
 
@@ -186,29 +186,25 @@ void VisualHelpers::createHelperDepthBuffer(VkCommandBuffer cmd, const VkExtent2
 
   m_helperExtent = size;
 
-  VkImageCreateInfo imageInfo = {VK_STRUCTURE_TYPE_IMAGE_CREATE_INFO};
-  imageInfo.imageType         = VK_IMAGE_TYPE_2D;
-  imageInfo.format            = m_depthFormat;
-  imageInfo.extent            = {size.width, size.height, 1};
-  imageInfo.mipLevels         = 1;
-  imageInfo.arrayLayers       = 1;
-  imageInfo.samples           = VK_SAMPLE_COUNT_1_BIT;
-  imageInfo.tiling            = VK_IMAGE_TILING_OPTIMAL;
-  imageInfo.usage             = VK_IMAGE_USAGE_DEPTH_STENCIL_ATTACHMENT_BIT;
-  imageInfo.initialLayout     = VK_IMAGE_LAYOUT_UNDEFINED;
+  VkImageCreateInfo imageInfo = {.sType         = VK_STRUCTURE_TYPE_IMAGE_CREATE_INFO,
+                                 .imageType     = VK_IMAGE_TYPE_2D,
+                                 .format        = m_depthFormat,
+                                 .extent        = {size.width, size.height, 1},
+                                 .mipLevels     = 1,
+                                 .arrayLayers   = 1,
+                                 .samples       = VK_SAMPLE_COUNT_1_BIT,
+                                 .tiling        = VK_IMAGE_TILING_OPTIMAL,
+                                 .usage         = VK_IMAGE_USAGE_DEPTH_STENCIL_ATTACHMENT_BIT,
+                                 .initialLayout = VK_IMAGE_LAYOUT_UNDEFINED};
 
   NVVK_CHECK(m_alloc->createImage(m_helperDepthImage, imageInfo));
   NVVK_DBG_NAME(m_helperDepthImage.image);
 
-  VkImageViewCreateInfo viewInfo           = {VK_STRUCTURE_TYPE_IMAGE_VIEW_CREATE_INFO};
-  viewInfo.image                           = m_helperDepthImage.image;
-  viewInfo.viewType                        = VK_IMAGE_VIEW_TYPE_2D;
-  viewInfo.format                          = m_depthFormat;
-  viewInfo.subresourceRange.aspectMask     = VK_IMAGE_ASPECT_DEPTH_BIT;
-  viewInfo.subresourceRange.baseMipLevel   = 0;
-  viewInfo.subresourceRange.levelCount     = 1;
-  viewInfo.subresourceRange.baseArrayLayer = 0;
-  viewInfo.subresourceRange.layerCount     = 1;
+  VkImageViewCreateInfo viewInfo = {.sType            = VK_STRUCTURE_TYPE_IMAGE_VIEW_CREATE_INFO,
+                                    .image            = m_helperDepthImage.image,
+                                    .viewType         = VK_IMAGE_VIEW_TYPE_2D,
+                                    .format           = m_depthFormat,
+                                    .subresourceRange = {VK_IMAGE_ASPECT_DEPTH_BIT, 0, 1, 0, 1}};
 
   NVVK_CHECK(vkCreateImageView(m_device, &viewInfo, nullptr, &m_helperDepthImageView));
   NVVK_DBG_NAME(m_helperDepthImageView);
@@ -238,7 +234,7 @@ void VisualHelpers::destroyHelperDepthBuffer()
 // Descriptor Set for Scene Depth Sampling
 //--------------------------------------------------------------------------------------------------
 
-void VisualHelpers::initDescriptorSet(VkImage sceneDepth, VkImageView sceneDepthView)
+void VisualHelpers::initDescriptorSet(VkImageView sceneDepthView)
 {
   VkDescriptorSetLayout helperLayout = transform.getDescriptorSetLayout();
 
@@ -247,28 +243,30 @@ void VisualHelpers::initDescriptorSet(VkImage sceneDepth, VkImageView sceneDepth
       {VK_DESCRIPTOR_TYPE_SAMPLER, 1},
   }};
 
-  VkDescriptorPoolCreateInfo poolInfo{VK_STRUCTURE_TYPE_DESCRIPTOR_POOL_CREATE_INFO};
-  poolInfo.maxSets       = 1;
-  poolInfo.poolSizeCount = static_cast<uint32_t>(poolSizes.size());
-  poolInfo.pPoolSizes    = poolSizes.data();
+  VkDescriptorPoolCreateInfo poolInfo{.sType         = VK_STRUCTURE_TYPE_DESCRIPTOR_POOL_CREATE_INFO,
+                                      .maxSets       = 1,
+                                      .poolSizeCount = static_cast<uint32_t>(poolSizes.size()),
+                                      .pPoolSizes    = poolSizes.data()};
 
   NVVK_CHECK(vkCreateDescriptorPool(m_device, &poolInfo, nullptr, &m_helperDescriptorPool));
   NVVK_DBG_NAME(m_helperDescriptorPool);
 
-  VkDescriptorSetAllocateInfo allocInfo{VK_STRUCTURE_TYPE_DESCRIPTOR_SET_ALLOCATE_INFO};
-  allocInfo.descriptorPool     = m_helperDescriptorPool;
-  allocInfo.descriptorSetCount = 1;
-  allocInfo.pSetLayouts        = &helperLayout;
+  VkDescriptorSetAllocateInfo allocInfo{.sType              = VK_STRUCTURE_TYPE_DESCRIPTOR_SET_ALLOCATE_INFO,
+                                        .descriptorPool     = m_helperDescriptorPool,
+                                        .descriptorSetCount = 1,
+                                        .pSetLayouts        = &helperLayout};
 
   NVVK_CHECK(vkAllocateDescriptorSets(m_device, &allocInfo, &m_helperDescriptorSet));
   NVVK_DBG_NAME(m_helperDescriptorSet);
 
-  VkDescriptorImageInfo depthImageInfo = {};
-  depthImageInfo.imageView             = sceneDepthView;
-  depthImageInfo.imageLayout           = VK_IMAGE_LAYOUT_GENERAL;
+  VkDescriptorImageInfo depthImageInfo = {
+      .imageView   = sceneDepthView,
+      .imageLayout = VK_IMAGE_LAYOUT_GENERAL,
+  };
 
-  VkDescriptorImageInfo samplerInfo = {};
-  samplerInfo.sampler               = m_sampler;
+  VkDescriptorImageInfo samplerInfo = {
+      .sampler = m_sampler,
+  };
 
   std::array<VkWriteDescriptorSet, 2> writes{};
 

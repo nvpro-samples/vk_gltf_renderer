@@ -45,8 +45,11 @@
 #include <nvvk/hdr_ibl.hpp>
 #include <nvvk/resource_allocator.hpp>
 #include <nvvk/sampler_pool.hpp>
+#include <nvvk/staging.hpp>
 #include "gltf_scene.hpp"
 #include "gltf_scene_gpu.hpp"
+#include "gltf_scene_transform_vk.hpp"
+#include "gpu_memory_tracker.hpp"
 #include <nvapp/application.hpp>
 
 
@@ -163,6 +166,39 @@ struct Settings
 };
 
 
+// StagingUploader with per-frame timeline semaphore tracking.
+// Overrides acquireStagingSpace so that all staging operations automatically
+// get the current frame's semaphore state, enabling releaseStaging() to free
+// resources only after the GPU has finished using them.
+class FrameStagingUploader : public nvvk::StagingUploader
+{
+public:
+  // Release completed staging resources and update the timeline semaphore
+  // for the new frame. Must be called once per frame before any staging uploads.
+  void beginFrame(const nvvk::SemaphoreInfo& frameSem)
+  {
+    releaseStaging();
+    m_timelineSemaphore = frameSem.semaphore;
+    m_timelineValue     = frameSem.value;
+  }
+
+  // Acquire staging space with the current frame's timeline semaphore and value
+  VkResult acquireStagingSpace(nvvk::BufferRange&          stagingSpace,
+                               size_t                      dataSize,
+                               const void*                 data,
+                               const nvvk::SemaphoreState& semaphoreState = {}) override
+  {
+    if(!semaphoreState.isValid() && m_timelineSemaphore != VK_NULL_HANDLE)
+      return StagingUploader::acquireStagingSpace(stagingSpace, dataSize, data,
+                                                  nvvk::SemaphoreState::makeFixed(m_timelineSemaphore, m_timelineValue));
+    return StagingUploader::acquireStagingSpace(stagingSpace, dataSize, data, semaphoreState);
+  }
+
+private:
+  VkSemaphore m_timelineSemaphore = VK_NULL_HANDLE;
+  uint64_t    m_timelineValue     = 0;
+};
+
 struct Resources
 {
   enum ImageType
@@ -176,7 +212,7 @@ struct Resources
 
   VkInstance              instance{};
   nvvk::ResourceAllocator allocator{};  // Vulkan Memory Allocator
-  nvvk::StagingUploader   staging;
+  FrameStagingUploader    staging;
 
   nvvk::SamplerPool      samplerPool{};    // Texture Sampler Pool
   VkCommandPool          commandPool{};    // Command pool for secondary command buffer
@@ -186,7 +222,8 @@ struct Resources
   nvvkgltf::SceneVk                sceneVk;
   nvvkgltf::SceneRtx               sceneRtx;
   nvvkgltf::AnimationVk            animationVk;
-  nvvkgltf::SceneGpu sceneGpu{sceneVk, animationVk, sceneRtx, staging};  // Must be declared after its reference dependencies
+  nvvkgltf::TransformComputeVk     transformCompute{};
+  nvvkgltf::SceneGpu sceneGpu{sceneVk, animationVk, sceneRtx, transformCompute, staging};  // Must be declared after its reference dependencies
 
   nvvkgltf::Scene*       getScene() { return scene.get(); }
   const nvvkgltf::Scene* getScene() const { return scene.get(); }
@@ -237,6 +274,8 @@ struct Resources
       }
     }
   }
+
+  nvvkgltf::GpuMemoryTracker appMemoryTracker;  // Application-level GPU memory tracking (GBuffers, etc.)
 
   Settings settings;
 

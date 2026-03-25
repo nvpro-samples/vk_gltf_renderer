@@ -95,6 +95,7 @@ struct RenderLight
 {
   glm::mat4 worldMatrix = glm::mat4(1.0f);
   int       light       = 0;
+  int       nodeID      = -1;
 };
 
 // Centralized registry for renderNode mappings (nodeID/primID <-> renderNodeID).
@@ -248,6 +249,9 @@ public:
   [[nodiscard]] bool save(const std::filesystem::path& filename);  // Save .gltf or .glb
   // Merge another glTF into this scene. Optional maxTextureCount validates combined texture limit (e.g. GPU descriptor limit).
   [[nodiscard]] int mergeScene(const std::filesystem::path& filename, std::optional<uint32_t> maxTextureCount = std::nullopt);  // Returns wrapper node index, or -1 on failure
+  // After mergeScene(), returns the animation list index of the first clip from the merged file (for UI default); -1 if none.
+  // Consumed once by the renderer so the animation dropdown selects merged motion instead of staying on a base-scene clip.
+  [[nodiscard]] int                      takeMergePreferredAnimationIndex();
   void                                   takeModel(tinygltf::Model&& model);  // Use pre-loaded model
   std::unordered_set<std::string>&       supportedExtensions() { return m_supportedExtensions; }
   const std::unordered_set<std::string>& supportedExtensions() const { return m_supportedExtensions; }
@@ -271,7 +275,24 @@ public:
   void                          setCurrentScene(int sceneID);  // Parse scene and create render nodes
   [[nodiscard]] int             getCurrentScene() const { return m_currentScene; }
   const std::vector<glm::mat4>& getNodesWorldMatrices() const { return m_nodesWorldMatrices; }
+  const std::vector<glm::mat4>& getNodesLocalMatrices() const { return m_nodesLocalMatrices; }
   void                          updateNodeWorldMatrices();
+  void                          updateLocalMatricesAndLights();
+  glm::mat4                     computeNodeWorldMatrix(int nodeID) const;
+
+  // Topological BFS levels (see buildTopologicalLevels) — shared by CPU parallel propagation and GPU transform compute.
+  [[nodiscard]] const std::vector<int>&                 getTopoNodeOrder() const { return m_topoLevels.nodeOrder; }
+  [[nodiscard]] const std::vector<std::pair<int, int>>& getTopoLevels() const { return m_topoLevels.levels; }
+  [[nodiscard]] const std::vector<int>&                 getNodeParents() const { return m_nodeParents; }
+  // Bumped when traverseSceneWithVisibility completes (parents/m_topoLevels/world matrices refresh), when
+  // variant changes alter render-node material IDs, etc. TransformComputeVk matches this to refresh static
+  // SSBOs (mappings, parents, topo, instancing locals) without relying only on buildAccelerationStructures.
+  [[nodiscard]] uint64_t getSceneGraphRevision() const { return m_sceneGraphRevision; }
+  // KHR_mesh_gpu_instancing: per-node instance locals (used by GPU transform path).
+  [[nodiscard]] const std::unordered_map<int, std::vector<glm::mat4>>& getGpuInstanceLocalMatrices() const
+  {
+    return m_gpuInstanceLocalMatrices;
+  }
 
   //--------------------------------------------------------------------------------------------------
   // Variant Management
@@ -339,7 +360,8 @@ public:
   // Compact scene model - remove orphaned resources (meshes, materials, textures, images, samplers, skins, cameras, animations, lights, and geometry data)
   // Returns true if any resources were removed.
   // Use after operations that create orphaned resources: delete nodes, import then delete, etc.
-  // IMPORTANT: Caller must rebuild GPU resources after compaction (call rebuildVulkanSceneFull() for full rebuild with textures).
+  // IMPORTANT: After compaction, re-parse the active scene so render nodes / dirty flags match the
+  // compacted model (e.g. setCurrentScene + parseScene), then rebuild GPU (e.g. rebuildVulkanSceneFull).
   [[nodiscard]] bool compactModel();
 
   //--------------------------------------------------------------------------------------------------
@@ -488,6 +510,7 @@ private:
     std::vector<std::pair<int, int>> levels;     // Per-level (offset, count) into nodeOrder
   };
   TopoLevels m_topoLevels;
+  uint64_t   m_sceneGraphRevision = 0;
   void       buildTopologicalLevels();
   void       updateWorldMatricesSerial();    // Filtered-root recursive walk (small dirty sets)
   void       updateWorldMatricesParallel();  // Level-by-level parallel (large dirty sets)
@@ -515,6 +538,9 @@ private:
   //--------------------------------------------------------------------------------------------------
 
   DirtyFlags m_dirtyFlags;
+
+  // Set by mergeScene when imported file contributes new animations (first new clip index). Cleared by takeMergePreferredAnimationIndex.
+  int m_pendingMergePreferredAnimationIndex = -1;
 
   std::unique_ptr<SceneEditor>             m_editor;
   mutable std::unique_ptr<AnimationSystem> m_animation;

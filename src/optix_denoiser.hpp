@@ -34,6 +34,7 @@
 // Vulkan-CUDA interop
 #include "vk_cuda.hpp"
 
+#include "gpu_memory_tracker.hpp"
 #include "resources.hpp"
 
 //-------------------------------------------------------------------------------------------------------
@@ -200,6 +201,8 @@ public:
   // Update auto-denoise logic (call every frame in render loop)
   void updateDenoiser(Resources& resources);
 
+  const nvvkgltf::GpuMemoryTracker& getExportMemoryTracker() const { return m_exportMemoryTracker; }
+
   // UI controls
   bool onUi(Resources& resources);
 
@@ -279,6 +282,10 @@ private:
 
   // Input G-Buffers reference
   const nvvk::GBuffer* m_inputGBuffers = nullptr;
+
+  // Memory tracking: GBuffer images use the main allocator (tracked via appTracker), export buffers use m_allocExport.
+  nvvkgltf::GpuMemoryTracker* m_appMemoryTracker = nullptr;
+  nvvkgltf::GpuMemoryTracker  m_exportMemoryTracker;
 
   // Output image
   nvvk::GBuffer m_inputOutputGbuffers;  // See GBufferIndex

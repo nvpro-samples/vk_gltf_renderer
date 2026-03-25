@@ -117,4 +117,12 @@ void SceneGpu::applyAnimation(VkCommandBuffer cmd, Scene& scn)
     m_sceneVk.uploadPrimitives(cmd, m_staging, scn);
 }
 
+//--------------------------------------------------------------------------------------------------
+// Check whether the GPU compute transform path should be used this frame.
+// Combines the user-facing toggle with the technical prerequisites checked by canUseGpuTransformPath.
+bool SceneGpu::shouldUseGpuTransform(const Scene& scn) const
+{
+  return useComputeTransformation && canUseGpuTransformPath(m_transformCompute, scn, m_sceneRtx);
+}
+
 }  // namespace nvvkgltf
