@@ -5,6 +5,7 @@ This document provides a curated collection of resources to support work with th
 
 ## glTF Models
 
+* **Models downloadable from CMake's "Configure" action** : Look into CMakeLists.txt in section "*Adding download resources*" around lne 287 : you can uncomment models we provided for our samples. They will be downloaded in the folder *_downloaded_resources*
 * [glTF Sample Assets](https://github.com/KhronosGroup/glTF-Sample-Assets) : glTF V2.0 Sample Assets
 * [Sketchfab](https://sketchfab.com/3d-models?features=downloadable&sort_by=-likeCount) : A huge collection of downloadable models.
 * [Polycam](https://poly.cam/3d-models/gltf-models) : GLTF 3D Models

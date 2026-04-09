@@ -176,6 +176,14 @@ std::optional<int> SceneEditor::getNodeSkin(int nodeIndex) const
 
 //--------------------------------------------------------------------------------------------------
 // Visibility
+//
+// Pushes KHR_node_visibility (and inherited visibility) into RenderNode::visible and marks each
+// affected render node dirty for Vk + RTX. Raster reads visible on the CPU.
+//
+// GPU transform path: toggling visibility can dirty a huge fraction of render nodes; staging a full
+// mapping SSBO would allocate proportional to the scene (OOM risk). We set tlasVisibilityNeedsCpuSync
+// so dispatchTransformUpdate skips that upload and runs SceneRtx::syncTopLevelAS once to refresh
+// TLAS instance references from CPU (same as the all-CPU path).
 //--------------------------------------------------------------------------------------------------
 
 void SceneEditor::updateVisibility(int nodeIndex)
@@ -187,7 +195,6 @@ void SceneEditor::updateVisibility(int nodeIndex)
     {
       visible = tinygltf::utils::getNodeVisibility(node).visible;
     }
-
     for(int renderNodeID : m_scene.m_renderNodeRegistry.getRenderNodesForNode(curNodeIndex))
     {
       m_scene.m_renderNodeRegistry.getRenderNodes()[renderNodeID].visible = visible;
@@ -203,6 +210,10 @@ void SceneEditor::updateVisibility(int nodeIndex)
   const tinygltf::Node& node    = m_scene.m_model.nodes[nodeIndex];
   bool                  visible = tinygltf::utils::getNodeVisibility(node).visible;
   processNode(nodeIndex, visible);
+  // Root dirty is enough: updateNodeWorldMatrices() propagates through descendants.
+  m_scene.markNodeDirty(nodeIndex);
+
+  m_scene.m_dirtyFlags.tlasVisibilityNeedsCpuSync = true;
 }
 
 //--------------------------------------------------------------------------------------------------
@@ -865,6 +876,8 @@ void SceneEditor::remapIndicesAfterNodeDeletion(int deletedIndex)
 // Material ops
 //--------------------------------------------------------------------------------------------------
 
+// Updates glTF + CPU RenderNodes. GPU transform path reads materialID from RenderNodeGpuMapping;
+// bumpSceneGraphRevision() forces TransformComputeVk to rebuild that SSBO (same as variant material changes).
 void SceneEditor::setPrimitiveMaterial(int meshIndex, int primIndex, int newMaterialID)
 {
   if(meshIndex < 0 || meshIndex >= static_cast<int>(m_scene.m_model.meshes.size()))
@@ -887,6 +900,7 @@ void SceneEditor::setPrimitiveMaterial(int meshIndex, int primIndex, int newMate
   }
 
   tinygltf::Primitive& primitive = mesh.primitives[primIndex];
+  const int            prevMat   = primitive.material;
   primitive.material             = newMaterialID;
 
   std::vector<nvvkgltf::RenderNode>& rnodes = m_scene.m_renderNodeRegistry.getRenderNodes();
@@ -908,6 +922,9 @@ void SceneEditor::setPrimitiveMaterial(int meshIndex, int primIndex, int newMate
       }
     }
   }
+
+  if(prevMat != newMaterialID)
+    m_scene.bumpSceneGraphRevision();
 }
 
 int SceneEditor::duplicateMaterial(int originalIndex)

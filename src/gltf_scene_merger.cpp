@@ -210,6 +210,7 @@ static void remapAndAppendTextures(tinygltf::Model& base, const tinygltf::Model&
       tex.source += offsets.images;
     if(tex.sampler >= 0)
       tex.sampler += offsets.samplers;
+    tinygltf::utils::offsetTextureExtensionImageSources(tex, offsets.images);
     base.textures.push_back(std::move(tex));
   }
 }

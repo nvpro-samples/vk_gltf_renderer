@@ -2,8 +2,12 @@
  * Copyright (c) 2026, NVIDIA CORPORATION.  All rights reserved.
  *
  * Phase 2: For each render node / TLAS slot, compute final world matrix (including GPU instancing),
- * write GltfRenderNode (object/world + inverse + IDs), and update only the 48-byte transform in
- * VkAccelerationStructureInstanceKHR (64-byte stride; remainder preserved for BLAS ref and packed fields).
+ * write GltfRenderNode (object/world + inverse + IDs), and update the TLAS instance transform.
+ *
+ * TLAS: we only rewrite transform3x4; accelerationStructureReference is preserved from the loaded
+ * instance (last CPU TLAS sync or prior frame). KHR_node_visibility is applied on the CPU via
+ * SceneRtx::syncTopLevelAS when DirtyFlags::tlasVisibilityNeedsCpuSync is set — avoids staging
+ * multi-megabyte mapping buffers when huge subtrees toggle visibility.
  *
  * Matrix math (WHY this matches CPU / glm):
  * - Slang compiles to SPIR-V using HLSL-style semantics: `mul(A, B)` is the matrix product A*B
@@ -24,7 +28,7 @@
 
 // SPIR-V path: GLSL450 extended instruction MatrixInverse (same numeric result as a full 4x4 inverse).
 // Kept in this .comp.slang only — not in shared .h.slang (C++ includes that header for struct layout).
-__generic<T : __BuiltinFloatingPointType, let N : int> [require(spirv)] matrix<T, N, N> inverse(matrix<T, N, N> m)
+__generic<T : __BuiltinFloatingPointType, let N : int>[require(spirv)] matrix<T, N, N> inverse(matrix<T, N, N> m)
 {
   __target_switch
   {
@@ -60,7 +64,6 @@ void main(uint3 dtid: SV_DispatchThreadID)
   rn.renderPrimID      = map.renderPrimID;
   pc.outRenderNodes[i] = rn;
 
-  // Set the TLAS transform
   float4x4 tr = transpose(worldMat);
 
   TlasInstance inst  = pc.outInstances[i];

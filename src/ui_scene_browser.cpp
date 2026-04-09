@@ -56,23 +56,20 @@ static ImGuiTreeNodeFlags s_treeNodeFlags = ImGuiTreeNodeFlags_SpanAllColumns | 
 // HELPER FUNCTIONS
 //==================================================================================================
 
-static std::string getTextureDisplayName(const tinygltf::Model& model, int textureIndex)
+static std::string getImageSourceLabel(const tinygltf::Model& model, int imageIndex)
 {
-  if(textureIndex < 0 || textureIndex >= static_cast<int>(model.textures.size()))
-    return "None";
+  if(imageIndex < 0 || imageIndex >= static_cast<int>(model.images.size()))
+    return {};
 
-  const tinygltf::Texture& texture = model.textures[textureIndex];
-  if(!texture.name.empty())
-    return texture.name + " (tex " + std::to_string(textureIndex) + ")";
-
-  if(texture.source >= 0 && texture.source < static_cast<int>(model.images.size()))
-  {
-    const tinygltf::Image& image = model.images[texture.source];
-    if(!image.name.empty())
-      return image.name + " (tex " + std::to_string(textureIndex) + ")";
-  }
-
-  return "Texture " + std::to_string(textureIndex);
+  const tinygltf::Image& image = model.images[imageIndex];
+  std::string            base;
+  if(!image.uri.empty())
+    base = image.uri;
+  else if(!image.name.empty())
+    base = image.name;
+  else
+    base = "Embedded image " + std::to_string(imageIndex);
+  return "[" + std::to_string(imageIndex) + "] " + base;
 }
 
 //==================================================================================================
@@ -101,13 +98,16 @@ void UiSceneBrowser::setScene(nvvkgltf::Scene* scene)
   m_textureNames.reserve(model.textures.size());
   for(int i = 0; i < static_cast<int>(model.textures.size()); ++i)
   {
-    m_textureNames.push_back(getTextureDisplayName(model, i));
+    m_textureNames.push_back(tinygltf::utils::getTextureUiLabel(model, i));
   }
 
   // Mark caches as dirty
   m_meshToNodeMapDirty   = true;
   m_lightToNodeMapDirty  = true;
   m_cameraToNodeMapDirty = true;
+
+  m_pendingScrollToImageIndex = -1;
+  m_forceImagesSectionOpen    = false;
 
   // Initialize scene transforms (only TRS state, node list will be rebuilt dynamically)
   m_sceneTransforms.clear();
@@ -208,37 +208,8 @@ void UiSceneBrowser::render(bool* show, bool isBusy)
       ImGui::EndTabBar();
     }
 
-    // Keyboard shortcuts (when window is focused)
-    if(ImGui::IsWindowFocused(ImGuiFocusedFlags_RootAndChildWindows) && m_selection && m_selection->hasSelection())
-    {
-      auto sel = m_selection->getSelection();
-
-      // Ctrl+D: Duplicate node
-      if(ImGui::IsKeyPressed(ImGuiKey_D) && ImGui::GetIO().KeyCtrl)
-      {
-        if(sel.type == SceneSelection::SelectionType::eNode && sel.nodeIndex >= 0)
-        {
-          auto cmd = std::make_unique<DuplicateNodeCommand>(*m_scene, sel.nodeIndex, m_selection);
-          m_undoStack->executeCommand(std::move(cmd));
-          LOGI("Duplicated node %d (via Ctrl+D)\n", sel.nodeIndex);
-          markCachesDirty();
-        }
-      }
-
-      // Del: Delete node
-      if(ImGui::IsKeyPressed(ImGuiKey_Delete))
-      {
-        if(sel.type == SceneSelection::SelectionType::eNode && sel.nodeIndex >= 0)
-        {
-          m_pendingDeleteNode        = sel.nodeIndex;
-          m_openDeletePopupNextFrame = true;
-        }
-      }
-    }
-
     // Dialogs (rendered outside tabs)
     renderRenameDialog();
-    renderDeleteConfirmation();
   }
   ImGui::End();
 }
@@ -1281,10 +1252,49 @@ void UiSceneBrowser::renderTexturesGroup()
     // Add scrollable child region with max height
     ImGui::BeginChild("TexturesScrollRegion", ImVec2(0, 200), false, ImGuiWindowFlags_HorizontalScrollbar);
 
-    for(int i = 0; i < static_cast<int>(model.textures.size()); ++i)
+    static ImGuiTableFlags s_texturesTableFlags = ImGuiTableFlags_ScrollY | ImGuiTableFlags_RowBg | ImGuiTableFlags_BordersOuter
+                                                  | ImGuiTableFlags_BordersV | ImGuiTableFlags_Resizable;
+    if(ImGui::BeginTable("TexturesTable", 3, s_texturesTableFlags))
     {
-      std::string label = "[" + std::to_string(i) + "] " + m_textureNames[i];
-      ImGui::BulletText("%s", label.c_str());
+      ImGui::TableSetupScrollFreeze(0, 1);
+      ImGui::TableSetupColumn("#", ImGuiTableColumnFlags_WidthFixed, 36.0f);
+      ImGui::TableSetupColumn("Name", ImGuiTableColumnFlags_WidthStretch);
+      ImGui::TableSetupColumn("Image source", ImGuiTableColumnFlags_WidthStretch);
+      ImGui::TableHeadersRow();
+
+      for(int i = 0; i < static_cast<int>(model.textures.size()); ++i)
+      {
+        const tinygltf::Texture& texture = model.textures[i];
+
+        ImGui::TableNextRow();
+        ImGui::TableNextColumn();
+        ImGui::Text("%d", i);
+        ImGui::TableNextColumn();
+        ImGui::TextUnformatted(m_textureNames[i].c_str());
+        ImGui::TableNextColumn();
+
+        const int imageIdx = tinygltf::utils::getTextureImageIndex(texture);
+        if(imageIdx >= 0 && imageIdx < static_cast<int>(model.images.size()))
+        {
+          const std::string srcLabel = getImageSourceLabel(model, imageIdx);
+          ImGui::PushID(i);
+          ImGui::PushStyleColor(ImGuiCol_Text, ImVec4(0.40f, 0.70f, 1.00f, 1.00f));
+          if(ImGui::Selectable(srcLabel.c_str(), false, ImGuiSelectableFlags_AllowOverlap))
+          {
+            m_pendingScrollToImageIndex = imageIdx;
+            m_forceImagesSectionOpen    = true;
+            m_currentTab                = ViewTab::SceneList;
+          }
+          ImGui::PopStyleColor();
+          ImGui::PopID();
+        }
+        else
+        {
+          ImGui::TextDisabled("-");
+        }
+      }
+
+      ImGui::EndTable();
     }
 
     ImGui::EndChild();
@@ -1297,6 +1307,15 @@ void UiSceneBrowser::renderImagesGroup()
     return;
 
   const tinygltf::Model& model = m_scene->getModel();
+
+  if(m_pendingScrollToImageIndex >= static_cast<int>(model.images.size()))
+    m_pendingScrollToImageIndex = -1;
+
+  if(m_forceImagesSectionOpen)
+  {
+    ImGui::SetNextItemOpen(true);
+    m_forceImagesSectionOpen = false;
+  }
 
   if(ImGui::CollapsingHeader((std::string(ICON_MS_PHOTO) + " Images (" + std::to_string(model.images.size()) + ")").c_str()))
   {
@@ -1327,8 +1346,17 @@ void UiSceneBrowser::renderImagesGroup()
           displayName = "Embedded image " + std::to_string(i);
 
         ImGui::TableNextRow();
+        if(m_pendingScrollToImageIndex == i)
+        {
+          ImGui::SetScrollHereY(0.5f);
+          m_pendingScrollToImageIndex = -1;
+        }
         ImGui::TableNextColumn();
         ImGui::Text("%d", i);
+        if(ImGui::IsItemHovered())
+        {
+          ImGui::SetTooltip("URI: %s", image.uri.empty() ? "(embedded)" : image.uri.c_str());
+        }
         ImGui::TableNextColumn();
         ImGui::TextUnformatted(displayName.c_str());
         ImGui::TableNextColumn();
@@ -1391,8 +1419,11 @@ void UiSceneBrowser::showNodeContextMenu(int nodeIdx)
 
       if(ImGui::MenuItem(ICON_MS_DELETE " Delete", "Del"))
       {
-        m_pendingDeleteNode        = nodeIdx;
-        m_openDeletePopupNextFrame = true;
+        if(m_pendingDeleteNode && m_openDeletePopupNextFrame)
+        {
+          *m_pendingDeleteNode        = nodeIdx;
+          *m_openDeletePopupNextFrame = true;
+        }
       }
 
       ImGui::Separator();
@@ -1558,50 +1589,6 @@ void UiSceneBrowser::renderRenameDialog()
     {
       m_renameState = {};
       ImGui::CloseCurrentPopup();
-    }
-
-    ImGui::EndPopup();
-  }
-}
-
-void UiSceneBrowser::renderDeleteConfirmation()
-{
-  // Open popup if flagged
-  if(m_openDeletePopupNextFrame)
-  {
-    ImGui::OpenPopup("DeleteConfirmation");
-    m_openDeletePopupNextFrame = false;
-  }
-
-  // Delete confirmation popup
-  if(ImGui::BeginPopupModal("DeleteConfirmation", nullptr, ImGuiWindowFlags_AlwaysAutoResize))
-  {
-    if(m_pendingDeleteNode >= 0 && m_scene && m_pendingDeleteNode < static_cast<int>(m_scene->getModel().nodes.size()))
-    {
-      const tinygltf::Model& model = m_scene->getModel();
-      ImGui::Text("Delete node '%s'?", model.nodes[m_pendingDeleteNode].name.c_str());
-      ImGui::Text("This will delete the node and all its children.");
-      ImGui::Text("You can undo this with Ctrl+Z.");
-      ImGui::Separator();
-
-      if(ImGui::Button(ICON_MS_DELETE " Delete", ImVec2(120, 0)))
-      {
-        LOGI("Deleting node %d: %s\n", m_pendingDeleteNode, model.nodes[m_pendingDeleteNode].name.c_str());
-
-        auto cmd = std::make_unique<DeleteNodeCommand>(*m_scene, m_pendingDeleteNode, m_selection);
-        m_undoStack->executeCommand(std::move(cmd));
-        m_pendingDeleteNode = -1;
-
-        markCachesDirty();
-
-        ImGui::CloseCurrentPopup();
-      }
-      ImGui::SameLine();
-      if(ImGui::Button(ICON_MS_CANCEL " Cancel", ImVec2(120, 0)))
-      {
-        m_pendingDeleteNode = -1;
-        ImGui::CloseCurrentPopup();
-      }
     }
 
     ImGui::EndPopup();

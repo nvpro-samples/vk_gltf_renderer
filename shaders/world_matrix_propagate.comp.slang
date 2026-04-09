@@ -16,7 +16,7 @@ ConstantBuffer<PropagateWorldMatricesPushConstant> pc;
 
 [shader("compute")]
 [numthreads(WORLD_MATRIX_WORKGROUP_SIZE, 1, 1)]
-void main(uint3 dtid : SV_DispatchThreadID)
+void main(uint3 dtid: SV_DispatchThreadID)
 {
   uint ti = dtid.x;
   if(ti >= pc.levelCount)

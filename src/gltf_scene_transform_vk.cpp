@@ -81,6 +81,17 @@ static void fillPerRenderNodeInstanceLocals(const Scene& scn, std::vector<glm::m
   }
 }
 
+//--------------------------------------------------------------------------------------------------
+// Pack one CPU RenderNode into the SSBO layout consumed by update_render_instances.comp (material/prim IDs).
+//--------------------------------------------------------------------------------------------------
+static void fillRenderNodeGpuMapping(shaderio::RenderNodeGpuMapping& out, const nvvkgltf::RenderNode& rn)
+{
+  out.nodeID       = rn.refNodeID;
+  out.pad0         = 0;
+  out.materialID   = rn.materialID;
+  out.renderPrimID = rn.renderPrimID;
+}
+
 }  // namespace
 
 //--------------------------------------------------------------------------------------------------
@@ -353,10 +364,7 @@ void TransformComputeVk::createGpuBuffers(nvvk::StagingUploader& staging, const 
   const auto&                                 rns = scn.getRenderNodes();
   for(size_t i = 0; i < numRenderNodes; ++i)
   {
-    mappings[i].nodeID       = rns[i].refNodeID;
-    mappings[i].pad0         = 0;
-    mappings[i].materialID   = rns[i].materialID;
-    mappings[i].renderPrimID = rns[i].renderPrimID;
+    fillRenderNodeGpuMapping(mappings[i], rns[i]);
   }
 
   NVVK_CHECK(m_alloc->createBuffer(m_bRenderNodeMappings, std::span(mappings).size_bytes(), kSsboUsage));
@@ -397,8 +405,11 @@ void TransformComputeVk::createGpuBuffers(nvvk::StagingUploader& staging, const 
 // Record the full GPU transform update into `cmd`:
 //   1. Upload dirty (or all) local matrices via the staging uploader.
 //   2. Phase 1 — propagate world matrices level-by-level through the scene-graph topology.
-//   3. Phase 2 — write final render-node transforms and TLAS instance data.
-//   4. Rebuild the TLAS from the updated instance buffer.
+//   3. Phase 2 — write render-node SSBO + TLAS instance transforms (BLAS ref preserved on GPU).
+//      RenderNodeGpuMapping is refreshed only in createGpuBuffers when getSceneGraphRevision() changes
+//      (parseScene(), variant-driven material IDs, etc.).
+//   4. TLAS in-place update from the instance buffer (cmdUpdateTlasFromInstanceBuffer).
+//   5. If tlasVisibilityNeedsCpuSync — syncTopLevelAS refreshes instance BLAS refs from CPU Scene.
 void TransformComputeVk::dispatchTransformUpdate(VkCommandBuffer cmd, nvvk::StagingUploader& staging, Scene& scn, const SceneVk& scnVk, SceneRtx& scnRtx)
 {
   if(!m_alloc)
@@ -485,6 +496,19 @@ void TransformComputeVk::dispatchTransformUpdate(VkCommandBuffer cmd, nvvk::Stag
   vkCmdDispatch(cmd, static_cast<uint32_t>((numRenderNodes + WORLD_MATRIX_WORKGROUP_SIZE - 1) / WORLD_MATRIX_WORKGROUP_SIZE), 1, 1);
 
   scnRtx.cmdUpdateTlasFromInstanceBuffer(cmd);
+
+  if(df.tlasVisibilityNeedsCpuSync)
+  {
+    // Visibility toggles force a CPU TLAS instance refresh; ensure CPU RenderNode world matrices
+    // are current (GPU path normally updates transforms only on the device).
+    if(!df.nodes.empty())
+      scn.updateNodeWorldMatrices();
+
+    nvvk::cmdMemoryBarrier(cmd, VK_PIPELINE_STAGE_2_ACCELERATION_STRUCTURE_BUILD_BIT_KHR, VK_PIPELINE_STAGE_2_TRANSFER_BIT,
+                           VK_ACCESS_2_ACCELERATION_STRUCTURE_READ_BIT_KHR, VK_ACCESS_2_TRANSFER_WRITE_BIT);
+    (void)scnRtx.syncTopLevelAS(cmd, staging, scn);
+    df.tlasVisibilityNeedsCpuSync = false;
+  }
 
 #ifndef NDEBUG
   const_cast<SceneVk&>(scnVk).debugUpdateShadowCopy(scn);  // material/prim IDs — matrices validated separately

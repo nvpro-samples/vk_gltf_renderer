@@ -74,6 +74,7 @@ public:
   // GPU transform path: instance buffer was written by compute — run in-place TLAS update only (no CPU instance upload).
   void                          cmdUpdateTlasFromInstanceBuffer(VkCommandBuffer cmd);
   [[nodiscard]] VkDeviceAddress getInstancesBufferAddress() const { return m_instancesBuffer.address; }
+
   // Rebuild or update TLAS. dirtyRenderNodes empty = full update.
   void rebuildTopLevelAS(VkCommandBuffer                cmd,
                          nvvk::StagingUploader&         staging,

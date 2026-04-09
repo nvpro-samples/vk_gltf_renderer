@@ -1122,10 +1122,31 @@ inline KHR_texture_transform getTextureTransform(const T& tinfo)
 
 /*-------------------------------------------------------------------------------------------------
 ## Function `getTextureImageIndex`
-> Retrieves the image index of a texture, accounting for extensions such as
-> `MSFT_texture_dds` and `KHR_texture_basisu`.
+> Effective glTF image index for a texture: `texture.source`, overridden by extension `source`
+> when present (`EXT_texture_webp`, `MSFT_texture_dds`, `KHR_texture_basisu`). If several apply,
+> the last listed extension wins (same order as the implementation).
 -------------------------------------------------------------------------------------------------*/
 int getTextureImageIndex(const tinygltf::Texture& texture);
+
+/*-------------------------------------------------------------------------------------------------
+## Function `getTextureUiLabel`
+> Short label for texture pickers / lists (texture name, else backing image name, else fallback).
+> Uses `getTextureImageIndex` so WebP / DDS / BasisU textures resolve to the correct image.
+-------------------------------------------------------------------------------------------------*/
+std::string getTextureUiLabel(const tinygltf::Model& model, int textureIndex);
+
+/*-------------------------------------------------------------------------------------------------
+## Function `remapTextureExtensionImageSources`
+> Rewrites `source` inside `EXT_texture_webp`, `MSFT_texture_dds`, and `KHR_texture_basisu` using
+> the same index mapping as `texture.source` during compaction.
+-------------------------------------------------------------------------------------------------*/
+void remapTextureExtensionImageSources(tinygltf::Texture& texture, const std::vector<int>& imageRemap);
+
+/*-------------------------------------------------------------------------------------------------
+## Function `offsetTextureExtensionImageSources`
+> Adds `imageIndexDelta` to `source` in WebP / DDS / BasisU extensions (e.g. merge append).
+-------------------------------------------------------------------------------------------------*/
+void offsetTextureExtensionImageSources(tinygltf::Texture& texture, int imageIndexDelta);
 
 /*-------------------------------------------------------------------------------------------------
 > Retrieves the visibility of a node using `KHR_node_visibility`.

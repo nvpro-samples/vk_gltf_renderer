@@ -309,16 +309,15 @@ void nvvkgltf::SceneRtx::cmdCreateBuildTopLevelAccelerationStructure(VkCommandBu
     m_tlasInstances.push_back(asInstance);
   }
 
+  // Vulkan requires at least one instance for TLAS builds. Use a local invisible dummy
+  // so m_tlasInstances always reflects the true scene state (empty when no render nodes).
+  VkAccelerationStructureInstanceKHR                  dummyInstance{};
+  std::span<const VkAccelerationStructureInstanceKHR> buildInstances = m_tlasInstances;
   if(m_tlasInstances.empty())
   {
-    VkAccelerationStructureInstanceKHR asInstance{};
-    asInstance.transform                              = nvvk::toTransformMatrixKHR(glm::mat4(1.0f));
-    asInstance.instanceCustomIndex                    = 0;
-    asInstance.accelerationStructureReference         = 0;
-    asInstance.instanceShaderBindingTableRecordOffset = 0;
-    asInstance.mask                                   = 0x01;
-    asInstance.flags                                  = 0;
-    m_tlasInstances.push_back(asInstance);
+    dummyInstance.transform = nvvk::toTransformMatrixKHR(glm::mat4(1.0f));
+    dummyInstance.mask      = 0x00;
+    buildInstances          = {&dummyInstance, 1};
   }
 
   VkBuildAccelerationStructureFlagsKHR buildFlags = VK_BUILD_ACCELERATION_STRUCTURE_PREFER_FAST_TRACE_BIT_KHR;
@@ -326,16 +325,16 @@ void nvvkgltf::SceneRtx::cmdCreateBuildTopLevelAccelerationStructure(VkCommandBu
 
   constexpr VmaAllocationCreateFlags instanceAllocFlags   = 0;
   constexpr VkDeviceSize             instanceMinAlignment = 16;
-  NVVK_CHECK(m_alloc->createBuffer(m_instancesBuffer, std::span(m_tlasInstances).size_bytes(),
+  NVVK_CHECK(m_alloc->createBuffer(m_instancesBuffer, buildInstances.size_bytes(),
                                    VK_BUFFER_USAGE_2_SHADER_DEVICE_ADDRESS_BIT | VK_BUFFER_USAGE_2_ACCELERATION_STRUCTURE_BUILD_INPUT_READ_ONLY_BIT_KHR
                                        | VK_BUFFER_USAGE_2_STORAGE_BUFFER_BIT,
                                    VMA_MEMORY_USAGE_AUTO, instanceAllocFlags, instanceMinAlignment));
-  NVVK_CHECK(staging.appendBuffer(m_instancesBuffer, 0, std::span(m_tlasInstances)));
+  NVVK_CHECK(staging.appendBuffer(m_instancesBuffer, 0, buildInstances));
   NVVK_DBG_NAME(m_instancesBuffer.buffer);
   m_memoryTracker.track(kMemCategoryInstances, m_instancesBuffer.allocation);
 
   m_tlasBuildData.asType = VK_ACCELERATION_STRUCTURE_TYPE_TOP_LEVEL_KHR;
-  auto geo               = m_tlasBuildData.makeInstanceGeometry(m_tlasInstances.size(), m_instancesBuffer.address);
+  auto geo               = m_tlasBuildData.makeInstanceGeometry(buildInstances.size(), m_instancesBuffer.address);
   m_tlasBuildData.addGeometry(geo);
 
   staging.cmdUploadAppended(cmd);

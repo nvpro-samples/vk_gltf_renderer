@@ -457,6 +457,27 @@ void GltfRenderer::renderUI()
   renderTonemapperWindow();
   renderStatisticsWindow();
 
+  if(m_resources.settings.showGridSettingsWindow)
+  {
+    if(ImGui::Begin(ICON_MS_GRID_VIEW " Grid & Snap", &m_resources.settings.showGridSettingsWindow))
+    {
+      Settings& s = m_resources.settings;
+      if(PE::begin())
+      {
+        PE::DragFloat("Grid Unit", &s.gridUnit, 0.01f, 0.001f, 1000.0f, "%.3f");
+        ImGui::Separator();
+        PE::Checkbox("Enable Snapping", &s.snapEnabled);
+        ImGui::BeginDisabled(!s.snapEnabled);
+        PE::Text("Translation", "%.3f (= Grid Unit)", s.gridUnit);
+        PE::DragFloat("Rotation (deg)", &s.snapRotation, 1.0f, 1.0f, 180.0f, "%.1f");
+        PE::DragFloat("Scale", &s.snapScale, 0.01f, 0.001f, 10.0f, "%.3f");
+        ImGui::EndDisabled();
+        PE::end();
+      }
+    }
+    ImGui::End();
+  }
+
 #ifndef NDEBUG
   if(m_resources.settings.showGridStyleWindow)
   {
@@ -475,6 +496,50 @@ void GltfRenderer::renderUI()
     ImGui::End();
   }
 #endif
+
+  // Application-level delete confirmation (works regardless of which windows are open)
+  if(m_openDeletePopupNextFrame)
+  {
+    ImGui::OpenPopup("DeleteConfirmation");
+    m_openDeletePopupNextFrame = false;
+  }
+  if(ImGui::BeginPopupModal("DeleteConfirmation", nullptr, ImGuiWindowFlags_AlwaysAutoResize))
+  {
+    if(m_pendingDeleteNode >= 0 && m_resources.getScene()
+       && m_pendingDeleteNode < static_cast<int>(m_resources.getScene()->getModel().nodes.size()))
+    {
+      const tinygltf::Model& model = m_resources.getScene()->getModel();
+      ImGui::Text("Delete node '%s'?", model.nodes[m_pendingDeleteNode].name.c_str());
+      ImGui::Text("This will delete the node and all its children.");
+      ImGui::Text("You can undo this with Ctrl+Z.");
+      ImGui::Separator();
+
+      if(ImGui::Button(ICON_MS_DELETE " Delete", ImVec2(120, 0)))
+      {
+        auto cmd = std::make_unique<DeleteNodeCommand>(*m_resources.getScene(), m_pendingDeleteNode, &m_sceneSelection);
+        m_undoStack.executeCommand(std::move(cmd));
+        m_pendingDeleteNode = -1;
+        onUndoRedo();
+        ImGui::CloseCurrentPopup();
+      }
+      ImGui::SameLine();
+      if(ImGui::Button(ICON_MS_CANCEL " Cancel", ImVec2(120, 0)))
+      {
+        m_pendingDeleteNode = -1;
+        ImGui::CloseCurrentPopup();
+      }
+    }
+    else
+    {
+      ImGui::Text("Nothing to delete.");
+      if(ImGui::Button("Close", ImVec2(120, 0)))
+      {
+        m_pendingDeleteNode = -1;
+        ImGui::CloseCurrentPopup();
+      }
+    }
+    ImGui::EndPopup();
+  }
 }
 
 void GltfRenderer::renderFileMenu(bool                   validScene,
@@ -540,6 +605,33 @@ void GltfRenderer::renderEditMenu(bool validScene)
   }
   ImGui::EndDisabled();
 
+  auto selectionNodeIndex = [this, validScene]() -> int {
+    if(!validScene || !m_sceneSelection.hasSelection())
+      return -1;
+    auto sel = m_sceneSelection.getSelection();
+    if((sel.type == SceneSelection::SelectionType::eNode || sel.type == SceneSelection::SelectionType::ePrimitive)
+       && sel.nodeIndex >= 0)
+      return sel.nodeIndex;
+    return -1;
+  };
+
+  bool hasNodeSelected = selectionNodeIndex() >= 0;
+  ImGui::Separator();
+  ImGui::BeginDisabled(!hasNodeSelected);
+  if(ImGui::MenuItem(ICON_MS_CONTENT_COPY " Duplicate", "Ctrl+D"))
+  {
+    int  nodeIdx = selectionNodeIndex();
+    auto cmd     = std::make_unique<DuplicateNodeCommand>(*m_resources.getScene(), nodeIdx, &m_sceneSelection);
+    m_undoStack.executeCommand(std::move(cmd));
+    onUndoRedo();
+  }
+  if(ImGui::MenuItem(ICON_MS_DELETE " Delete", "Del"))
+  {
+    m_pendingDeleteNode        = selectionNodeIndex();
+    m_openDeletePopupNextFrame = true;
+  }
+  ImGui::EndDisabled();
+
   ImGui::EndMenu();
 }
 
@@ -559,6 +651,9 @@ void GltfRenderer::renderViewMenu(bool validScene, bool& fitScene, bool& fitObje
   ImGui::Separator();
   ImGui::MenuItem(ICON_MS_GRID_ON " Grid", "G", &m_resources.settings.showGrid);
   ImGui::MenuItem(ICON_MS_3D_ROTATION " Gizmo", "T", &m_resources.settings.showGizmo);
+  ImGui::MenuItem(ICON_MS_STRAIGHTEN " Snap", nullptr, &m_resources.settings.snapEnabled);
+  ImGui::Separator();
+  ImGui::MenuItem(ICON_MS_GRID_VIEW " Grid & Snap Settings...", nullptr, &m_resources.settings.showGridSettingsWindow);
   ImGui::EndMenu();
 }
 
@@ -587,6 +682,7 @@ void GltfRenderer::renderWindowsMenu()
     ImGui::MenuItem(label.c_str(), t.shortcut, t.visible);
   }
   ImGui::MenuItem(ICON_MS_ANALYTICS " Statistics", nullptr, &m_resources.settings.showStatisticsWindow);
+  ImGui::MenuItem(ICON_MS_GRID_VIEW " Grid & Snap", nullptr, &m_resources.settings.showGridSettingsWindow);
   ImGui::Separator();
   ImGui::MenuItem(ICON_MS_MONITORING " Memory Usage", nullptr, &m_resources.settings.showMemStats);
   ImGui::EndMenu();
@@ -696,6 +792,7 @@ void GltfRenderer::renderMenuToolbarAndGizmos()
   GizmoToggle gizmoToggles[] = {
       {ICON_MS_GRID_ON, "Grid", "G", &m_resources.settings.showGrid},
       {ICON_MS_3D_ROTATION, "Gizmo", "T", &m_resources.settings.showGizmo},
+      {ICON_MS_STRAIGHTEN, "Snap", nullptr, &m_resources.settings.snapEnabled},
   };
   for(size_t i = 0; i < std::size(gizmoToggles); ++i)
   {
@@ -707,7 +804,12 @@ void GltfRenderer::renderMenuToolbarAndGizmos()
       *toggle.visible = !*toggle.visible;
     ImGui::PopStyleColor();
     if(ImGui::IsItemHovered())
-      ImGui::SetTooltip("Toggle %s (%s in viewport)", toggle.tooltip, toggle.shortcut);
+    {
+      if(toggle.shortcut)
+        ImGui::SetTooltip("Toggle %s (%s in viewport)", toggle.tooltip, toggle.shortcut);
+      else
+        ImGui::SetTooltip("Toggle %s", toggle.tooltip);
+    }
     if(i < std::size(gizmoToggles) - 1)
       ImGui::SameLine(0, 0);
   }
@@ -764,6 +866,8 @@ void GltfRenderer::renderMenu()
   bool compactScene   = ImGui::IsKeyChordPressed(ImGuiMod_Ctrl | ImGuiKey_K);
   bool undoCmd        = ImGui::IsKeyChordPressed(ImGuiMod_Ctrl | ImGuiKey_Z);
   bool redoCmd        = ImGui::IsKeyChordPressed(ImGuiMod_Ctrl | ImGuiKey_Y);
+  bool duplicateCmd   = ImGui::IsKeyChordPressed(ImGuiMod_Ctrl | ImGuiKey_D);
+  bool deleteCmd      = !ImGui::GetIO().WantTextInput && ImGui::IsKeyPressed(ImGuiKey_Delete, false);
   if(toggleVsyc)
     v_sync = !v_sync;
   bool validScene = m_resources.getScene() && m_resources.getScene()->valid();
@@ -787,6 +891,29 @@ void GltfRenderer::renderMenu()
   {
     m_undoStack.redo();
     onUndoRedo();
+  }
+
+  // Duplicate / Delete selected node (global shortcuts; works with both node and primitive selections)
+  if(validScene && m_sceneSelection.hasSelection())
+  {
+    auto sel = m_sceneSelection.getSelection();
+    int nodeIdx = (sel.type == SceneSelection::SelectionType::eNode || sel.type == SceneSelection::SelectionType::ePrimitive) ?
+                      sel.nodeIndex :
+                      -1;
+    if(nodeIdx >= 0)
+    {
+      if(duplicateCmd)
+      {
+        auto cmd = std::make_unique<DuplicateNodeCommand>(*m_resources.getScene(), nodeIdx, &m_sceneSelection);
+        m_undoStack.executeCommand(std::move(cmd));
+        onUndoRedo();
+      }
+      if(deleteCmd)
+      {
+        m_pendingDeleteNode        = nodeIdx;
+        m_openDeletePopupNextFrame = true;
+      }
+    }
   }
 
   renderViewMenu(validScene, fitScene, fitObject, v_sync);
@@ -1172,8 +1299,6 @@ void GltfRenderer::renderMemoryStatistics()
   const auto& animationTracker = m_resources.animationVk.getMemoryTracker();
   const auto& appTracker       = m_resources.appMemoryTracker;
 
-  const OptiXDenoiser* optix = m_pathTracer.getOptiXDenoiser();
-
   // Create sortable table with memory statistics
   ImGuiTableFlags tableFlags = ImGuiTableFlags_Borders | ImGuiTableFlags_RowBg | ImGuiTableFlags_SizingFixedFit | ImGuiTableFlags_Sortable;
   if(ImGui::BeginTable("MemoryStatsTable", 3, tableFlags))
@@ -1321,10 +1446,12 @@ void GltfRenderer::renderMemoryStatistics()
 
     // --- Application (GBuffers, Denoisers) Section ---
     auto totalApp = appTracker.getTotalStats();
-    // Include OptiX export tracker if available
+    // OptiX export memory is only compiled in when USE_OPTIX_DENOISER is enabled (see CMakeLists.txt).
     GpuMemoryStats totalOptixExport{};
-    if(optix)
+#if defined(USE_OPTIX_DENOISER)
+    if(const OptiXDenoiser* optix = m_pathTracer.getOptiXDenoiser())
       totalOptixExport = optix->getExportMemoryTracker().getTotalStats();
+#endif
 
     uint64_t appCombinedBytes = totalApp.currentBytes + totalOptixExport.currentBytes;
     uint32_t appCombinedCount = totalApp.currentCount + totalOptixExport.currentCount;
@@ -1348,7 +1475,8 @@ void GltfRenderer::renderMemoryStatistics()
         ImGui::Text("%u", stats.currentCount);
       }
 
-      if(optix)
+#if defined(USE_OPTIX_DENOISER)
+      if(const OptiXDenoiser* optix = m_pathTracer.getOptiXDenoiser())
       {
         for(const auto& categoryName : optix->getExportMemoryTracker().getActiveCategories(sortBy, ascending))
         {
@@ -1362,6 +1490,7 @@ void GltfRenderer::renderMemoryStatistics()
           ImGui::Text("%u", stats.currentCount);
         }
       }
+#endif
 
       ImGui::TableNextRow();
       ImGui::TableNextColumn();

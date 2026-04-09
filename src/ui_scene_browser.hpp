@@ -75,6 +75,13 @@ public:
   // Selection synchronization (called from external picker)
   void focusOnSelection();  // Auto-expand/scroll to selection
 
+  // Shared state for delete requests (application owns the storage, renders the confirmation dialog)
+  void setPendingDelete(int* nodeIndex, bool* openPopup)
+  {
+    m_pendingDeleteNode        = nodeIndex;
+    m_openDeletePopupNextFrame = openPopup;
+  }
+
   // Animation control accessor (needed by renderer for update logic)
   AnimationControl& getAnimationControl() { return m_animControl; }
 
@@ -133,7 +140,6 @@ private:
   // DIALOG RENDERING
   //==================================================================================================
   void renderRenameDialog();
-  void renderDeleteConfirmation();
 
   //==================================================================================================
   // ICON HELPERS
@@ -165,6 +171,10 @@ private:
   // UI state
   std::unordered_set<int> m_expandedNodes;     // Only force-open these nodes (from selection)
   bool                    m_doScroll = false;  // Auto-scroll to selection
+
+  // Scene List: jump from texture row to Images group (scroll to image index)
+  int  m_pendingScrollToImageIndex = -1;
+  bool m_forceImagesSectionOpen    = false;
 
   // Scene transform state (per scene)
   struct SceneTransformState
@@ -199,8 +209,9 @@ private:
   RenameState m_renameState;
   bool        m_openRenamePopupNextFrame = false;
 
-  int  m_pendingDeleteNode        = -1;
-  bool m_openDeletePopupNextFrame = false;
+  // Shared delete state (owned by renderer, written by context menu)
+  int*  m_pendingDeleteNode        = nullptr;
+  bool* m_openDeletePopupNextFrame = nullptr;
 
   // Animation control
   AnimationControl m_animControl;

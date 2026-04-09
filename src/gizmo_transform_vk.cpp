@@ -39,8 +39,23 @@
 #include <glm/gtx/quaternion.hpp>
 
 #include <cfloat>
+#include <cmath>
 
 #include "_autogen/gizmo_visuals.slang.h"
+
+//-----------------------------------------------------------------------------
+// Snap helpers: round a value to the nearest multiple of step
+//-----------------------------------------------------------------------------
+
+static float snapValue(float value, float step)
+{
+  return std::round(value / step) * step;
+}
+
+static glm::vec3 snapVec3(const glm::vec3& value, float step)
+{
+  return {snapValue(value.x, step), snapValue(value.y, step), snapValue(value.z, step)};
+}
 
 //-----------------------------------------------------------------------------
 // Helper: Upload nvutils primitive mesh to GPU
@@ -723,6 +738,8 @@ void TransformHelperVk::updateDrag(const glm::vec2& mousePos,
         glm::vec3 worldMovement   = worldAxis * projection;
 
         *m_attachedPosition = m_dragStartPosition + worldDeltaToLocal(worldMovement);
+        if(m_enableSnapping && m_snapTranslate > 0.0f)
+          *m_attachedPosition = snapVec3(*m_attachedPosition, m_snapTranslate);
 
         if(m_onTransformChange)
           m_onTransformChange();
@@ -743,6 +760,8 @@ void TransformHelperVk::updateDrag(const glm::vec2& mousePos,
         glm::vec3 worldDelta      = currentHitPoint - m_dragStartHitPoint;
 
         *m_attachedPosition = m_dragStartPosition + worldDeltaToLocal(worldDelta);
+        if(m_enableSnapping && m_snapTranslate > 0.0f)
+          *m_attachedPosition = snapVec3(*m_attachedPosition, m_snapTranslate);
 
         if(m_onTransformChange)
           m_onTransformChange();
@@ -779,6 +798,8 @@ void TransformHelperVk::updateDrag(const glm::vec2& mousePos,
           glm::vec3 cross = glm::cross(toStartHit, toHit);
           if(glm::dot(cross, worldAxis) < 0.0f)
             angleDeg = -angleDeg;
+          if(m_enableSnapping && m_snapRotate > 0.0f)
+            angleDeg = snapValue(angleDeg, m_snapRotate);
 
           *m_attachedRotation = m_dragStartRotation + localAxis * angleDeg;
 
@@ -800,6 +821,8 @@ void TransformHelperVk::updateDrag(const glm::vec2& mousePos,
 
       *m_attachedScale              = m_dragStartScale;
       (*m_attachedScale)[axisIndex] = m_dragStartScale[axisIndex] * scaleFactor;
+      if(m_enableSnapping && m_snapScale > 0.0f)
+        (*m_attachedScale)[axisIndex] = snapValue((*m_attachedScale)[axisIndex], m_snapScale);
 
       if(m_onTransformChange)
         m_onTransformChange();
@@ -810,6 +833,8 @@ void TransformHelperVk::updateDrag(const glm::vec2& mousePos,
       float scaleFactor = computeScaleFactor(mousePos);
 
       *m_attachedScale = m_dragStartScale * scaleFactor;
+      if(m_enableSnapping && m_snapScale > 0.0f)
+        *m_attachedScale = snapVec3(*m_attachedScale, m_snapScale);
 
       if(m_onTransformChange)
         m_onTransformChange();

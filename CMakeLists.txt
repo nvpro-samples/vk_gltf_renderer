@@ -286,6 +286,7 @@ endif()
 #####################################################################################
 # Adding download resources
 # download_files(FILENAMES FlightHelmet.zip EXTRACT)
+# download_files(FILENAMES Spaceships.zip EXTRACT)
 download_files(FILENAMES daytime.hdr std_env.hdr)
 
 #####################################################################################

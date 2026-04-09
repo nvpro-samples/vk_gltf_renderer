@@ -59,25 +59,6 @@ static float logarithmicStep(float value)
 // HELPER FUNCTIONS
 //==================================================================================================
 
-static std::string getTextureDisplayName(const tinygltf::Model& model, int textureIndex)
-{
-  if(textureIndex < 0 || textureIndex >= static_cast<int>(model.textures.size()))
-    return "None";
-
-  const tinygltf::Texture& texture = model.textures[textureIndex];
-  if(!texture.name.empty())
-    return texture.name + " (tex " + std::to_string(textureIndex) + ")";
-
-  if(texture.source >= 0 && texture.source < static_cast<int>(model.images.size()))
-  {
-    const tinygltf::Image& image = model.images[texture.source];
-    if(!image.name.empty())
-      return image.name + " (tex " + std::to_string(textureIndex) + ")";
-  }
-
-  return "Texture " + std::to_string(textureIndex);
-}
-
 // Texture editing UI - handles add/remove/change texture
 template <typename T>
 static bool renderTextureEditRow(const char* label, T& info, const tinygltf::Model& model, const std::vector<std::string>& textureItems)
@@ -120,9 +101,10 @@ static bool renderTextureEditRow(const char* label, T& info, const tinygltf::Mod
         const tinygltf::Texture& texture = model.textures[info.index];
         ImGui::Separator();
 
-        if(texture.source >= 0 && texture.source < static_cast<int>(model.images.size()))
+        const int imageIdx = tinygltf::utils::getTextureImageIndex(texture);
+        if(imageIdx >= 0 && imageIdx < static_cast<int>(model.images.size()))
         {
-          const tinygltf::Image& image = model.images[texture.source];
+          const tinygltf::Image& image = model.images[imageIdx];
 
           // Check if image is embedded or has a URI
           if(!image.uri.empty())
@@ -131,7 +113,7 @@ static bool renderTextureEditRow(const char* label, T& info, const tinygltf::Mod
           }
           else
           {
-            ImGui::Text("Image: %d (EMB)", texture.source);
+            ImGui::Text("Image: %d (EMB)", imageIdx);
           }
         }
         else
@@ -261,7 +243,7 @@ void UiInspector::setScene(nvvkgltf::Scene* scene)
   m_textureNames.reserve(model.textures.size());
   for(int i = 0; i < static_cast<int>(model.textures.size()); ++i)
   {
-    m_textureNames.push_back(getTextureDisplayName(model, i));
+    m_textureNames.push_back(tinygltf::utils::getTextureUiLabel(model, i));
   }
 }
 

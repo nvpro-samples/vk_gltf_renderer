@@ -30,7 +30,8 @@ struct PropagateWorldMatricesPushConstant
   uint      levelCount;
 };
 
-// One entry per render node (TLAS instance index). Built once at scene load / rebuild.
+// One entry per render node (TLAS instance index). Uploaded in createGpuBuffers when Scene graph
+// revision changes (parseScene, variants, primitive material edits, etc.).
 struct RenderNodeGpuMapping
 {
   int nodeID;
@@ -48,8 +49,8 @@ struct TlasInstance
   uint64_t accelerationStructureReference;
 };
 
-// Instance buffer uses read/modify/write: reload each instance, replace transform only,
-// store back so packed fields and BLAS device address stay valid.
+// Instance buffer: load existing row, replace transform only; keep BLAS reference and packed fields.
+// Visibility clears the reference on the CPU path via SceneRtx::syncTopLevelAS when needed.
 struct UpdateRenderInstancesPushConstant
 {
   float4x4*             worldMatrices;

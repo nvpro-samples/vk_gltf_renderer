@@ -33,6 +33,16 @@
 
 #include "nvshaders/functions.h.slang"
 
+namespace {
+
+// Texture extensions that store the backing image index in `source` (see `getTextureImageIndex`).
+const char* const kTextureImageSourceExtensionNames[] = {
+    EXT_TEXTURE_WEBP_EXTENSION_NAME,
+    MSFT_TEXTURE_DDS_NAME,
+    KHR_TEXTURE_BASISU_EXTENSION_NAME,
+};
+
+}  // namespace
 
 KHR_materials_displacement tinygltf::utils::getDisplacement(const tinygltf::Material& tmat)
 {
@@ -611,29 +621,75 @@ int tinygltf::utils::getTextureImageIndex(const tinygltf::Texture& texture)
 {
   int source_image = texture.source;
 
-  // If the image uses one of the WebP, DDS, or KTX extensions, we need to get
-  // the source image from the extension.
-  // glTF doesn't specify what happens if multiple of these extensions exist;
-  // for now, we arbitrarily prefer KTX.
-  if(hasElementName(texture.extensions, EXT_TEXTURE_WEBP_EXTENSION_NAME))
+  for(const char* extName : kTextureImageSourceExtensionNames)
   {
-    const tinygltf::Value& ext = getElementValue(texture.extensions, EXT_TEXTURE_WEBP_EXTENSION_NAME);
-    getValue(ext, "source", source_image);
-  }
-
-  if(hasElementName(texture.extensions, MSFT_TEXTURE_DDS_NAME))
-  {
-    const tinygltf::Value& ext = getElementValue(texture.extensions, MSFT_TEXTURE_DDS_NAME);
-    getValue(ext, "source", source_image);
-  }
-
-  if(hasElementName(texture.extensions, KHR_TEXTURE_BASISU_EXTENSION_NAME))
-  {
-    const tinygltf::Value& ext = getElementValue(texture.extensions, KHR_TEXTURE_BASISU_EXTENSION_NAME);
-    getValue(ext, "source", source_image);
+    if(hasElementName(texture.extensions, extName))
+    {
+      const tinygltf::Value& ext = getElementValue(texture.extensions, extName);
+      getValue(ext, "source", source_image);
+    }
   }
 
   return source_image;
+}
+
+void tinygltf::utils::remapTextureExtensionImageSources(tinygltf::Texture& texture, const std::vector<int>& imageRemap)
+{
+  auto safeRemap = [&imageRemap](int oldIdx) -> int {
+    return (oldIdx >= 0 && oldIdx < static_cast<int>(imageRemap.size())) ? imageRemap[oldIdx] : oldIdx;
+  };
+
+  for(const char* extName : kTextureImageSourceExtensionNames)
+  {
+    auto it = texture.extensions.find(extName);
+    if(it == texture.extensions.end())
+      continue;
+    tinygltf::Value& ext = it->second;
+    if(!ext.Has("source"))
+      continue;
+    const int idx = ext.Get("source").GetNumberAsInt();
+    if(idx >= 0)
+      ext.Get<tinygltf::Value::Object>()["source"] = tinygltf::Value(safeRemap(idx));
+  }
+}
+
+void tinygltf::utils::offsetTextureExtensionImageSources(tinygltf::Texture& texture, int imageIndexDelta)
+{
+  if(imageIndexDelta == 0)
+    return;
+
+  for(const char* extName : kTextureImageSourceExtensionNames)
+  {
+    auto it = texture.extensions.find(extName);
+    if(it == texture.extensions.end())
+      continue;
+    tinygltf::Value& ext = it->second;
+    if(!ext.Has("source"))
+      continue;
+    const int idx = ext.Get("source").GetNumberAsInt();
+    if(idx >= 0)
+      ext.Get<tinygltf::Value::Object>()["source"] = tinygltf::Value(idx + imageIndexDelta);
+  }
+}
+
+std::string tinygltf::utils::getTextureUiLabel(const tinygltf::Model& model, int textureIndex)
+{
+  if(textureIndex < 0 || textureIndex >= static_cast<int>(model.textures.size()))
+    return "None";
+
+  const tinygltf::Texture& texture = model.textures[textureIndex];
+  if(!texture.name.empty())
+    return texture.name + " (tex " + std::to_string(textureIndex) + ")";
+
+  const int imageIndex = getTextureImageIndex(texture);
+  if(imageIndex >= 0 && imageIndex < static_cast<int>(model.images.size()))
+  {
+    const tinygltf::Image& image = model.images[imageIndex];
+    if(!image.name.empty())
+      return image.name + " (tex " + std::to_string(textureIndex) + ")";
+  }
+
+  return "Texture " + std::to_string(textureIndex);
 }
 
 // Creating missing tangent attribute

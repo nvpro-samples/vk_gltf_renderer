@@ -337,9 +337,10 @@ void collectReferencedResources(const tinygltf::Model& model, UsedResources& use
     if(texIdx >= static_cast<int>(model.textures.size()))
       continue;
 
-    const tinygltf::Texture& texture = model.textures[texIdx];
-    if(texture.source >= 0)
-      used.images.insert(texture.source);
+    const tinygltf::Texture& texture  = model.textures[texIdx];
+    const int                imageIdx = tinygltf::utils::getTextureImageIndex(texture);
+    if(imageIdx >= 0)
+      used.images.insert(imageIdx);
     if(texture.sampler >= 0)
       used.samplers.insert(texture.sampler);
   }
@@ -483,6 +484,7 @@ void updateAllReferences(tinygltf::Model&                 model,
   {
     texture.source  = safeRemap(texture.source, imageRemap);
     texture.sampler = safeRemap(texture.sampler, samplerRemap);
+    tinygltf::utils::remapTextureExtensionImageSources(texture, imageRemap);
   }
 
   // Update KHR_lights_punctual extension

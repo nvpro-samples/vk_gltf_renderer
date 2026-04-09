@@ -195,6 +195,10 @@ private:
   // Undo/Redo
   UndoStack m_undoStack;
 
+  // Application-level delete confirmation (shared with scene browser via pointers)
+  int  m_pendingDeleteNode        = -1;
+  bool m_openDeletePopupNextFrame = false;
+
   // Gizmo TRS local storage (pointers passed to TransformHelperVk)
   glm::vec3 m_gizmoPosition{0.f};
   glm::vec3 m_gizmoRotation{0.f};  // Euler angles in degrees

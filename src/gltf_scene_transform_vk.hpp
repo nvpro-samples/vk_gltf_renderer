@@ -5,6 +5,10 @@
  * buffer. Avoids staging 100k+ matrices when only a few locals change; CPU still runs
  * updateNodeWorldMatrices() for gizmo, lights, and picking.
  *
+ * TLAS visibility (KHR_node_visibility): hidden instances clear their BLAS reference on the CPU
+ * via SceneRtx::syncTopLevelAS when Scene::DirtyFlags::tlasVisibilityNeedsCpuSync is set (see
+ * SceneEditor::updateVisibility), avoiding huge mapping SSBO uploads on the GPU transform path.
+ *
  * SPDX-License-Identifier: Apache-2.0
  */
 

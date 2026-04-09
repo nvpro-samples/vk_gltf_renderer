@@ -526,7 +526,12 @@ void nvvkgltf::SceneVk::uploadRenderNodes(nvvk::StagingUploader& staging, const 
   const VkDeviceSize prevSize = m_bRenderNode.bufferSize;
   ensureRenderNodeBuffer(staging, renderNodes.size());
   if(renderNodes.empty())
+  {
+#ifndef NDEBUG
+    debugUpdateShadowCopy(scn);
+#endif
     return;
+  }
 
   const bool bufferRecreated = (m_bRenderNode.bufferSize != prevSize) || (prevSize == 0);
   if(bufferRecreated || dirtyIndices.empty())

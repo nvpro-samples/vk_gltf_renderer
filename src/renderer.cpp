@@ -185,6 +185,11 @@ void GltfRenderer::onAttach(nvapp::Application* app)
     m_settingsHandler.setSetting("showAxis", &m_resources.settings.showAxis);
     m_settingsHandler.setSetting("showGrid", &m_resources.settings.showGrid);
     m_settingsHandler.setSetting("showGizmo", &m_resources.settings.showGizmo);
+    m_settingsHandler.setSetting("snapEnabled", &m_resources.settings.snapEnabled);
+    m_settingsHandler.setSetting("gridUnit", &m_resources.settings.gridUnit);
+    m_settingsHandler.setSetting("snapRotation", &m_resources.settings.snapRotation);
+    m_settingsHandler.setSetting("snapScale", &m_resources.settings.snapScale);
+    m_settingsHandler.setSetting("showGridSettingsWindow", &m_resources.settings.showGridSettingsWindow);
     m_settingsHandler.setSetting("showMemStats", &m_resources.settings.showMemStats);
     m_settingsHandler.setSetting("showCameraWindow", &m_resources.settings.showCameraWindow);
     m_settingsHandler.setSetting("showSettingsWindow", &m_resources.settings.showSettingsWindow);
@@ -855,8 +860,12 @@ void GltfRenderer::silhouette(VkCommandBuffer cmd)
 // Render visual helpers (grid + transform gizmo) onto the tonemapped image
 void GltfRenderer::renderVisualHelpers(VkCommandBuffer cmd)
 {
-  // Sync grid visibility from settings
+  // Sync grid and snap settings to visual helpers
   m_visualHelpers.grid.setVisible(m_resources.settings.showGrid);
+  m_visualHelpers.grid.style().baseUnit = m_resources.settings.gridUnit;
+  m_visualHelpers.transform.setSnapEnabled(m_resources.settings.snapEnabled);
+  m_visualHelpers.transform.setSnapValues(m_resources.settings.gridUnit, m_resources.settings.snapRotation,
+                                          m_resources.settings.snapScale);
 
   // Sync gizmo attachment from selection state
   updateGizmoAttachment();
@@ -1021,6 +1030,7 @@ void GltfRenderer::createScene(const std::filesystem::path& sceneFilename)
   m_sceneBrowser.setSelection(&m_sceneSelection);
   m_sceneBrowser.setUndoStack(&m_undoStack);
   m_sceneBrowser.setBbox(scene->getSceneBounds());
+  m_sceneBrowser.setPendingDelete(&m_pendingDeleteNode, &m_openDeletePopupNextFrame);
 
   m_inspector.setScene(scene);
   m_inspector.setSelection(&m_sceneSelection);
@@ -1116,6 +1126,7 @@ void GltfRenderer::createSceneFromDescriptor(const std::filesystem::path& descri
   m_sceneBrowser.setSelection(&m_sceneSelection);
   m_sceneBrowser.setUndoStack(&m_undoStack);
   m_sceneBrowser.setBbox(scene->getSceneBounds());
+  m_sceneBrowser.setPendingDelete(&m_pendingDeleteNode, &m_openDeletePopupNextFrame);
 
   m_inspector.setScene(scene);
   m_inspector.setSelection(&m_sceneSelection);
@@ -1348,7 +1359,7 @@ void GltfRenderer::buildAccelerationStructures()
   if(m_resources.getScene())
     m_resources.getScene()->getDirtyFlags().primitivesChanged = false;
 
-  // GPU transform SSBOs (static hierarchy + render-node mappings). Requires TLAS instance buffer to exist.
+  // GPU transform SSBOs (hierarchy, matrices, RenderNodeGpuMapping). Queue after TLAS instance buffer exists.
   if(m_resources.getScene())
   {
     m_resources.transformCompute.createGpuBuffers(m_resources.staging, *m_resources.getScene());

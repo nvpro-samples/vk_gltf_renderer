@@ -285,9 +285,12 @@ public:
   [[nodiscard]] const std::vector<std::pair<int, int>>& getTopoLevels() const { return m_topoLevels.levels; }
   [[nodiscard]] const std::vector<int>&                 getNodeParents() const { return m_nodeParents; }
   // Bumped when traverseSceneWithVisibility completes (parents/m_topoLevels/world matrices refresh), when
-  // variant changes alter render-node material IDs, etc. TransformComputeVk matches this to refresh static
-  // SSBOs (mappings, parents, topo, instancing locals) without relying only on buildAccelerationStructures.
+  // variant changes alter render-node material IDs, editor assigns a primitive material, etc.
+  // TransformComputeVk matches this to refresh static SSBOs (mappings, parents, topo, instancing locals)
+  // without relying only on buildAccelerationStructures.
   [[nodiscard]] uint64_t getSceneGraphRevision() const { return m_sceneGraphRevision; }
+  void                   bumpSceneGraphRevision() { ++m_sceneGraphRevision; }
+
   // KHR_mesh_gpu_instancing: per-node instance locals (used by GPU transform path).
   [[nodiscard]] const std::unordered_map<int, std::vector<glm::mat4>>& getGpuInstanceLocalMatrices() const
   {
@@ -376,13 +379,14 @@ public:
 
   struct DirtyFlags
   {
-    std::unordered_set<int> renderNodesVk;                // RenderNode indices for SceneVk
-    std::unordered_set<int> renderNodesRtx;               // RenderNode indices for SceneRTX
-    std::unordered_set<int> materials;                    // Material indices
-    std::unordered_set<int> lights;                       // Light indices (glTF light array)
-    std::unordered_set<int> nodes;                        // Node indices (for transform updates)
-    bool                    allRenderNodesDirty = false;  // Full RN upload (count change or massive reorder)
-    bool                    primitivesChanged   = false;  // BLAS rebuild needed (primitive set changed)
+    std::unordered_set<int> renderNodesVk;                       // RenderNode indices for SceneVk
+    std::unordered_set<int> renderNodesRtx;                      // RenderNode indices for SceneRTX
+    std::unordered_set<int> materials;                           // Material indices
+    std::unordered_set<int> lights;                              // Light indices (glTF light array)
+    std::unordered_set<int> nodes;                               // Node indices (for transform updates)
+    bool                    allRenderNodesDirty        = false;  // Full RN upload (count change or massive reorder)
+    bool                    primitivesChanged          = false;  // BLAS rebuild needed (primitive set changed)
+    bool                    tlasVisibilityNeedsCpuSync = false;  // KHR_node_visibility: SceneEditor::updateVisibility
 
     void clear()
     {
@@ -391,14 +395,15 @@ public:
       materials.clear();
       lights.clear();
       nodes.clear();
-      allRenderNodesDirty = false;
-      primitivesChanged   = false;
+      allRenderNodesDirty        = false;
+      primitivesChanged          = false;
+      tlasVisibilityNeedsCpuSync = false;
     }
 
     [[nodiscard]] bool isEmpty() const
     {
       return renderNodesVk.empty() && renderNodesRtx.empty() && materials.empty() && lights.empty() && nodes.empty()
-             && !allRenderNodesDirty && !primitivesChanged;
+             && !allRenderNodesDirty && !primitivesChanged && !tlasVisibilityNeedsCpuSync;
     }
   };
 

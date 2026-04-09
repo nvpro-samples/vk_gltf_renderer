@@ -182,6 +182,7 @@ TEST_F(DirtyFlagsTest, ClearDirtyFlagsResetsAll)
   EXPECT_TRUE(scene.getDirtyFlags().renderNodesVk.empty());
   EXPECT_TRUE(scene.getDirtyFlags().renderNodesRtx.empty());
   EXPECT_FALSE(scene.getDirtyFlags().allRenderNodesDirty);
+  EXPECT_FALSE(scene.getDirtyFlags().tlasVisibilityNeedsCpuSync);
 }
 
 //--------------------------------------------------------------------------------------------------
