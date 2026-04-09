@@ -67,7 +67,7 @@ void PathTracer::onAttach(Resources& resources, nvvk::ProfilerGpuTimer* profiler
   m_device = resources.allocator.getDevice();
 
   // Create pipeline cache for faster pipeline creation
-  m_pipelineCache.init(m_device, "pipeline_cache.bin");
+  m_pipelineCache.init(m_device, nvutils::getExecutablePath().parent_path() / "pipeline_cache.bin");
 
 
   // Requesting ray tracing properties
