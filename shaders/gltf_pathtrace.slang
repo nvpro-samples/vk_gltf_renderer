@@ -602,10 +602,9 @@ float getOpacity(GltfRenderNode renderNode, GltfRenderPrimitive renderPrim, int 
     baseColorAlpha = mat.pbrBaseColorFactor.a;
     if(isTexturePresent(mat.pbrBaseColorTexture))
     {
-      // Retrieve the interpolated texture coordinate from the vertex
-      float2 uv = getInterpolatedVertexTexCoord0(renderPrim, triangleIndex, barycentrics);
-
       GltfTextureInfo texInfo = texInfos[mat.pbrBaseColorTexture];
+      float2 uv = getInterpolatedVertexTexCoord(renderPrim, texInfo.texCoord, triangleIndex, barycentrics);
+
       baseColorAlpha *= allTextures[texInfo.index].SampleLevel(uv, 0.0f).a;
     }
   }
@@ -614,9 +613,8 @@ float getOpacity(GltfRenderNode renderNode, GltfRenderPrimitive renderPrim, int 
     baseColorAlpha = mat.pbrDiffuseFactor.a;
     if(isTexturePresent(mat.pbrDiffuseTexture))
     {
-      float2 uv = getInterpolatedVertexTexCoord0(renderPrim, triangleIndex, barycentrics);
-
       GltfTextureInfo texInfo = texInfos[mat.pbrDiffuseTexture];
+      float2 uv = getInterpolatedVertexTexCoord(renderPrim, texInfo.texCoord, triangleIndex, barycentrics);
       baseColorAlpha *= allTextures[texInfo.index].SampleLevel(uv, 0.0f).a;
     }
   }
@@ -716,11 +714,10 @@ float3 getShadowTransmission(GltfRenderNode      renderNode,
     float metallic  = mat.pbrMetallicFactor;
     if(isTexturePresent(mat.pbrMetallicRoughnessTexture))
     {
-      float2 tc[2];
-      tc[0] = getInterpolatedVertexTexCoord0(renderPrim, indices, barycentrics);
-      tc[1] = getInterpolatedVertexTexCoord1(renderPrim, indices, barycentrics);
+      GltfTextureInfo texInfo = texInfos[mat.pbrMetallicRoughnessTexture];
+      float2 uv = getInterpolatedVertexTexCoord(renderPrim, texInfo.texCoord, indices, barycentrics);
 
-      float4 mr_sample = allTextures[texInfos[mat.pbrMetallicRoughnessTexture].index].SampleLevel(tc[0], 0.0f);
+      float4 mr_sample = allTextures[texInfos[mat.pbrMetallicRoughnessTexture].index].SampleLevel(uv, 0.0f);
       roughness *= mr_sample.g;
       metallic *= mr_sample.b;
     }
