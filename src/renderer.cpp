@@ -147,6 +147,7 @@ GltfRenderer::GltfRenderer(nvutils::ParameterRegistry* paramReg)
   paramReg->add({"useSolidBackground", "Use solid color background"}, &m_resources.settings.useSolidBackground, true);
   paramReg->addVector({"solidBackgroundColor", "Solid Background Color"}, &m_resources.settings.solidBackgroundColor);
   paramReg->add({"maxFrames", "Maximum number of iterations"}, &m_resources.settings.maxFrames);
+  paramReg->add({"output", "Output image file path for headless mode"}, &m_resources.headlessOutputPath);
 
   paramReg->add({"tmMethod", "Tonemapper method: [Filmic:0, Uncharted:1, Clip:2, ACES:3, AgX:4, KhronosPBR:5]"},
                 &m_resources.tonemapperData.method);
@@ -570,8 +571,14 @@ void GltfRenderer::onUIMenu()
 // Called with headless rendering, to save the final image
 void GltfRenderer::onLastHeadlessFrame()
 {
-  m_app->saveImageToFile(m_resources.gBuffers.getColorImage(Resources::eImgTonemapped), m_resources.gBuffers.getSize(),
-                         nvutils::getExecutablePath().replace_extension(".jpg").string());
+  std::string outputPath = m_resources.headlessOutputPath.empty() ?
+                               nvutils::getExecutablePath().replace_extension(".jpg").string() :
+                               m_resources.headlessOutputPath.string();
+  if(!std::filesystem::exists(std::filesystem::path(outputPath).parent_path()))
+  {
+    LOGW("GltfRenderer::onLastHeadlessFrame(): output directory does not exist for path %s\n", outputPath.c_str());
+  }
+  m_app->saveImageToFile(m_resources.gBuffers.getColorImage(Resources::eImgTonemapped), m_resources.gBuffers.getSize(), outputPath);
 }
 
 //--------------------------------------------------------------------------------------------------

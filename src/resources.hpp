@@ -244,7 +244,8 @@ struct Resources
   shaderio::TonemapperData        tonemapperData{
              .autoExposure = 1,
   };  // Tonemapper data
-  std::shared_ptr<nvutils::CameraManipulator> cameraManip;  // Camera manipulator (owned by GltfRenderer)
+  std::shared_ptr<nvutils::CameraManipulator> cameraManip;         // Camera manipulator (owned by GltfRenderer)
+  std::filesystem::path                       headlessOutputPath;  // --output: override for headless image save path
 
   // Pipeline
   std::array<nvvk::DescriptorBindings, 2> descriptorBinding{};    // Descriptor bindings: 0: textures, 1: tlas

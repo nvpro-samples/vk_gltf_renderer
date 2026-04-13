@@ -441,6 +441,7 @@ All settings can be overridden from the command line using `--paramName value` s
 | `--size <W> <H>` | Window size |
 | `--headless` | Run without UI (batch mode) |
 | `--frames <N>` | Number of frames to render in headless mode |
+| `--output <path>` | Output image file path for headless mode (default: `<exe_name>.jpg` next to executable) |
 | `--vsync` | Enable vertical sync |
 | `--vvl` | Activate Vulkan Validation Layers |
 | `--logLevel <0-2>` | Log level: Info (0), Warning (1), Error (2) |
@@ -520,7 +521,7 @@ All settings can be overridden from the command line using `--paramName value` s
 **Headless / Batch Rendering Example:**
 
 ```bash
-./vk_gltf_renderer --headless --scenefile shader_ball.gltf --hdrfile daytime.hdr --envSystem 1 --frames 1000
+./vk_gltf_renderer --headless --scenefile shader_ball.gltf --hdrfile daytime.hdr --envSystem 1 --frames 1000 --output render.jpg
 ```
 
 ---
