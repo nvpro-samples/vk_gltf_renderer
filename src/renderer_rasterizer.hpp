@@ -75,6 +75,6 @@ private:
   nvshaders::SkyPhysical m_skyPhysical;  // Sky physical
 
   // UI
-  bool m_enableWireframe = false;
-  bool m_useRecordedCmd  = true;  // Use recorded command buffer for rendering
+  bool m_useRecordedCmd = true;   // Use recorded command buffer for rendering
+  bool m_lastWireframe  = false;  // Tracks settings.wireframe to invalidate recorded commands
 };

@@ -192,11 +192,17 @@ PixelOutput fragmentMain(VertexOutput input, uint primitiveID: SV_PrimitiveID, f
   output.selection = float4(asfloat(pushConst.renderNodeID + 1), 0, 0, 0);
 
 
-  if(pushConst.frameInfo.debugMethod != DebugMethod::eNone)
+  if(pushConst.frameInfo.visualization != Visualization::eRendered)
   {
-    output.color.xyz = debugValue(pbrMat, hit, pushConst.frameInfo.debugMethod);
-    output.color.a   = 1.0;
-    return output;
+    float3              vizColor;
+    VisualizationResult vizResult =
+        applyVisualization(pbrMat, hit, pushConst.frameInfo.visualization, pushConst.renderPrimID, primitiveID, vizColor);
+    if(vizResult == VisualizationResult::eColorOverride)
+    {
+      output.color.xyz = vizColor;
+      output.color.a   = 1.0;
+      return output;
+    }
   }
 
   if(material.alphaMode == AlphaMode::eAlphaModeMask)

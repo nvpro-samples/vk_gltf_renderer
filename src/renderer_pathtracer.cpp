@@ -339,10 +339,7 @@ bool PathTracer::onUIRender(Resources& resources)
     {
       // SYNC NOTE: DLSS transparency toggle — wait before destroying pipelines compiled with old specialization.
       NVVK_CHECK(vkQueueWaitIdle(resources.app->getQueue(0).queue));
-      vkDestroyPipeline(m_device, m_rtxPipeline, nullptr);
-      m_rtxPipeline = VK_NULL_HANDLE;
-      vkDestroyPipeline(m_device, m_rqPipeline, nullptr);
-      m_rqPipeline = VK_NULL_HANDLE;
+      destroyPipelines();
     }
 #else
     ImGui::TextDisabled("DLSS is not enabled.");
@@ -364,6 +361,12 @@ bool PathTracer::onUIRender(Resources& resources)
 void PathTracer::onRender(VkCommandBuffer cmd, Resources& resources)
 {
   NVVK_DBG_SCOPE(cmd);  // <-- Helps to debug in NSight
+
+  if(m_compiledWireframe != resources.settings.wireframe)
+  {
+    NVVK_CHECK(vkQueueWaitIdle(resources.app->getQueue(0).queue));
+    compileShader(resources);
+  }
 
   // Reset display buffer to rendered on first frame
   if((resources.frameCount == 0) && (resources.settings.displayBuffer == DisplayBuffer::eOptixDenoised))
@@ -753,13 +756,14 @@ void PathTracer::compileShader(Resources& resources, bool fromFile)
   };
 
   // Compile from shader file if requested, used when reloading the shader
+  bool compiledFromFile = false;
   if(fromFile)
   {
     SCOPED_TIMER("Slang compile from file");
 
     resources.slangCompiler.clearMacros();
     std::vector<std::pair<std::string, std::string>> macros = {
-        {"AVAILABLE_SER", std::to_string(m_supportSER)},
+        {"AVAILABLE_SER", std::to_string(m_supportSER)}, {"WIREFRAME", std::to_string((int)resources.settings.wireframe)},
         // {"USE_DLSS_TRANSP", std::to_string(m_dlss->useDlssTransparency())},
     };
     for(const auto& [k, v] : macros)
@@ -769,6 +773,7 @@ void PathTracer::compileShader(Resources& resources, bool fromFile)
     {
       shaderInfo.codeSize = resources.slangCompiler.getSpirvSize();
       shaderInfo.pCode    = resources.slangCompiler.getSpirv();
+      compiledFromFile    = true;
     }
     else
     {
@@ -790,7 +795,14 @@ void PathTracer::compileShader(Resources& resources, bool fromFile)
     NVVK_DBG_NAME(m_shaderModule);
   }
 
+  m_compiledWireframe = compiledFromFile ? resources.settings.wireframe : false;
+
   // Destroy pipeline since there is a new shader
+  destroyPipelines();
+}
+
+void PathTracer::destroyPipelines()
+{
   vkDestroyPipeline(m_device, m_rtxPipeline, nullptr);
   m_rtxPipeline = VK_NULL_HANDLE;
   vkDestroyPipeline(m_device, m_rqPipeline, nullptr);

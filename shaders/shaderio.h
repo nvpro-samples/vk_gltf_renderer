@@ -87,9 +87,9 @@ enum SilhouetteBindings
   eSelectionBitMask,  // In: storage buffer of uint32_t (one bit per render node)
 };
 
-enum DebugMethod
+enum Visualization
 {
-  eNone,
+  eRendered,
   eBaseColor,
   eMetallic,
   eRoughness,
@@ -100,6 +100,8 @@ enum DebugMethod
   eOpacity,
   eTexCoord0,
   eTexCoord1,
+  eClay,
+  eTriangleID,
 };
 
 
@@ -116,22 +118,22 @@ enum SceneFrameInfoFlags
 // Camera info
 struct SceneFrameInfo
 {
-  float4x4    viewMatrix;                     // View matrix
-  float4x4    projInv;                        // Inverse projection matrix
-  float4x4    viewInv;                        // Inverse view matrix
-  float4x4    viewProjMatrix;                 // View-projection matrix (P*V)
-  float4x4    prevMVP;                        // Previous view-projection matrix
-  int         flags = 0;                      // Bit flags: see SceneFrameInfoFlags
-  float       envRotation;                    // Environment rotation (used for the HDR)
-  float       envBlur;                        // Level of blur for the environment map (0.0: no blur, 1.0: full blur)
-  float       envIntensity = 1.f;             // Environment intensity
-  float3      backgroundColor;                // Background color when using solid background
-  DebugMethod debugMethod               = DebugMethod::eNone;  // Debug method
-  float       infinitePlaneDistance     = 0;
-  float3      infinitePlaneBaseColor    = float3(0.5, 0.5, 0.5);  // Default gray color
-  float       infinitePlaneMetallic     = 0.0;                    // Default non-metallic
-  float       infinitePlaneRoughness    = 0.5;                    // Default medium roughness
-  float       shadowCatcherDarkenAmount = 0.0;  // Non-physical shadow darkening (precomputed from darkness slider)
+  float4x4      viewMatrix;          // View matrix
+  float4x4      projInv;             // Inverse projection matrix
+  float4x4      viewInv;             // Inverse view matrix
+  float4x4      viewProjMatrix;      // View-projection matrix (P*V)
+  float4x4      prevMVP;             // Previous view-projection matrix
+  int           flags = 0;           // Bit flags: see SceneFrameInfoFlags
+  float         envRotation;         // Environment rotation (used for the HDR)
+  float         envBlur;             // Level of blur for the environment map (0.0: no blur, 1.0: full blur)
+  float         envIntensity = 1.f;  // Environment intensity
+  float3        backgroundColor;     // Background color when using solid background
+  Visualization visualization             = Visualization::eRendered;  // Visualization mode
+  float         infinitePlaneDistance     = 0;
+  float3        infinitePlaneBaseColor    = float3(0.5, 0.5, 0.5);  // Default gray color
+  float         infinitePlaneMetallic     = 0.0;                    // Default non-metallic
+  float         infinitePlaneRoughness    = 0.5;                    // Default medium roughness
+  float         shadowCatcherDarkenAmount = 0.0;  // Non-physical shadow darkening (precomputed from darkness slider)
 };
 
 enum PathtracerFlags
@@ -145,19 +147,19 @@ enum PathtracerFlags
 // Push constant
 struct PathtracePushConstant
 {
-  int   maxDepth              = 5;     // Maximum depth of the ray
-  int   frameCount            = 0;     // Frame number
-  float fireflyClampThreshold = 10.f;  // Firefly clamp threshold
-  int   numSamples            = 1;     // Number of samples per pixel per frame
-  int   totalSamples          = 0;     // Total samples accumulated so far
-  float focalDistance         = 0.0f;  // Focal distance for depth of field
-  float aperture              = 0.0f;  // Aperture for depth of field
+  int                    maxDepth              = 5;     // Maximum depth of the ray
+  int                    frameCount            = 0;     // Frame number
+  float                  fireflyClampThreshold = 10.f;  // Firefly clamp threshold
+  int                    numSamples            = 1;     // Number of samples per pixel per frame
+  int                    totalSamples          = 0;     // Total samples accumulated so far
+  float                  focalDistance         = 0.0f;  // Focal distance for depth of field
+  float                  aperture              = 0.0f;  // Aperture for depth of field
   int                    flags                 = 0;     // Bit flags: ePtUseDlss | ePtUseOptixDenoiser | ePtFirstFrame
-  float2                 jitter;               // Jitter for the DLSS
-  float2                 mouseCoord = {0, 0};  // Mouse coordinates (use for debug)
-  SceneFrameInfo*        frameInfo;            // Camera info
-  SkyPhysicalParameters* skyParams;            // Sky physical parameters
-  GltfScene*             gltfScene;            // GLTF sceneF
+  float2                 jitter;                        // Jitter for the DLSS
+  float2                 mouseCoord = {0, 0};           // Mouse coordinates (use for debug)
+  SceneFrameInfo*        frameInfo;                     // Camera info
+  SkyPhysicalParameters* skyParams;                     // Sky physical parameters
+  GltfScene*             gltfScene;                     // GLTF sceneF
 };
 
 // Push constant

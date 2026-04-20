@@ -94,6 +94,7 @@ public:
 
   bool m_supportSER{false};
   bool m_useSER{false};
+  bool m_compiledWireframe{false};
 
   // The default rendering technique
   RenderTechnique m_renderTechnique{RenderTechnique::RayTracing};
@@ -163,22 +164,15 @@ public:
 private:
   void updateStatistics(Resources& resources);
   void renderRayQuery(VkCommandBuffer cmd, VkExtent2D renderingSize, Resources& resources);
-
-
   void renderRayTrace(VkCommandBuffer cmd, VkExtent2D& renderingSize, Resources& resources);
-
-
   void denoiseDlss(VkCommandBuffer cmd, Resources& resources);
-
-
   void setupPushConstant(VkCommandBuffer cmd, Resources& resources);
-
   // Determine if DLSS should actively denoise this frame
   bool getEffectiveDlssEnabled(const Resources& resources) const;
-
   // Determine if OptiX should actively denoise this frame
   bool getEffectiveOptixEnabled(const Resources& resources) const;
-
   // Upscale selection ID and depth from render resolution to display resolution (OptiX 2x mode)
   void upscaleSelectionAndDepth(VkCommandBuffer cmd, Resources& resources);
+  // Destroy the pipelines for both Ray Query and Ray Tracing
+  void destroyPipelines();
 };

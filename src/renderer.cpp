@@ -143,7 +143,8 @@ GltfRenderer::GltfRenderer(nvutils::ParameterRegistry* paramReg)
   paramReg->add({"hdrEnvRotation", "HDR Environment Rotation"}, &m_resources.settings.hdrEnvRotation);
   paramReg->add({"hdrBlur", "HDR Environment Blur"}, &m_resources.settings.hdrBlur);
   paramReg->addVector({"silhouetteColor", "Color of the silhouette"}, &m_resources.settings.silhouetteColor);
-  paramReg->add({"debugMethod", "Debug Method"}, (int*)&m_resources.settings.debugMethod);
+  paramReg->add({"visualization", "Visualization Mode"}, (int*)&m_resources.settings.visualization);
+  paramReg->add({"wireframe", "Enable wireframe overlay"}, &m_resources.settings.wireframe);
   paramReg->add({"useSolidBackground", "Use solid color background"}, &m_resources.settings.useSolidBackground, true);
   paramReg->addVector({"solidBackgroundColor", "Solid Background Color"}, &m_resources.settings.solidBackgroundColor);
   paramReg->add({"maxFrames", "Maximum number of iterations"}, &m_resources.settings.maxFrames);
@@ -515,7 +516,7 @@ void GltfRenderer::onRender(VkCommandBuffer cmd)
         .envBlur                   = m_resources.settings.hdrBlur,
         .envIntensity              = m_resources.settings.hdrEnvIntensity,
         .backgroundColor           = m_resources.settings.solidBackgroundColor,
-        .debugMethod               = m_resources.settings.debugMethod,
+        .visualization             = m_resources.settings.visualization,
         .infinitePlaneDistance     = m_resources.settings.infinitePlaneDistance,
         .infinitePlaneBaseColor    = m_resources.settings.infinitePlaneBaseColor,
         .infinitePlaneMetallic     = m_resources.settings.infinitePlaneMetallic,
@@ -783,7 +784,9 @@ void GltfRenderer::tonemap(VkCommandBuffer cmd)
 
   // Disable tonemapping for debug buffers or guide buffers (display raw values)
   shaderio::TonemapperData tonemapperData = m_resources.tonemapperData;
-  if(m_resources.settings.debugMethod != shaderio::DebugMethod::eNone || usingGuideBuffer)
+  if((m_resources.settings.visualization != shaderio::Visualization::eRendered
+      && m_resources.settings.visualization != shaderio::Visualization::eClay)
+     || usingGuideBuffer)
   {
     tonemapperData.isActive = 0;
   }

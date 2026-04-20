@@ -465,7 +465,7 @@ All settings can be overridden from the command line using `--paramName value` s
 | `--renderSystem <0-1>` | Path tracer (0) or Rasterizer (1) |
 | `--envSystem <0-1>` | Sky (0) or HDR (1) |
 | `--maxFrames <N>` | Maximum path tracer iterations |
-| `--debugMethod <N>` | Debug visualization method |
+| `--visualization <N>` | Visualization mode (0=Rendered, 1=BaseColor, ..., 11=Clay, 12=TriangleID) |
 | `--useSolidBackground` | Use solid background color |
 | `--solidBackgroundColor <R> <G> <B>` | Solid background color (0.0-1.0) |
 

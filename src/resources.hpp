@@ -128,41 +128,42 @@ enum DirtyFlags
 
 struct Settings
 {
-  RenderingMode         renderSystem           = RenderingMode::ePathtracer;    // Renderer to use
-  shaderio::DebugMethod debugMethod            = shaderio::DebugMethod::eNone;  // Debug method for the rasterizer
-  shaderio::EnvSystem   envSystem              = shaderio::EnvSystem::eSky;     // Environment system: Sky or HDR
-  bool                  showAxis               = true;                          // Show the axis (bottom left)
-  bool                  showGrid               = false;                         // Show infinite grid
-  bool                  showGizmo              = false;                         // Show transform gizmo on selected node
-  bool                  snapEnabled            = false;                     // Snap gizmo transforms to grid increments
-  float                 gridUnit               = 1.0f;                      // Grid base unit (world units)
-  float                 snapRotation           = 45.0f;                     // Rotation snap increment (degrees)
-  float                 snapScale              = 0.1f;                      // Scale snap increment
-  bool                  showMemStats           = false;                     // Show memory statistics window
-  bool                  showCameraWindow       = true;                      // Show Camera window
-  bool                  showSettingsWindow     = true;                      // Show Settings window
-  bool                  showEnvironmentWindow  = true;                      // Show Environment window
-  bool                  showTonemapperWindow   = true;                      // Show Tonemapper window
-  bool                  showStatisticsWindow   = false;                     // Show Statistics window
-  bool                  showSceneBrowserWindow = true;                      // Show Scene Browser window
-  bool                  showInspectorWindow    = true;                      // Show Inspector window
-  bool                  showGridSettingsWindow = false;                     // Show Grid & Snap settings window
-  float                 hdrEnvIntensity        = 1.0f;                      // Intensity of the environment (HDR)
-  float                 hdrEnvRotation         = 0.0f;                      // Rotation of the environment (HDR)
-  float                 hdrBlur                = 0.0f;                      // Blur of the environment (HDR)
-  glm::vec3             silhouetteColor        = {0.933f, 0.580f, 0.180f};  // Color of the silhouette
-  bool                  useSolidBackground     = false;                     // Use solid background color
-  glm::vec3             solidBackgroundColor   = {0.0f, 0.0f, 0.0f};        // Solid background color
-  int                   maxFrames              = {500};                     // Maximum number of frames to render
-  bool                  useInfinitePlane       = false;                     // Use infinite plane
-  bool                  isShadowCatcher        = true;                      // Infinite place only catch shadow
-  float                 infinitePlaneDistance  = 0;                         // Distance/height of the infinite plane
-  glm::vec3             infinitePlaneBaseColor = glm::vec3(0.5, 0.5, 0.5);  // Default gray color
-  float                 infinitePlaneMetallic  = 0.0;                       // Default non-metallic
-  float                 infinitePlaneRoughness = 0.5;                       // Default medium roughness
-  float                 shadowCatcherDarkness  = 0.0f;                      // Non-physical shadow darkening
-  bool                  dlssHardwareAvailable  = false;  // DLSS hardware/extensions available (set at startup)
-  DisplayBuffer         displayBuffer          = DisplayBuffer::eRendered;  // Which buffer to display in viewport
+  RenderingMode           renderSystem           = RenderingMode::ePathtracer;          // Renderer to use
+  shaderio::Visualization visualization          = shaderio::Visualization::eRendered;  // Visualization mode
+  bool                    wireframe              = false;                      // Wireframe overlay on rendered meshes
+  shaderio::EnvSystem     envSystem              = shaderio::EnvSystem::eSky;  // Environment system: Sky or HDR
+  bool                    showAxis               = true;                       // Show the axis (bottom left)
+  bool                    showGrid               = false;                      // Show infinite grid
+  bool                    showGizmo              = false;                      // Show transform gizmo on selected node
+  bool                    snapEnabled            = false;  // Snap gizmo transforms to grid increments
+  float                   gridUnit               = 1.0f;   // Grid base unit (world units)
+  float                   snapRotation           = 45.0f;  // Rotation snap increment (degrees)
+  float                   snapScale              = 0.1f;   // Scale snap increment
+  bool                    showMemStats           = false;  // Show memory statistics window
+  bool                    showCameraWindow       = true;   // Show Camera window
+  bool                    showSettingsWindow     = true;   // Show Settings window
+  bool                    showEnvironmentWindow  = true;   // Show Environment window
+  bool                    showTonemapperWindow   = true;   // Show Tonemapper window
+  bool                    showStatisticsWindow   = false;  // Show Statistics window
+  bool                    showSceneBrowserWindow = true;   // Show Scene Browser window
+  bool                    showInspectorWindow    = true;   // Show Inspector window
+  bool                    showGridSettingsWindow = false;  // Show Grid & Snap settings window
+  float                   hdrEnvIntensity        = 1.0f;   // Intensity of the environment (HDR)
+  float                   hdrEnvRotation         = 0.0f;   // Rotation of the environment (HDR)
+  float                   hdrBlur                = 0.0f;   // Blur of the environment (HDR)
+  glm::vec3               silhouetteColor        = {0.933f, 0.580f, 0.180f};  // Color of the silhouette
+  bool                    useSolidBackground     = false;                     // Use solid background color
+  glm::vec3               solidBackgroundColor   = {0.0f, 0.0f, 0.0f};        // Solid background color
+  int                     maxFrames              = {500};                     // Maximum number of frames to render
+  bool                    useInfinitePlane       = false;                     // Use infinite plane
+  bool                    isShadowCatcher        = true;                      // Infinite place only catch shadow
+  float                   infinitePlaneDistance  = 0;                         // Distance/height of the infinite plane
+  glm::vec3               infinitePlaneBaseColor = glm::vec3(0.5, 0.5, 0.5);  // Default gray color
+  float                   infinitePlaneMetallic  = 0.0;                       // Default non-metallic
+  float                   infinitePlaneRoughness = 0.5;                       // Default medium roughness
+  float                   shadowCatcherDarkness  = 0.0f;                      // Non-physical shadow darkening
+  bool                    dlssHardwareAvailable  = false;  // DLSS hardware/extensions available (set at startup)
+  DisplayBuffer           displayBuffer          = DisplayBuffer::eRendered;  // Which buffer to display in viewport
 
 #ifndef NDEBUG
   bool showGridStyleWindow  = false;  // Show Grid Style debug window
@@ -234,16 +235,14 @@ struct Resources
   const nvvkgltf::Scene* getScene() const { return scene.get(); }
 
   // Resources
-  nvvk::HdrIbl                    hdrIbl;  // HDR environment map
-  nvshaders::HdrEnvDome           hdrDome;
-  nvvk::GBuffer                   gBuffers;      // G-Buffers: color + depth
-  nvvk::Buffer                    bFrameInfo;    // Scene/Frame information
-  nvvk::Buffer                    bSkyParams;    // Sky parameters
-  shaderio::SkyPhysicalParameters skyParams{};   // Sky parameters
-  nvshaders::Tonemapper           tonemapper{};  // Tonemapper
-  shaderio::TonemapperData        tonemapperData{
-             .autoExposure = 1,
-  };  // Tonemapper data
+  nvvk::HdrIbl                                hdrIbl;  // HDR environment map
+  nvshaders::HdrEnvDome                       hdrDome;
+  nvvk::GBuffer                               gBuffers;                           // G-Buffers: color + depth
+  nvvk::Buffer                                bFrameInfo;                         // Scene/Frame information
+  nvvk::Buffer                                bSkyParams;                         // Sky parameters
+  shaderio::SkyPhysicalParameters             skyParams{};                        // Sky parameters
+  nvshaders::Tonemapper                       tonemapper{};                       // Tonemapper
+  shaderio::TonemapperData                    tonemapperData{.autoExposure = 1};  // Tonemapper data
   std::shared_ptr<nvutils::CameraManipulator> cameraManip;         // Camera manipulator (owned by GltfRenderer)
   std::filesystem::path                       headlessOutputPath;  // --output: override for headless image save path
 

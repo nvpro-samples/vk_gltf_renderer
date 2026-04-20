@@ -351,8 +351,9 @@ void GltfRenderer::renderUI()
             m_resources.settings.renderSystem = static_cast<RenderingMode>(currentItem);
             changed                           = true;  // Reset frame counter when switching renderers
           }
-          changed |= PE::Combo("Debug Method", (int32_t*)(&m_resources.settings.debugMethod),
-                               "None\0BaseColor\0Metallic\0Roughness\0Normal\0Tangent\0Bitangent\0Emissive\0Opacity\0TexCoord0\0TexCoord1\0\0");
+          changed |= PE::Combo("Visualization", (int32_t*)(&m_resources.settings.visualization),
+                               "Rendered\0BaseColor\0Metallic\0Roughness\0Normal\0Tangent\0Bitangent\0Emissive\0Opacity\0TexCoord0\0TexCoord1\0Clay\0TriangleID\0\0");
+          changed |= PE::Checkbox("Wireframe", &m_resources.settings.wireframe, "Overlay wireframe on rendered meshes");
           PE::end();
           if(m_resources.settings.renderSystem == RenderingMode::ePathtracer)
           {

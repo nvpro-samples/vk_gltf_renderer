@@ -21,6 +21,10 @@
 #define AVAILABLE_SER 1
 #endif
 
+#ifndef WIREFRAME
+#define WIREFRAME 0
+#endif
+
 // This is a debug flag to enable/disable debug output
 // For example, to use print statements in the shader, set this to true.
 // Add printf and enable the Validation layer debug output.
@@ -43,6 +47,9 @@ static bool doDebug = false;
 #include "nvshaders/pbr_material_eval.h.slang"
 #include "nvshaders/ray_utils.h.slang"
 #include "nvshaders/sample_blur.h.slang"
+#if WIREFRAME
+#include "nvshaders/wireframe.h.slang"
+#endif
 
 #include "shaderio.h"
 #include "get_hit.h.slang"
@@ -603,7 +610,7 @@ float getOpacity(GltfRenderNode renderNode, GltfRenderPrimitive renderPrim, int 
     if(isTexturePresent(mat.pbrBaseColorTexture))
     {
       GltfTextureInfo texInfo = texInfos[mat.pbrBaseColorTexture];
-      float2 uv = getInterpolatedVertexTexCoord(renderPrim, texInfo.texCoord, triangleIndex, barycentrics);
+      float2          uv = getInterpolatedVertexTexCoord(renderPrim, texInfo.texCoord, triangleIndex, barycentrics);
 
       baseColorAlpha *= allTextures[texInfo.index].SampleLevel(uv, 0.0f).a;
     }
@@ -614,7 +621,7 @@ float getOpacity(GltfRenderNode renderNode, GltfRenderPrimitive renderPrim, int 
     if(isTexturePresent(mat.pbrDiffuseTexture))
     {
       GltfTextureInfo texInfo = texInfos[mat.pbrDiffuseTexture];
-      float2 uv = getInterpolatedVertexTexCoord(renderPrim, texInfo.texCoord, triangleIndex, barycentrics);
+      float2          uv = getInterpolatedVertexTexCoord(renderPrim, texInfo.texCoord, triangleIndex, barycentrics);
       baseColorAlpha *= allTextures[texInfo.index].SampleLevel(uv, 0.0f).a;
     }
   }
@@ -715,9 +722,9 @@ float3 getShadowTransmission(GltfRenderNode      renderNode,
     if(isTexturePresent(mat.pbrMetallicRoughnessTexture))
     {
       GltfTextureInfo texInfo = texInfos[mat.pbrMetallicRoughnessTexture];
-      float2 uv = getInterpolatedVertexTexCoord(renderPrim, texInfo.texCoord, indices, barycentrics);
+      float2          uv      = getInterpolatedVertexTexCoord(renderPrim, texInfo.texCoord, indices, barycentrics);
 
-      float4 mr_sample = allTextures[texInfos[mat.pbrMetallicRoughnessTexture].index].SampleLevel(uv, 0.0f);
+      float4 mr_sample = allTextures[texInfo.index].SampleLevel(uv, 0.0f);
       roughness *= mr_sample.g;
       metallic *= mr_sample.b;
     }
@@ -843,7 +850,16 @@ bool checkInfinitePlaneIntersection(RayDesc ray, inout HitPayload payload, inout
 //    - Volumetric effects: transmission, attenuation, and scattering
 //    - Alpha transparency: stochastic alpha testing for correct compositing
 //
-SampleResult pathTrace(IRaytracer raytracer, RayDesc ray, inout uint seed, float pixelAngle)
+SampleResult pathTrace(IRaytracer raytracer,
+                       RayDesc    ray,
+                       inout uint seed,
+                       float      pixelAngle
+#if WIREFRAME
+                       ,
+                       float3 wireDiffX,
+                       float3 wireDiffY
+#endif
+)
 {
   float3      radiance     = float3(0.0F, 0.0F, 0.0F);
   float3      throughput   = float3(1.0F, 1.0F, 1.0F);
@@ -853,6 +869,10 @@ SampleResult pathTrace(IRaytracer raytracer, RayDesc ray, inout uint seed, float
   bool        solid        = true;
 
   float lastSamplePdf = DIRAC;
+
+#if WIREFRAME
+  float firstHitWireframeAlpha = 0.0;
+#endif
 
   // #DLSS - Store data temporarily to avoid writing to sampleResult during loop (reduces live state)
   float16_t3 dlss_albedo          = float16_t3(0);
@@ -883,6 +903,14 @@ SampleResult pathTrace(IRaytracer raytracer, RayDesc ray, inout uint seed, float
       SceneFrameInfo* frameInfo = pushConst.frameInfo;
       HitPayload      payload   = {};
 
+#if WIREFRAME
+      if(depth == 0)
+      {
+        payload.differentialX = wireDiffX;
+        payload.differentialY = wireDiffY;
+      }
+#endif
+
       // Trace the ray through the scene
       raytracer.Trace(ray, payload, seed);
 
@@ -890,6 +918,11 @@ SampleResult pathTrace(IRaytracer raytracer, RayDesc ray, inout uint seed, float
       HitState hit = payload.hitState;
 
       bool firstRay = (depth == 0);
+
+#if WIREFRAME
+      if(firstRay && payload.hitT != INFINITE)
+        firstHitWireframeAlpha = payload.wireframeAlpha;
+#endif
 
       // Check if we hit the infinite plane
       bool hitInfinitePlane = checkInfinitePlaneIntersection(ray, payload, hit, frameInfo);
@@ -1016,11 +1049,17 @@ SampleResult pathTrace(IRaytracer raytracer, RayDesc ray, inout uint seed, float
       maxRoughness     = max(pbrMat.roughness, maxRoughness);
       pbrMat.roughness = maxRoughness;
 
-      // Debugging, single frame
-      if(frameInfo->debugMethod != DebugMethod::eNone && firstRay)
+      // Visualization override (clay continues shading; flat-color modes break)
+      if(frameInfo->visualization != Visualization::eRendered)
       {
-        radiance.xyz = debugValue(pbrMat, hit, frameInfo->debugMethod);
-        break;
+        float3              vizColor;
+        VisualizationResult vizResult =
+            applyVisualization(pbrMat, hit, frameInfo->visualization, payload.rprimID, payload.primitiveID, vizColor);
+        if(vizResult == VisualizationResult::eColorOverride && firstRay)
+        {
+          radiance.xyz = vizColor;
+          break;
+        }
       }
 
 
@@ -1160,6 +1199,11 @@ SampleResult pathTrace(IRaytracer raytracer, RayDesc ray, inout uint seed, float
     }
   }
 
+#if WIREFRAME
+  if(firstHitWireframeAlpha > 0.0)
+    radiance = lerp(radiance, float3(0.9, 0.0, 0.0), firstHitWireframeAlpha);
+#endif
+
   // Returning the sample result; radiance + DLSS data
   SampleResult sampleResult = {};
   sampleResult.radiance     = float4(radiance, solid ? 1 : 0);
@@ -1207,8 +1251,19 @@ SampleResult samplePixel(IRaytracer raytracer,
     ray.Direction = finalRayDir;
   }
 
-  float        pixelAngle   = computePixelAngle(projMatrixI, imageSize.y, isOrthographic);
-  SampleResult sampleResult = pathTrace(raytracer, ray, seed, pixelAngle);
+  float pixelAngle = computePixelAngle(projMatrixI, imageSize.y, isOrthographic);
+
+#if WIREFRAME
+  float3 wireDiffX, wireDiffY;
+  computeDifferentials(samplePos, imageSize, viewMatrixI, projMatrixI, wireDiffX, wireDiffY);
+#endif
+
+  SampleResult sampleResult = pathTrace(raytracer, ray, seed, pixelAngle
+#if WIREFRAME
+                                        ,
+                                        wireDiffX, wireDiffY
+#endif
+  );
 
   // Removing fireflies
   float lum = dot(sampleResult.radiance.xyz, float3(1.0F / 3.0F));
@@ -1378,10 +1433,21 @@ void rchitMain(inout HitPayload payload, in BuiltInTriangleIntersectionAttribute
 
   HitState hit = getHitState(renderPrim, barycentrics, worldToObject, objectToWorld, primitiveID, WorldRayDirection());
 
-  payload.hitT     = hitT;
-  payload.rprimID  = renderPrimID;
-  payload.rnodeID  = instanceID;
-  payload.hitState = hit;
+  payload.hitT        = hitT;
+  payload.rprimID     = renderPrimID;
+  payload.rnodeID     = instanceID;
+  payload.primitiveID = primitiveID;
+  payload.hitState    = hit;
+
+#if WIREFRAME
+  {
+    uint3 triIdx = getTriangleIndices(renderPrim, primitiveID);
+    payload.wireframeAlpha =
+        computeMeshWireframe(worldToObject, WorldRayOrigin(), getVertexPosition(renderPrim, triIdx.x),
+                             getVertexPosition(renderPrim, triIdx.y), getVertexPosition(renderPrim, triIdx.z),
+                             barycentrics, payload.differentialX, payload.differentialY);
+  }
+#endif
 }
 
 [shader("closesthit")]

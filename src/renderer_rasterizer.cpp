@@ -72,7 +72,6 @@ void Rasterizer::onAttach(Resources& resources, nvvk::ProfilerGpuTimer* profiler
 void Rasterizer::registerParameters(nvutils::ParameterRegistry* paramReg)
 {
   // Rasterizer-specific command line parameters
-  paramReg->add({"rasterWireframe", "Rasterizer: Enable wireframe mode"}, &m_enableWireframe);
   paramReg->add({"rasterUseRecordedCmd", "Rasterizer: Use recorded command buffers"}, &m_useRecordedCmd);
 }
 
@@ -80,7 +79,6 @@ void Rasterizer::registerParameters(nvutils::ParameterRegistry* paramReg)
 // Set the settings handler
 void Rasterizer::setSettingsHandler(nvgui::SettingsHandler* settingsHandler)
 {
-  // settingsHandler->setSetting("rasterWireframe", &m_enableWireframe);
   // settingsHandler->setSetting("rasterUseRecordedCmd", &m_useRecordedCmd);
 }
 
@@ -115,11 +113,6 @@ bool Rasterizer::onUIRender(Resources& resources)
   bool changed = false;
   if(PE::begin())
   {
-    if(PE::Checkbox("Wireframe", &m_enableWireframe))
-    {
-      freeRecordCommandBuffer(resources);
-      changed = true;
-    }
     PE::Checkbox("Use Recorded Cmd", &m_useRecordedCmd, "Use recorded command buffers for better performance");
     PE::end();
   }
@@ -138,6 +131,11 @@ void Rasterizer::onRender(VkCommandBuffer cmd, Resources& resources)
 {
   NVVK_DBG_SCOPE(cmd);  // <-- Helps to debug in NSight
 
+  if(m_lastWireframe != resources.settings.wireframe)
+  {
+    freeRecordCommandBuffer(resources);
+    m_lastWireframe = resources.settings.wireframe;
+  }
 
   // Rendering the environment
   if(!resources.settings.useSolidBackground)
@@ -500,7 +498,7 @@ void Rasterizer::renderRasterScene(VkCommandBuffer cmd, Resources& resources)
   vkCmdSetColorBlendEnableEXT(cmd, 0, 1, &blendEnable);
   renderNodes(cmd, resources, resources.getScene()->getShadedNodes(nvvkgltf::Scene::eRasterBlend));
 
-  if(m_enableWireframe)
+  if(resources.settings.wireframe)
   {
     m_dynamicPipeline.cmdBindShaders(cmd, {.vertex = m_vertexShader, .fragment = m_wireframeShader});
     vkCmdSetColorBlendEnableEXT(cmd, 0, 1, &blendDisable);

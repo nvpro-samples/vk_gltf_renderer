@@ -39,10 +39,16 @@ float3 getShadowTransmission(GltfRenderNode      renderNode,
 struct HitPayload
 {
   uint     seed;
-  float    hitT    = 0.0f;
-  int      rnodeID = -1;
-  int      rprimID = -1;
+  float    hitT        = 0.0f;
+  int      rnodeID     = -1;
+  int      rprimID     = -1;
+  int      primitiveID = -1;
   HitState hitState;
+#if WIREFRAME
+  float3 differentialX  = float3(0);
+  float3 differentialY  = float3(0);
+  float  wireframeAlpha = 0.0;
+#endif
 };
 
 // Shadow payload for the path tracer
@@ -53,6 +59,17 @@ struct ShadowPayload
   bool   isInside          = false;
   float3 totalTransmission = float3(1.0f);
 };
+
+#if WIREFRAME
+float computeMeshWireframe(float4x3 worldToObject, float3 worldRayOrigin, float3 v0, float3 v1, float3 v2, float3 barycentrics, float3 differentialX, float3 differentialY)
+{
+  float3 objectRayOrigin  = mul(float4(worldRayOrigin, 1.0), worldToObject);
+  float3 triangleVerts[3] = { v0, v1, v2 };
+  float3 deltas = computeDerivative(worldToObject, worldRayOrigin, objectRayOrigin, triangleVerts, differentialX,
+                                    differentialY, barycentrics);
+  return processWireframe(WIREFRAME_PRESETS[WIREFRAME_THIN], barycentrics, deltas);
+}
+#endif
 
 // Raytracer interface definition
 interface IRaytracer
@@ -111,10 +128,21 @@ struct RayQueryRaytracer : IRaytracer
 
       HitState hit = getHitState(renderPrim, barycentrics, worldToObject, objectToWorld, triID, ray.Direction);
 
-      payload.hitT     = hitT;
-      payload.rprimID  = renderPrimID;
-      payload.rnodeID  = instanceID;
-      payload.hitState = hit;
+      payload.hitT        = hitT;
+      payload.rprimID     = renderPrimID;
+      payload.rnodeID     = instanceID;
+      payload.primitiveID = triID;
+      payload.hitState    = hit;
+
+#if WIREFRAME
+      {
+        uint3 triIdx = getTriangleIndices(renderPrim, triID);
+        payload.wireframeAlpha =
+            computeMeshWireframe(worldToObject, ray.Origin, getVertexPosition(renderPrim, triIdx.x),
+                                 getVertexPosition(renderPrim, triIdx.y), getVertexPosition(renderPrim, triIdx.z),
+                                 barycentrics, payload.differentialX, payload.differentialY);
+      }
+#endif
     }
   }
 
@@ -225,10 +253,21 @@ struct TraditionalRaytracer : IRaytracer
 
       HitState hit = getHitState(renderPrim, barycentrics, worldToObject, objectToWorld, primitiveID, ray.Direction);
 
-      payload.hitT     = hitT;
-      payload.rprimID  = renderPrimID;
-      payload.rnodeID  = instanceID;
-      payload.hitState = hit;
+      payload.hitT        = hitT;
+      payload.rprimID     = renderPrimID;
+      payload.rnodeID     = instanceID;
+      payload.primitiveID = primitiveID;
+      payload.hitState    = hit;
+
+#if WIREFRAME
+      {
+        uint3 triIdx = getTriangleIndices(renderPrim, primitiveID);
+        payload.wireframeAlpha =
+            computeMeshWireframe(worldToObject, ray.Origin, getVertexPosition(renderPrim, triIdx.x),
+                                 getVertexPosition(renderPrim, triIdx.y), getVertexPosition(renderPrim, triIdx.z),
+                                 barycentrics, payload.differentialX, payload.differentialY);
+      }
+#endif
     }
     else
     {

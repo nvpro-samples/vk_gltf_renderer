@@ -18,32 +18,75 @@
  */
 
 
-float3 debugValue(PbrMaterial pbrMat, HitState hit, DebugMethod dbgMethod)
+enum VisualizationResult
 {
-  switch(dbgMethod)
+  eRenderedOutput,    // No override: continue full-quality shading
+  eColorOverride,     // Flat color returned in overrideColor; caller should use it directly
+  eMaterialOverride,  // pbrMat was mutated in-place; caller should continue shading with it
+};
+
+float3 hashToColor(uint id)
+{
+  uint h = id;
+  h      = h * 747796405u + 2891336453u;
+  h      = ((h >> ((h >> 28u) + 4u)) ^ h) * 277803737u;
+  h      = (h >> 22u) ^ h;
+  return float3(float((h >> 0) & 0xFF), float((h >> 8) & 0xFF), float((h >> 16) & 0xFF)) / 255.0;
+}
+
+VisualizationResult applyVisualization(inout PbrMaterial pbrMat,
+                                       HitState          hit,
+                                       Visualization     vizMethod,
+                                       int               rprimID,
+                                       int               primitiveID,
+                                       out float3        overrideColor)
+{
+  overrideColor = float3(0);
+
+  switch(vizMethod)
   {
-    case DebugMethod::eBaseColor:
-      return float3(pbrMat.baseColor);
-    case DebugMethod::eMetallic:
-      return float3(pbrMat.metallic);
-    case DebugMethod::eRoughness:
-      return float3(pbrMat.roughness.xyx);
-    case DebugMethod::eNormal:
-      return float3(pbrMat.N * .5 + .5);
-    case DebugMethod::eTangent:
-      return pbrMat.T * .5 + .5;
-    case DebugMethod::eBitangent:
-      return pbrMat.B * .5 + .5;
-    case DebugMethod::eEmissive:
-      return float3(pbrMat.emissive);
-    case DebugMethod::eOpacity:
-      return float3(pbrMat.opacity * (1.0 - pbrMat.transmission));
-    case DebugMethod::eTexCoord0:
-      return float3(fract(hit.uv[0]), 0);
-    case DebugMethod::eTexCoord1:
-      return float3(fract(hit.uv[1]), 0);
+    case Visualization::eBaseColor:
+      overrideColor = float3(pbrMat.baseColor);
+      return VisualizationResult::eColorOverride;
+    case Visualization::eMetallic:
+      overrideColor = float3(pbrMat.metallic);
+      return VisualizationResult::eColorOverride;
+    case Visualization::eRoughness:
+      overrideColor = float3(pbrMat.roughness.xyx);
+      return VisualizationResult::eColorOverride;
+    case Visualization::eNormal:
+      overrideColor = float3(pbrMat.N * .5 + .5);
+      return VisualizationResult::eColorOverride;
+    case Visualization::eTangent:
+      overrideColor = pbrMat.T * .5 + .5;
+      return VisualizationResult::eColorOverride;
+    case Visualization::eBitangent:
+      overrideColor = pbrMat.B * .5 + .5;
+      return VisualizationResult::eColorOverride;
+    case Visualization::eEmissive:
+      overrideColor = float3(pbrMat.emissive);
+      return VisualizationResult::eColorOverride;
+    case Visualization::eOpacity:
+      overrideColor = float3(pbrMat.opacity * (1.0 - pbrMat.transmission));
+      return VisualizationResult::eColorOverride;
+    case Visualization::eTexCoord0:
+      overrideColor = float3(fract(hit.uv[0]), 0);
+      return VisualizationResult::eColorOverride;
+    case Visualization::eTexCoord1:
+      overrideColor = float3(fract(hit.uv[1]), 0);
+      return VisualizationResult::eColorOverride;
+    case Visualization::eClay:
+      pbrMat.baseColor = float3(0.8, 0.75, 0.7);
+      pbrMat.metallic  = 0.0;
+      pbrMat.roughness = float2(0.5 * 0.5);
+      pbrMat.emissive  = float3(0);
+      return VisualizationResult::eMaterialOverride;
+    case Visualization::eTriangleID:
+      overrideColor = hashToColor(uint(rprimID) * 65537u + uint(primitiveID));
+      return VisualizationResult::eColorOverride;
+    default:
+      return VisualizationResult::eRenderedOutput;
   }
-  return float3(0);
 }
 
 //-----------------------------------------------------------------------
