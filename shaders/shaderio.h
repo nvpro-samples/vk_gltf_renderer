@@ -22,7 +22,7 @@
 
 #include "nvshaders/slang_types.h"
 #include "nvshaders/sky_io.h.slang"
-#include "nvshaders/gltf_scene_io.h.slang"
+#include "gltf_scene_io.h.slang"
 #include "nvshaders/hdr_io.h.slang"
 
 NAMESPACE_SHADERIO_BEGIN()
@@ -93,7 +93,8 @@ enum Visualization
   eBaseColor,
   eMetallic,
   eRoughness,
-  eNormal,
+  eNormalShading,
+  eNormalGeometric,
   eTangent,
   eBitangent,
   eEmissive,
@@ -102,6 +103,7 @@ enum Visualization
   eTexCoord1,
   eClay,
   eTriangleID,
+  eFaceOrientation,
 };
 
 
@@ -150,6 +152,7 @@ struct PathtracePushConstant
   int                    maxDepth              = 5;     // Maximum depth of the ray
   int                    frameCount            = 0;     // Frame number
   float                  fireflyClampThreshold = 10.f;  // Firefly clamp threshold
+  float                  texGradScale          = 1.f;   // Ray-footprint gradient scale
   int                    numSamples            = 1;     // Number of samples per pixel per frame
   int                    totalSamples          = 0;     // Total samples accumulated so far
   float                  focalDistance         = 0.0f;  // Focal distance for depth of field
@@ -159,7 +162,7 @@ struct PathtracePushConstant
   float2                 mouseCoord = {0, 0};           // Mouse coordinates (use for debug)
   SceneFrameInfo*        frameInfo;                     // Camera info
   SkyPhysicalParameters* skyParams;                     // Sky physical parameters
-  GltfScene*             gltfScene;                     // GLTF sceneF
+  GltfScene*             gltfScene;                     // GLTF scene
 };
 
 // Push constant
@@ -171,7 +174,7 @@ struct RasterPushConstant
   float2                 mouseCoord   = {0, 0};  // Mouse coordinates (use for debug)
   SceneFrameInfo*        frameInfo;              // Camera info
   SkyPhysicalParameters* skyParams;              // Sky physical parameters
-  GltfScene*             gltfScene;              // GLTF sceneF
+  GltfScene*             gltfScene;              // GLTF scene
 };
 
 

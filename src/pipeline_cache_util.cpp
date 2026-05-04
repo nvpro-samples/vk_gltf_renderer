@@ -56,6 +56,7 @@ VkResult PipelineCacheManager::init(VkDevice device, const std::filesystem::path
           file.seekg(0);
           file.read(cacheData.data(), fileSize);
           file.close();
+          m_initialSize = fileSize;
           LOGI("Loaded pipeline cache from %s (%zu bytes)\n", m_cacheFilePath.string().c_str(), fileSize);
         }
         else if(fileSize > kMaxPipelineCacheFileSize)
@@ -149,7 +150,8 @@ bool PipelineCacheManager::save()
       file.close();
       if(writeOk)
       {
-        LOGI("Saved pipeline cache to %s (%zu bytes)\n", m_cacheFilePath.string().c_str(), cacheSize);
+        const ptrdiff_t delta = static_cast<ptrdiff_t>(cacheSize) - static_cast<ptrdiff_t>(m_initialSize);
+        LOGI("Saved pipeline cache to %s (%zu bytes, %+td vs load)\n", m_cacheFilePath.string().c_str(), cacheSize, delta);
         return true;
       }
       LOGW("Failed to write pipeline cache to %s\n", m_cacheFilePath.string().c_str());

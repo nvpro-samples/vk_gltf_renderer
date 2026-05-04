@@ -39,13 +39,17 @@
 #include <nvgui/tonemapper.hpp>
 #include <nvgui/file_dialog.hpp>
 #include <nvgui/axis.hpp>
+#include <nvgui/fonts.hpp>
+#include <nvgui/tooltip.hpp>
 #include "tinygltf_utils.hpp"
 
 #include <nvapp/elem_camera.hpp>
 
 #include "renderer.hpp"
 #include "gltf_create_tangent.hpp"
+#include "gltf_scene_animation.hpp"
 #include "scoped_banner.hpp"
+#include "ui_animation.hpp"
 #include "ui_mouse_state.hpp"
 #include "version.hpp"
 
@@ -352,7 +356,7 @@ void GltfRenderer::renderUI()
             changed                           = true;  // Reset frame counter when switching renderers
           }
           changed |= PE::Combo("Visualization", (int32_t*)(&m_resources.settings.visualization),
-                               "Rendered\0BaseColor\0Metallic\0Roughness\0Normal\0Tangent\0Bitangent\0Emissive\0Opacity\0TexCoord0\0TexCoord1\0Clay\0TriangleID\0\0");
+                               "Rendered\0BaseColor\0Metallic\0Roughness\0NormalShd\0NormalGeo\0Tangent\0Bitangent\0Emissive\0Opacity\0TexCoord0\0TexCoord1\0Clay\0TriangleID\0FaceOrientation\0\0");
           changed |= PE::Checkbox("Wireframe", &m_resources.settings.wireframe, "Overlay wireframe on rendered meshes");
           PE::end();
           if(m_resources.settings.renderSystem == RenderingMode::ePathtracer)
@@ -428,15 +432,44 @@ void GltfRenderer::renderUI()
         m_resources.settings.showGrid = !m_resources.settings.showGrid;
       if(ImGui::IsKeyPressed(ImGuiKey_T, false))
         m_resources.settings.showGizmo = !m_resources.settings.showGizmo;
+      // Space toggles animation play/pause.
+      if(ImGui::IsKeyPressed(ImGuiKey_Space, false))
+      {
+        if(ui::animation::hasPlayableAnimation(m_resources.getScene()))
+          m_resources.animationControl.togglePlay();
+      }
     }
 
-    // Display the G-Buffer tonemapped image
-    ImGui::Image(ImTextureID(m_resources.gBuffers.getDescriptorSet(Resources::eImgTonemapped)), ImGui::GetContentRegionAvail());
+    // Display the G-Buffer tonemapped image. The Animation Strip below is an
+    // overlay (drawn on top of the image), so the image uses the full content
+    // region and the G-Buffer always matches what is displayed. Capture the
+    // image's top-left before drawing so we can anchor the overlay with no
+    // item-spacing fudge factor.
+    const ImVec2 imageTopLeft = ImGui::GetCursorScreenPos();
+    const ImVec2 imageSize    = ImGui::GetContentRegionAvail();
+    ImGui::Image(ImTextureID(m_resources.gBuffers.getDescriptorSet(Resources::eImgTonemapped)), imageSize);
 
-    // Adding Axis at the bottom left corner of the viewport
+    // Axis gizmo: anchored to the 3D image's bottom-left, nudged up by one
+    // frame-height when the Animation Strip is showing so the two don't overlap.
+    const bool stripVisible = m_resources.animationControl.showStrip;
     if(m_resources.settings.showAxis)
     {
-      nvgui::Axis(m_cameraManip->getViewMatrix(), 25.f);
+      const float  axisSize   = 25.f;
+      const float  dpi        = ImGui::GetWindowDpiScale();
+      const ImVec2 windowPos  = ImGui::GetWindowPos();
+      const ImVec2 windowSize = ImGui::GetWindowSize();
+      const float  stripOff   = stripVisible ? ImGui::GetFrameHeight() : 0.0F;
+      const ImVec2 axisPos(windowPos.x + axisSize * 1.1F * dpi, windowPos.y + windowSize.y - stripOff - axisSize * 1.1F * dpi);
+      nvgui::Axis(axisPos, m_cameraManip->getViewMatrix(), axisSize);
+    }
+
+    // Animation Strip overlay: hover-reactive strip flush with the image's bottom.
+    if(stripVisible)
+    {
+      const float  h = ImGui::GetFrameHeight();
+      const ImVec2 stripTopLeft(imageTopLeft.x, imageTopLeft.y + imageSize.y - h);
+      ui::animation::renderStripOverlay(m_resources.getScene(), m_resources.animationControl, stripTopLeft,
+                                        ImVec2(imageSize.x, h));
     }
 
     ImGui::End();
@@ -511,6 +544,18 @@ void GltfRenderer::renderUI()
     {
       const tinygltf::Model& model = m_resources.getScene()->getModel();
       ImGui::Text("Delete node '%s'?", model.nodes[m_pendingDeleteNode].name.c_str());
+
+      const auto& gpuInstMap = m_resources.getScene()->getGpuInstanceLocalMatrices();
+      auto        instIt     = gpuInstMap.find(m_pendingDeleteNode);
+      if(instIt != gpuInstMap.end() && !instIt->second.empty())
+      {
+        ImGui::TextColored(ImVec4(1.f, 0.6f, 0.2f, 1.f),
+                           ICON_MS_WARNING
+                           " This node uses EXT_mesh_gpu_instancing (%zu instances).\n"
+                           "Deleting it will remove ALL instances.",
+                           instIt->second.size());
+      }
+
       ImGui::Text("This will delete the node and all its children.");
       ImGui::Text("You can undo this with Ctrl+Z.");
       ImGui::Separator();
@@ -653,6 +698,7 @@ void GltfRenderer::renderViewMenu(bool validScene, bool& fitScene, bool& fitObje
   ImGui::MenuItem(ICON_MS_GRID_ON " Grid", "G", &m_resources.settings.showGrid);
   ImGui::MenuItem(ICON_MS_3D_ROTATION " Gizmo", "T", &m_resources.settings.showGizmo);
   ImGui::MenuItem(ICON_MS_STRAIGHTEN " Snap", nullptr, &m_resources.settings.snapEnabled);
+  ImGui::MenuItem(ICON_MS_MOVIE " Animation Strip", nullptr, &m_resources.animationControl.showStrip);
   ImGui::Separator();
   ImGui::MenuItem(ICON_MS_GRID_VIEW " Grid & Snap Settings...", nullptr, &m_resources.settings.showGridSettingsWindow);
   ImGui::EndMenu();
@@ -794,6 +840,7 @@ void GltfRenderer::renderMenuToolbarAndGizmos()
       {ICON_MS_GRID_ON, "Grid", "G", &m_resources.settings.showGrid},
       {ICON_MS_3D_ROTATION, "Gizmo", "T", &m_resources.settings.showGizmo},
       {ICON_MS_STRAIGHTEN, "Snap", nullptr, &m_resources.settings.snapEnabled},
+      {ICON_MS_MOVIE, "Animation Strip", nullptr, &m_resources.animationControl.showStrip},
   };
   for(size_t i = 0; i < std::size(gizmoToggles); ++i)
   {
@@ -939,7 +986,7 @@ void GltfRenderer::renderMenu()
   if(reloadShader)
   {
     SCOPED_BANNER("Reload Shaders");
-    // SYNC NOTE: User-initiated shader recompile (F5) — wait before destroying old pipelines.
+    // SYNC NOTE: User-initiated shader recompile (Ctrl-Shift-R) — wait before destroying old pipelines.
     vkQueueWaitIdle(m_app->getQueue(0).queue);
     compileShaders();
     resetFrame();

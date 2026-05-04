@@ -64,6 +64,7 @@ private:
   VkDevice              m_device{VK_NULL_HANDLE};
   VkPipelineCache       m_cache{VK_NULL_HANDLE};
   std::filesystem::path m_cacheFilePath;
+  size_t                m_initialSize{0};  // Size of cache data loaded from disk at init()
 };
 
 }  // namespace nvvk

@@ -1,4 +1,11 @@
 cmake_minimum_required(VERSION 3.22...3.31)
+
+# In CI only: disable CMake's "re-run at build time"
+# NOTE: Must be set before the first project() call.
+if(DEFINED ENV{CI})
+  set(CMAKE_SUPPRESS_REGENERATION ON)
+endif()
+
 project(GLTF_renderer VERSION 2.0 LANGUAGES C CXX)
 
 # Enable export of compile commands for clangd

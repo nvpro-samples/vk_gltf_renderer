@@ -102,9 +102,12 @@ auto main(int argc, char** argv) -> int
   auto profilerSettings  = std::make_shared<nvapp::ElementProfiler::ViewSettings>();
   profilerSettings->show = false;
 
+  // The command line parser is declared here so its address can be passed to GltfRenderer,
+  // which queries `wasParsed()` at runtime (after `cli.parse()` has populated the parser).
+  nvutils::ParameterParser cli(nvutils::getExecutablePath().stem().string());
 
   // Create all application elements
-  auto elemGltfRenderer = std::make_shared<GltfRenderer>(&parameterRegistry);
+  auto elemGltfRenderer = std::make_shared<GltfRenderer>(&parameterRegistry, &cli);
   auto elemGpuMonitor   = std::make_shared<nvgpu_monitor::ElementGpuMonitor>();
   auto elemProfiler     = std::make_shared<nvapp::ElementProfiler>(&g_profilerManager, profilerSettings);
   auto elemLogger       = std::make_shared<nvapp::ElementLogger>(false);
@@ -121,8 +124,7 @@ auto main(int argc, char** argv) -> int
     elemLogger->addLog(logLevel, "%s", str.c_str());
   });
 
-  // Adding the parameter registry to the command line parser
-  nvutils::ParameterParser cli(nvutils::getExecutablePath().stem().string());
+  // Adding the parameter registry to the command line parser and parsing arguments
   cli.add(parameterRegistry);
   cli.parse(argc, argv);
 

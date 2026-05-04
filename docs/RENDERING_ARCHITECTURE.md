@@ -562,7 +562,9 @@ Any mismatch is logged as a warning with a descriptive error message.
 - `syncFromScene()` - `gltf_scene_vk.cpp`
 - `uploadRenderNodes()` - `gltf_scene_vk.cpp`
 - `uploadPrimitives()` - `gltf_scene_vk.cpp`
-- `uploadMaterials()` - `gltf_scene_vk.cpp`
+- `uploadMaterials()` - `gltf_scene_vk.cpp` (uploads the `shaderio::GltfShadeMaterial` array
+  produced by `nvvkgltf::MaterialCache` in `gltf_material_cache.cpp`; the material struct
+  is locally forked, see [developer.md → Material System](developer.md#material-system))
 - `createVertexBuffers()` - `gltf_scene_vk.cpp`
 
 ### SceneRtx (Ray Tracing)

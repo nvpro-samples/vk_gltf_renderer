@@ -10,7 +10,7 @@ macro(download_draco)
     )
 	set(draco_SOURCE_DIR ${draco_SOURCE_DIR}/draco-main)
     set(draco_BINARY_DIR ${CMAKE_BINARY_DIR}/draco)
-    
+
     # Configure draco with minimal build options for tinygltf support
     set(DRACO_BUILD_EXECUTABLES OFF CACHE BOOL "Disable building draco command-line tools" FORCE)
     set(DRACO_TESTS OFF CACHE BOOL "Disable draco tests" FORCE)

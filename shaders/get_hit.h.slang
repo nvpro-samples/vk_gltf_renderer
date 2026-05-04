@@ -25,15 +25,16 @@
 // Hit state information
 struct HitState
 {
-  float3 pos;                 // World-space hit position
-  float3 nrm;                 // Shading normal (interpolated and transformed)
-  float4 color;               // Vertex color
-  float3 geonrm;              // Geometric normal (face normal, for back-face detection)
-  float3 shadowPos;           // Shadow position
-  float2 uv[2];               // UV0 and UV1
-  float3 tangent;             // Tangent
-  float3 bitangent;           // Bitangent
-  float  texelDensity = 0.0;  // UV-to-world area ratio for ray-footprint texture LOD (0 if no UVs)
+  float3 pos;                  // World-space hit position
+  float3 nrm;                  // Shading normal (interpolated and transformed)
+  float4 color;                // Vertex color
+  float3 geonrm;               // Geometric normal (face normal, for back-face detection)
+  float3 shadowPos;            // Shadow position
+  float2 uv[2];                // UV0 and UV1
+  float3 tangent;              // Tangent
+  float3 bitangent;            // Bitangent
+  float  texelDensity = 0.0;   // UV-to-world area ratio for ray-footprint texture LOD (0 if no UVs)
+  bool   frontFace    = true;  // True if the primitive was hit on its front side (CCW from the ray)
 };
 
 //-----------------------------------------------------------------------
@@ -97,13 +98,13 @@ HitState getHitState(GltfRenderPrimitive renderPrim,  //
   hit.shadowPos    = float3(mul(float4(shadowPos, 1.0), objectToWorld));
 
   // TexCoord
-  hit.uv[0] = getInterpolatedVertexTexCoord0(renderPrim, triangleIndex, barycentrics);
-  hit.uv[1] = getInterpolatedVertexTexCoord1(renderPrim, triangleIndex, barycentrics);
+  hit.uv[0] = getInterpolatedVertexTexCoord(renderPrim, 0, triangleIndex, barycentrics);
+  hit.uv[1] = getInterpolatedVertexTexCoord(renderPrim, 1, triangleIndex, barycentrics);
 
   // Texel density for ray-footprint texture LOD (geometry-only; used by path tracer)
-  if(hasVertexTexCoord0(renderPrim))
+  if(hasVertexTexCoord(renderPrim, 0))
   {
-    float2* texCoords0 = renderPrim.vertexBuffer.texCoords0;
+    float2* texCoords0 = renderPrim.vertexBuffer.texCoords[0];
     float2  uv0        = texCoords0[triangleIndex.x];
     float2  uv1        = texCoords0[triangleIndex.y];
     float2  uv2        = texCoords0[triangleIndex.z];
@@ -138,7 +139,8 @@ HitState getHitState(GltfRenderPrimitive renderPrim,  //
   hit.bitangent = cross(hit.nrm, hit.tangent) * tng[0].w;
 
   // Ensure geometric normal faces towards the ray origin (front-facing)
-  if(dot(hit.geonrm, worldRayDirection) > 0.0f)
+  hit.frontFace = dot(hit.geonrm, worldRayDirection) < 0.0f;
+  if(!hit.frontFace)
   {
     hit.geonrm = -hit.geonrm;  // Flip if back-facing
   }

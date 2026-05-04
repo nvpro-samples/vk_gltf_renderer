@@ -9,6 +9,7 @@ This project is developer-oriented: the **RTX path tracer** is the primary high-
 - [Architecture](#architecture)
 - [Scene Graph](#scene-graph)
 - [Source Code Structure](#source-code-structure)
+- [Material System](#material-system)
 - [Common Development Workflows](#common-development-workflows)
 - [Testing](#testing)
 - [Contributing](#contributing)
@@ -130,7 +131,7 @@ src/
 ├── ui_scene_browser.cpp/hpp    # Scene graph browser (tree + flat views)
 ├── ui_renderer.cpp             # Viewport UI and mouse interaction
 ├── ui_xmp.cpp/hpp              # KHR_xmp_json_ld metadata display
-├── ui_animation_control.hpp    # Animation playback UI widget
+├── ui_animation.cpp/hpp        # Animation playback state and viewport animation widget
 ├── ui_mouse_state.hpp          # Mouse state tracking for viewport
 ├── ui_busy_window.hpp          # Loading/busy indicator overlay
 │
@@ -167,8 +168,67 @@ shaders/
 ├── gizmo_grid_shaderio.h.slang # Grid shader I/O
 ├── gizmo_visuals.slang         # Transform gizmo overlays
 ├── gizmo_visuals_shaderio.h.slang # Gizmo shader I/O
-└── optix_image_to_buffer.slang # OptiX denoiser buffer conversion
+├── optix_image_to_buffer.slang # OptiX denoiser buffer conversion
+│
+│   # Local material fork (see "Material System" below)
+├── gltf_material_config.h      # MAT_EXT_* compile-time feature flags
+├── gltf_scene_io.h.slang       # GltfShadeMaterial / GltfLight / GltfScene shaderio structs
+├── gltf_vertex_access.h.slang  # Vertex buffer accessors
+└── gltf_material_eval.h.slang  # evaluateMaterial(): GltfShadeMaterial -> PbrMaterial
 ```
+
+---
+
+## Material System
+
+The glTF material struct (`shaderio::GltfShadeMaterial`) and its `evaluateMaterial()` function
+are **forked locally** into `shaders/gltf_*.h.slang` rather than using the upstream
+`nvpro_core2/nvshaders/` versions. The fork exists for two reasons:
+
+1. **Forkability**: the struct layout can be tailored to this project without affecting other
+   samples that share `nvpro_core2`.
+2. **Extension gating**: every `KHR_materials_*` extension (plus `KHR_texture_transform`) is
+   controlled by a compile-time `MAT_EXT_*` flag in
+   [`shaders/gltf_material_config.h`](../shaders/gltf_material_config.h).
+   When a flag is `0`, that extension's fields drop out of the relevant struct
+   (`GltfShadeMaterial` for `KHR_materials_*`, `GltfTextureInfo` for `KHR_texture_transform`)
+   and its code paths drop out of `evaluateMaterial()` / `getTexture()` / `getShadowTransmission()`.
+   Defaults are all `1`, reproducing the upstream behavior byte-for-byte.
+
+### Key design points
+
+- **`gltf_scene_io.h.slang`** and **`gltf_vertex_access.h.slang`** intentionally reuse the
+  upstream include guards (`DH_SCN_DESC_H`, `VERTEX_ACCESSORS_H`) so that transitive
+  includes from `nvpro_core2` headers (e.g. `nvshaders/light_contrib.h.slang`) become
+  no-ops. The local version must be included first in every translation unit.
+- **`gltf_material_eval.h.slang`** uses its own guard (`GLTF_MATERIAL_EVAL_H`) because no
+  upstream code transitively includes it.
+- `PbrMaterial` and the BSDF interface (`nvshaders/bsdf_functions.h.slang`) stay in
+  `nvpro_core2`. The local `evaluateMaterial()` initializes `PbrMaterial` with
+  `defaultPbrMaterial()` first, then overrides per extension — gating an extension off
+  safely leaves the corresponding BSDF fields at their neutral defaults.
+- Struct members carry their defaults inline (`float3 emissiveFactor = float3(0);`),
+  so `GltfShadeMaterial m = {};` works; no parallel `default*()` helpers to keep in sync.
+- Host-side layout is asserted in [`src/gltf_material_cache.cpp`](../src/gltf_material_cache.cpp)
+  via `static_assert(sizeof(...) % 4 == 0)` and anchor-offset checks, so flipping any
+  `MAT_EXT_*` flag that breaks the stride rule fails the build immediately.
+
+### Adding a new KHR_materials_* extension
+
+1. Define a new `MAT_EXT_<NAME>` flag in [`gltf_material_config.h`](../shaders/gltf_material_config.h),
+   default `1`.
+2. In [`gltf_scene_io.h.slang`](../shaders/gltf_scene_io.h.slang), add the new struct fields
+   (+ any texture slots) inside `#if MAT_EXT_<NAME>` with inline default values.
+3. In [`gltf_material_eval.h.slang`](../shaders/gltf_material_eval.h.slang), add the
+   evaluation block inside `#if MAT_EXT_<NAME>`, overriding the relevant `PbrMaterial`
+   fields. Respect the existing block order (volume block runs before IOR, etc.).
+4. In [`src/gltf_material_cache.cpp`](../src/gltf_material_cache.cpp), add the matching
+   CPU-side population block under the same `#if MAT_EXT_<NAME>` — the `tinygltf::utils::get*`
+   call, all field writes, and all `handleTexture(...)` calls go inside the guard.
+5. If the path tracer reads the new field directly outside `evaluateMaterial()` (e.g.
+   `getShadowTransmission()` in `gltf_pathtrace.slang`), gate those accesses too.
+6. Update documentation in [`README.md`](../README.md) (extension support list) and
+   [`user-guide.md`](user-guide.md).
 
 ---
 
@@ -190,8 +250,11 @@ shaders/
 ### Add or update glTF extension support
 
 1. Parse and serialize extension fields in `tinygltf_utils.*`.
-2. Integrate runtime behavior in scene/material/shader code as needed.
-3. Update extension documentation in `README.md` and usage notes in `user-guide.md`.
+2. If the extension affects the material model (any `KHR_materials_*`), follow the
+   checklist in [Material System → Adding a new KHR_materials_* extension](#adding-a-new-khr_materials_-extension).
+3. Otherwise, integrate runtime behavior in scene/shader code as needed.
+4. Update extension documentation in [README.md](../README.md) and usage notes in
+   [user-guide.md](user-guide.md).
 
 ### Modify sync/data-flow behavior
 

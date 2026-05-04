@@ -25,6 +25,9 @@
 //
 
 #include <fmt/format.h>
+#include <chrono>
+#include <thread>
+#include <vector>
 
 #include <nvapp/elem_dbgprintf.hpp>
 #include <nvvk/check_error.hpp>
@@ -39,6 +42,16 @@
 
 // Pre-compiled shaders
 #include "_autogen/gltf_pathtrace.slang.h"
+
+// Toggle deferred host operations for RTX pipeline creation.
+// 1 = use VkDeferredOperationKHR to parallelize SPIR-V->ISA compilation across worker threads.
+// 0 = create the pipeline synchronously on the calling thread (useful for comparing compile
+//     times or as a workaround if the driver misbehaves with deferred ops).
+// NOTE: the NVIDIA driver currently does not populate VkPipelineCreationFeedback when a
+// deferred op is used, so the cache-hit flag is only meaningful with USE_DEFERRED_RTX_COMPILE=0.
+#ifndef USE_DEFERRED_RTX_COMPILE
+#define USE_DEFERRED_RTX_COMPILE 0
+#endif
 
 
 PathTracer::PathTracer()
@@ -106,6 +119,7 @@ void PathTracer::registerParameters(nvutils::ParameterRegistry* paramReg)
                  .callbackSuccess = [this](const nvutils::ParameterBase* const) { m_adaptiveSampling = false; }},
                 &m_pushConst.numSamples);
   paramReg->add({"ptFireflyClamp", "PathTracer: Firefly clamp threshold"}, &m_pushConst.fireflyClampThreshold);
+  paramReg->add({"ptTexGradScale", "PathTracer: Ray-footprint gradient scale (0=mip0, 1=physical)"}, &m_pushConst.texGradScale);
   paramReg->add({"ptAperture", "PathTracer: Camera aperture"}, &m_pushConst.aperture);
   paramReg->add({"ptFocalDistance", "PathTracer: Focal distance"}, &m_pushConst.focalDistance);
   paramReg->add({"ptAutoFocus", "PathTracer: Enable auto focus"}, &m_autoFocus);
@@ -130,6 +144,7 @@ void PathTracer::setSettingsHandler(nvgui::SettingsHandler* settingsHandler)
   settingsHandler->setSetting("ptAdaptiveSampling", &m_adaptiveSampling);
   settingsHandler->setSetting("ptPerformanceTarget", (int*)&m_performanceTarget);
   settingsHandler->setSetting("ptMaxDepth", &m_pushConst.maxDepth);
+  settingsHandler->setSetting("ptTexGradScale", &m_pushConst.texGradScale);
 
 #if defined(USE_DLSS)
   m_dlss->setSettingsHandler(settingsHandler);
@@ -144,6 +159,10 @@ void PathTracer::setSettingsHandler(nvgui::SettingsHandler* settingsHandler)
 // Destroy the resources
 void PathTracer::onDetach(Resources& resources)
 {
+  // Wait for any background compile to finish before destroying the Vulkan objects it owns.
+  if(m_compileThread.joinable())
+    m_compileThread.join();
+
   resources.allocator.destroyBuffer(m_sbtBuffer);
 
 #if defined(USE_DLSS)
@@ -233,6 +252,10 @@ bool PathTracer::onUIRender(Resources& resources)
     changed |= PE::SliderInt("Max Depth", &m_pushConst.maxDepth, 0, 20, "%d", 0, "Maximum number of bounces");
     changed |= PE::SliderFloat("FireFly Clamp", &m_pushConst.fireflyClampThreshold, 0.0f, 10.0f, "%.2f", 0,
                                "Clamp threshold for fireflies");
+    changed |= PE::SliderFloat("Texture LOD", &m_pushConst.texGradScale, 0.0f, 1.0f, "%.2f", 0,
+                               "Ray-footprint gradient scale for texture LOD.\n"
+                               "0 = always mip 0 (sharpest, relies on MC accumulation for AA).\n"
+                               "1 = full physically-derived LOD (default, may look soft at distance).");
     PE::end();
   }
 
@@ -357,15 +380,62 @@ bool PathTracer::onUIRender(Resources& resources)
 }
 
 //--------------------------------------------------------------------------------------------------
+// Launches a background worker that (re)compiles the Slang shader and builds the ray
+// tracing pipeline for the currently selected technique.
+void PathTracer::startAsyncCompile(Resources& resources)
+{
+  if(m_compileThread.joinable())
+    m_compileThread.join();
+
+  m_busyWindow->start("Preparing path tracer...");
+
+  m_compileThread = std::thread([this, &resources]() {
+    // Recompile Slang->SPIR-V if the wireframe flag has changed. compileShader() also
+    // destroys the existing pipelines, so the build step below runs against fresh handles.
+    if(m_compiledWireframe != resources.settings.wireframe)
+    {
+      m_busyWindow->setReason("Compiling Slang shaders...");
+      compileShader(resources);
+    }
+
+    // Build the pipeline for the selected technique
+    const bool rqMissing  = m_renderTechnique == RenderTechnique::RayQuery && m_rqPipeline == VK_NULL_HANDLE;
+    const bool rtxMissing = m_renderTechnique == RenderTechnique::RayTracing && m_rtxPipeline == VK_NULL_HANDLE;
+
+    if(rqMissing)
+    {
+      m_busyWindow->setReason("Creating Ray Query pipeline...");
+      createRqPipeline(resources);
+    }
+    else if(rtxMissing)
+    {
+      m_busyWindow->setReason("Creating RTX pipeline...");
+      createRtxPipeline(resources);
+    }
+
+    m_busyWindow->stop();
+  });
+}
+
+//--------------------------------------------------------------------------------------------------
 // Render the scene
 void PathTracer::onRender(VkCommandBuffer cmd, Resources& resources)
 {
   NVVK_DBG_SCOPE(cmd);  // <-- Helps to debug in NSight
 
-  if(m_compiledWireframe != resources.settings.wireframe)
+  // Decide whether we need to (re)compile or (re)build a pipeline. Any of these triggers
+  // an async job that shows the BusyWindow; we then skip rendering this frame.
+  const bool needRecompile = (m_compiledWireframe != resources.settings.wireframe);
+  const bool needPipeline  = (m_renderTechnique == RenderTechnique::RayQuery) ? (m_rqPipeline == VK_NULL_HANDLE) :
+                                                                                (m_rtxPipeline == VK_NULL_HANDLE);
+
+  if(needRecompile || needPipeline)
   {
+    // SYNC NOTE: old pipelines may be in flight from the previous frame — wait before
+    // the worker destroys/recreates them.
     NVVK_CHECK(vkQueueWaitIdle(resources.app->getQueue(0).queue));
-    compileShader(resources);
+    startAsyncCompile(resources);
+    return;
   }
 
   // Reset display buffer to rendered on first frame
@@ -579,8 +649,16 @@ void PathTracer::createRqPipeline(Resources& /*resources*/)
       .pSpecializationInfo = specialization.getSpecializationInfo(),
   };
 
+  // Query the driver about pipeline cache hit / compilation duration (core in Vulkan 1.3)
+  VkPipelineCreationFeedback           feedback{};
+  VkPipelineCreationFeedbackCreateInfo feedbackInfo{
+      .sType                     = VK_STRUCTURE_TYPE_PIPELINE_CREATION_FEEDBACK_CREATE_INFO,
+      .pPipelineCreationFeedback = &feedback,
+  };
+
   VkComputePipelineCreateInfo cpCreateInfo{
       .sType  = VK_STRUCTURE_TYPE_COMPUTE_PIPELINE_CREATE_INFO,
+      .pNext  = &feedbackInfo,
       .stage  = shaderStage,
       .layout = m_pipelineLayout,
   };
@@ -588,6 +666,11 @@ void PathTracer::createRqPipeline(Resources& /*resources*/)
   // NOTE: if the creation is slow, disable the validation layers for faster creation (--vvl 0)
   NVVK_CHECK(vkCreateComputePipelines(m_device, m_pipelineCache.getCache(), 1, &cpCreateInfo, nullptr, &m_rqPipeline));
   NVVK_DBG_NAME(m_rqPipeline);
+
+  const bool valid = (feedback.flags & VK_PIPELINE_CREATION_FEEDBACK_VALID_BIT) != 0;
+  const bool hit   = (feedback.flags & VK_PIPELINE_CREATION_FEEDBACK_APPLICATION_PIPELINE_CACHE_HIT_BIT) != 0;
+  LOGI("RQ pipeline creation: %s, %s (%.2f ms)\n", valid ? "valid" : "invalid", hit ? "CACHE HIT" : "cache miss",
+       feedback.duration / 1e6);
 }
 
 
@@ -686,9 +769,17 @@ void PathTracer::createRtxPipeline(Resources& resources)
   stages[eRaygen].pSpecializationInfo = specialization.getSpecializationInfo();
 
 
+  // Query the driver about pipeline cache hit / compilation duration (core in Vulkan 1.3)
+  VkPipelineCreationFeedback           feedback{};
+  VkPipelineCreationFeedbackCreateInfo feedbackInfo{
+      .sType                     = VK_STRUCTURE_TYPE_PIPELINE_CREATION_FEEDBACK_CREATE_INFO,
+      .pPipelineCreationFeedback = &feedback,
+  };
+
   // Assemble the shader stages and recursion depth info into the ray tracing pipeline
   VkRayTracingPipelineCreateInfoKHR rtPipelineCreateInfo{
       .sType                        = VK_STRUCTURE_TYPE_RAY_TRACING_PIPELINE_CREATE_INFO_KHR,
+      .pNext                        = &feedbackInfo,
       .stageCount                   = static_cast<uint32_t>(stages.size()),  // Stages are shaders
       .pStages                      = stages.data(),
       .groupCount                   = static_cast<uint32_t>(shader_groups.size()),
@@ -699,9 +790,84 @@ void PathTracer::createRtxPipeline(Resources& resources)
   vkDestroyPipeline(m_device, m_rtxPipeline, nullptr);
 
 
+  // Time the create (+ join, when deferred) wall-clock ourselves. The NVIDIA driver does
+  // not populate VkPipelineCreationFeedback when a VkDeferredOperationKHR is used, so
+  // feedback.duration and the VALID_BIT cannot be relied on on the deferred path.
   // NOTE: if the creation is slow, disable the validation layers for faster creation (--vvl 0)
-  NVVK_CHECK(vkCreateRayTracingPipelinesKHR(m_device, {}, m_pipelineCache.getCache(), 1, &rtPipelineCreateInfo, nullptr, &m_rtxPipeline));
+  const auto createStart = std::chrono::steady_clock::now();
+
+#if USE_DEFERRED_RTX_COMPILE
+  // Deferred host operation: lets the driver split the SPIR-V->ISA compile across worker
+  // threads. On a cache hit the call returns VK_SUCCESS immediately and the join loop is a
+  // no-op, so this is safe to do unconditionally.
+  VkDeferredOperationKHR deferredOp = VK_NULL_HANDLE;
+  NVVK_CHECK(vkCreateDeferredOperationKHR(m_device, nullptr, &deferredOp));
+
+  VkResult createResult = vkCreateRayTracingPipelinesKHR(m_device, deferredOp, m_pipelineCache.getCache(), 1,
+                                                         &rtPipelineCreateInfo, nullptr, &m_rtxPipeline);
+
+  if(createResult == VK_OPERATION_DEFERRED_KHR)
+  {
+    // Parallelize the compile across worker threads. We spawn (maxConcurrency - 1) workers
+    // and have the calling thread also participate, so we use all available parallelism
+    // reported by the driver without over-subscribing.
+    const uint32_t maxConcurrency = vkGetDeferredOperationMaxConcurrencyKHR(m_device, deferredOp);
+    const uint32_t hwConcurrency  = std::max(1u, std::thread::hardware_concurrency());
+    const uint32_t threadCount    = std::min(maxConcurrency, hwConcurrency);
+
+    auto joinLoop = [this, deferredOp]() {
+      VkResult r;
+      do
+      {
+        r = vkDeferredOperationJoinKHR(m_device, deferredOp);
+      } while(r == VK_THREAD_IDLE_KHR);
+      // VK_THREAD_DONE_KHR: no more work available for this thread (others may still be running)
+      // VK_SUCCESS: whole deferred op finished
+    };
+
+    std::vector<std::thread> workers;
+    workers.reserve(threadCount > 0 ? threadCount - 1 : 0);
+    for(uint32_t i = 1; i < threadCount; ++i)
+      workers.push_back(std::thread(joinLoop));
+    joinLoop();
+    for(auto& t : workers)
+      t.join();
+
+    // All threads returned either VK_THREAD_DONE_KHR or VK_SUCCESS; poll the final result
+    // (per spec, VK_NOT_READY means workers are done but some bookkeeping remains).
+    VkResult finalResult;
+    do
+    {
+      finalResult = vkGetDeferredOperationResultKHR(m_device, deferredOp);
+    } while(finalResult == VK_NOT_READY);
+    NVVK_CHECK(finalResult);
+  }
+  else
+  {
+    NVVK_CHECK(createResult);
+  }
+
+  vkDestroyDeferredOperationKHR(m_device, deferredOp, nullptr);
+  const bool wasDeferred = (createResult == VK_OPERATION_DEFERRED_KHR);
+#else
+  // Synchronous path: no deferred op, driver is expected to populate VkPipelineCreationFeedback.
+  NVVK_CHECK(vkCreateRayTracingPipelinesKHR(m_device, VK_NULL_HANDLE, m_pipelineCache.getCache(), 1,
+                                            &rtPipelineCreateInfo, nullptr, &m_rtxPipeline));
+  const bool wasDeferred = false;
+#endif
+
   NVVK_DBG_NAME(m_rtxPipeline);
+
+  const double elapsedMs = std::chrono::duration<double, std::milli>(std::chrono::steady_clock::now() - createStart).count();
+
+  // Log pipeline creation status and whether deferred compilation was used. On the deferred
+  // path the driver may skip filling in VkPipelineCreationFeedback, so we rely on our own
+  // wall-clock timing and treat the cache-hit bit as a best-effort hint.
+  const bool  valid = (feedback.flags & VK_PIPELINE_CREATION_FEEDBACK_VALID_BIT) != 0;
+  const char* cacheStatus =
+      valid ? ((feedback.flags & VK_PIPELINE_CREATION_FEEDBACK_APPLICATION_PIPELINE_CACHE_HIT_BIT) ? "CACHE HIT" : "cache miss") :
+              "cache status unknown";
+  LOGI("RTX pipeline creation: %s, deferred=%s (%.2f ms)\n", cacheStatus, wasDeferred ? "yes" : "no", elapsedMs);
 
   // Create the Shading Binding Table
   {

@@ -17,22 +17,23 @@
  * SPDX-License-Identifier: Apache-2.0
  */
 
+#include "gltf_scene_io.h.slang"
+#include "gltf_vertex_access.h.slang"
+#include "gltf_material_eval.h.slang"
+#include "shaderio.h"
+#include "get_hit.h.slang"
+#include "common.h.slang"
+
 // NVSHADERS are under: https://github.com/nvpro-samples/nvpro_core2/tree/main/nvshaders
 #include "nvshaders/bsdf_functions.h.slang"
 #include "nvshaders/bsdf_types.h.slang"
-#include "nvshaders/gltf_scene_io.h.slang"
-#include "nvshaders/gltf_vertex_access.h.slang"
 #include "nvshaders/hdr_env_sampling.h.slang"
 #include "nvshaders/light_contrib.h.slang"
 #include "nvshaders/pbr_ggx_microfacet.h.slang"
-#include "nvshaders/pbr_material_eval.h.slang"
 #include "nvshaders/ray_utils.h.slang"
 #include "nvshaders/sample_blur.h.slang"
 
 
-#include "shaderio.h"
-#include "get_hit.h.slang"
-#include "common.h.slang"
 
 // Bindings
 // clang-format off

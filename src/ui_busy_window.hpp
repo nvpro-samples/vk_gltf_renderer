@@ -42,6 +42,8 @@
  * void loadAssets() {
  *     busy.start("Loading assets...");
  *     // ... do your long operation ...
+ *     busy.setReason("Finalizing...");   // update message mid-flight
+ *     // ... more work ...
  *     busy.stop();
  * }
  *
@@ -55,6 +57,7 @@
 
 #include <string>
 #include <atomic>
+#include <mutex>
 
 #include "imgui.h"
 
@@ -63,9 +66,21 @@ class BusyWindow
 public:
   void start(const std::string& reason)
   {
-    m_busy   = true;
+    {
+      std::lock_guard<std::mutex> lock(m_reasonMutex);
+      m_reason = reason;
+    }
+    m_busy = true;
+  }
+
+  // Update the progress message while the busy window is running. Safe to call from
+  // the worker thread; the UI thread picks up the new text on its next show() call.
+  void setReason(const std::string& reason)
+  {
+    std::lock_guard<std::mutex> lock(m_reasonMutex);
     m_reason = reason;
   }
+
   void stop()
   {
     m_busy = false;
@@ -78,10 +93,11 @@ public:
   // Display a modal window when loading assets or other long operation on separated thread
   inline void show()
   {
+    // Hold the lock across the whole draw so the worker thread cannot mutate m_reason
+    std::lock_guard<std::mutex> lock(m_reasonMutex);
     if(m_reason.empty())
       return;
 
-    // Display a modal window when loading assets or other long operation on separated thread
     ImGui::OpenPopup("Busy Info");
 
     // Position in the center of the main window when appearing
@@ -94,7 +110,6 @@ public:
     ImGui::PushStyleVar(ImGuiStyleVar_WindowRounding, 15.0);
     if(ImGui::BeginPopupModal("Busy Info", nullptr, ImGuiWindowFlags_AlwaysAutoResize | ImGuiWindowFlags_NoDecoration))
     {
-      // Center text in window
       ImGui::TextDisabled("Please wait ...");
       ImGui::NewLine();
       ImGui::ProgressBar(-.20f * float(ImGui::GetTime()), ImVec2(-1.0f, 0.0f), m_reason.c_str());
@@ -106,5 +121,6 @@ public:
 private:
   std::atomic<bool> m_busy{false};
   std::atomic<bool> m_done{false};
+  std::mutex        m_reasonMutex;
   std::string       m_reason;
 };

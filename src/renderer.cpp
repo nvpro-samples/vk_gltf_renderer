@@ -132,7 +132,8 @@ bool webPLoadCallback(nvvkgltf::SceneVk::SceneImage& image, const void* data, si
 }  // namespace
 
 // The constructor registers the parameters that can be set from the command line
-GltfRenderer::GltfRenderer(nvutils::ParameterRegistry* paramReg)
+GltfRenderer::GltfRenderer(nvutils::ParameterRegistry* paramReg, const nvutils::ParameterParser* paramParser)
+    : m_parameterParser(paramParser)
 {
   // All parameters that can be set from the command line
   paramReg->add({"envSystem", "Environment: [Sky:0, HDR:1]"}, (int*)&m_resources.settings.envSystem);
@@ -206,6 +207,10 @@ void GltfRenderer::onAttach(nvapp::Application* app)
     m_settingsHandler.setSetting("solidBackgroundColor", &m_resources.settings.solidBackgroundColor);
     m_pathTracer.setSettingsHandler(&m_settingsHandler);
     m_rasterizer.setSettingsHandler(&m_settingsHandler);
+    m_settingsHandler.setLoadFilter([this](const std::string& key) {
+      // Skip loading settings that were explicitly set via the command line
+      return !(m_parameterParser && m_parameterParser->wasParsed(key));
+    });
     m_settingsHandler.addImGuiHandler();
   }
 
@@ -339,6 +344,7 @@ void GltfRenderer::onAttach(nvapp::Application* app)
   // Initialize the renderers
   m_pathTracer.onAttach(m_resources, &m_profilerGpuTimer);
   m_pathTracer.setProfilerTimeline(m_profilerTimeline);
+  m_pathTracer.setBusyWindow(&m_busy);  // Show BusyWindow during async shader/pipeline compiles
   m_rasterizer.onAttach(m_resources, &m_profilerGpuTimer);
 
   m_pathTracer.createPipeline(m_resources);
@@ -456,10 +462,11 @@ void GltfRenderer::onRender(VkCommandBuffer cmd)
     return;
   }
 
-  // Consume the done signal from the busy state, this will remove the Progress Bar from the UI
+  // Consume the done signal from the busy state, this will remove the Progress Bar from the UI.
   if(m_busy.isDone())
   {
     m_busy.consumeDone();
+    resetFrame();
   }
 
   // Loading pipeline: submit queued work, poll completion, run callbacks
@@ -1033,6 +1040,8 @@ void GltfRenderer::createScene(const std::filesystem::path& sceneFilename)
 
   // Scene is loaded, we can create the Vulkan scene
   createVulkanScene();
+  if(ui::animation::hasPlayableAnimation(m_resources.getScene()))
+    m_resources.animationControl.showStrip = true;
 
   nvvkgltf::Scene* scene = m_resources.getScene();
   // Scene Browser system
@@ -1131,6 +1140,8 @@ void GltfRenderer::createSceneFromDescriptor(const std::filesystem::path& descri
   // Publish to resources only when fully constructed (UI thread can now see it)
   m_resources.scene = std::move(scn);
   createVulkanScene();
+  if(ui::animation::hasPlayableAnimation(scene))
+    m_resources.animationControl.showStrip = true;
 
   m_sceneBrowser.setScene(scene);
   m_sceneBrowser.setSelection(&m_sceneSelection);
@@ -1174,9 +1185,7 @@ void GltfRenderer::cleanupScene()
   m_inspector.setScene(nullptr);
   m_sceneSelection.clearSelection();  // Clear selection in new UI system
   m_resources.selectedRenderNodes.clear();
-
-  // Reset animation control to avoid out-of-bounds access when loading a scene with fewer animations
-  m_sceneBrowser.getAnimationControl().currentAnimation = 0;
+  m_resources.animationControl = AnimationControl{};
 
   // Reset memory statistics for the new scene
   // Keeps lifetime allocation/deallocation counts but resets current and peak values
@@ -1236,7 +1245,7 @@ void GltfRenderer::rebuildVulkanSceneInternal(bool rebuildTextures)
 
     // After merge: select the merged file's first animation clip (appended after base clips).
     // Otherwise currentAnimation often stays on a base-scene clip and merged motion appears "stuck".
-    AnimationControl& animCtrl = m_sceneBrowser.getAnimationControl();
+    AnimationControl& animCtrl = m_resources.animationControl;
     if(int prefer = scene->takeMergePreferredAnimationIndex(); prefer >= 0)
     {
       const int nAnim = scene->animation().getNumAnimations();
@@ -1249,6 +1258,8 @@ void GltfRenderer::rebuildVulkanSceneInternal(bool rebuildTextures)
       if(nAnim > 0 && (animCtrl.currentAnimation < 0 || animCtrl.currentAnimation >= nAnim))
         animCtrl.currentAnimation = 0;
     }
+    if(ui::animation::hasPlayableAnimation(scene))
+      animCtrl.showStrip = true;
   }
 
   // Update textures if requested
@@ -1683,10 +1694,10 @@ bool GltfRenderer::updateAnimation(VkCommandBuffer cmd)
   if(!scnPtr)
     return false;
   nvvkgltf::Scene&  scn      = *scnPtr;
-  AnimationControl& animCtrl = m_sceneBrowser.getAnimationControl();
+  AnimationControl& animCtrl = m_resources.animationControl;
 
 
-  if(scn.animation().hasAnimation() && animCtrl.doAnimation())
+  if(ui::animation::hasPlayableAnimation(scnPtr) && animCtrl.doAnimation())
   {
     const int nAnim = scn.animation().getNumAnimations();
     if(nAnim <= 0)

@@ -33,7 +33,7 @@
 #include "nvvk/sampler_pool.hpp"
 #include "nvvk/staging.hpp"
 #include "gpu_memory_tracker.hpp"
-#include "nvshaders/gltf_scene_io.h.slang"
+#include "shaders/gltf_scene_io.h.slang"
 
 
 /*-------------------------------------------------------------------------------------------------

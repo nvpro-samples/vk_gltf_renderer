@@ -19,6 +19,8 @@
 
 #pragma once
 
+#include <thread>
+
 #include <glm/glm.hpp>
 
 // Shader Input/Output
@@ -29,6 +31,7 @@
 #include "renderer_base.hpp"
 #include "utils.hpp"
 #include "pipeline_cache_util.hpp"
+#include "ui_busy_window.hpp"
 
 // #DLSS
 #if defined(USE_DLSS)
@@ -67,7 +70,7 @@ public:
   void createRqPipeline(Resources& resources);
   void createRtxPipeline(Resources& resources);
   void compileShader(Resources& resources, bool fromFile = true) override;
-
+  void setBusyWindow(BusyWindow* busy) { m_busyWindow = busy; }
 
   // Register command line parameters
   void registerParameters(nvutils::ParameterRegistry* paramReg);
@@ -95,6 +98,10 @@ public:
   bool m_supportSER{false};
   bool m_useSER{false};
   bool m_compiledWireframe{false};
+
+
+  BusyWindow* m_busyWindow{nullptr};  // Modal shown during async shader/pipeline compile.
+  std::thread m_compileThread;        // Joined in onDetach().
 
   // The default rendering technique
   RenderTechnique m_renderTechnique{RenderTechnique::RayTracing};
@@ -162,6 +169,7 @@ public:
 
 
 private:
+  void startAsyncCompile(Resources& resources);
   void updateStatistics(Resources& resources);
   void renderRayQuery(VkCommandBuffer cmd, VkExtent2D renderingSize, Resources& resources);
   void renderRayTrace(VkCommandBuffer cmd, VkExtent2D& renderingSize, Resources& resources);

@@ -38,7 +38,6 @@
 #include <nvutils/bounding_box.hpp>
 
 #include "scene_selection.hpp"
-#include "ui_animation_control.hpp"
 
 class UndoStack;
 
@@ -81,9 +80,6 @@ public:
     m_pendingDeleteNode        = nodeIndex;
     m_openDeletePopupNextFrame = openPopup;
   }
-
-  // Animation control accessor (needed by renderer for update logic)
-  AnimationControl& getAnimationControl() { return m_animControl; }
 
   // Node lookup helpers (public for camera operations)
   int getNodeForCamera(int camIdx);
@@ -212,7 +208,4 @@ private:
   // Shared delete state (owned by renderer, written by context menu)
   int*  m_pendingDeleteNode        = nullptr;
   bool* m_openDeletePopupNextFrame = nullptr;
-
-  // Animation control
-  AnimationControl m_animControl;
 };

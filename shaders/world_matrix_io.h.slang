@@ -12,7 +12,7 @@
 #define WORLD_MATRIX_IO_H
 
 #include "nvshaders/slang_types.h"
-#include "nvshaders/gltf_scene_io.h.slang"
+#include "gltf_scene_io.h.slang"
 
 NAMESPACE_SHADERIO_BEGIN()
 

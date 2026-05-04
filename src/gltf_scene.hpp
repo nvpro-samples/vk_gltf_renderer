@@ -147,7 +147,7 @@ struct AnimationInfo
 {
   std::string name;
   float       start       = std::numeric_limits<float>::max();
-  float       end         = std::numeric_limits<float>::min();
+  float       end         = std::numeric_limits<float>::lowest();
   float       currentTime = 0.0f;
   float       reset() { return currentTime = start; }
   float       incrementTime(float deltaTime, bool loop = true)

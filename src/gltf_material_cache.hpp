@@ -25,7 +25,7 @@
 
 #include <tinygltf/tiny_gltf.h>
 
-#include "nvshaders/gltf_scene_io.h.slang"
+#include "shaders/gltf_scene_io.h.slang"
 
 namespace nvvkgltf {
 

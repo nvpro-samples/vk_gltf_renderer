@@ -48,6 +48,7 @@
 #include <nvvk/staging.hpp>
 #include "gltf_scene.hpp"
 #include "gltf_scene_gpu.hpp"
+#include "ui_animation.hpp"
 #include "gltf_scene_transform_vk.hpp"
 #include "gpu_memory_tracker.hpp"
 #include <nvapp/application.hpp>
@@ -252,6 +253,8 @@ struct Resources
   VkDescriptorSet                         descriptorSet{};        // Descriptor set for the textures
   VkDescriptorPool                        descriptorPool{};
 
+  // Animation playback state
+  AnimationControl animationControl{};
 
   int frameCount{0};
 

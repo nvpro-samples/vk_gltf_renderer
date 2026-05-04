@@ -17,6 +17,10 @@
  * SPDX-License-Identifier: Apache-2.0
  */
 
+#include "shaderio.h"
+#include "gltf_scene_io.h.slang"
+
+#include "nvshaders/tonemap_functions.h.slang"
 
 enum VisualizationResult
 {
@@ -34,12 +38,7 @@ float3 hashToColor(uint id)
   return float3(float((h >> 0) & 0xFF), float((h >> 8) & 0xFF), float((h >> 16) & 0xFF)) / 255.0;
 }
 
-VisualizationResult applyVisualization(inout PbrMaterial pbrMat,
-                                       HitState          hit,
-                                       Visualization     vizMethod,
-                                       int               rprimID,
-                                       int               primitiveID,
-                                       out float3        overrideColor)
+VisualizationResult applyVisualization(inout PbrMaterial pbrMat, HitState hit, Visualization vizMethod, int rprimID, int primitiveID, out float3 overrideColor)
 {
   overrideColor = float3(0);
 
@@ -47,15 +46,22 @@ VisualizationResult applyVisualization(inout PbrMaterial pbrMat,
   {
     case Visualization::eBaseColor:
       overrideColor = float3(pbrMat.baseColor);
+      overrideColor = toSrgb(overrideColor);
       return VisualizationResult::eColorOverride;
     case Visualization::eMetallic:
       overrideColor = float3(pbrMat.metallic);
+      overrideColor = toSrgb(overrideColor);
       return VisualizationResult::eColorOverride;
     case Visualization::eRoughness:
       overrideColor = float3(pbrMat.roughness.xyx);
+      overrideColor = toSrgb(overrideColor);
       return VisualizationResult::eColorOverride;
-    case Visualization::eNormal:
+    case Visualization::eNormalShading:
       overrideColor = float3(pbrMat.N * .5 + .5);
+      overrideColor = toSrgb(overrideColor);
+      return VisualizationResult::eColorOverride;
+    case Visualization::eNormalGeometric:
+      overrideColor = float3(pbrMat.Ng * .5 + .5);
       return VisualizationResult::eColorOverride;
     case Visualization::eTangent:
       overrideColor = pbrMat.T * .5 + .5;
@@ -83,6 +89,9 @@ VisualizationResult applyVisualization(inout PbrMaterial pbrMat,
       return VisualizationResult::eMaterialOverride;
     case Visualization::eTriangleID:
       overrideColor = hashToColor(uint(rprimID) * 65537u + uint(primitiveID));
+      return VisualizationResult::eColorOverride;
+    case Visualization::eFaceOrientation:
+      overrideColor = hit.frontFace ? float3(0, 1, 0) : float3(1, 0, 0);
       return VisualizationResult::eColorOverride;
     default:
       return VisualizationResult::eRenderedOutput;

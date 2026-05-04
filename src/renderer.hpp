@@ -39,6 +39,7 @@
 #include "gltf_scene_rtx.hpp"
 #include "gltf_scene_vk.hpp"
 #include <nvvk/profiler_vk.hpp>
+#include "nvutils/parameter_parser.hpp"
 #include "nvutils/parameter_registry.hpp"
 
 // Shader Input/Output
@@ -59,7 +60,7 @@
 class GltfRenderer : public nvapp::IAppElement
 {
 public:
-  GltfRenderer(nvutils::ParameterRegistry* parameterReg);
+  GltfRenderer(nvutils::ParameterRegistry* parameterReg, const nvutils::ParameterParser* parameterParser);
   ~GltfRenderer() override = default;
 
   void createScene(const std::filesystem::path& sceneFilename);
@@ -89,8 +90,6 @@ private:
   void clearGbuffer(VkCommandBuffer cmd);
   void cleanupScene();           // Helper to cleanup current scene
   void rebuildSceneFromModel();  // Rebuild Vulkan scene after modifying the glTF model in-place (preserves textures)
-  /// `setCurrentScene(getCurrentScene())` → `parseScene`. Call before GPU rebuild when the model
-  /// changed without `mergeScene`/`parseScene` (e.g. compact, tangent gen).
   void refreshCpuSceneGraphFromModel();
   void rebuildVulkanSceneInternal(bool rebuildTextures);  // GPU upload + AS; CPU scene must already be parsed
   void compileShaders();
@@ -219,5 +218,6 @@ private:
 
   VkCommandPool m_transientCmdPool{};  // Command pool for transient command buffers
 
-  nvgui::SettingsHandler m_settingsHandler;  // Settings handler for ImGui.ini
+  nvgui::SettingsHandler          m_settingsHandler;    // Settings handler for ImGui.ini
+  const nvutils::ParameterParser* m_parameterParser{};  // CLI parameter parser, for INI load filtering (see wasParsed)
 };

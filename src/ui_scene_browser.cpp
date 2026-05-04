@@ -42,7 +42,6 @@
 #include <glm/gtx/quaternion.hpp>
 
 #include <algorithm>
-#include "ui_animation_control.hpp"
 
 //==================================================================================================
 // CONSTANTS
@@ -152,15 +151,6 @@ void UiSceneBrowser::render(bool* show, bool isBusy)
     if(ImGui::CollapsingHeader("Asset Info"))
     {
       renderAssetInfoTab();
-    }
-
-    // Animation Widget (at the top of the Scene Browser)
-    if(m_scene->animation().hasAnimation())
-    {
-      if(ImGui::CollapsingHeader("Animation"))
-      {
-        m_animControl.onUI(m_scene);
-      }
     }
 
     // Material Variant selection (at the top of the Scene Browser)

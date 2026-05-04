@@ -30,33 +30,30 @@
 // Add printf and enable the Validation layer debug output.
 static bool doDebug = false;
 
+#include "raytracer_interface.h.slang"
+#include "gltf_material_eval.h.slang"
+#include "gltf_scene_io.h.slang"
+#include "gltf_vertex_access.h.slang"
+#include "shaderio.h"
+#include "get_hit.h.slang"
+#include "dlss_util.h"
+#include "common.h.slang"
 
 // NVSHADERS are under: https://github.com/nvpro-samples/nvpro_core2/tree/main/nvshaders
 #include "nvshaders/functions.h.slang"
 #include "nvshaders/random.h.slang"
 #include "nvshaders/sky_functions.h.slang"
-
 #include "nvshaders/bsdf_types.h.slang"
 #include "nvshaders/bsdf_functions.h.slang"
-#include "nvshaders/gltf_scene_io.h.slang"
-#include "nvshaders/gltf_vertex_access.h.slang"
 #include "nvshaders/hdr_env_sampling.h.slang"
 #include "nvshaders/light_contrib.h.slang"
 #include "nvshaders/normal_compress.h.slang"
 #include "nvshaders/pbr_ggx_microfacet.h.slang"
-#include "nvshaders/pbr_material_eval.h.slang"
 #include "nvshaders/ray_utils.h.slang"
 #include "nvshaders/sample_blur.h.slang"
 #if WIREFRAME
 #include "nvshaders/wireframe.h.slang"
 #endif
-
-#include "shaderio.h"
-#include "get_hit.h.slang"
-#include "dlss_util.h"
-
-#include "common.h.slang"
-#include "raytracer_interface.h.slang"
 
 
 // clang-format off
@@ -260,14 +257,9 @@ float2 sampleGaussian(float2 u)
 // Ray-footprint texture LOD: compute the angular size of a single pixel in world space.
 // Camera-only quantity, constant across the entire frame.
 //-----------------------------------------------------------------------
-float computePixelAngle(float4x4 projInv, float viewportHeight, bool isOrthographic)
+float computePixelAngle(float4x4 projInv, float viewportHeight)
 {
-  if(isOrthographic)
-  {
-    return 2.0 * abs(projInv[1][1]) / max(viewportHeight, 1.0);
-  }
-  float tanHalfFov = abs(projInv[1][1]);
-  return 2.0 * tanHalfFov / max(viewportHeight, 1.0);
+  return 2.0 * abs(projInv[1][1]) / max(viewportHeight, 1.0);
 }
 
 //-----------------------------------------------------------------------
@@ -604,7 +596,9 @@ float getOpacity(GltfRenderNode renderNode, GltfRenderPrimitive renderPrim, int 
   uint3 triangleIndex = getTriangleIndices(renderPrim, triangleID);
 
   float baseColorAlpha = 1;
-  if(mat.usePbrSpecularGlossiness == 0)
+#if MAT_EXT_SPECULAR_GLOSSINESS
+  if(mat.pbrModel == PbrModel::ePbrModelMetallicRoughness)
+#endif
   {
     baseColorAlpha = mat.pbrBaseColorFactor.a;
     if(isTexturePresent(mat.pbrBaseColorTexture))
@@ -615,6 +609,7 @@ float getOpacity(GltfRenderNode renderNode, GltfRenderPrimitive renderPrim, int 
       baseColorAlpha *= allTextures[texInfo.index].SampleLevel(uv, 0.0f).a;
     }
   }
+#if MAT_EXT_SPECULAR_GLOSSINESS
   else
   {
     baseColorAlpha = mat.pbrDiffuseFactor.a;
@@ -625,6 +620,7 @@ float getOpacity(GltfRenderNode renderNode, GltfRenderPrimitive renderPrim, int 
       baseColorAlpha *= allTextures[texInfo.index].SampleLevel(uv, 0.0f).a;
     }
   }
+#endif
 
   baseColorAlpha *= getInterpolatedVertexColor(renderPrim, triangleIndex, barycentrics).a;
 
@@ -649,6 +645,11 @@ float3 getShadowTransmission(GltfRenderNode      renderNode,
                              float3              rayDirection,
                              inout bool          isInside)
 {
+#if !MAT_EXT_TRANSMISSION
+  // Without KHR_materials_transmission the material has no transmissionFactor field and no
+  // shadow ray can pass through it — return full shadow (zero transmission).
+  return float3(0.0);
+#else
   uint               matIndex  = max(0, renderNode.materialID);
   GltfShadeMaterial* materials = pushConst.gltfScene->materials;  // Buffer of materials
   GltfShadeMaterial  mat       = materials[matIndex];
@@ -678,14 +679,20 @@ float3 getShadowTransmission(GltfRenderNode      renderNode,
   // Transmission calculation
   float3 currentTransmission = float3(mat.transmissionFactor);
 
-  // Regular transmission with Fresnel using normal
+  // Regular transmission with Fresnel using normal.
+  // Falls back to the glTF default IOR (1.5) when KHR_materials_ior is gated out.
   float cosTheta = abs(dot(rayDirection, normal));
-  float fresnel  = schlickFresnel(mat.ior, cosTheta);
+#if MAT_EXT_IOR
+  float fresnel = schlickFresnel(mat.ior, cosTheta);
+#else
+  float fresnel = schlickFresnel(1.5F, cosTheta);
+#endif
   currentTransmission *= float3((1.0 - fresnel));
 
   // Apply material color tint to transmission
   currentTransmission *= mat.pbrBaseColorFactor.rgb;
 
+#if MAT_EXT_VOLUME
   // Volume attenuation (Beer's law) and scattering (KHR_materials_volume + KHR_materials_volume_scatter)
   if(mat.thicknessFactor > 0.0)
   {
@@ -694,8 +701,12 @@ float3 getShadowTransmission(GltfRenderNode      renderNode,
       // Absorption coefficient: σ_a
       float3 absCoeff = -log(max(mat.attenuationColor, float3(0.001))) / max(mat.attenuationDistance, 0.001);
 
+#if MAT_EXT_VOLUME_SCATTER
       // Scattering coefficient: σ_s
       float3 scatterCoeff = absCoeff * multiToSingleScatterAlbedo(mat.multiscatterColor);
+#else
+      float3 scatterCoeff = float3(0.0);
+#endif
 
       // Extinction: σ_t = σ_a + σ_s
       float3 extinction = absCoeff + scatterCoeff;
@@ -713,6 +724,7 @@ float3 getShadowTransmission(GltfRenderNode      renderNode,
     }
     isInside = !isInside;
   }
+#endif
 
   // Attenuation due to roughness and metallic
   float transmissionAttenuation = 1.0;
@@ -739,6 +751,7 @@ float3 getShadowTransmission(GltfRenderNode      renderNode,
   currentTransmission *= transmissionAttenuation;
 
   return currentTransmission;
+#endif  // MAT_EXT_TRANSMISSION
 }
 
 //-----------------------------------------------------------------------
@@ -985,7 +998,7 @@ SampleResult pathTrace(IRaytracer raytracer,
         // Evaluate the material at the hit point
         pbrMat   = defaultPbrMaterial(frameInfo->infinitePlaneBaseColor, frameInfo->infinitePlaneMetallic,
                                       frameInfo->infinitePlaneRoughness, hit.nrm, hit.nrm);
-        material = defaultGltfMaterial();
+        material = {};  // struct member defaults apply
 
         // Shadow catcher: invisible plane that shows only shadows for compositing
         if(hasFlag(frameInfo->flags, SceneFrameInfoFlags::eSceneInfinitePlaneShadowCatcher))
@@ -1012,10 +1025,11 @@ SampleResult pathTrace(IRaytracer raytracer,
 
         material.pbrBaseColorFactor *= hit.color;  // Modulate the base color with the vertex color
 
-        // Evaluate the material at the hit point (ray-footprint gradient for anisotropic texture LOD)
-        float     texGrad = computeRayFootprintGrad(payload.hitT, pixelAngle, hit.texelDensity);
-        MeshState mesh    = MeshState(hit.nrm, hit.tangent, hit.bitangent, hit.geonrm, hit.uv, isInside, texGrad);
-        pbrMat            = evaluateMaterial(material, mesh, allTextures, texInfos);
+        // Evaluate the material at the hit point (ray-footprint gradient for anisotropic texture LOD).
+        // texGradScale is a user knob: 0 falls through to Sample() (mip 0), 1 is the full physical gradient.
+        float texGrad  = computeRayFootprintGrad(payload.hitT, pixelAngle, hit.texelDensity) * pushConst.texGradScale;
+        MeshState mesh = MeshState(hit.nrm, hit.tangent, hit.bitangent, hit.geonrm, hit.uv, isInside, texGrad);
+        pbrMat         = evaluateMaterial(material, mesh, allTextures, texInfos);
       }
 
       // #DLSS - Capture specular hit distance on depth 1 (first reflection bounce)
@@ -1066,15 +1080,17 @@ SampleResult pathTrace(IRaytracer raytracer,
       // Adding emissive
       radiance += pbrMat.emissive * throughput;
 
+#if MAT_EXT_UNLIT
       // Unlit
       if(material.unlit > 0)
       {
         radiance += pbrMat.baseColor;
         break;
       }
+#endif
 
       // Apply volume effects: scattering and/or absorption (KHR_materials_volume + KHR_materials_volume_scatter)
-      if(isInside && !volumeMat.isThinWalled)
+      if(isInside && (volumeMat.thickness > 0.0f))
       {
         // Use volumeMat (the enclosing volume's material), not pbrMat (the hit surface's material).
         if(handleVolumeScatter(volumeMat, payload.hitT, ray, throughput, lastSamplePdf, seed))
@@ -1251,7 +1267,7 @@ SampleResult samplePixel(IRaytracer raytracer,
     ray.Direction = finalRayDir;
   }
 
-  float pixelAngle = computePixelAngle(projMatrixI, imageSize.y, isOrthographic);
+  float pixelAngle = computePixelAngle(projMatrixI, imageSize.y);
 
 #if WIREFRAME
   float3 wireDiffX, wireDiffY;
