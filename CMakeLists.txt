@@ -33,9 +33,30 @@ get_filename_component(PROJECT_NAME ${CMAKE_CURRENT_SOURCE_DIR} NAME)
 project(${PROJECT_NAME} VERSION 2.0 LANGUAGES C CXX)
 message(STATUS "Processing: ${PROJECT_NAME}")
 
-# Generate version header with build date
-string(TIMESTAMP BUILD_DATE "%y%m%d")
-set(APP_VERSION_STRING "v${PROJECT_VERSION_MAJOR}.${PROJECT_VERSION_MINOR}.${BUILD_DATE}")
+# Generate version header. Single rule: tag-driven, with a git-describe fallback.
+# - CI passes -DRELEASE_VERSION=<tag> (e.g. 2026.5); that wins.
+# - Otherwise we ask git for the closest tag + offset (handy for dev builds, e.g.
+#   v2026.5-3-g1a2b3c4-dirty).
+# - Otherwise (e.g. tarball checkout without .git), fall back to dev-unknown.
+if(DEFINED RELEASE_VERSION AND NOT "${RELEASE_VERSION}" STREQUAL "")
+  set(APP_VERSION_STRING "v${RELEASE_VERSION}")
+else()
+  find_package(Git QUIET)
+  set(APP_VERSION_STRING "dev-unknown")
+  if(GIT_FOUND AND EXISTS "${CMAKE_CURRENT_SOURCE_DIR}/.git")
+    execute_process(
+      COMMAND ${GIT_EXECUTABLE} describe --tags --always --dirty
+      WORKING_DIRECTORY ${CMAKE_CURRENT_SOURCE_DIR}
+      OUTPUT_VARIABLE _GIT_DESCRIBE
+      OUTPUT_STRIP_TRAILING_WHITESPACE
+      ERROR_QUIET
+      RESULT_VARIABLE _GIT_RESULT
+    )
+    if(_GIT_RESULT EQUAL 0 AND _GIT_DESCRIBE)
+      set(APP_VERSION_STRING "${_GIT_DESCRIBE}")
+    endif()
+  endif()
+endif()
 configure_file(
   "${CMAKE_CURRENT_SOURCE_DIR}/src/version.hpp.in"
   "${CMAKE_BINARY_DIR}/${PROJECT_NAME}/version.hpp"
@@ -152,17 +173,6 @@ set(SHADER_SLANG_FILES ${SHADER_SRC_SLANG_FILES} ${SHADER_SHARED_SLANG_FILES})
 list(LENGTH SHADER_SLANG_FILES _SHADER_COUNT)
 message(STATUS "Compiling ${_SHADER_COUNT} Slang shader(s) to SPIR-V")
 
-# Define required SPIR-V capabilities for ray tracing and advanced features
-set(SHADER_CAPABILITIES 
-  spvInt64Atomics                     # 64-bit atomic operations
-  spvShaderClockKHR                   # Shader clock for profiling
-  spvRayTracingMotionBlurNV           # Motion blur for ray tracing
-  spvRayQueryKHR                      # Ray query operations
-  spvGroupNonUniformBallot            # Ballot operations for subgroup functionality
-  spvGroupNonUniformArithmetic        # Arithmetic operations across subgroups
-  spvImageGatherExtended              # Slang emits this as a transitive dependency of the GLSL450 extended instruction set
-)
-
 # Shader compile options: -O0 for both (driver optimizes SPIR-V when compiling to native; pre-optimization can remove driver opportunities)
 set(SHADER_DEBUG_LEVEL 2)   # None:0, minimal:1, standard:2, maximal:3 (see Slang documentation for details)
 set(SHADER_OPT_LEVEL 0)     # None:0 — let the driver optimize
@@ -173,7 +183,6 @@ compile_slang(
   "${CMAKE_BINARY_DIR}/${PROJECT_NAME}/_autogen"
   HEADERS_VAR GENERATED_SHADER_HEADERS
   # SPVS_VAR GENERATED_SHADER_SPIRV  # For debugging purpose
-  CAPABILITIES ${SHADER_CAPABILITIES}  # List expands and is automatically joined with `+`
   EXTRA_FLAGS "-I${NVSHADERS_DIR}"
   DEBUG_LEVEL ${SHADER_DEBUG_LEVEL}
   OPTIMIZATION_LEVEL ${SHADER_OPT_LEVEL}

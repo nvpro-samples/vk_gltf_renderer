@@ -1,0 +1,199 @@
+name: Build
+
+on:
+  push:
+    tags:
+      # CalVer release tags: v2026.5, v2026.6, v2026.6.1, ...
+      - 'v[0-9][0-9][0-9][0-9].[0-9]*'
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+env:
+  VULKAN_SDK_VERSION: 1.4.304.0
+  # nvpro_core2 is checked out as a sibling so FindNvproCore2.cmake picks it up.
+  # Head is fine; bump this if you ever need to pin to a specific tag/SHA.
+  NVPRO_CORE2_REF: main
+
+jobs:
+  build:
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - os: windows-latest
+            platform: windows-x64
+          - os: ubuntu-latest
+            platform: linux-x64
+
+    runs-on: ${{ matrix.os }}
+
+    steps:
+      - name: Checkout vk_gltf_renderer
+        uses: actions/checkout@v4
+        with:
+          path: vk_gltf_renderer
+          # Full history so `git describe --tags` works on workflow_dispatch.
+          fetch-depth: 0
+
+      # Place nvpro_core2 as a SIBLING of vk_gltf_renderer.
+      # FindNvproCore2.cmake searches ${CMAKE_SOURCE_DIR}/.. and will pick this up.
+      # No submodule needed; this also keeps the repo dual-remote (GitHub + GitLab) clean.
+      - name: Checkout nvpro_core2
+        uses: actions/checkout@v4
+        with:
+          repository: nvpro-samples/nvpro_core2
+          ref: ${{ env.NVPRO_CORE2_REF }}
+          path: nvpro_core2
+
+      - name: Determine version
+        id: version
+        shell: bash
+        working-directory: vk_gltf_renderer
+        run: |
+          if [[ "${GITHUB_REF}" == refs/tags/v* ]]; then
+            tag="${GITHUB_REF#refs/tags/v}"
+            echo "release_version=${tag}" >> "${GITHUB_OUTPUT}"
+            echo "artifact_version=${tag}" >> "${GITHUB_OUTPUT}"
+            echo "Building tagged release: ${tag}"
+          else
+            short_sha="$(git rev-parse --short HEAD)"
+            # Leave release_version empty so CMake's git-describe fallback runs.
+            echo "release_version=" >> "${GITHUB_OUTPUT}"
+            echo "artifact_version=dispatch-${short_sha}" >> "${GITHUB_OUTPUT}"
+            echo "Building untagged dispatch: dispatch-${short_sha}"
+          fi
+
+      - name: Install Vulkan SDK (Windows)
+        if: runner.os == 'Windows'
+        shell: pwsh
+        run: |
+          $url = "https://sdk.lunarg.com/sdk/download/${{ env.VULKAN_SDK_VERSION }}/windows/VulkanSDK-${{ env.VULKAN_SDK_VERSION }}-Installer.exe"
+          Write-Host "Downloading Vulkan SDK from $url"
+          Invoke-WebRequest -Uri $url -OutFile VulkanSDK-Installer.exe
+          Write-Host "Installing Vulkan SDK..."
+          Start-Process -FilePath .\VulkanSDK-Installer.exe -ArgumentList "--accept-licenses --default-answer --confirm-command install" -Wait
+          $sdkPath = "C:\VulkanSDK\${{ env.VULKAN_SDK_VERSION }}"
+          echo "VULKAN_SDK=$sdkPath" >> $env:GITHUB_ENV
+          echo "$sdkPath\Bin" >> $env:GITHUB_PATH
+
+      - name: Install Vulkan SDK (Linux)
+        if: runner.os == 'Linux'
+        run: |
+          # Derive the Ubuntu codename so this keeps working when GitHub bumps ubuntu-latest.
+          codename="$(. /etc/os-release && echo "$VERSION_CODENAME")"
+          if [ -z "${codename}" ]; then
+            echo "ERROR: could not determine VERSION_CODENAME from /etc/os-release" >&2
+            exit 1
+          fi
+          echo "Using Ubuntu codename: ${codename}"
+          wget -qO- https://packages.lunarg.com/lunarg-signing-key-pub.asc | sudo tee /etc/apt/trusted.gpg.d/lunarg.asc > /dev/null
+          if ! sudo wget -O "/etc/apt/sources.list.d/lunarg-vulkan-${codename}.list" "https://packages.lunarg.com/vulkan/lunarg-vulkan-${codename}.list"; then
+            echo "ERROR: Vulkan SDK repository not available for Ubuntu ${codename}" >&2
+            echo "Check https://packages.lunarg.com/vulkan/ for available versions" >&2
+            exit 1
+          fi
+          sudo apt-get update
+          sudo apt-get install -y vulkan-sdk
+
+      - name: Install Linux build dependencies
+        if: runner.os == 'Linux'
+        run: |
+          sudo apt-get install -y ninja-build \
+            libx11-dev libxcb1-dev libxcb-keysyms1-dev libxcursor-dev \
+            libxi-dev libxinerama-dev libxrandr-dev libxxf86vm-dev libtbb-dev
+
+      # CUDA Toolkit is required at link time for OptiX denoiser interop.
+      # cudart is delay-loaded on Windows and bundled at install on Linux,
+      # so the resulting binary still runs on machines without CUDA installed.
+      - name: Install CUDA Toolkit
+        uses: Jimver/cuda-toolkit@v0.2.19
+        with:
+          cuda: '12.6.0'
+          method: 'network'
+          sub-packages: '["cudart", "nvcc"]'
+
+      - name: Configure (Windows)
+        if: runner.os == 'Windows'
+        working-directory: vk_gltf_renderer
+        run: >
+          cmake -S . -B build -G "Visual Studio 17 2022" -A x64
+          -DUSE_DEFAULT_SCENE=OFF
+          -DUSE_OPTIX_DENOISER=ON
+          -DUSE_DLSS=ON
+          -DUSE_DRACO=ON
+          -DBUILD_TESTING=OFF
+          -DRELEASE_VERSION="${{ steps.version.outputs.release_version }}"
+
+      - name: Configure (Linux)
+        if: runner.os == 'Linux'
+        working-directory: vk_gltf_renderer
+        run: >
+          cmake -S . -B build -G Ninja
+          -DCMAKE_BUILD_TYPE=Release
+          -DUSE_DEFAULT_SCENE=OFF
+          -DUSE_OPTIX_DENOISER=ON
+          -DUSE_DLSS=ON
+          -DUSE_DRACO=ON
+          -DBUILD_TESTING=OFF
+          -DRELEASE_VERSION="${{ steps.version.outputs.release_version }}"
+
+      - name: Build
+        working-directory: vk_gltf_renderer
+        run: cmake --build build --config Release --parallel
+
+      - name: Install
+        working-directory: vk_gltf_renderer
+        run: cmake --install build --config Release --prefix _install
+
+      - name: Prepare package
+        shell: bash
+        working-directory: vk_gltf_renderer
+        run: |
+          folder="vk_gltf_renderer-${{ steps.version.outputs.artifact_version }}-${{ matrix.platform }}"
+          mkdir staging
+          mv _install "staging/${folder}"
+          if [ "$RUNNER_OS" = "Linux" ]; then
+            chmod +x "staging/${folder}/vk_gltf_renderer"
+          fi
+
+      - name: Upload artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: vk_gltf_renderer-${{ steps.version.outputs.artifact_version }}-${{ matrix.platform }}
+          path: vk_gltf_renderer/staging
+          if-no-files-found: error
+
+  release:
+    needs: build
+    if: startsWith(github.ref, 'refs/tags/v')
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Determine version
+        id: version
+        run: echo "version=${GITHUB_REF#refs/tags/v}" >> "${GITHUB_OUTPUT}"
+
+      - name: Download artifacts
+        uses: actions/download-artifact@v4
+        with:
+          path: artifacts
+          merge-multiple: true
+
+      - name: Create release archives
+        shell: bash
+        run: |
+          v="${{ steps.version.outputs.version }}"
+          cd artifacts
+          zip -r "../vk_gltf_renderer-${v}-windows-x64.zip" "vk_gltf_renderer-${v}-windows-x64"
+          tar -czf "../vk_gltf_renderer-${v}-linux-x64.tar.gz" "vk_gltf_renderer-${v}-linux-x64"
+
+      - name: Create draft release
+        uses: softprops/action-gh-release@v2
+        with:
+          draft: true
+          generate_release_notes: true
+          files: |
+            vk_gltf_renderer-*.zip
+            vk_gltf_renderer-*.tar.gz
