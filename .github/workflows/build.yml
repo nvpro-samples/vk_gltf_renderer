@@ -72,11 +72,11 @@ jobs:
         if: runner.os == 'Windows'
         shell: pwsh
         run: |
-          $url = "https://sdk.lunarg.com/sdk/download/${{ env.VULKAN_SDK_VERSION }}/windows/vulkan_sdk.exe"
+          $url = "https://sdk.lunarg.com/sdk/download/${{ env.VULKAN_SDK_VERSION }}/windows/VulkanSDK-${{ env.VULKAN_SDK_VERSION }}-Installer.exe"
           Write-Host "Downloading Vulkan SDK from $url"
-          Invoke-WebRequest -Uri $url -OutFile vulkan_sdk.exe
+          Invoke-WebRequest -Uri $url -OutFile VulkanSDK-Installer.exe
           Write-Host "Installing Vulkan SDK..."
-          Start-Process -FilePath .\VulkanSDK-Installer.exe -ArgumentList "--accept-licenses --default-answer --confirm-command install" -Wait
+          Start-Process -FilePath .\vulkan_sdk.exe -ArgumentList "--accept-licenses --default-answer --confirm-command install" -Wait
           $sdkPath = "C:\VulkanSDK\${{ env.VULKAN_SDK_VERSION }}"
           echo "VULKAN_SDK=$sdkPath" >> $env:GITHUB_ENV
           echo "$sdkPath\Bin" >> $env:GITHUB_PATH
@@ -84,28 +84,32 @@ jobs:
       - name: Install Vulkan SDK (Linux)
         if: runner.os == 'Linux'
         run: |
-          # Derive the Ubuntu codename so this keeps working when GitHub bumps ubuntu-latest.
-          codename="$(. /etc/os-release && echo "$VERSION_CODENAME")"
-          if [ -z "${codename}" ]; then
-            echo "ERROR: could not determine VERSION_CODENAME from /etc/os-release" >&2
+          SDK_URL="https://sdk.lunarg.com/sdk/download/${{ env.VULKAN_SDK_VERSION }}/linux/vulkan_sdk.tar.xz"
+          echo "Downloading Vulkan SDK from $SDK_URL"
+          mkdir -p "$HOME/vulkan_sdk"
+          cd "$HOME/vulkan_sdk"
+          wget -q -O vulkan_sdk.tar.xz "$SDK_URL"
+          tar -xf vulkan_sdk.tar.xz
+          rm vulkan_sdk.tar.xz
+          SDK_ROOT="$HOME/vulkan_sdk/${{ env.VULKAN_SDK_VERSION }}/x86_64"
+          if [ ! -d "$SDK_ROOT" ]; then
+            echo "ERROR: expected SDK root not found at $SDK_ROOT" >&2
+            ls "$HOME/vulkan_sdk/${{ env.VULKAN_SDK_VERSION }}" >&2 || true
             exit 1
           fi
-          echo "Using Ubuntu codename: ${codename}"
-          wget -qO- https://packages.lunarg.com/lunarg-signing-key-pub.asc | sudo tee /etc/apt/trusted.gpg.d/lunarg.asc > /dev/null
-          if ! sudo wget -O "/etc/apt/sources.list.d/lunarg-vulkan-${codename}.list" "https://packages.lunarg.com/vulkan/lunarg-vulkan-${codename}.list"; then
-            echo "ERROR: Vulkan SDK repository not available for Ubuntu ${codename}" >&2
-            echo "Check https://packages.lunarg.com/vulkan/ for available versions" >&2
-            exit 1
-          fi
-          sudo apt-get update
-          sudo apt-get install -y vulkan-sdk
+          echo "VULKAN_SDK=$SDK_ROOT" >> "$GITHUB_ENV"
+          echo "$SDK_ROOT/bin" >> "$GITHUB_PATH"
+          echo "LD_LIBRARY_PATH=$SDK_ROOT/lib:${LD_LIBRARY_PATH:-}" >> "$GITHUB_ENV"
+          echo "VK_LAYER_PATH=$SDK_ROOT/share/vulkan/explicit_layer.d" >> "$GITHUB_ENV"
+          echo "Installed Vulkan SDK at: $SDK_ROOT"
 
       - name: Install Linux build dependencies
         if: runner.os == 'Linux'
         run: |
-          sudo apt-get install -y \
+          sudo apt-get install -y ninja-build \
             libx11-dev libxcb1-dev libxcb-keysyms1-dev libxcursor-dev \
-            libxi-dev libxinerama-dev libxrandr-dev libxxf86vm-dev libtbb-dev
+            libxi-dev libxinerama-dev libxrandr-dev libxxf86vm-dev libtbb-dev \
+            libgl-dev
 
       # CUDA Toolkit is required at link time for OptiX denoiser interop.
       # cudart is delay-loaded on Windows and bundled at install on Linux,
@@ -129,17 +133,11 @@ jobs:
           -DBUILD_TESTING=OFF
           -DRELEASE_VERSION="${{ steps.version.outputs.release_version }}"
 
-      # Note: we use Unix Makefiles instead of Ninja because nvpro_core2's
-      # FindWebP.cmake sets CMAKE_BUILD_TYPE to a junk string containing
-      # angle brackets ("<any string works here ...>") to work around libwebp's
-      # CMake. Ninja's lexer rejects '<' / '>' in rule names; Make and the
-      # Visual Studio generator are not affected. Switch back to Ninja once
-      # the upstream FindWebP.cmake guards that hack on multi-config only.
       - name: Configure (Linux)
         if: runner.os == 'Linux'
         working-directory: vk_gltf_renderer
         run: >
-          cmake -S . -B build -G "Unix Makefiles"
+          cmake -S . -B build -G Ninja
           -DCMAKE_BUILD_TYPE=Release
           -DUSE_DEFAULT_SCENE=OFF
           -DUSE_OPTIX_DENOISER=ON
@@ -151,6 +149,18 @@ jobs:
       - name: Build
         working-directory: vk_gltf_renderer
         run: cmake --build build --config Release --parallel
+
+      # CMake's install(TARGETS ... RUNTIME_DEPENDENCIES) resolves every shared
+      # library the binary links against. libcuda.so.1 lives in the NVIDIA
+      # driver (not the CUDA Toolkit) and isn't on a GPU-less CI runner, so
+      # resolution fails. Symlink the CUDA Toolkit's linker stub at a system
+      # path; the path matches POST_EXCLUDE_REGEXES "^/usr/lib" inside
+      # nvpro_core2's copy_to_runtime_and_install, so the stub is found by
+      # the resolver but NOT copied into the install tree -- libcuda.so.1
+      # will come from the end user's NVIDIA driver at runtime.
+      - name: Provide CUDA driver stub for install resolution
+        if: runner.os == 'Linux'
+        run: sudo ln -sf "$CUDA_PATH/lib64/stubs/libcuda.so" /usr/lib/x86_64-linux-gnu/libcuda.so.1
 
       - name: Install
         working-directory: vk_gltf_renderer
