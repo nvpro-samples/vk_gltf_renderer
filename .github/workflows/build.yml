@@ -72,9 +72,9 @@ jobs:
         if: runner.os == 'Windows'
         shell: pwsh
         run: |
-          $url = "https://sdk.lunarg.com/sdk/download/${{ env.VULKAN_SDK_VERSION }}/windows/VulkanSDK-${{ env.VULKAN_SDK_VERSION }}-Installer.exe"
+          $url = "https://sdk.lunarg.com/sdk/download/${{ env.VULKAN_SDK_VERSION }}/windows/vulkan_sdk.exe"
           Write-Host "Downloading Vulkan SDK from $url"
-          Invoke-WebRequest -Uri $url -OutFile VulkanSDK-Installer.exe
+          Invoke-WebRequest -Uri $url -OutFile vulkan_sdk.exe
           Write-Host "Installing Vulkan SDK..."
           Start-Process -FilePath .\vulkan_sdk.exe -ArgumentList "--accept-licenses --default-answer --confirm-command install" -Wait
           $sdkPath = "C:\VulkanSDK\${{ env.VULKAN_SDK_VERSION }}"
@@ -106,7 +106,7 @@ jobs:
       - name: Install Linux build dependencies
         if: runner.os == 'Linux'
         run: |
-          sudo apt-get install -y ninja-build \
+          sudo apt-get install -y \
             libx11-dev libxcb1-dev libxcb-keysyms1-dev libxcursor-dev \
             libxi-dev libxinerama-dev libxrandr-dev libxxf86vm-dev libtbb-dev \
             libgl-dev
@@ -133,11 +133,17 @@ jobs:
           -DBUILD_TESTING=OFF
           -DRELEASE_VERSION="${{ steps.version.outputs.release_version }}"
 
+      # Note: we use Unix Makefiles instead of Ninja because nvpro_core2's
+      # FindWebP.cmake sets CMAKE_BUILD_TYPE to a junk string containing
+      # angle brackets ("<any string works here ...>") to work around libwebp's
+      # CMake. Ninja's lexer rejects '<' / '>' in rule names; Make and the
+      # Visual Studio generator are not affected. Switch back to Ninja once
+      # the upstream FindWebP.cmake guards that hack on multi-config only.
       - name: Configure (Linux)
         if: runner.os == 'Linux'
         working-directory: vk_gltf_renderer
         run: >
-          cmake -S . -B build -G Ninja
+          cmake -S . -B build -G "Unix Makefiles"
           -DCMAKE_BUILD_TYPE=Release
           -DUSE_DEFAULT_SCENE=OFF
           -DUSE_OPTIX_DENOISER=ON
