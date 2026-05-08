@@ -177,6 +177,12 @@ message(STATUS "Compiling ${_SHADER_COUNT} Slang shader(s) to SPIR-V")
 set(SHADER_DEBUG_LEVEL 2)   # None:0, minimal:1, standard:2, maximal:3 (see Slang documentation for details)
 set(SHADER_OPT_LEVEL 0)     # None:0 — let the driver optimize
 
+# Define required SPIR-V capabilities for ray tracing and advanced features
+set(SHADER_CAPABILITIES 
+  spvGroupNonUniformArithmetic      # Arithmetic operations across subgroups
+  spvGroupNonUniform                # Enable subgroup operations (required for wave operations in shaders
+)
+
 # Compile all shaders to embedded headers (.h) and SPIR-V binaries (.spv) [optionally generate SPIR-V binaries (.spv) for debugging]
 compile_slang(
   "${SHADER_SLANG_FILES}"
@@ -186,6 +192,7 @@ compile_slang(
   EXTRA_FLAGS "-I${NVSHADERS_DIR}"
   DEBUG_LEVEL ${SHADER_DEBUG_LEVEL}
   OPTIMIZATION_LEVEL ${SHADER_OPT_LEVEL}
+  CAPABILITIES ${SHADER_CAPABILITIES}
 )
 
 # Add shader files to the project for IDE organization
