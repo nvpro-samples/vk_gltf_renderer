@@ -93,6 +93,56 @@ VisualizationResult applyVisualization(inout PbrMaterial pbrMat, HitState hit, V
     case Visualization::eFaceOrientation:
       overrideColor = hit.frontFace ? float3(0, 1, 0) : float3(1, 0, 0);
       return VisualizationResult::eColorOverride;
+    // Khronos parity debug views. Each maps to a PbrMaterial field already filled in by
+    // evaluateMaterial. Outputs match the conventions used in pbr.frag's debug branches.
+    case Visualization::eOcclusion:
+      overrideColor = float3(pbrMat.occlusion);
+      return VisualizationResult::eColorOverride;
+    case Visualization::eClearcoatFactor:
+      overrideColor = float3(pbrMat.clearcoat);
+      return VisualizationResult::eColorOverride;
+    case Visualization::eClearcoatRoughness:
+      overrideColor = float3(pbrMat.clearcoatRoughness);
+      return VisualizationResult::eColorOverride;
+    case Visualization::eClearcoatNormal:
+      overrideColor = pbrMat.Nc * 0.5 + 0.5;
+      return VisualizationResult::eColorOverride;
+    case Visualization::eSheenColor:
+      overrideColor = pbrMat.sheenColor;
+      return VisualizationResult::eColorOverride;
+    case Visualization::eSheenRoughness:
+      overrideColor = float3(pbrMat.sheenRoughness);
+      return VisualizationResult::eColorOverride;
+    case Visualization::eSpecularFactor:
+      overrideColor = float3(pbrMat.specular);
+      return VisualizationResult::eColorOverride;
+    case Visualization::eSpecularColor:
+      overrideColor = pbrMat.specularColor;
+      return VisualizationResult::eColorOverride;
+    case Visualization::eTransmissionFactor:
+      overrideColor = float3(pbrMat.transmission);
+      return VisualizationResult::eColorOverride;
+    case Visualization::eIridescenceFactor:
+      overrideColor = float3(pbrMat.iridescence);
+      return VisualizationResult::eColorOverride;
+    case Visualization::eIridescenceThickness:
+      // Khronos pbr.frag normalizes by a fixed 1200; we do the same so screenshots compare.
+      overrideColor = float3(pbrMat.iridescenceThickness / 1200.0);
+      return VisualizationResult::eColorOverride;
+    case Visualization::eAnisotropyStrength:
+      // PbrMaterial doesn't store the strength scalar (folded into roughness.xy); recover it
+      // from the inflation: strength² = (rx - ry) / (1 - ry).
+      {
+        float den = max(1.0 - pbrMat.roughness.y, 1e-5);
+        overrideColor = float3(sqrt(saturate((pbrMat.roughness.x - pbrMat.roughness.y) / den)));
+      }
+      return VisualizationResult::eColorOverride;
+    case Visualization::eDiffuseTransmissionFactor:
+      overrideColor = float3(pbrMat.diffuseTransmissionFactor);
+      return VisualizationResult::eColorOverride;
+    case Visualization::eDiffuseTransmissionColor:
+      overrideColor = pbrMat.diffuseTransmissionColor;
+      return VisualizationResult::eColorOverride;
     default:
       return VisualizationResult::eRenderedOutput;
   }

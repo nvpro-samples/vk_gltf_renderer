@@ -93,8 +93,17 @@ HitState getHitState(GltfRenderPrimitive renderPrim,  //
   }
   hit.nrm = normalize(float3(mul(worldToObject, normal).xyz));
 
-  // Hacking the shadow terminator
-  float3 shadowPos = pointOffset(position, pos0, pos1, pos2, nrm0, nrm1, nrm2, barycentrics);
+  // Front-face is checked so the shadow-terminator `pointOffset` below can pre-flip
+  // the per-vertex normals; without it, back-face hits on doubleSided meshes (e.g. leaf
+  // underside) shift `shadowPos` to the wrong side and the shadow ray hits its own surface.
+  hit.frontFace        = dot(hit.geonrm, worldRayDirection) < 0.0f;
+  const float sideFlip = hit.frontFace ? 1.0f : -1.0f;
+
+  // Hacking the shadow terminator (object-space offset; see Hanika 2021, "Hacking the
+  // Shadow Terminator"). `nrm[i] * sideFlip` ensures the offset is on the camera-facing
+  // side for back-face hits on doubleSided meshes.
+  float3 shadowPos = pointOffset(position, pos0, pos1, pos2,
+                                 nrm0 * sideFlip, nrm1 * sideFlip, nrm2 * sideFlip, barycentrics);
   hit.shadowPos    = float3(mul(float4(shadowPos, 1.0), objectToWorld));
 
   // TexCoord
@@ -138,11 +147,11 @@ HitState getHitState(GltfRenderPrimitive renderPrim,  //
   hit.tangent   = normalize(hit.tangent - hit.nrm * dot(hit.nrm, hit.tangent));
   hit.bitangent = cross(hit.nrm, hit.tangent) * tng[0].w;
 
-  // Ensure geometric normal faces towards the ray origin (front-facing)
-  hit.frontFace = dot(hit.geonrm, worldRayDirection) < 0.0f;
+  // Flip geometric normal toward the ray origin for back-face hits (front-face already
+  // computed above so the shadow-terminator hack can pre-flip the per-vertex normals).
   if(!hit.frontFace)
   {
-    hit.geonrm = -hit.geonrm;  // Flip if back-facing
+    hit.geonrm = -hit.geonrm;
   }
 
   // Ensure shading normal and geometric normal are on the same side

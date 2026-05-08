@@ -1089,8 +1089,9 @@ SampleResult pathTrace(IRaytracer raytracer,
       }
 #endif
 
-      // Apply volume effects: scattering and/or absorption (KHR_materials_volume + KHR_materials_volume_scatter)
-      if(isInside && (volumeMat.thickness > 0.0f))
+      // Apply volume effects: scattering and/or absorption (KHR_materials_volume + KHR_materials_volume_scatter).
+      // thickness > 0 indicates a non-thin-walled material; thin walls don't carry a volume.
+      if(isInside && (volumeMat.thickness > 0.0F))
       {
         // Use volumeMat (the enclosing volume's material), not pbrMat (the hit surface's material).
         if(handleVolumeScatter(volumeMat, payload.hitT, ray, throughput, lastSamplePdf, seed))

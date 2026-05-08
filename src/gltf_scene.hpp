@@ -344,13 +344,33 @@ public:
   const std::vector<nvvkgltf::RenderPrimitive>& getRenderPrimitives() const { return m_renderPrimitives; }
   const nvvkgltf::RenderPrimitive&              getRenderPrimitive(size_t ID) const { return m_renderPrimitives[ID]; }
   [[nodiscard]] size_t                          getNumRenderPrimitives() const { return m_renderPrimitives.size(); }
+  // Object-space AABB centroids, parallel to getRenderPrimitives(). Populated once when the
+  // primitive set is built from the POSITION accessor min/max; reused by the rasterizer's
+  // transparent depth sort to avoid re-parsing tinygltf accessors per frame.
+  const std::vector<glm::vec3>& getRenderPrimCenterObj() const { return m_renderPrimCenterObj; }
 
   //--------------------------------------------------------------------------------------------------
   // Shading & Statistics
   //--------------------------------------------------------------------------------------------------
 
-  std::vector<uint32_t> getShadedNodes(PipelineType type) const;
-  [[nodiscard]] int     getNumTriangles() const { return m_numTriangles; }
+  // Returns render node indices that belong to the requested draw bucket. Backed by a cache
+  // that is reconciled lazily from m_dirtyFlags on first call per frame; returned reference is
+  // valid until the next scene mutation (material dirty, variant change, scene reload, ...).
+  const std::vector<uint32_t>& getShadedNodes(PipelineType type) const;
+  // True when any glTF material in the scene has a non-zero KHR_materials_transmission factor.
+  // Used by the rasterizer to gate the screen-space-refraction capture pass: a scene that only
+  // has plain alpha-blend draws does not need the opaque framebuffer captured. Backed by the
+  // same cache reconciliation as getShadedNodes().
+  [[nodiscard]] bool hasTransmissionMaterials() const;
+  // Monotonic counter bumped whenever reconcileShadedNodesCache() actually rebuilds the lists.
+  // Callers that cache a snapshot of getShadedNodes() can detect membership change (e.g. a
+  // material alphaMode toggle that didn't change the list size) by watching this revision.
+  [[nodiscard]] uint64_t getShadedNodesRevision() const
+  {
+    reconcileShadedNodesCache();
+    return m_shadedNodesRevision;
+  }
+  [[nodiscard]] int getNumTriangles() const { return m_numTriangles; }
   // Returns cached bounds; lazily computes on first call (mutable cache, logically const).
   [[nodiscard]] nvutils::Bbox getSceneBounds() const;
 
@@ -478,6 +498,25 @@ private:
   // so that all downstream consumers (Vulkan upload, save/copy, display) see the correct path.
   void resolveImageURIs();
 
+  //--------------------------------------------------------------------------------------------------
+  // Private Methods: Shaded-Nodes Cache (see getShadedNodes())
+  //--------------------------------------------------------------------------------------------------
+
+  // 3-bit key that determines which raster bucket a material's render nodes fall into.
+  // bit0 = alphaMode == "OPAQUE", bit1 = doubleSided, bit2 = KHR_materials_transmission factor > 0.
+  // Any field not in this key can change without invalidating the shaded-nodes cache.
+  static uint8_t computeMaterialBucketKey(const tinygltf::Material& mat);
+
+  // Lazily reconcile the per-bucket cache against m_dirtyFlags. Compares the current material
+  // bucket key against the cached key; rebuilds the four lists only when a key actually flipped,
+  // a render node's materialID was dirtied (renderNodesVk), or a structural reset flag is set.
+  // Does NOT consume any dirty flags (SceneVk / SceneRTX still need them).
+  void reconcileShadedNodesCache() const;
+
+  // Compute the object-space AABB centroid for a render primitive from its POSITION accessor
+  // min/max, falling back to (0,0,0) when the accessor is missing or has no min/max arrays.
+  glm::vec3 computePrimitiveCenterObj(const tinygltf::Primitive& primitive) const;
+
 
   //--------------------------------------------------------------------------------------------------
   // Data Members: Core glTF Model
@@ -493,10 +532,29 @@ private:
   // Data Members: Render Data (Built from Model)
   //--------------------------------------------------------------------------------------------------
 
-  RenderNodeRegistry                     m_renderNodeRegistry;  // Centralized renderNode mappings
-  std::vector<nvvkgltf::RenderPrimitive> m_renderPrimitives;    // Unique primitives
-  std::vector<nvvkgltf::RenderCamera>    m_cameras;             // Cameras
-  std::vector<nvvkgltf::RenderLight>     m_lights;              // Lights
+  RenderNodeRegistry                     m_renderNodeRegistry;   // Centralized renderNode mappings
+  std::vector<nvvkgltf::RenderPrimitive> m_renderPrimitives;     // Unique primitives
+  std::vector<glm::vec3>                 m_renderPrimCenterObj;  // Object-space AABB centroid per render primitive
+  std::vector<nvvkgltf::RenderCamera>    m_cameras;              // Cameras
+  std::vector<nvvkgltf::RenderLight>     m_lights;               // Lights
+
+  //--------------------------------------------------------------------------------------------------
+  // Data Members: Shaded-Nodes Cache
+  //--------------------------------------------------------------------------------------------------
+
+  // Four std::vector<uint32_t> indexed by PipelineType (eRasterSolid, eRasterSolidDoubleSided,
+  // eRasterBlend, eRasterAll). Reconciled lazily by getShadedNodes() / hasTransmissionMaterials().
+  static constexpr int          kPipelineTypeCount = 4;
+  mutable std::vector<uint32_t> m_shadedNodesCache[kPipelineTypeCount];
+  mutable std::vector<uint8_t>  m_materialBucketKey;  // Parallel to m_model.materials
+  mutable bool                  m_shadedCacheValid     = false;
+  mutable bool                  m_hasTransmissionCache = false;
+  mutable uint64_t              m_shadedNodesRevision  = 0;  // Bumped on every rebuild, see getShadedNodesRevision()
+  // Observed m_sceneGraphRevision at the point the cache was built. Re-observed in
+  // reconcileShadedNodesCache() to catch materialID reassignments (setCurrentVariant,
+  // SceneEditor::setPrimitiveMaterial) without reacting to animation world-matrix dirties
+  // -- those do not bump m_sceneGraphRevision.
+  mutable uint64_t m_shadedCacheSceneGraphRevision = 0;
 
 
   //--------------------------------------------------------------------------------------------------

@@ -1335,6 +1335,10 @@ void nvvkgltf::Scene::rebuildRenderNodesAndLights()
   m_gpuInstanceLocalMatrices.clear();
   m_numTriangles = 0;
 
+  // Render-node indices in the shaded-nodes cache are about to become stale (node count and
+  // ordering may both change). Force a rebuild on the next getShadedNodes() call.
+  m_shadedCacheValid = false;
+
   PrimitiveKeyMap primMap = buildPrimitiveKeyMap();
 
   traverseSceneWithVisibility([&](int nodeID, const glm::mat4& worldMat, bool visible) {
@@ -1401,6 +1405,7 @@ void nvvkgltf::Scene::clearParsedData()
     m_animation->clear();
   m_renderNodeRegistry.clear();
   m_renderPrimitives.clear();
+  m_renderPrimCenterObj.clear();
   m_variants.clear();
   m_nodeParents.clear();
   m_nodesLocalMatrices.clear();
@@ -1409,6 +1414,18 @@ void nvvkgltf::Scene::clearParsedData()
   m_sceneBounds     = {};
   m_sceneCameraNode = -1;
   m_dirtyFlags.clear();
+
+  // Invalidate the shaded-nodes cache: m_dirtyFlags.clear() wiped the signals the reconcile
+  // path would have seen, so we must force the next getShadedNodes() call to do a full rebuild.
+  for(int i = 0; i < kPipelineTypeCount; ++i)
+    m_shadedNodesCache[i].clear();
+  m_materialBucketKey.clear();
+  m_shadedCacheValid              = false;
+  m_hasTransmissionCache          = false;
+  m_shadedCacheSceneGraphRevision = 0;
+  // Note: intentionally NOT resetting m_shadedNodesRevision -- it's a monotonic external handle
+  // and callers (e.g. Rasterizer::updateSortedBlendNodes) rely on it strictly increasing to
+  // detect rebuilds. The next reconcile will ++ it naturally.
 }
 
 void nvvkgltf::Scene::destroy()
@@ -1420,11 +1437,32 @@ void nvvkgltf::Scene::destroy()
 }
 
 
+// Compute the object-space AABB centroid for a primitive from its POSITION accessor min/max.
+// Returns (0,0,0) when POSITION is missing or has no min/max arrays -- same behavior the
+// rasterizer's transparent-sort previously fell back to when parsing accessors inline.
+glm::vec3 nvvkgltf::Scene::computePrimitiveCenterObj(const tinygltf::Primitive& primitive) const
+{
+  glm::vec3 minVal{0.f}, maxVal{0.f};
+  auto      it = primitive.attributes.find("POSITION");
+  if(it != primitive.attributes.end() && static_cast<size_t>(it->second) < m_model.accessors.size())
+  {
+    const tinygltf::Accessor& accessor = m_model.accessors[it->second];
+    if(accessor.minValues.size() >= 3)
+      minVal = glm::vec3(float(accessor.minValues[0]), float(accessor.minValues[1]), float(accessor.minValues[2]));
+    if(accessor.maxValues.size() >= 3)
+      maxVal = glm::vec3(float(accessor.maxValues[0]), float(accessor.maxValues[1]), float(accessor.maxValues[2]));
+  }
+  return 0.5f * (minVal + maxVal);
+}
+
 // Build the primitive key map and (re)populate m_renderPrimitives with unique primitives.
-// Iterates meshes in deterministic order so indices match the BLAS build order.
+// Iterates meshes in deterministic order so indices match the BLAS build order. Also fills the
+// parallel m_renderPrimCenterObj array so the rasterizer never has to re-parse POSITION
+// accessor min/max for transparent depth sorting.
 nvvkgltf::Scene::PrimitiveKeyMap nvvkgltf::Scene::buildPrimitiveKeyMap()
 {
   m_renderPrimitives.clear();
+  m_renderPrimCenterObj.clear();
   PrimitiveKeyMap primMap;
   for(size_t i = 0; i < m_model.meshes.size(); ++i)
   {
@@ -1441,6 +1479,7 @@ nvvkgltf::Scene::PrimitiveKeyMap nvvkgltf::Scene::buildPrimitiveKeyMap()
         renderPrim.indexCount  = int(tinygltf::utils::getIndexCount(m_model, primitive));
         renderPrim.meshID      = static_cast<int>(i);
         m_renderPrimitives.push_back(renderPrim);
+        m_renderPrimCenterObj.push_back(computePrimitiveCenterObj(primitive));
       }
     }
   }
@@ -1755,42 +1794,148 @@ std::unordered_set<int> nvvkgltf::Scene::getMaterialRenderNodes(const std::unord
 }
 
 //-------------------------------------------------------------------------------------------------
-// Find which nodes are solid or translucent, helps for raster rendering
+// Pack the three fields that decide which raster bucket a material's render nodes belong to
+// (alphaMode==OPAQUE, doubleSided, KHR_materials_transmission factor > 0) into one byte. Kept
+// minimal on purpose -- any material field NOT in this key can change every frame (e.g. base
+// color, roughness, KHR_animation_pointer animating a transmission factor that stays > 0) and
+// the shaded-nodes cache stays valid.
 //
-std::vector<uint32_t> nvvkgltf::Scene::getShadedNodes(PipelineType type) const
+uint8_t nvvkgltf::Scene::computeMaterialBucketKey(const tinygltf::Material& mat)
 {
-  std::vector<uint32_t> result;
-
-  const auto& rnodes = m_renderNodeRegistry.getRenderNodes();
-  for(uint32_t i = 0; i < rnodes.size(); i++)
+  uint8_t key = 0;
+  if(mat.alphaMode == "OPAQUE")
+    key |= 0x1;
+  if(mat.doubleSided)
+    key |= 0x2;
+  if(const auto* ext = tinygltf::utils::findExtension(mat.extensions, KHR_MATERIALS_TRANSMISSION_EXTENSION_NAME))
   {
-    const auto& tmat               = m_model.materials[rnodes[i].materialID];
-    float       transmissionFactor = 0;
-    if(tinygltf::utils::hasElementName(tmat.extensions, KHR_MATERIALS_TRANSMISSION_EXTENSION_NAME))
+    float transmissionFactor = 0.f;
+    tinygltf::utils::getValue(*ext, "transmissionFactor", transmissionFactor);
+    if(transmissionFactor > 0.f)
+      key |= 0x4;
+  }
+  return key;
+}
+
+//-------------------------------------------------------------------------------------------------
+// Lazily reconcile the per-bucket cache against the current dirty state. Called from the entry
+// of getShadedNodes() and hasTransmissionMaterials().
+//
+// Invariants:
+//  - The cache is valid when m_shadedCacheValid == true AND no bucket-affecting mutation has
+//    happened since the last reconcile.
+//  - m_materialBucketKey is parallel to m_model.materials and stores the key the cache was
+//    built with. Dirty materials are re-keyed; only when the new key differs do we rebuild.
+//  - m_dirtyFlags are NOT consumed here (SceneVk / SceneRTX still need them). This is a
+//    read-only diff against the cached key columns.
+//
+void nvvkgltf::Scene::reconcileShadedNodesCache() const
+{
+  const size_t materialCount = m_model.materials.size();
+  const auto&  renderNodes   = m_renderNodeRegistry.getRenderNodes();
+
+  bool needsRebuild = !m_shadedCacheValid;
+
+  // A structural reset (scene reload, primitive set rebuilt, or a bulk "everything dirty"
+  // signal from the owning scene) forces a full rebuild.
+  if(m_dirtyFlags.allRenderNodesDirty || m_dirtyFlags.primitivesChanged)
+    needsRebuild = true;
+
+  // A scene-graph revision bump captures *bucket-relevant* RenderNode edits: setCurrentVariant
+  // flipping materialIDs, SceneEditor::setPrimitiveMaterial, and structural rebuilds. It does
+  // NOT bump on animation world-matrix updates (line ~1073 inserts into renderNodesVk without
+  // bumping the revision), so this signal lets us stay valid across an animated scene.
+  if(m_sceneGraphRevision != m_shadedCacheSceneGraphRevision)
+    needsRebuild = true;
+
+  // Material count changed (editor added / removed materials): resize the key column and
+  // force rebuild -- per-index keys may have shifted meaning.
+  if(m_materialBucketKey.size() != materialCount)
+  {
+    m_materialBucketKey.assign(materialCount, 0);
+    needsRebuild = true;
+  }
+
+  // Re-key dirty materials and detect whether any bucket actually flipped. Most material
+  // edits (base color slider, KHR_animation_pointer animating a factor without crossing zero)
+  // leave the key equal -- cache survives.
+  if(m_shadedCacheValid && !needsRebuild)
+  {
+    for(int matIdx : m_dirtyFlags.materials)
     {
-      const auto& ext = tinygltf::utils::getElementValue(tmat.extensions, KHR_MATERIALS_TRANSMISSION_EXTENSION_NAME);
-      tinygltf::utils::getValue(ext, "transmissionFactor", transmissionFactor);
-    }
-    switch(type)
-    {
-      case eRasterSolid:
-        if(tmat.alphaMode == "OPAQUE" && !tmat.doubleSided && (transmissionFactor == 0.0F))
-          result.push_back(i);
-        break;
-      case eRasterSolidDoubleSided:
-        if(tmat.alphaMode == "OPAQUE" && tmat.doubleSided)
-          result.push_back(i);
-        break;
-      case eRasterBlend:
-        if(tmat.alphaMode != "OPAQUE" || (transmissionFactor != 0))
-          result.push_back(i);
-        break;
-      case eRasterAll:
-        result.push_back(i);
-        break;
+      if(matIdx < 0 || static_cast<size_t>(matIdx) >= materialCount)
+        continue;
+      const uint8_t newKey = computeMaterialBucketKey(m_model.materials[matIdx]);
+      if(newKey != m_materialBucketKey[matIdx])
+      {
+        m_materialBucketKey[matIdx] = newKey;
+        needsRebuild                = true;
+      }
     }
   }
-  return result;
+
+  if(!needsRebuild)
+    return;
+
+  // Full rebuild: re-key every material, repopulate the four lists, and refresh the
+  // hasTransmissionMaterials() cache (equivalent to OR'ing bit2 across the key column).
+  for(int i = 0; i < kPipelineTypeCount; ++i)
+    m_shadedNodesCache[i].clear();
+
+  m_materialBucketKey.assign(materialCount, 0);
+  m_hasTransmissionCache = false;
+  for(size_t i = 0; i < materialCount; ++i)
+  {
+    const uint8_t key      = computeMaterialBucketKey(m_model.materials[i]);
+    m_materialBucketKey[i] = key;
+    if(key & 0x4)
+      m_hasTransmissionCache = true;
+  }
+
+  for(uint32_t i = 0; i < renderNodes.size(); ++i)
+  {
+    const int matID = renderNodes[i].materialID;
+    if(matID < 0 || static_cast<size_t>(matID) >= materialCount)
+      continue;
+    const uint8_t key             = m_materialBucketKey[matID];
+    const bool    isOpaque        = (key & 0x1) != 0;
+    const bool    isDoubleSided   = (key & 0x2) != 0;
+    const bool    hasTransmission = (key & 0x4) != 0;
+
+    // Bucket classification matches the original getShadedNodes() switch exactly.
+    if(isOpaque && !isDoubleSided && !hasTransmission)
+      m_shadedNodesCache[eRasterSolid].push_back(i);
+    if(isOpaque && isDoubleSided)
+      m_shadedNodesCache[eRasterSolidDoubleSided].push_back(i);
+    if(!isOpaque || hasTransmission)
+      m_shadedNodesCache[eRasterBlend].push_back(i);
+    m_shadedNodesCache[eRasterAll].push_back(i);
+  }
+
+  m_shadedCacheValid              = true;
+  m_shadedCacheSceneGraphRevision = m_sceneGraphRevision;
+  ++m_shadedNodesRevision;
+}
+
+//-------------------------------------------------------------------------------------------------
+// Find which nodes are solid or translucent, helps for raster rendering. Backed by
+// reconcileShadedNodesCache(); returns a reference valid until the next scene mutation.
+//
+const std::vector<uint32_t>& nvvkgltf::Scene::getShadedNodes(PipelineType type) const
+{
+  reconcileShadedNodesCache();
+  return m_shadedNodesCache[type];
+}
+
+//-------------------------------------------------------------------------------------------------
+// True when any material in the scene has a non-zero KHR_materials_transmission factor. Derived
+// from the same bucket-key table built by reconcileShadedNodesCache(); O(1) after the first call
+// of a frame (reconcile is lazy and no-op when nothing changed).
+//
+bool nvvkgltf::Scene::hasTransmissionMaterials() const
+{
+  reconcileShadedNodesCache();
+  return m_hasTransmissionCache;
 }
 
 

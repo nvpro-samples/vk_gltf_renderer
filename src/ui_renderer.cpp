@@ -356,7 +356,13 @@ void GltfRenderer::renderUI()
             changed                           = true;  // Reset frame counter when switching renderers
           }
           changed |= PE::Combo("Visualization", (int32_t*)(&m_resources.settings.visualization),
-                               "Rendered\0BaseColor\0Metallic\0Roughness\0NormalShd\0NormalGeo\0Tangent\0Bitangent\0Emissive\0Opacity\0TexCoord0\0TexCoord1\0Clay\0TriangleID\0FaceOrientation\0\0");
+                               "Rendered\0BaseColor\0Metallic\0Roughness\0NormalShd\0NormalGeo\0Tangent\0Bitangent\0Emissive\0Opacity\0TexCoord0\0TexCoord1\0Clay\0TriangleID\0FaceOrientation\0"
+                               // Khronos glTF-Sample-Renderer DEBUG_* parity views (must match
+                               // the Visualization enum order in shaderio.h).
+                               "Occlusion\0Clearcoat Factor\0Clearcoat Roughness\0Clearcoat Normal\0"
+                               "Sheen Color\0Sheen Roughness\0Specular Factor\0Specular Color\0"
+                               "Transmission Factor\0Iridescence Factor\0Iridescence Thickness\0"
+                               "Anisotropy Strength\0Diffuse Transmission Factor\0Diffuse Transmission Color\0\0");
           changed |= PE::Checkbox("Wireframe", &m_resources.settings.wireframe, "Overlay wireframe on rendered meshes");
           PE::end();
           if(m_resources.settings.renderSystem == RenderingMode::ePathtracer)

@@ -36,18 +36,19 @@ public:
   BaseRenderer()          = default;
   virtual ~BaseRenderer() = default;
 
-
   virtual void onAttach(Resources& resources, nvvk::ProfilerGpuTimer* profiler) { m_profiler = profiler; }
   virtual void onDetach(Resources& resources) {};
   virtual void onResize(VkCommandBuffer cmd, const VkExtent2D& size, Resources& resources) {};
   virtual void onRender(VkCommandBuffer cmd, Resources& resources) {};
   virtual void onUIMenu() {};
+  virtual void onSceneInvalidated(Resources& resources) {};
 
   [[nodiscard]] virtual bool onUIRender(Resources&) { return false; }
 
   //---
   virtual void compileShader(Resources& resources, bool fromFile = true) {};
   virtual void createPipeline(Resources& resources) {};
+  virtual void freeRecordCommandBuffer(Resources& resources) {};
 
 protected:
   nvvk::ProfilerGpuTimer* m_profiler{nullptr};

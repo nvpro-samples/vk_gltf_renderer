@@ -254,12 +254,18 @@ PbrMaterial evaluateMaterial(in GltfShadeMaterial material, MeshState state, Sam
   pbrMat.emissive = max(float3(0.0F), pbrMat.emissive);
 
 #if MAT_EXT_VOLUME
-  // KHR_materials_volume — set before the IOR block so isThinWalled drives the inside/outside
-  // IOR swap below. When MAT_EXT_VOLUME is off, pbrMat.isThinWalled stays at defaultPbrMaterial()'s
-  // default (true), which correctly disables the swap.
+  // KHR_materials_volume — set before the IOR block so the thin-walled check
+  // (`pbrMat.thickness == 0`) drives the inside/outside IOR swap below. When MAT_EXT_VOLUME is
+  // gated out, pbrMat.thickness stays at defaultPbrMaterial()'s 0.0 default and the swap is
+  // correctly disabled.
   pbrMat.attenuationColor    = material.attenuationColor;
   pbrMat.attenuationDistance = material.attenuationDistance;
-  pbrMat.thickness           = material.thicknessFactor;
+  // KHR_materials_volume spec: per-fragment thickness = thicknessFactor * thicknessTexture.g.
+  pbrMat.thickness = material.thicknessFactor;
+  if(isTexturePresent(material.thicknessTexture))
+  {
+    pbrMat.thickness *= getTexture(textures, texInfos[material.thicknessTexture], state.tc, state.texGrad).g;
+  }
 #endif
 
 #if MAT_EXT_SPECULAR
@@ -278,8 +284,9 @@ PbrMaterial evaluateMaterial(in GltfShadeMaterial material, MeshState state, Sam
   }
 #endif
 
-  // Dielectric Specular — inside/outside IOR swap uses pbrMat.isThinWalled (set by the volume
-  // block above or left at defaultPbrMaterial()'s true default when MAT_EXT_VOLUME is off).
+  // Dielectric Specular — inside/outside IOR swap is enabled only for materials with finite
+  // KHR_materials_volume thickness (thickness > 0). Thin-walled (thickness == 0) materials
+  // never swap, matching the glTF specification.
   float ior1 = 1.0F;  // IOR of the current medium (e.g., air)
 #if MAT_EXT_IOR
   float ior2 = material.ior;  // IOR of the material

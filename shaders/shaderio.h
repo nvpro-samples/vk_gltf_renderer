@@ -31,10 +31,17 @@ NAMESPACE_SHADERIO_BEGIN()
 #define SILHOUETTE_WORKGROUP_SIZE 16
 
 
-#define HDR_DIFFUSE_INDEX 0
-#define HDR_GLOSSY_INDEX 1
-#define HDR_IMAGE_INDEX 0
-#define HDR_LUT_INDEX 1
+// Indices into `texturesCube[]` (eTexturesCube binding).
+#define HDR_DIFFUSE_INDEX 0  // Lambert-prefiltered HDR environment cubemap
+#define HDR_GLOSSY_INDEX 1   // GGX-prefiltered HDR environment cubemap
+
+// Indices into `texturesHdr[]` (eTexturesHdr binding). Grouped here because they are all 2D
+// Sampler2D slots consumed together at shade time for IBL + KHR_materials_transmission.
+#define HDR_IMAGE_INDEX 0    // Lat-long HDR environment image
+#define HDR_LUT_INDEX 1      // GGX split-sum BRDF LUT (hdr_integrate_brdf)
+#define HDR_SHEEN_INDEX 2    // Charlie sheen directional-albedo LUT (hdr_charlie_brdf_lut)
+#define HDR_OPAQUE_INDEX 3   // Raster-only opaque-pass color capture (screen-space transmission)
+#define HDR_TEXTURE_COUNT 4  // Count for descriptor binding
 
 // Environment types
 enum class EnvSystem
@@ -63,11 +70,14 @@ enum BindingPoints
   eTlas = 0,      // Top level acceleration structure
   eOutImages,     // Output image (RGBA32); eSelectImage slot = ObjectID in .r (R32_SFLOAT)
   eOutDepth,      // Scene depth output (D32_SFLOAT as r32f storage image)
-  eTextures,      // Textures (array of textures)
-  eTexturesCube,  // Textures (array of textures)
-  eTexturesHdr,   // HDR textures (array of textures)
-  eTexturesStorage,
+  eTextures,      // glTF material textures (bindless array)
+  eTexturesCube,  // Prefiltered HDR env cubemaps (HDR_DIFFUSE_INDEX, HDR_GLOSSY_INDEX)
+  eTexturesHdr,   // 2D IBL/transmission textures (HDR_{IMAGE,LUT,SHEEN,OPAQUE}_INDEX)
 };
+
+// Fixed resolution of the opaque-pass color capture used for screen-space transmission.
+// Matches the Khronos reference (1024x1024). Square so the LOD = log2(size) is unambiguous.
+#define OPAQUE_COLOR_SIZE 1024
 
 enum OptixBindingPoints
 {
@@ -104,6 +114,22 @@ enum Visualization
   eClay,
   eTriangleID,
   eFaceOrientation,
+  // Khronos glTF-Sample-Renderer DEBUG_* parity (subset — only the modes that map to fields
+  // already populated in PbrMaterial; otherwise we render the base color as a fallback).
+  eOcclusion,
+  eClearcoatFactor,
+  eClearcoatRoughness,
+  eClearcoatNormal,
+  eSheenColor,
+  eSheenRoughness,
+  eSpecularFactor,
+  eSpecularColor,
+  eTransmissionFactor,
+  eIridescenceFactor,
+  eIridescenceThickness,
+  eAnisotropyStrength,
+  eDiffuseTransmissionFactor,
+  eDiffuseTransmissionColor,
 };
 
 
@@ -168,13 +194,14 @@ struct PathtracePushConstant
 // Push constant
 struct RasterPushConstant
 {
-  int                    materialID   = 0;       // Material used by the rendering instance
-  int                    renderNodeID = 0;       // Node used by the rendering instance
-  int                    renderPrimID = 0;       // Primitive used by the rendering instance
-  float2                 mouseCoord   = {0, 0};  // Mouse coordinates (use for debug)
-  SceneFrameInfo*        frameInfo;              // Camera info
-  SkyPhysicalParameters* skyParams;              // Sky physical parameters
-  GltfScene*             gltfScene;              // GLTF scene
+  int                    materialID       = 0;       // Material used by the rendering instance
+  int                    renderNodeID     = 0;       // Node used by the rendering instance
+  int                    renderPrimID     = 0;       // Primitive used by the rendering instance
+  int                    opaqueColorReady = 0;       // 1 = transmission framebuffer ready (mip chain valid)
+  float2                 mouseCoord       = {0, 0};  // Mouse coordinates (use for debug)
+  SceneFrameInfo*        frameInfo;                  // Camera info
+  SkyPhysicalParameters* skyParams;                  // Sky physical parameters
+  GltfScene*             gltfScene;                  // GLTF scene
 };
 
 

@@ -166,6 +166,7 @@ set(SHADER_SHARED_SLANG_FILES
   ${NVSHADERS_DIR}/nvshaders/hdr_prefilter_glossy.slang
   ${NVSHADERS_DIR}/nvshaders/hdr_dome.slang
   ${NVSHADERS_DIR}/nvshaders/hdr_integrate_brdf.slang
+  ${NVSHADERS_DIR}/nvshaders/hdr_charlie_brdf_lut.slang
 )
 
 # Combine all shader files for compilation

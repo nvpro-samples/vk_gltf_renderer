@@ -642,8 +642,7 @@ void GltfRenderer::onFileDrop(const std::filesystem::path& filename)
       return;
 
     m_loadPipeline.clear();
-    cleanupScene();
-    m_rasterizer.freeRecordCommandBuffer(m_resources);
+    cleanupScene();  // also frees rasterizer record cmd + clears sort state via onSceneInvalidated()
 
     m_busy.start("Loading Descriptor");
     std::thread([=, this]() {
@@ -675,8 +674,7 @@ void GltfRenderer::onFileDrop(const std::filesystem::path& filename)
     else
     {
       m_loadPipeline.clear();
-      cleanupScene();  // Cleanup current scene
-      m_rasterizer.freeRecordCommandBuffer(m_resources);
+      cleanupScene();  // also frees rasterizer record cmd + clears sort state via onSceneInvalidated()
 
       // Set busy BEFORE starting the worker thread to prevent re-entrant drops
       m_busy.start("Loading");
@@ -1177,6 +1175,12 @@ void GltfRenderer::createSceneFromDescriptor(const std::filesystem::path& descri
 void GltfRenderer::cleanupScene()
 {
   m_undoStack.clear();
+  // Drop any renderer-side state tied to the outgoing Scene BEFORE the unique_ptr is reset.
+  // The heap allocator is free to hand the same address back to the next Scene instance, so
+  // any Scene-pointer-based invalidation inside the render loop would be unreliable -- this is
+  // the authoritative invalidation point.
+  m_pathTracer.onSceneInvalidated(m_resources);
+  m_rasterizer.onSceneInvalidated(m_resources);
   if(m_resources.getScene())
     m_resources.transformCompute.destroyGpuBuffers();
   m_resources.scene.reset();
@@ -1444,12 +1448,17 @@ void GltfRenderer::createDescriptorSets()
                                               m_maxTextures, VK_SHADER_STAGE_ALL, nullptr,
                                               VK_DESCRIPTOR_BINDING_UPDATE_AFTER_BIND_BIT | VK_DESCRIPTOR_BINDING_UPDATE_UNUSED_WHILE_PENDING_BIT
                                                   | VK_DESCRIPTOR_BINDING_PARTIALLY_BOUND_BIT);
-  // The 2 textures are for the HDR environment map: one is the pre-integrated BRDF LUT, the other is the HDR image
-  m_resources.descriptorBinding[0].addBinding(shaderio::BindingPoints::eTexturesHdr,
-                                              VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER, 2, VK_SHADER_STAGE_ALL, nullptr,
+  // 2D IBL/transmission textures (see shaderio.h HDR_* indices):
+  //   [0] HDR_IMAGE_INDEX   lat-long HDR environment image
+  //   [1] HDR_LUT_INDEX     GGX split-sum BRDF LUT
+  //   [2] HDR_SHEEN_INDEX   Charlie sheen directional-albedo LUT (raster only)
+  //   [3] HDR_OPAQUE_INDEX  opaque-pass color capture for screen-space transmission (raster only)
+  // PARTIALLY_BOUND lets the path tracer leave slots [2]/[3] unbound.
+  m_resources.descriptorBinding[0].addBinding(shaderio::BindingPoints::eTexturesHdr, VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER,
+                                              HDR_TEXTURE_COUNT, VK_SHADER_STAGE_ALL, nullptr,
                                               VK_DESCRIPTOR_BINDING_UPDATE_AFTER_BIND_BIT | VK_DESCRIPTOR_BINDING_UPDATE_UNUSED_WHILE_PENDING_BIT
                                                   | VK_DESCRIPTOR_BINDING_PARTIALLY_BOUND_BIT);
-  // The 2 other HDR textures with cube maps: pre-convoluted diffuse and glossy maps
+  // Prefiltered HDR cubemaps: [0] diffuse Lambertian, [1] GGX glossy.
   m_resources.descriptorBinding[0].addBinding(shaderio::BindingPoints::eTexturesCube,
                                               VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER, 2, VK_SHADER_STAGE_ALL, nullptr,
                                               VK_DESCRIPTOR_BINDING_UPDATE_AFTER_BIND_BIT | VK_DESCRIPTOR_BINDING_UPDATE_UNUSED_WHILE_PENDING_BIT
