@@ -21,8 +21,8 @@ if(NOT DEFINED GLTF_SAMPLE_ASSETS_PATH)
 endif()
 
 # Disable unused libraries from nvpro_core2 - we use local copy
-set(NVPRO2_ENABLE_nvvkgltf OFF CACHE BOOL "Disable nvvkgltf from nvpro_core2" FORCE)
-set(NVPRO2_ENABLE_nvvkglsl OFF CACHE BOOL "Disable nvvkglsl from nvpro_core2" FORCE)
+option(NVPRO2_ENABLE_nvvkgltf "Disable nvvkgltf from nvpro_core2" OFF)
+option(NVPRO2_ENABLE_nvvkglsl "Disable nvvkglsl from nvpro_core2" OFF)
 
 # Add the cmake folder to the module path
 list(APPEND CMAKE_MODULE_PATH "${CMAKE_CURRENT_SOURCE_DIR}/cmake")
