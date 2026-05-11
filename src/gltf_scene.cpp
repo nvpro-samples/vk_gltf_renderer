@@ -1630,9 +1630,13 @@ nvutils::Bbox nvvkgltf::Scene::getSceneBounds() const
     const nvvkgltf::RenderPrimitive& rprim    = m_renderPrimitives[rnode.renderPrimID];
     const tinygltf::Accessor&        accessor = m_model.accessors[rprim.pPrimitive->attributes.at("POSITION")];
     if(!accessor.minValues.empty())
-      minValues = glm::vec3(accessor.minValues[0], accessor.minValues[1], accessor.minValues[2]);
+      minValues = {tinygltf::utils::getAccessorNormalizedValue(accessor, accessor.minValues[0]),
+                   tinygltf::utils::getAccessorNormalizedValue(accessor, accessor.minValues[1]),
+                   tinygltf::utils::getAccessorNormalizedValue(accessor, accessor.minValues[2])};
     if(!accessor.maxValues.empty())
-      maxValues = glm::vec3(accessor.maxValues[0], accessor.maxValues[1], accessor.maxValues[2]);
+      maxValues = {tinygltf::utils::getAccessorNormalizedValue(accessor, accessor.maxValues[0]),
+                   tinygltf::utils::getAccessorNormalizedValue(accessor, accessor.maxValues[1]),
+                   tinygltf::utils::getAccessorNormalizedValue(accessor, accessor.maxValues[2])};
     nvutils::Bbox bbox(minValues, maxValues);
     bbox = bbox.transform(rnode.worldMatrix);
     m_sceneBounds.insert(bbox);

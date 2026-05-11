@@ -202,9 +202,13 @@ nvutils::Bbox GltfRenderer::getRenderNodeBbox(int renderNodeIndex)
   glm::vec3 minValues = {-1.f, -1.f, -1.f};
   glm::vec3 maxValues = {1.f, 1.f, 1.f};
   if(!accessor.minValues.empty())
-    minValues = glm::vec3(accessor.minValues[0], accessor.minValues[1], accessor.minValues[2]);
+    minValues = {tinygltf::utils::getAccessorNormalizedValue(accessor, accessor.minValues[0]),
+                 tinygltf::utils::getAccessorNormalizedValue(accessor, accessor.minValues[1]),
+                 tinygltf::utils::getAccessorNormalizedValue(accessor, accessor.minValues[2])};
   if(!accessor.maxValues.empty())
-    maxValues = glm::vec3(accessor.maxValues[0], accessor.maxValues[1], accessor.maxValues[2]);
+    maxValues = {tinygltf::utils::getAccessorNormalizedValue(accessor, accessor.maxValues[0]),
+                 tinygltf::utils::getAccessorNormalizedValue(accessor, accessor.maxValues[1]),
+                 tinygltf::utils::getAccessorNormalizedValue(accessor, accessor.maxValues[2])};
   nvutils::Bbox objBbox(minValues, maxValues);
 
   glm::mat4 nodeWorld = scene->computeNodeWorldMatrix(renderNode.refNodeID);
