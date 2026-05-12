@@ -236,7 +236,7 @@ struct GltfShadeMaterial
 #endif
 
 #if MAT_EXT_VOLUME_SCATTER
-  float3 multiscatterColor = float3(0);
+  float3 multiscatterColorFactor = float3(0);
   float  scatterAnisotropy = 0;
 #endif
 

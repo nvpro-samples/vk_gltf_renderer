@@ -314,9 +314,9 @@ PbrMaterial evaluateMaterial(in GltfShadeMaterial material, MeshState state, Sam
 #if MAT_EXT_VOLUME_SCATTER
   // KHR_materials_volume_scatter
   // Compute scattering coefficient from multi-scatter albedo and attenuation
-  if(any(material.multiscatterColor > float3(0.0)))
+  if(any(material.multiscatterColorFactor > float3(0.0)))
   {
-    float3 singleScatterAlbedo = multiToSingleScatterAlbedo(material.multiscatterColor);
+    float3 singleScatterAlbedo = multiToSingleScatterAlbedo(material.multiscatterColorFactor);
     float3 attenuationCoef = -log(max(pbrMat.attenuationColor, float3(0.001))) / max(pbrMat.attenuationDistance, 0.001);
     pbrMat.scatterCoefficient = attenuationCoef * singleScatterAlbedo;
   }

@@ -1567,7 +1567,7 @@ bool UiInspector::materialVolumeScatter(tinygltf::Material& material)
         bool                         modif         = false;
         if(PE::begin())
         {
-          modif |= PE::ColorEdit3("Multiscatter Color", glm::value_ptr(volumeScatter.multiscatterColor), 0,
+          modif |= PE::ColorEdit3("Multiscatter Color", glm::value_ptr(volumeScatter.multiscatterColorFactor), 0,
                                   "Multi-scatter albedo (linear RGB). Black = no scattering.\n"
                                   "Approximates the perceived color after many scattering bounces.\n"
                                   "Requires KHR_materials_volume.");
@@ -1579,8 +1579,8 @@ bool UiInspector::materialVolumeScatter(tinygltf::Material& material)
         if(modif)
         {
           // ImGui's triangle HSV picker clamps S,V to 0.0001, preventing exact black
-          if(glm::all(glm::lessThan(volumeScatter.multiscatterColor, glm::vec3(0.001f))))
-            volumeScatter.multiscatterColor = glm::vec3(0.0f);
+          if(glm::all(glm::lessThan(volumeScatter.multiscatterColorFactor, glm::vec3(0.001f))))
+            volumeScatter.multiscatterColorFactor = glm::vec3(0.0f);
           tinygltf::utils::setVolumeScatter(material, volumeScatter);
         }
         return modif;

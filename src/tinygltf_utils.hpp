@@ -143,8 +143,8 @@ struct KHR_materials_volume
 #define KHR_MATERIALS_VOLUME_SCATTER_EXTENSION_NAME "KHR_materials_volume_scatter"
 struct KHR_materials_volume_scatter
 {
-  glm::vec3 multiscatterColor = {0.0f, 0.0f, 0.0f};
-  float     scatterAnisotropy = 0.0f;
+  glm::vec3 multiscatterColorFactor = {0.0f, 0.0f, 0.0f};
+  float     scatterAnisotropy       = 0.0f;
 };
 
 

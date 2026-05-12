@@ -221,7 +221,7 @@ void populateShaderMaterial(shaderio::GltfShadeMaterial& dstMat, const tinygltf:
 
 #if MAT_EXT_VOLUME_SCATTER
   KHR_materials_volume_scatter volumeScatter = tinygltf::utils::getVolumeScatter(srcMat);
-  dstMat.multiscatterColor                   = volumeScatter.multiscatterColor;
+  dstMat.multiscatterColorFactor             = volumeScatter.multiscatterColorFactor;
   dstMat.scatterAnisotropy                   = volumeScatter.scatterAnisotropy;
 #endif
 }

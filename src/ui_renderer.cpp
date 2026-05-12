@@ -27,28 +27,25 @@
 #include <algorithm>
 #include <filesystem>
 #include <fmt/format.h>
-#include <cmath>
 #include <GLFW/glfw3.h>
-#include <glm/gtc/matrix_transform.hpp>
 #include <glm/gtc/type_ptr.hpp>
 #include <imgui.h>
 
-#include <nvvk/check_error.hpp>
-#include <nvvk/helpers.hpp>
-#include <nvutils/bounding_box.hpp>
-#include <nvgui/tonemapper.hpp>
-#include <nvgui/file_dialog.hpp>
 #include <nvgui/axis.hpp>
+#include <nvgui/file_dialog.hpp>
 #include <nvgui/fonts.hpp>
+#include <nvgui/hover_scrolling.hpp>
+#include <nvgui/tonemapper.hpp>
 #include <nvgui/tooltip.hpp>
-#include "tinygltf_utils.hpp"
+#include <nvutils/bounding_box.hpp>
+#include <nvvk/check_error.hpp>
 
 #include <nvapp/elem_camera.hpp>
 
 #include "renderer.hpp"
 #include "gltf_create_tangent.hpp"
-#include "gltf_scene_animation.hpp"
 #include "scoped_banner.hpp"
+#include "tinygltf_utils.hpp"
 #include "ui_animation.hpp"
 #include "ui_mouse_state.hpp"
 #include "version.hpp"
@@ -367,6 +364,8 @@ void GltfRenderer::renderUI()
                                "Sheen Color\0Sheen Roughness\0Specular Factor\0Specular Color\0"
                                "Transmission Factor\0Iridescence Factor\0Iridescence Thickness\0"
                                "Anisotropy Strength\0Diffuse Transmission Factor\0Diffuse Transmission Color\0\0");
+          changed |= nvgui::hoverScrolling(*reinterpret_cast<int32_t*>(&m_resources.settings.visualization), 0,
+                                           int32_t(shaderio::Visualization::eDiffuseTransmissionColor));
           changed |= PE::Checkbox("Wireframe", &m_resources.settings.wireframe, "Overlay wireframe on rendered meshes");
           PE::end();
           if(m_resources.settings.renderSystem == RenderingMode::ePathtracer)

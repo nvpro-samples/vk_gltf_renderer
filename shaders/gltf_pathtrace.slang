@@ -120,6 +120,19 @@ struct LightingTechniqueProbabilities
 #define RR_MIN_DEPTH 3
 
 //-----------------------------------------------------------------------
+// Volume scattering tuning constants (KHR_materials_volume_scatter).
+// VOLUME_FREE_BUDGET is the number of "free" volume scatter events per
+// pixel-sample before Russian Roulette begins probabilistic termination.
+// Decoupled from pushConst.maxDepth: volume scattering is a property of
+// the medium, not the surface bounce budget.
+//-----------------------------------------------------------------------
+#define VOLUME_MIN_SCATTER 0.001F
+#define VOLUME_RAND_FLOOR 1.0e-10F
+#define VOLUME_FREE_BUDGET 64
+#define RR_PCONT_FLOOR 0.001F
+#define RR_PCONT_CAP 0.95F
+
+//-----------------------------------------------------------------------
 // The safeOffsetRay function shifts a point on a surface so that a ray
 // bouncing off the surface is no longer treated as intersecting the surface
 // from which it originated when tMin = 0.0.
@@ -355,7 +368,7 @@ LightingTechniqueProbabilities getDirectLightingTechniqueProbabilities()
 // Environment sampling has zero probability of hitting the exact delta direction,
 // so MIS weight = 1.0 for both strategies when delta lights are involved.
 //-----------------------------------------------------------------------
-void sampleLights(in float3 pos, float3 normal, in float3 worldRayDirection, inout uint seed, out DirectLight directLight)
+void sampleLights(in float3 pos, float3 normal, in float3 worldRayDirection, inout uint seed, out DirectLight directLight, in bool isVolumeSample = false)
 {
   float3 radiance             = float3(0.0f);
   directLight.pdf             = 0.0f;
@@ -383,9 +396,13 @@ void sampleLights(in float3 pos, float3 normal, in float3 worldRayDirection, ino
     // Selection probability for Monte Carlo normalization (1/N lights)
     float selectionPdf = 1.0 / pushConst.gltfScene.numLights;
 
-    int          lightIndex = min(int(rand(seed) * pushConst.gltfScene.numLights), pushConst.gltfScene.numLights - 1);
-    GltfLight    light      = pushConst.gltfScene.lights[lightIndex];
-    LightContrib contrib    = singleLightContribution(light, pos, normal, float2(rand(seed), rand(seed)));
+    int       lightIndex = min(int(rand(seed) * pushConst.gltfScene.numLights), pushConst.gltfScene.numLights - 1);
+    GltfLight light      = pushConst.gltfScene.lights[lightIndex];
+
+    // Volume scatter points have no surface; bypass singleLightContribution()'s
+    // directional back-hemisphere cull by feeding it a normal that always passes
+    float3 cullNormal = (isVolumeSample && light.type == LightType::eLightTypeDirectional) ? -light.direction : normal;
+    LightContrib contrib = singleLightContribution(light, pos, cullNormal, float2(rand(seed), rand(seed)));
 
     directLight.direction = -contrib.incidentVector;
     directLight.distance  = contrib.distance;
@@ -646,8 +663,8 @@ float3 getShadowTransmission(GltfRenderNode      renderNode,
                              inout bool          isInside)
 {
 #if !MAT_EXT_TRANSMISSION
-  // Without KHR_materials_transmission the material has no transmissionFactor field and no
-  // shadow ray can pass through it — return full shadow (zero transmission).
+  // Without transmission extension the material has no fields that let shadow rays pass
+  // through -- return full shadow.
   return float3(0.0);
 #else
   uint               matIndex  = max(0, renderNode.materialID);
@@ -655,8 +672,11 @@ float3 getShadowTransmission(GltfRenderNode      renderNode,
   GltfShadeMaterial  mat       = materials[matIndex];
   GltfTextureInfo*   texInfos  = pushConst.gltfScene->textureInfos;
 
-  // If hit a non-transmissive surface, terminate with full shadow
-  if(mat.transmissionFactor <= MIN_TRANSMISSION)
+  // Transmission factor
+  float tFactor = mat.transmissionFactor;
+
+  // Fully opaque to shadow rays if neither lobe contributes meaningfully.
+  if(tFactor <= MIN_TRANSMISSION)
   {
     return float3(0.0);
   }
@@ -676,24 +696,20 @@ float3 getShadowTransmission(GltfRenderNode      renderNode,
     normal    = normalize(float3(mul(worldToObject, normal).xyz));
   }
 
-  // Transmission calculation
-  float3 currentTransmission = float3(mat.transmissionFactor);
-
-  // Regular transmission with Fresnel using normal.
-  // Falls back to the glTF default IOR (1.5) when KHR_materials_ior is gated out.
+  // Fresnel using the geometric normal (falls back to glTF default IOR 1.5 when KHR_materials_ior is gated out).
   float cosTheta = abs(dot(rayDirection, normal));
 #if MAT_EXT_IOR
   float fresnel = schlickFresnel(mat.ior, cosTheta);
 #else
   float fresnel = schlickFresnel(1.5F, cosTheta);
 #endif
-  currentTransmission *= float3((1.0 - fresnel));
 
-  // Apply material color tint to transmission
-  currentTransmission *= mat.pbrBaseColorFactor.rgb;
+  // Combined dielectric-base transmission contribution
+  float3 currentTransmission = tFactor * mat.pbrBaseColorFactor.rgb;
+  currentTransmission *= (1.0F - fresnel);
 
 #if MAT_EXT_VOLUME
-  // Volume attenuation (Beer's law) and scattering (KHR_materials_volume + KHR_materials_volume_scatter)
+  // Volume attenuation (Beer's law)
   if(mat.thicknessFactor > 0.0)
   {
     if(isInside)
@@ -703,7 +719,7 @@ float3 getShadowTransmission(GltfRenderNode      renderNode,
 
 #if MAT_EXT_VOLUME_SCATTER
       // Scattering coefficient: σ_s
-      float3 scatterCoeff = absCoeff * multiToSingleScatterAlbedo(mat.multiscatterColor);
+      float3 scatterCoeff = absCoeff * multiToSingleScatterAlbedo(mat.multiscatterColorFactor);
 #else
       float3 scatterCoeff = float3(0.0);
 #endif
@@ -755,58 +771,88 @@ float3 getShadowTransmission(GltfRenderNode      renderNode,
 }
 
 //-----------------------------------------------------------------------
-// Volume Scattering (KHR_materials_volume_scatter)
-//
-// Handles volumetric scattering inside transmissive materials using:
-// - Delta tracking to sample scatter distance
-// - Henyey-Greenstein phase function for scatter direction
-//
-// Returns true if a scatter event occurred (caller should continue loop).
-// Returns false if no scatter (absorption applied, continue to surface).
+// Handles volume scattering for KHR_materials_volume[_scatter], using
+// spectral delta (null-collision) tracking with a Henyey-Greenstein phase.
+// If the ray scatters inside the volume, it updates the ray, throughput,
+// and lastSamplePdf, and returns true (the caller should then run NEE via
+// `volumeScatterNEE` and keep going). If the ray makes it to the surface
+// instead, the segment transmittance is applied and it returns false.
+// For the math behind this, see PBRT v4 ch.11 and Misuik et al. 2014.
 //-----------------------------------------------------------------------
 bool handleVolumeScatter(PbrMaterial pbrMat, float hitDistance, inout RayDesc ray, inout float3 throughput, inout float lastSamplePdf, inout uint seed)
 {
-  float3 extinction   = absorptionCoefficient(pbrMat);  // σ_t = -ln(c)/d per KHR_materials_volume
-  float3 scatterCoeff = pbrMat.scatterCoefficient;      // σ_s = σ_t * ρ_ss
+  float3 extinction   = volumeExtinctionCoefficient(pbrMat);  // sigma_t = -ln(c)/d
+  float3 scatterCoeff = pbrMat.scatterCoefficient;            // sigma_s = sigma_t * rho_ss
 
-  // Check if volume has scattering enabled
+  // Below VOLUME_MIN_SCATTER, treat sigma_s as zero -> pure absorption fallback.
   float maxScatter = max(scatterCoeff.x, max(scatterCoeff.y, scatterCoeff.z));
-  if(maxScatter > 0.001f)
+  if(maxScatter > VOLUME_MIN_SCATTER)
   {
     float maxExtinction = max(extinction.x, max(extinction.y, extinction.z));
 
-    // Free-flight sampling: t ~ Exp(σ_max)
-    float scatterDist = -log(max(rand(seed), 1e-10f)) / maxExtinction;
+    // Free-flight sampling: t ~ Exp(sigma_max).
+    float scatterDist = -log(max(rand(seed), VOLUME_RAND_FLOOR)) / maxExtinction;
 
     if(scatterDist < hitDistance)
     {
-      // Weighted delta tracking: combine real-scatter and null-collision into one weight.
-      // w_c = (σ_t,c/σ_max)·(σ_s,c/σ_t,c) + (1 - σ_t,c/σ_max)·1 = 1 - σ_a,c/σ_max
-      // No distance-dependent exp correction → zero spectral variance per scatter event.
+      // Combined (real-scatter + null-collision) per-event throughput weight.
       throughput *= float3(1.0) - (extinction - scatterCoeff) / maxExtinction;
 
-      // Move ray to scatter point
-      ray.Origin = ray.Origin + ray.Direction * scatterDist;
-
-      // Sample new direction using Henyey-Greenstein phase function
+      // Advance to scatter point and sample new direction via Henyey-Greenstein phase function.
+      ray.Origin    = ray.Origin + ray.Direction * scatterDist;
       float3 wi     = ray.Direction;
       ray.Direction = sampleHenyeyGreenstein(float2(rand(seed), rand(seed)), pbrMat.scatterAnisotropy, wi);
 
-      // Update PDF for MIS with environment lighting
+      // Phase PDF for env-hit MIS at the next iteration (paired with envWeight*envPdf).
       lastSamplePdf = henyeyGreensteinPdf(dot(wi, ray.Direction), pbrMat.scatterAnisotropy);
 
       return true;  // Scatter occurred - caller should continue loop
     }
 
-    // No scatter event before surface: spectral correction only.
-    // Transmittance for the dominant channel is encoded in the sampling probability.
+    // Reached surface without scattering: spectral residual correction (see docblock).
     throughput *= exp(hitDistance * (float3(maxExtinction) - extinction));
     return false;
   }
 
-  // No scattering enabled: pure Beer's law absorption
+  // No scattering -- pure Beer's-law absorption over the segment.
   throughput *= exp(-hitDistance * extinction);
   return false;  // No scatter - continue to surface interaction
+}
+
+//-----------------------------------------------------------------------
+// Does next-event estimation at a volume scatter point: samples a light,
+// evaluates the HG phase function, MIS-combines with phase sampling, and
+// traces a shadow ray starting inside the volume so it gets Beer-attenuated.
+// `wiBeforeScatter` is the ray direction going into the scatter event, used
+// for the phase cosine. Returns the radiance contribution for the caller.
+//-----------------------------------------------------------------------
+float3 volumeScatterNEE(IRaytracer raytracer, PbrMaterial volumeMat, float3 scatterPos, float3 wiBeforeScatter, float3 throughput, inout uint seed)
+{
+  DirectLight directLight;
+  sampleLights(scatterPos, /*normal=*/wiBeforeScatter, wiBeforeScatter, seed, directLight, /*isVolumeSample=*/true);
+
+  if(directLight.pdf <= 0.0F)
+    return float3(0.0F);
+
+  // HG is its own normalized PDF over the unit sphere, so phase value == phase PDF.
+  float cosTheta = dot(wiBeforeScatter, directLight.direction);
+  float phasePdf = henyeyGreensteinPdf(cosTheta, volumeMat.scatterAnisotropy);
+
+  // Balance heuristic (one-sample MIS). DIRAC point/spot lights skip MIS by convention
+  // since the phase-sampling technique can never sample a delta direction.
+  float misWeight = (directLight.pdf == DIRAC) ? 1.0F : directLight.pdf / (directLight.pdf + phasePdf);
+
+  // Shadow ray from the scatter point, starting INSIDE the volume so the
+  // in-volume segment is Beer-attenuated by getShadowTransmission.
+  RayDesc shadowRay;
+  shadowRay.Origin    = scatterPos;
+  shadowRay.Direction = directLight.direction;
+  shadowRay.TMin      = 0.0F;
+  shadowRay.TMax      = directLight.distance;
+  float3 shadowFactor = raytracer.TraceShadow(shadowRay, seed, /*initialInside=*/true);
+
+  // throughput * Li * phase(L) * shadowFactor * MIS weight
+  return throughput * directLight.radianceOverPdf * misWeight * phasePdf * shadowFactor;
 }
 
 //-----------------------------------------------------------------------
@@ -897,8 +943,12 @@ SampleResult pathTrace(IRaytracer raytracer,
 
   int scatterBounces = 0;
 
-  // Path tracing loop, until the ray hits the environment or the maximum depth is reached or the ray is absorbed
-  for(int depth = 0; depth < pushConst.maxDepth; depth++)
+  // Path tracing loop, until the ray hits the environment or the maximum depth is reached or the ray is absorbed.
+  // surfaceDepth advances ONLY on actual surface bounces (at the bottom of the loop). Volume scatter events
+  // `continue` past that increment, so volume chains never consume the surface bounce budget; they are bounded
+  // only by Russian Roulette past VOLUME_FREE_BUDGET events.
+  int surfaceDepth = 0;
+  while(surfaceDepth < pushConst.maxDepth)
   {
     // Ensure ray direction is normalized
     ray.Direction = normalize(ray.Direction);
@@ -917,7 +967,7 @@ SampleResult pathTrace(IRaytracer raytracer,
       HitPayload      payload   = {};
 
 #if WIREFRAME
-      if(depth == 0)
+      if(surfaceDepth == 0)
       {
         payload.differentialX = wireDiffX;
         payload.differentialY = wireDiffY;
@@ -930,7 +980,7 @@ SampleResult pathTrace(IRaytracer raytracer,
       // Getting the hit information (primitive/mesh that was hit)
       HitState hit = payload.hitState;
 
-      bool firstRay = (depth == 0);
+      bool firstRay = (surfaceDepth == 0);
 
 #if WIREFRAME
       if(firstRay && payload.hitT != INFINITE)
@@ -1089,19 +1139,38 @@ SampleResult pathTrace(IRaytracer raytracer,
       }
 #endif
 
-      // Apply volume effects: scattering and/or absorption (KHR_materials_volume + KHR_materials_volume_scatter).
-      // thickness > 0 indicates a non-thin-walled material; thin walls don't carry a volume.
+      // KHR_materials_volume + KHR_materials_volume_scatter:
+      // While inside a volume with thickness > 0 (non-thin-walled), perform null-collision tracking.
+      // On a real scatter event, run NEE here and `continue` so the next loop iteration traces from
+      // the new (scattered) ray. Volume events never advance surfaceDepth, so they never consume the
+      // surface bounce budget; chains are bounded only by Russian Roulette past VOLUME_FREE_BUDGET events.
       if(isInside && (volumeMat.thickness > 0.0F))
       {
-        // Use volumeMat (the enclosing volume's material), not pbrMat (the hit surface's material).
+        // Capture the pre-scatter direction: handleVolumeScatter overwrites ray.Direction on a real
+        // scatter event, but volumeScatterNEE needs the incoming wi to evaluate the HG phase cosine.
+        const float3 wiBeforeScatter = ray.Direction;
+
+        // volumeMat is the enclosing medium captured at boundary entry, not pbrMat (the surface we
+        // just hit, which would have the wrong sigma_t / sigma_s for the in-volume segment).
         if(handleVolumeScatter(volumeMat, payload.hitT, ray, throughput, lastSamplePdf, seed))
         {
           scatterBounces++;
-          if(scatterBounces < pushConst.maxDepth * 16)
-            depth--;  // Volume scatter events don't consume the surface bounce budget
-          continue;
+
+          // NEE at the scatter point
+          radiance += volumeScatterNEE(raytracer, volumeMat, ray.Origin, wiBeforeScatter, throughput, seed);
+
+          // Russian roulette for runaway scatter chains. Surviving events still don't bill against
+          // surfaceDepth; RR is the sole termination mechanism for long volume chains.
+          if(scatterBounces >= VOLUME_FREE_BUDGET)
+          {
+            float rrPcont = min(max(throughput.x, max(throughput.y, throughput.z)) + RR_PCONT_FLOOR, RR_PCONT_CAP);
+            if(rand(seed) >= rrPcont)
+              break;
+            throughput /= rrPcont;
+          }
+          continue;  // skips the surfaceDepth++ at the bottom of the loop
         }
-        // If no scatter, absorption was applied inside handleVolumeScatter
+        // If no scatter, segment transmittance was applied inside handleVolumeScatter.
       }
 
       // Light contribution; can be environment or punctual lights
@@ -1180,18 +1249,19 @@ SampleResult pathTrace(IRaytracer raytracer,
         {
           // Exit tracing rays, but still finish this iteration; in particular the visibility test
           // for the light that we may have hit.
-          depth = pushConst.maxDepth;
+          surfaceDepth = pushConst.maxDepth;
         }
 
         // End scope to free live states
       }
 
-      // Extract minimal shadow ray data before scope closes (to free hit/directLight structures)
-      float3 shadowOffsetDir = dot(directLight.direction, hit.geonrm) > 0 ? hit.geonrm : -hit.geonrm;
-      // The shadowPos already contains the correction from pointOffset ("Hacking the shadow terminator"), but offset for planar surfaces
-      shadowRayPos  = float16_t3(safeOffsetRay(hit.shadowPos, shadowOffsetDir));
-      shadowRayDir  = float16_t3(directLight.direction);
-      shadowRayDist = float16_t(directLight.distance);
+      // Find shadow ray position and direction
+      bool   shadowSideForward = dot(directLight.direction, hit.nrm) > 0.0F;
+      float3 shadowOffsetDir   = shadowSideForward ? hit.geonrm : -hit.geonrm;
+      float3 shadowOffsetBase  = shadowSideForward ? hit.shadowPos : hit.pos;
+      shadowRayPos             = float16_t3(safeOffsetRay(shadowOffsetBase, shadowOffsetDir));
+      shadowRayDir             = float16_t3(directLight.direction);
+      shadowRayDist            = float16_t(directLight.distance);
     }
 
     // We are adding the contribution to the radiance only if the ray is not occluded by an object.
@@ -1207,13 +1277,17 @@ SampleResult pathTrace(IRaytracer raytracer,
     }
 
     // Russian-Roulette (minimizing live state)
-    if(depth >= RR_MIN_DEPTH)
+    if(surfaceDepth >= RR_MIN_DEPTH)
     {
       float rrPcont = min(max(throughput.x, max(throughput.y, throughput.z)) + 0.001F, 0.95F);
       if(rand(seed) >= rrPcont)
         break;                // paths with low throughput that won't contribute
       throughput /= rrPcont;  // boost the energy of the non-terminated paths
     }
+
+    // Surface bounce consumed: advance the surface budget. Volume scatter `continue`s before
+    // reaching this point, so it never advances surfaceDepth.
+    surfaceDepth++;
   }
 
 #if WIREFRAME
@@ -1490,9 +1564,8 @@ void rmissMain(inout HitPayload payload)
 void rmissShadow(inout ShadowPayload payload)
 {
   // When we miss, we've passed through all surfaces along the ray.
-  // Keep the accumulated transmission - don't reset it.
-  // totalTransmission already contains the accumulated value from rahitShadow
-  payload.approxHitT = INFINITE;
+  // Keep the accumulated transmission -- don't reset it. totalTransmission already contains
+  // the accumulated value from rahitShadow.
 }
 
 //-----------------------------------------------------------------------
@@ -1547,9 +1620,12 @@ void rahitShadow(inout ShadowPayload payload, in BuiltInTriangleIntersectionAttr
   float r       = rand(payload.seed);
   if(r < opacity)
   {
-    payload.approxHitT  = abs(hitT - payload.approxHitT);
+    // anyhit invocations arrive in spatial order (TraceRay default), so the in-volume segment
+    // length is just the delta between consecutive accepted hit distances.
+    float segmentLength = max(0.0F, hitT - payload.prevHitT);
+    payload.prevHitT    = hitT;
     bool   isInside     = payload.isInside;
-    float3 transmission = getShadowTransmission(renderNode, renderPrim, primitiveID, barycentrics, payload.approxHitT,
+    float3 transmission = getShadowTransmission(renderNode, renderPrim, primitiveID, barycentrics, segmentLength,
                                                 worldToObject, worldRayDir, isInside);
 
     payload.isInside = isInside;

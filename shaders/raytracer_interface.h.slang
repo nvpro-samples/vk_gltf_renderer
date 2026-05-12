@@ -54,10 +54,10 @@ struct HitPayload
 // Shadow payload for the path tracer
 struct ShadowPayload
 {
-  uint   seed;
-  float  approxHitT        = 0.0f;
-  bool   isInside          = false;
-  float3 totalTransmission = float3(1.0f);
+  uint seed;
+  float prevHitT = 0.0f;  // The previous candidate hit's absolute RayT (in-order assumption); rahitShadow / TraceShadow use it to compute the segment length for Beer's-law volume attenuation between consecutive transmissive hits.
+  bool   isInside          = false;         // If true, the shadow ray is considered to start INSIDE a volume
+  float3 totalTransmission = float3(1.0f);  // The total transmission of the shadow ray through the volume
 };
 
 #if WIREFRAME
@@ -74,9 +74,9 @@ float computeMeshWireframe(float4x3 worldToObject, float3 worldRayOrigin, float3
 // Raytracer interface definition
 interface IRaytracer
 {
-  void   Trace(RayDesc ray, inout HitPayload payload, inout uint seed);
-  void   TraceLow(RayDesc ray, inout HitPayload payload);
-  float3 TraceShadow(RayDesc ray, inout uint seed);
+  void Trace(RayDesc ray, inout HitPayload payload, inout uint seed);
+  void TraceLow(RayDesc ray, inout HitPayload payload);
+  float3 TraceShadow(RayDesc ray, inout uint seed, bool initialInside = false);
 }
 
 // Implementation using RayQuery
@@ -161,12 +161,12 @@ struct RayQueryRaytracer : IRaytracer
     }
   }
 
-  float3 TraceShadow(RayDesc ray, inout uint seed)
+  float3 TraceShadow(RayDesc ray, inout uint seed, bool initialInside = false)
   {
     const float MIN_TRANSMISSION  = 0.01;  // Minimum transmission factor to continue tracing
     float3      totalTransmission = float3(1.0);
-    bool        isInside          = false;
-    float       approxHitT        = 0;
+    bool        isInside          = initialInside;
+    float       prevHitT          = 0;
 
     RayQuery rayQuery;
     rayQuery.TraceRayInline(topLevelAS, RAY_FLAG_NONE, 0xFF, ray);
@@ -189,10 +189,11 @@ struct RayQueryRaytracer : IRaytracer
       float r = rand(seed);
       if(r < opacity)
       {
-        approxHitT                 = abs(hitT - approxHitT);
-        float3 currentTransmission = getShadowTransmission(renderNode, renderPrim, triangleID, barycentrics, approxHitT,
-                                                           worldToObject, ray.Direction, isInside);
-
+        // RayQuery candidate hits arrive in spatial order: |segment| = hitT - prevHitT.
+        float  segmentLength       = max(0.0F, hitT - prevHitT);
+        float3 currentTransmission = getShadowTransmission(renderNode, renderPrim, triangleID, barycentrics,
+                                                           segmentLength, worldToObject, ray.Direction, isInside);
+        prevHitT                   = hitT;
         totalTransmission *= currentTransmission;
 
         if(max(max(totalTransmission.r, totalTransmission.g), totalTransmission.b) <= MIN_TRANSMISSION)
@@ -298,10 +299,11 @@ struct TraditionalRaytracer : IRaytracer
     }
   }
 
-  float3 TraceShadow(RayDesc ray, inout uint seed)
+  float3 TraceShadow(RayDesc ray, inout uint seed, bool initialInside = false)
   {
     ShadowPayload shadowPayload = {};
     shadowPayload.seed          = seed;
+    shadowPayload.isInside      = initialInside;
 
     if(USE_SER == 1 && AVAILABLE_SER == 1)
     {
