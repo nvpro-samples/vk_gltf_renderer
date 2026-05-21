@@ -1490,14 +1490,20 @@ void GltfRenderer::createDescriptorSets()
       m_device, VK_DESCRIPTOR_SET_LAYOUT_CREATE_UPDATE_AFTER_BIND_POOL_BIT, &m_resources.descriptorSetLayout[0]));
   NVVK_DBG_NAME(m_resources.descriptorSetLayout[0]);
 
-  std::vector<VkDescriptorPoolSize> poolSize  = m_resources.descriptorBinding[0].calculatePoolSizes();
-  VkDescriptorPoolCreateInfo        dpoolInfo = {
-             .sType = VK_STRUCTURE_TYPE_DESCRIPTOR_POOL_CREATE_INFO,
-             .flags = VK_DESCRIPTOR_POOL_CREATE_UPDATE_AFTER_BIND_BIT |  // allows descriptor sets to be updated after they have been bound to a command buffer
+  // Pool sizes: the scene's texture set (descriptorBinding[0]) needs COMBINED_IMAGE_SAMPLER,
+  // and every nvvk::GBuffer UI descriptor (main: 3, DLSS: 8, OptiX: 2 + margin) is now a
+  // single VK_DESCRIPTOR_TYPE_SAMPLED_IMAGE (post ImGui 2026-04-22 backend change), so we
+  // reserve one SAMPLED_IMAGE descriptor per allocated UI set.
+  constexpr uint32_t kGBufferUiMaxSets = 15;
+  std::vector<VkDescriptorPoolSize> poolSize = m_resources.descriptorBinding[0].calculatePoolSizes();
+  poolSize.push_back({VK_DESCRIPTOR_TYPE_SAMPLED_IMAGE, kGBufferUiMaxSets});
+  VkDescriptorPoolCreateInfo dpoolInfo = {
+      .sType = VK_STRUCTURE_TYPE_DESCRIPTOR_POOL_CREATE_INFO,
+      .flags = VK_DESCRIPTOR_POOL_CREATE_UPDATE_AFTER_BIND_BIT |  // allows descriptor sets to be updated after they have been bound to a command buffer
                VK_DESCRIPTOR_POOL_CREATE_FREE_DESCRIPTOR_SET_BIT,  // individual descriptor sets can be freed from the descriptor pool
-             .maxSets       = 15,  // For all GBuffer images (main: 3, DLSS: 8, OptiX: 2) + margin
-             .poolSizeCount = uint32_t(poolSize.size()),
-             .pPoolSizes    = poolSize.data(),
+      .maxSets       = kGBufferUiMaxSets + 1,  // GBuffer UI sets + the scene texture set
+      .poolSizeCount = uint32_t(poolSize.size()),
+      .pPoolSizes    = poolSize.data(),
   };
   NVVK_CHECK(vkCreateDescriptorPool(m_device, &dpoolInfo, nullptr, &m_resources.descriptorPool));
   NVVK_DBG_NAME(m_resources.descriptorPool);

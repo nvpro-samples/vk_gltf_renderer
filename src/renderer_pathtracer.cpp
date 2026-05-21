@@ -395,6 +395,35 @@ bool PathTracer::onUIRender(Resources& resources)
 }
 
 //--------------------------------------------------------------------------------------------------
+// Ensure shader binaries and the selected technique pipeline are available.
+void PathTracer::ensureShadersAndPipelines(Resources& resources)
+{
+  // Recompile Slang->SPIR-V if the wireframe flag has changed. compileShader() also
+  // destroys existing pipelines, so pipeline creation below runs against fresh handles.
+  if(m_compiledWireframe != resources.settings.wireframe)
+  {
+    if(m_busyWindow)
+      m_busyWindow->setReason("Compiling Slang shaders...");
+    compileShader(resources);
+  }
+
+  const bool rqMissing  = m_renderTechnique == RenderTechnique::RayQuery && m_rqPipeline == VK_NULL_HANDLE;
+  const bool rtxMissing = m_renderTechnique == RenderTechnique::RayTracing && m_rtxPipeline == VK_NULL_HANDLE;
+  if(rqMissing)
+  {
+    if(m_busyWindow)
+      m_busyWindow->setReason("Creating Ray Query pipeline...");
+    createRqPipeline(resources);
+  }
+  else if(rtxMissing)
+  {
+    if(m_busyWindow)
+      m_busyWindow->setReason("Creating RTX pipeline...");
+    createRtxPipeline(resources);
+  }
+}
+
+//--------------------------------------------------------------------------------------------------
 // Launches a background worker that (re)compiles the Slang shader and builds the ray
 // tracing pipeline for the currently selected technique.
 void PathTracer::startAsyncCompile(Resources& resources)
@@ -405,29 +434,7 @@ void PathTracer::startAsyncCompile(Resources& resources)
   m_busyWindow->start("Preparing path tracer...");
 
   m_compileThread = std::thread([this, &resources]() {
-    // Recompile Slang->SPIR-V if the wireframe flag has changed. compileShader() also
-    // destroys the existing pipelines, so the build step below runs against fresh handles.
-    if(m_compiledWireframe != resources.settings.wireframe)
-    {
-      m_busyWindow->setReason("Compiling Slang shaders...");
-      compileShader(resources);
-    }
-
-    // Build the pipeline for the selected technique
-    const bool rqMissing  = m_renderTechnique == RenderTechnique::RayQuery && m_rqPipeline == VK_NULL_HANDLE;
-    const bool rtxMissing = m_renderTechnique == RenderTechnique::RayTracing && m_rtxPipeline == VK_NULL_HANDLE;
-
-    if(rqMissing)
-    {
-      m_busyWindow->setReason("Creating Ray Query pipeline...");
-      createRqPipeline(resources);
-    }
-    else if(rtxMissing)
-    {
-      m_busyWindow->setReason("Creating RTX pipeline...");
-      createRtxPipeline(resources);
-    }
-
+    ensureShadersAndPipelines(resources);
     m_busyWindow->stop();
   });
 }
@@ -449,8 +456,16 @@ void PathTracer::onRender(VkCommandBuffer cmd, Resources& resources)
     // SYNC NOTE: old pipelines may be in flight from the previous frame — wait before
     // the worker destroys/recreates them.
     NVVK_CHECK(vkQueueWaitIdle(resources.app->getQueue(0).queue));
-    startAsyncCompile(resources);
-    return;
+    if(resources.app->isHeadless())
+    {
+      // In headless mode we must compile/build synchronously so frames are actually rendered before the application frame loop exits.
+      ensureShadersAndPipelines(resources);
+    }
+    else
+    {
+      startAsyncCompile(resources);
+      return;
+    }
   }
 
 #if defined(USE_DLSS)
@@ -487,7 +502,7 @@ void PathTracer::onRender(VkCommandBuffer cmd, Resources& resources)
   // Setting up the push constant
   setupPushConstant(cmd, resources, renderingSize);
 
-  // Make sure buffer is ready to be used. 
+  // Make sure buffer is ready to be used.
   nvvk::cmdMemoryBarrier(cmd, VK_PIPELINE_STAGE_2_TRANSFER_BIT,
                          VK_PIPELINE_STAGE_2_COMPUTE_SHADER_BIT | VK_PIPELINE_STAGE_2_RAY_TRACING_SHADER_BIT_KHR);
 

@@ -175,6 +175,7 @@ public:
 
 
 private:
+  void ensureShadersAndPipelines(Resources& resources);
   void startAsyncCompile(Resources& resources);
   void updateStatistics(Resources& resources);
   void renderRayQuery(VkCommandBuffer cmd, VkExtent2D renderingSize, Resources& resources);
