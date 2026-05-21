@@ -75,9 +75,9 @@ struct RenderCamera
   };
 
   CameraType type   = ePerspective;
-  glm::vec3  eye    = {0.0f, 0.0f, 0.0f};
-  glm::vec3  center = {0.0f, 0.0f, 0.0f};
-  glm::vec3  up     = {0.0f, 1.0f, 0.0f};
+  glm::dvec3 eye    = {0.0, 0.0, 0.0};
+  glm::dvec3 center = {0.0, 0.0, 0.0};
+  glm::dvec3 up     = {0.0, 1.0, 0.0};
 
   // Perspective
   double yfov = {0.0};  // in radians

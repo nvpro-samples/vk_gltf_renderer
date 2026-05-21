@@ -18,6 +18,8 @@
  */
 
 #pragma once
+#include <memory>
+
 #include <nvapp/application.hpp>
 #include <nvvk/graphics_pipeline.hpp>
 #include <nvvk/resources.hpp>
@@ -30,11 +32,15 @@
 #include "resources.hpp"
 #include "renderer_base.hpp"
 
+#if defined(USE_DLSS)
+class Dlss;  // forward decl, defined in dlss.hpp; only declared under USE_DLSS so the unique_ptr below has a complete type when needed
+#endif
+
 class Rasterizer : public BaseRenderer
 {
 public:
-  Rasterizer()          = default;
-  virtual ~Rasterizer() = default;
+  Rasterizer();
+  ~Rasterizer() override;
 
   void onAttach(Resources& resources, nvvk::ProfilerGpuTimer* profiler) override;
   void onDetach(Resources& resources) override;
@@ -51,29 +57,26 @@ public:
   void registerParameters(nvutils::ParameterRegistry* paramReg);
   void setSettingsHandler(nvgui::SettingsHandler* settingsHandler);
 
+  void resetHdr() { m_lastHdrDomeView = {}; }
+
 private:
   void renderNodes(VkCommandBuffer cmd, Resources& resources, const std::vector<uint32_t>& nodeIDs);
-  void recordRasterScene(Resources& resources);
-  void renderRasterScene(VkCommandBuffer cmd, Resources& resources);
-  void renderOpaqueOnly(VkCommandBuffer cmd, Resources& resources);
-  void renderBlendOnly(VkCommandBuffer cmd, Resources& resources);
+  void recordRasterScene(Resources& resources, VkExtent2D renderExtent);
+  void renderRasterScene(VkCommandBuffer cmd, Resources& resources, VkExtent2D renderExtent);
+  void renderOpaqueOnly(VkCommandBuffer cmd, Resources& resources, VkExtent2D renderExtent);
+  void renderBlendOnly(VkCommandBuffer cmd, Resources& resources, VkExtent2D renderExtent);
   void createRecordCommandBuffer();
 
   // Allocate / destroy the opaque-pass color capture used for KHR_materials_transmission.
-  // Single 2D image, OPAQUE_COLOR_SIZE x OPAQUE_COLOR_SIZE, R16G16B16A16_SFLOAT, mip chain.
   void createOpaqueColorImage(Resources& resources);
   void destroyOpaqueColorImage(Resources& resources);
-  // Resolve the rendered opaque image into m_opaqueColorImage and generate the mip chain.
   void captureAndMipOpaqueColor(VkCommandBuffer cmd, Resources& resources);
 
-  // Allocate and bake the sheen directional-albedo LUT (used by the raster IBL composition for
-  // both the Charlie BRDF term and the sheen energy-compensation factor). One-time bake at
-  // attach; the LUT is independent of the HDR environment.
+  // Allocate and bake the sheen directional-albedo LUT
   void createSheenLut(Resources& resources);
   void destroySheenLut(Resources& resources);
 
-  // Sort blend (transparent) nodes back-to-front against the current view matrix, returning
-  // a list whose ordering matches the previous call when the order is stable. Returns true
+  // Sort blend (transparent) nodes back-to-front against the current view matrix. Returns true
   // if the order changed since the last call (used to invalidate recorded command buffers).
   bool updateSortedBlendNodes(VkCommandBuffer cmd, Resources& resources);
 
@@ -94,18 +97,10 @@ private:
 
   nvshaders::SkyPhysical m_skyPhysical;  // Sky physical
 
-  // Transparent (blend) draw ordering. Sorted back-to-front each frame from the camera; we
-  // re-record the secondary command buffer when the order changes (camera moves enough).
-  // The list persists across frames so the depth sort can exploit temporal coherence: a stable
-  // scene typically drifts by a couple of inversions per frame, making insertion sort near-O(N).
-  std::vector<uint32_t> m_sortedBlendNodes;
-  // Short-circuit memo: when the view matrix, Scene::getShadedNodesRevision(), and
-  // Scene::getSceneGraphRevision() are all unchanged since our last sort, m_sortedBlendNodes is
-  // still valid and we can skip the whole sort pass. Reset by onSceneInvalidated() on scene
-  // swaps so we don't mistake a new Scene's starting revisions for the previous Scene's.
-  glm::mat4 m_lastViewMatrix{0.f};
-  uint64_t  m_lastShadedNodesRevision = 0;
-  uint64_t  m_lastSceneGraphRevision  = 0;
+  std::vector<uint32_t> m_sortedBlendNodes;     // Transparent (blend) draw ordering. Sorted back-to-front
+  glm::mat4             m_lastViewMatrix{0.f};  // Last view matrix used to sort blend nodes.
+  uint64_t m_lastShadedNodesRevision = 0;  // Last scene graph revision at which we updated m_sortedBlendNodes. Used to detect when we need to re-sort.
+  uint64_t m_lastSceneGraphRevision = 0;  // Last scene graph revision we recorded commands against. Used to detect when we need to re-record.
 
   // Opaque-pass color capture for screen-space transmission (KHR_materials_transmission).
   // Allocated lazily on first use; size matches OPAQUE_COLOR_SIZE in shaderio.h.
@@ -119,4 +114,15 @@ private:
   // UI
   bool m_useRecordedCmd = true;   // Use recorded command buffer for rendering
   bool m_lastWireframe  = false;  // Tracks settings.wireframe to invalidate recorded commands
+
+  // ---- DLSS-SR (DLAA / Quality / Balanced / Performance / Ultra) ----
+#if defined(USE_DLSS)
+public:
+  Dlss*       getDlss() { return m_dlss.get(); }
+  const Dlss* getDlss() const { return m_dlss.get(); }
+
+private:
+  std::unique_ptr<Dlss> m_dlss;
+#endif
+  VkImageView m_lastHdrDomeView = VK_NULL_HANDLE;  // Last image view we wrote into HdrEnvDome::setOutImage
 };

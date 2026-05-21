@@ -60,65 +60,15 @@ enum class RenderingMode
   eRasterizer
 };
 
+// Which special view the user wants in the viewport. The DLSS guide-buffer entries that used
+// to live here are gone -- DLSS guide selection is now encapsulated inside the Dlss class
+// (see Dlss::activeGuideImage() in dlss.hpp). What remains are only the two app-level overrides
+// of the rendered output: the regular renderer output, or the OptiX denoised image.
 enum class DisplayBuffer
 {
-  eRendered,         // Final rendered image
-  eAlbedo,           // DLSS Albedo
-  eSpecAlbedo,       // DLSS Specular Albedo
-  eNormalRoughness,  // DLSS Normal/Roughness
-  eMotionVectors,    // DLSS Motion
-  eDepth,            // DLSS Depth
-  eSpecularHitDist,  // DLSS Specular Hit Distance
-  eOptixDenoised,    // OptiX Denoised output
+  eRendered,       // Final rendered image (default)
+  eOptixDenoised,  // OptiX Denoised output (handled via OptiXDenoiser::getDescriptorImageInfo)
 };
-
-// Utility functions for bidirectional mapping between DisplayBuffer and OutputImage enums
-constexpr inline shaderio::OutputImage displayBufferToOutputImage(DisplayBuffer buffer)
-{
-  switch(buffer)
-  {
-    case DisplayBuffer::eAlbedo:
-      return shaderio::eDlssAlbedo;
-    case DisplayBuffer::eSpecAlbedo:
-      return shaderio::eDlssSpecAlbedo;
-    case DisplayBuffer::eNormalRoughness:
-      return shaderio::eDlssNormalRoughness;
-    case DisplayBuffer::eMotionVectors:
-      return shaderio::eDlssMotion;
-    case DisplayBuffer::eDepth:
-      return shaderio::eDlssDepth;
-    case DisplayBuffer::eSpecularHitDist:
-      return shaderio::eDlssSpecularHitDist;
-    case DisplayBuffer::eOptixDenoised:
-      return shaderio::eResultImage;  // Special case: handled separately
-    default:
-      return shaderio::eResultImage;
-  }
-}
-
-constexpr inline DisplayBuffer outputImageToDisplayBuffer(shaderio::OutputImage image)
-{
-  switch(image)
-  {
-    case shaderio::eDlssAlbedo:
-      return DisplayBuffer::eAlbedo;
-    case shaderio::eDlssSpecAlbedo:
-      return DisplayBuffer::eSpecAlbedo;
-    case shaderio::eDlssNormalRoughness:
-      return DisplayBuffer::eNormalRoughness;
-    case shaderio::eDlssMotion:
-      return DisplayBuffer::eMotionVectors;
-    case shaderio::eDlssDepth:
-      return DisplayBuffer::eDepth;
-    case shaderio::eDlssSpecularHitDist:
-      return DisplayBuffer::eSpecularHitDist;
-    default:
-      return DisplayBuffer::eRendered;
-  }
-}
-
-// Note: eOptixDenoised doesn't have a direct OutputImage equivalent
-// It's handled specially through OptiXDenoiser::getDescriptorImageInfo()
 
 enum DirtyFlags
 {
@@ -163,8 +113,9 @@ struct Settings
   float                   infinitePlaneMetallic  = 0.0;                       // Default non-metallic
   float                   infinitePlaneRoughness = 0.5;                       // Default medium roughness
   float                   shadowCatcherDarkness  = 0.0f;                      // Non-physical shadow darkening
-  bool                    dlssHardwareAvailable  = false;  // DLSS hardware/extensions available (set at startup)
-  DisplayBuffer           displayBuffer          = DisplayBuffer::eRendered;  // Which buffer to display in viewport
+  bool dlssRrHardwareAvailable = false;  // DLSS Ray Reconstruction hardware/extensions available (set at startup)
+  bool dlssSrHardwareAvailable = false;  // DLSS Super Resolution / DLAA hardware/extensions available (set at startup)
+  DisplayBuffer displayBuffer  = DisplayBuffer::eRendered;  // Which buffer to display in viewport
 
 #ifndef NDEBUG
   bool showGridStyleWindow  = false;  // Show Grid Style debug window
@@ -213,6 +164,11 @@ struct Resources
     eImgTonemapped,
     eImgRendered,
     eImgSelection,
+    // Motion-vector image is intentionally not here. When USE_DLSS=ON, the rasterizer's
+    // motion vectors live inside its Dlss (Kind::SR) instance (mirrors how the path tracer's
+    // Dlss (Kind::RR) instance owns its own 8-attachment guide GBuffer). When USE_DLSS=OFF, no
+    // motion image is allocated at all.
+    eImgCount,  // Sentinel: number of GBuffer color attachments. KEEP LAST.
   };
 
   nvapp::Application* app{nullptr};

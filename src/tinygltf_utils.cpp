@@ -465,7 +465,20 @@ tinygltf::Value tinygltf::utils::convertToTinygltfValue(int numElements, const f
     result.emplace_back(static_cast<double>(elements[i]));
   }
 
-  return tinygltf::Value(result);
+  return tinygltf::Value(std::move(result));
+}
+
+tinygltf::Value tinygltf::utils::convertToTinygltfValue(int numElements, const double* elements)
+{
+  tinygltf::Value::Array result;
+  result.reserve(numElements);
+
+  for(int i = 0; i < numElements; ++i)
+  {
+    result.emplace_back(elements[i]);
+  }
+
+  return tinygltf::Value(std::move(result));
 }
 
 void tinygltf::utils::getNodeTRS(const tinygltf::Node& node, glm::vec3& translation, glm::quat& rotation, glm::vec3& scale)

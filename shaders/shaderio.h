@@ -151,6 +151,8 @@ struct SceneFrameInfo
   float4x4      viewInv;             // Inverse view matrix
   float4x4      viewProjMatrix;      // View-projection matrix (P*V)
   float4x4      prevMVP;             // Previous view-projection matrix
+  float2        jitter;              // DLSS sub-pixel jitter in pixel units, range [-0.5, +0.5]
+  float2        imageSize;           // Render extent in pixels (W,H)
   int           flags = 0;           // Bit flags: see SceneFrameInfoFlags
   float         envRotation;         // Environment rotation (used for the HDR)
   float         envBlur;             // Level of blur for the environment map (0.0: no blur, 1.0: full blur)
@@ -184,11 +186,11 @@ struct PathtracePushConstant
   float                  focalDistance         = 0.0f;  // Focal distance for depth of field
   float                  aperture              = 0.0f;  // Aperture for depth of field
   int                    flags                 = 0;     // Bit flags: ePtUseDlss | ePtUseOptixDenoiser | ePtFirstFrame
-  float2                 jitter;                        // Jitter for the DLSS
-  float2                 mouseCoord = {0, 0};           // Mouse coordinates (use for debug)
-  SceneFrameInfo*        frameInfo;                     // Camera info
-  SkyPhysicalParameters* skyParams;                     // Sky physical parameters
-  GltfScene*             gltfScene;                     // GLTF scene
+  float                  pixelAngle = 0.0f;    // Angular size of one pixel (radians) for ray-cone footprint LOD
+  float2                 mouseCoord = {0, 0};  // Mouse coordinates (use for debug)
+  SceneFrameInfo*        frameInfo;            // Camera info (incl. SceneFrameInfo::jitter when DLSS is active)
+  SkyPhysicalParameters* skyParams;            // Sky physical parameters
+  GltfScene*             gltfScene;            // GLTF scene
 };
 
 // Push constant
@@ -199,7 +201,7 @@ struct RasterPushConstant
   int                    renderPrimID     = 0;       // Primitive used by the rendering instance
   int                    opaqueColorReady = 0;       // 1 = transmission framebuffer ready (mip chain valid)
   float2                 mouseCoord       = {0, 0};  // Mouse coordinates (use for debug)
-  SceneFrameInfo*        frameInfo;                  // Camera info
+  SceneFrameInfo*        frameInfo;                  // Camera info (incl. viewProjMatrix, prevMVP, jitter)
   SkyPhysicalParameters* skyParams;                  // Sky physical parameters
   GltfScene*             gltfScene;                  // GLTF scene
 };

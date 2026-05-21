@@ -184,13 +184,24 @@ set(SHADER_CAPABILITIES
   spvGroupNonUniform                # Enable subgroup operations (required for wave operations in shaders
 )
 
+# Declared here (above compile_slang) so HAS_DLSS_MOTION reaches the shader build. The DLSS
+# link/source wiring lives further down under "Adding DLSS if selected".
+option(USE_DLSS "Use DLSS-RR for denoising" ON)
+
+# When USE_DLSS=ON we define HAS_DLSS_MOTION so gltf_raster.slang emits the third color
+# attachment (SV_TARGET2 motion vector) for DLAA. USE_DLSS=OFF drops it entirely.
+set(SHADER_EXTRA_FLAGS "-I${NVSHADERS_DIR}")
+if(USE_DLSS)
+  list(APPEND SHADER_EXTRA_FLAGS "-DHAS_DLSS_MOTION=1")
+endif()
+
 # Compile all shaders to embedded headers (.h) and SPIR-V binaries (.spv) [optionally generate SPIR-V binaries (.spv) for debugging]
 compile_slang(
   "${SHADER_SLANG_FILES}"
   "${CMAKE_BINARY_DIR}/${PROJECT_NAME}/_autogen"
   HEADERS_VAR GENERATED_SHADER_HEADERS
   # SPVS_VAR GENERATED_SHADER_SPIRV  # For debugging purpose
-  EXTRA_FLAGS "-I${NVSHADERS_DIR}"
+  EXTRA_FLAGS ${SHADER_EXTRA_FLAGS}
   DEBUG_LEVEL ${SHADER_DEBUG_LEVEL}
   OPTIMIZATION_LEVEL ${SHADER_OPT_LEVEL}
   CAPABILITIES ${SHADER_CAPABILITIES}
@@ -292,18 +303,18 @@ find_package(WebP REQUIRED)
 target_link_libraries(${PROJECT_NAME} PRIVATE webp)
 # target_link_libraries(${PROJECT_NAME} PRIVATE webp)
 #####################################################################################
-# Adding DLSS if selected
-option(USE_DLSS "Use DLSS-RR for denoising" ON)
+# DLSS link/source wiring. The option() itself lives further up so the slang build sees
+# HAS_DLSS_MOTION; this section only adds the C++/library bits.
 if(USE_DLSS)
   set(DLSS_VERSION "310.5.3")
   find_package(NGX REQUIRED)
   target_link_libraries(${PROJECT_NAME} PRIVATE ngx)
   target_compile_definitions(${PROJECT_NAME} PRIVATE USE_DLSS)
   target_sources(${PROJECT_NAME} PRIVATE
-    ${CMAKE_CURRENT_SOURCE_DIR}/src/dlss_wrapper.cpp 
+    ${CMAKE_CURRENT_SOURCE_DIR}/src/dlss_wrapper.cpp
     ${CMAKE_CURRENT_SOURCE_DIR}/src/dlss_wrapper.hpp
-    ${CMAKE_CURRENT_SOURCE_DIR}/src/dlss_denoiser.cpp 
-    ${CMAKE_CURRENT_SOURCE_DIR}/src/dlss_denoiser.hpp
+    ${CMAKE_CURRENT_SOURCE_DIR}/src/dlss.cpp
+    ${CMAKE_CURRENT_SOURCE_DIR}/src/dlss.hpp
   )
 endif()
 

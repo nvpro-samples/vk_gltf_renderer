@@ -35,7 +35,7 @@
 
 // #DLSS
 #if defined(USE_DLSS)
-#include "dlss_denoiser.hpp"
+#include "dlss.hpp"
 #endif
 
 // #OPTIX
@@ -62,6 +62,7 @@ public:
   void onResize(VkCommandBuffer cmd, const VkExtent2D& size, Resources& resources) override;
   bool onUIRender(Resources& resources) override;
   void onRender(VkCommandBuffer cmd, Resources& resources) override;
+  void onSceneInvalidated(Resources& resources) override;
 
   void updateDlssResources(VkCommandBuffer cmd, Resources& resources);
   void updateOptiXResources(VkCommandBuffer cmd, Resources& resources);
@@ -144,21 +145,26 @@ public:
     }
   }
 
+  // True when the user has DLSS-RR enabled
   bool isDlssEnabled() const
   {
 #if defined(USE_DLSS)
-    return m_dlss && m_dlss->isEnabled();
+    if(!m_dlss)
+      return false;
+    const auto s = m_dlss->state();
+    return s == Dlss::State::eLoading || s == Dlss::State::eActive;
 #else
     return false;
 #endif
   }
 
-  // #DLSS - Implementation of the DLSS denoiser
+  // #DLSS - Implementation of the DLSS denoiser (Ray Reconstruction).
 #if defined(USE_DLSS)
-  std::unique_ptr<DlssDenoiser> m_dlss;
-  DlssDenoiser*                 getDlssDenoiser() { return m_dlss.get(); }
-  const DlssDenoiser*           getDlssDenoiser() const { return m_dlss.get(); }
+  std::unique_ptr<Dlss> m_dlss;
+  Dlss*                 getDlss() { return m_dlss.get(); }
+  const Dlss*           getDlss() const { return m_dlss.get(); }
 #endif
+
 
   // #OPTIX - Implementation of the OptiX denoiser
 #if defined(USE_OPTIX_DENOISER)
@@ -174,7 +180,7 @@ private:
   void renderRayQuery(VkCommandBuffer cmd, VkExtent2D renderingSize, Resources& resources);
   void renderRayTrace(VkCommandBuffer cmd, VkExtent2D& renderingSize, Resources& resources);
   void denoiseDlss(VkCommandBuffer cmd, Resources& resources);
-  void setupPushConstant(VkCommandBuffer cmd, Resources& resources);
+  void setupPushConstant(VkCommandBuffer cmd, Resources& resources, VkExtent2D renderingSize);
   // Determine if DLSS should actively denoise this frame
   bool getEffectiveDlssEnabled(const Resources& resources) const;
   // Determine if OptiX should actively denoise this frame

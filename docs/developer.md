@@ -135,8 +135,8 @@ src/
 ├── ui_mouse_state.hpp          # Mouse state tracking for viewport
 ├── ui_busy_window.hpp          # Loading/busy indicator overlay
 │
-├── dlss_denoiser.cpp/hpp       # DLSS Ray Reconstruction integration
-├── dlss_wrapper.cpp/hpp        # NGX / DLSS SDK wrapper
+├── dlss.cpp/hpp                # DLSS adapter (Ray Reconstruction + Super Resolution)
+├── dlss_wrapper.cpp/hpp        # NGX / DLSS SDK wrapper (project-independent)
 ├── optix_denoiser.cpp/hpp      # OptiX AI Denoiser integration
 ├── vk_cuda.cpp/hpp             # Vulkan-CUDA interop (shared memory/semaphores)
 │

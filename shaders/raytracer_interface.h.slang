@@ -44,11 +44,6 @@ struct HitPayload
   int      rprimID     = -1;
   int      primitiveID = -1;
   HitState hitState;
-#if WIREFRAME
-  float3 differentialX  = float3(0);
-  float3 differentialY  = float3(0);
-  float  wireframeAlpha = 0.0;
-#endif
 };
 
 // Shadow payload for the path tracer
@@ -61,21 +56,54 @@ struct ShadowPayload
 };
 
 #if WIREFRAME
-float computeMeshWireframe(float4x3 worldToObject, float3 worldRayOrigin, float3 v0, float3 v1, float3 v2, float3 barycentrics, float3 differentialX, float3 differentialY)
+//-----------------------------------------------------------------------
+// Analytical wireframe alpha: closed-form barycentric deltas from the ray-cone footprint.
+//   worldFoot = hitT * pixelAngle / |N.V|              (slant-corrected, see rayConeWorldFootprint)
+//   d(bary_i) = worldFoot * |edge_opposite_i| / (2A)   (h_i = 2A / |edge_i|)
+// Inputs: object-space verts v0..v2 + objectToWorld (float4x4 from GltfRenderNode); world-space
+// hit position (barycentrics are recovered here via plane projection so the payload doesn't
+// have to carry them); N = world geometric normal; V = -ray.Direction.
+//-----------------------------------------------------------------------
+float computeMeshWireframe(float4x4 objectToWorld, float3 v0, float3 v1, float3 v2, float3 hitWorldPos, float hitT, float pixelAngle, float3 N, float3 V)
 {
-  float3 objectRayOrigin  = mul(float4(worldRayOrigin, 1.0), worldToObject);
-  float3 triangleVerts[3] = { v0, v1, v2 };
-  float3 deltas = computeDerivative(worldToObject, worldRayOrigin, objectRayOrigin, triangleVerts, differentialX,
-                                    differentialY, barycentrics);
-  return processWireframe(WIREFRAME_PRESETS[WIREFRAME_THIN], barycentrics, deltas);
+  // Triangle in world space (the cone footprint is a world-space quantity).
+  float3 wp0 = mul(float4(v0, 1.0), objectToWorld).xyz;
+  float3 wp1 = mul(float4(v1, 1.0), objectToWorld).xyz;
+  float3 wp2 = mul(float4(v2, 1.0), objectToWorld).xyz;
+
+  // Recover barycentrics from the world-space hit position (Ericson, "Real-Time Collision
+  // Detection", section 3.4). Saves carrying attr.barycentrics in the payload just for wireframe.
+  float3 e1       = wp1 - wp0;
+  float3 e2       = wp2 - wp0;
+  float3 ep       = hitWorldPos - wp0;
+  float  d11      = dot(e1, e1);
+  float  d12      = dot(e1, e2);
+  float  d22      = dot(e2, e2);
+  float  dp1      = dot(ep, e1);
+  float  dp2      = dot(ep, e2);
+  float  invDenom = 1.0 / max(d11 * d22 - d12 * d12, 1e-20);
+  float  baryV    = (d22 * dp1 - d12 * dp2) * invDenom;
+  float  baryW    = (d11 * dp2 - d12 * dp1) * invDenom;
+  float3 barys    = float3(1.0 - baryV - baryW, baryV, baryW);
+
+  // Slant-corrected ray-cone footprint on the surface.
+  float worldFoot = hitT * pixelAngle / max(abs(dot(N, V)), 1e-3);
+
+  // |grad(bary_i)| in world space is 1/h_i = |edge_opposite_i|/(2A); times worldFoot gives
+  // the per-pixel bary delta. Same role as fwidth(bary) in a raster pipeline.
+  float  twoArea  = length(cross(e1, e2));
+  float3 edgesOpp = float3(length(wp2 - wp1), length(wp0 - wp2), length(wp1 - wp0));
+  float3 deltas   = worldFoot * edgesOpp / max(twoArea, 1e-20);
+
+  return processWireframe(WIREFRAME_PRESETS[WIREFRAME_THIN], barys, deltas);
 }
 #endif
 
 // Raytracer interface definition
 interface IRaytracer
 {
-  void Trace(RayDesc ray, inout HitPayload payload, inout uint seed);
-  void TraceLow(RayDesc ray, inout HitPayload payload);
+  void   Trace(RayDesc ray, inout HitPayload payload, inout uint seed);
+  void   TraceLow(RayDesc ray, inout HitPayload payload);
   float3 TraceShadow(RayDesc ray, inout uint seed, bool initialInside = false);
 }
 
@@ -133,16 +161,6 @@ struct RayQueryRaytracer : IRaytracer
       payload.rnodeID     = instanceID;
       payload.primitiveID = triID;
       payload.hitState    = hit;
-
-#if WIREFRAME
-      {
-        uint3 triIdx = getTriangleIndices(renderPrim, triID);
-        payload.wireframeAlpha =
-            computeMeshWireframe(worldToObject, ray.Origin, getVertexPosition(renderPrim, triIdx.x),
-                                 getVertexPosition(renderPrim, triIdx.y), getVertexPosition(renderPrim, triIdx.z),
-                                 barycentrics, payload.differentialX, payload.differentialY);
-      }
-#endif
     }
   }
 
@@ -259,16 +277,6 @@ struct TraditionalRaytracer : IRaytracer
       payload.rnodeID     = instanceID;
       payload.primitiveID = primitiveID;
       payload.hitState    = hit;
-
-#if WIREFRAME
-      {
-        uint3 triIdx = getTriangleIndices(renderPrim, primitiveID);
-        payload.wireframeAlpha =
-            computeMeshWireframe(worldToObject, ray.Origin, getVertexPosition(renderPrim, triIdx.x),
-                                 getVertexPosition(renderPrim, triIdx.y), getVertexPosition(renderPrim, triIdx.z),
-                                 barycentrics, payload.differentialX, payload.differentialY);
-      }
-#endif
     }
     else
     {

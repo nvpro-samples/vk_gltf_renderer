@@ -63,7 +63,7 @@ PathTracer::PathTracer()
   m_pushConst.numSamples            = 1;  // Number of samples per pixel
 
 #if defined(USE_DLSS)
-  m_dlss = std::make_unique<DlssDenoiser>();
+  m_dlss = std::make_unique<Dlss>(Dlss::Kind::RR);
 #endif
 
 #if defined(USE_OPTIX_DENOISER)
@@ -185,6 +185,18 @@ void PathTracer::onResize(VkCommandBuffer cmd, const VkExtent2D& /*size*/, Resou
 {
   updateDlssResources(cmd, resources);
   updateOptiXResources(cmd, resources);
+#if defined(USE_DLSS)
+  m_dlss->notifyReset();  // viewport size changed -> reseed jitter sequence + drop NGX history
+#endif
+}
+
+//--------------------------------------------------------------------------------------------------
+// Scene was destroyed/replaced; reset per-scene transient state.
+void PathTracer::onSceneInvalidated(Resources& /*resources*/)
+{
+#if defined(USE_DLSS)
+  m_dlss->notifyReset();
+#endif
 }
 
 void PathTracer::updateDlssResources(VkCommandBuffer cmd, Resources& resources)
@@ -192,11 +204,11 @@ void PathTracer::updateDlssResources(VkCommandBuffer cmd, Resources& resources)
 #if defined(USE_DLSS)
   NVVK_DBG_SCOPE(cmd);  // <-- Helps to debug in NSight
   VkExtent2D size = resources.gBuffers.getSize();
-  m_dlss->updateSize(cmd, size);
+  m_dlss->updateSize(cmd, resources, size);
   m_dlss->setResources();
-  m_dlss->setResource(DlssRayReconstruction::ResourceType::eColorOut, resources.gBuffers.getColorImage(Resources::eImgRendered),
-                      resources.gBuffers.getColorImageView(Resources::eImgRendered),
-                      resources.gBuffers.getColorFormat(Resources::eImgRendered));
+  m_dlss->setOutputImage(resources.gBuffers.getColorImage(Resources::eImgRendered),
+                         resources.gBuffers.getColorImageView(Resources::eImgRendered),
+                         resources.gBuffers.getColorFormat(Resources::eImgRendered));
 #endif
 }
 
@@ -357,7 +369,10 @@ bool PathTracer::onUIRender(Resources& resources)
 // DLSS section
 #if defined(USE_DLSS)
     bool oldTransp = m_dlss->useDlssTransparency();
-    changed |= m_dlss->onUi(resources);
+    if(m_dlss->onUi(resources))
+    {
+      changed = true;
+    }
     if(oldTransp != m_dlss->useDlssTransparency())
     {
       // SYNC NOTE: DLSS transparency toggle — wait before destroying pipelines compiled with old specialization.
@@ -438,6 +453,12 @@ void PathTracer::onRender(VkCommandBuffer cmd, Resources& resources)
     return;
   }
 
+#if defined(USE_DLSS)
+  // Drive the DLSS state machine.
+  if(m_dlss->tick(resources))
+    updateDlssResources(cmd, resources);
+#endif
+
   // Reset display buffer to rendered on first frame
   if((resources.frameCount == 0) && (resources.settings.displayBuffer == DisplayBuffer::eOptixDenoised))
   {
@@ -447,15 +468,9 @@ void PathTracer::onRender(VkCommandBuffer cmd, Resources& resources)
   // Handle adaptive sampling (SPP adjustment)
   updateAdaptiveSampling(resources);
 
-  // Setting up the push constant
-  setupPushConstant(cmd, resources);
-
-  // Make sure buffer is ready to be used
-  nvvk::cmdMemoryBarrier(cmd, VK_PIPELINE_STAGE_2_TRANSFER_BIT, VK_PIPELINE_STAGE_2_COMPUTE_SHADER_BIT);
-
-  // Finding the rendering size
+  // Finding the rendering size (needed before setupPushConstant so pixelAngle can be derived).
   VkExtent2D renderingSize = resources.gBuffers.getSize();
-#if USE_DLSS
+#if defined(USE_DLSS)
   // When DLSS is effectively enabled, use DLSS render size
   if(getEffectiveDlssEnabled(resources))
   {
@@ -468,6 +483,13 @@ void PathTracer::onRender(VkCommandBuffer cmd, Resources& resources)
     renderingSize = m_optix->getRenderSize();
   }
 #endif
+
+  // Setting up the push constant
+  setupPushConstant(cmd, resources, renderingSize);
+
+  // Make sure buffer is ready to be used. 
+  nvvk::cmdMemoryBarrier(cmd, VK_PIPELINE_STAGE_2_TRANSFER_BIT,
+                         VK_PIPELINE_STAGE_2_COMPUTE_SHADER_BIT | VK_PIPELINE_STAGE_2_RAY_TRACING_SHADER_BIT_KHR);
 
   // Tracing the rays: Ray Query or Ray Tracing
   if(m_renderTechnique == RenderTechnique::RayQuery)
@@ -570,15 +592,16 @@ void PathTracer::pushDescriptorSet(VkCommandBuffer cmd, Resources& resources, Vk
   if(getEffectiveDlssEnabled(resources))
   {
     using namespace shaderio;
-    outputImages.resize(8);
-    outputImages[eResultImage]         = m_dlss->getGBuffers().getDescriptorImageInfo(eResultImage);
-    outputImages[eSelectImage]         = m_dlss->getGBuffers().getDescriptorImageInfo(eSelectImage);
-    outputImages[eDlssAlbedo]          = m_dlss->getGBuffers().getDescriptorImageInfo(eDlssAlbedo);
-    outputImages[eDlssSpecAlbedo]      = m_dlss->getGBuffers().getDescriptorImageInfo(eDlssSpecAlbedo);
-    outputImages[eDlssNormalRoughness] = m_dlss->getGBuffers().getDescriptorImageInfo(eDlssNormalRoughness);
-    outputImages[eDlssMotion]          = m_dlss->getGBuffers().getDescriptorImageInfo(eDlssMotion);
-    outputImages[eDlssDepth]           = m_dlss->getGBuffers().getDescriptorImageInfo(eDlssDepth);
-    outputImages[eDlssSpecularHitDist] = m_dlss->getGBuffers().getDescriptorImageInfo(eDlssSpecularHitDist);
+    // Re-route every output image at the path tracer's RR guide-buffer slots. The Dlss adapter
+    // hides the inner GBuffer behind getRrAttachment() so we can iterate the OutputImage enum
+    // values without ever touching a raw nvvk::GBuffer here.
+    static constexpr OutputImage kRrSlots[] = {
+        eResultImage,         eSelectImage, eDlssAlbedo, eDlssSpecAlbedo,
+        eDlssNormalRoughness, eDlssMotion,  eDlssDepth,  eDlssSpecularHitDist,
+    };
+    outputImages.resize(static_cast<size_t>(kRrSlots[std::size(kRrSlots) - 1]) + 1);
+    for(OutputImage slot : kRrSlots)
+      outputImages[slot] = m_dlss->getRrAttachment(slot);
   }
 #endif
 
@@ -637,7 +660,7 @@ void PathTracer::createRqPipeline(Resources& /*resources*/)
 
   nvvk::Specialization specialization;
   specialization.add(0, m_useSER ? 1 : 0);  // USE_SER
-#if USE_DLSS
+#if defined(USE_DLSS)
   specialization.add(1, m_dlss->useDlssTransparency() ? 1 : 0);  // USE_DLSS_TRANSP
 #endif
 
@@ -763,7 +786,7 @@ void PathTracer::createRtxPipeline(Resources& resources)
   // Shader Execution Reorder (SER)
   nvvk::Specialization specialization;
   specialization.add(0, m_useSER ? 1 : 0);  // USE_SER
-#if USE_DLSS
+#if defined(USE_DLSS)
   specialization.add(1, m_dlss->useDlssTransparency() ? 1 : 0);  // USE_DLSS_TRANSP
 #endif
   stages[eRaygen].pSpecializationInfo = specialization.getSpecializationInfo();
@@ -1117,12 +1140,11 @@ void PathTracer::denoiseDlss(VkCommandBuffer cmd, Resources& resources)
 #if defined(USE_DLSS)
   auto timerSection = m_profiler->cmdFrameSection(cmd, "DLSS");
 
-  // #DLSS - Denoising
-  const glm::mat4& view   = resources.cameraManip->getViewMatrix();
-  const glm::mat4& proj   = resources.cameraManip->getPerspectiveMatrix();
-  glm::vec2        jitter = m_pushConst.jitter;
+  // #DLSS - Denoising.
+  const glm::mat4& view = resources.cameraManip->getViewMatrix();
+  const glm::mat4& proj = resources.cameraManip->getPerspectiveMatrix();
 
-  m_dlss->denoise(cmd, jitter, view, proj, false);
+  m_dlss->evaluate(cmd, view, proj);
 
   // Memory barrier to ensure DLSS operations are complete before blit operations
   nvvk::cmdMemoryBarrier(cmd, VK_PIPELINE_STAGE_2_ALL_GRAPHICS_BIT, VK_PIPELINE_STAGE_2_BLIT_BIT,
@@ -1130,16 +1152,17 @@ void PathTracer::denoiseDlss(VkCommandBuffer cmd, Resources& resources)
 
   {
     // Blit the selection image from the DLSS GBuffer (different resolution) to the Renderer GBuffer Selection
-    VkOffset3D  minCorner = {0, 0, 0};
-    VkImageBlit blitRegions{
-        .srcSubresource = {.aspectMask = VK_IMAGE_ASPECT_COLOR_BIT, .layerCount = 1},
-        .srcOffsets = {minCorner, {int(m_dlss->getGBuffers().getSize().width), int(m_dlss->getGBuffers().getSize().height), 1}},
-        .dstSubresource = {.aspectMask = VK_IMAGE_ASPECT_COLOR_BIT, .layerCount = 1},
-        .dstOffsets = {minCorner, {int(resources.gBuffers.getSize().width), int(resources.gBuffers.getSize().height), 1}},
+    const VkExtent2D innerSz   = m_dlss->getRenderSize();
+    VkOffset3D       minCorner = {0, 0, 0};
+    VkImageBlit      blitRegions{
+             .srcSubresource = {.aspectMask = VK_IMAGE_ASPECT_COLOR_BIT, .layerCount = 1},
+             .srcOffsets     = {minCorner, {int(innerSz.width), int(innerSz.height), 1}},
+             .dstSubresource = {.aspectMask = VK_IMAGE_ASPECT_COLOR_BIT, .layerCount = 1},
+             .dstOffsets = {minCorner, {int(resources.gBuffers.getSize().width), int(resources.gBuffers.getSize().height), 1}},
     };
-    vkCmdBlitImage(cmd, m_dlss->getGBuffers().getColorImage(shaderio::OutputImage::eSelectImage),
-                   VK_IMAGE_LAYOUT_GENERAL, resources.gBuffers.getColorImage(Resources::eImgSelection),
-                   VK_IMAGE_LAYOUT_GENERAL, 1, &blitRegions, VK_FILTER_NEAREST);  // ObjectID in .r, no interpolation
+    vkCmdBlitImage(cmd, m_dlss->getRrImage(shaderio::OutputImage::eSelectImage), VK_IMAGE_LAYOUT_GENERAL,
+                   resources.gBuffers.getColorImage(Resources::eImgSelection), VK_IMAGE_LAYOUT_GENERAL, 1, &blitRegions,
+                   VK_FILTER_NEAREST);  // ObjectID in .r, no interpolation
 
     // Ensure the blit operation completes before any subsequent reads from this image
     nvvk::cmdMemoryBarrier(cmd, VK_PIPELINE_STAGE_2_BLIT_BIT, VK_PIPELINE_STAGE_2_COMPUTE_SHADER_BIT,
@@ -1148,7 +1171,7 @@ void PathTracer::denoiseDlss(VkCommandBuffer cmd, Resources& resources)
 #endif
 }
 
-void PathTracer::setupPushConstant(VkCommandBuffer cmd, Resources& resources)
+void PathTracer::setupPushConstant(VkCommandBuffer cmd, Resources& resources, VkExtent2D renderingSize)
 {
   // Current frame count, can be overridden by DLSS
   int frameCount = resources.frameCount;
@@ -1162,27 +1185,21 @@ void PathTracer::setupPushConstant(VkCommandBuffer cmd, Resources& resources)
   // Adjust focal distance if auto-focus is enabled
   if(m_autoFocus)
   {
-    m_pushConst.focalDistance = glm::length(resources.cameraManip->getEye() - resources.cameraManip->getCenter());
+    m_pushConst.focalDistance =
+        static_cast<float>(glm::length(resources.cameraManip->getEye() - resources.cameraManip->getCenter()));
   }
 
 #if defined(USE_DLSS)
-  // Lazy initialize DLSS NGX on first use (2-5 second delay occurs here, once)
-  static uint32_t haltonIndex = 0;
-
-  // Set useDlss based on EFFECTIVE state (false when both enabled and frameCount > 0)
-  bool useDlss = getEffectiveDlssEnabled(resources);
-
+  const bool useDlss = getEffectiveDlssEnabled(resources);
   if(useDlss)
-  {
-    // When DLSS is enabled, force numSamples to 1
     m_pushConst.numSamples = 1;
-    frameCount             = ++haltonIndex;  // Override frame count with Halton index
 
-    // Lazy NGX initialization (2-5s, once) OR size update triggers resource setup
-    if(m_dlss->tryInitializeNGX(resources) || m_dlss->needsSizeUpdate())
-      updateDlssResources(cmd, resources);
-  }
-  m_pushConst.jitter = shaderio::dlssJitter(frameCount);
+  // Halton jitter and frame-index counter.
+  const Dlss::FrameContext fc = m_dlss->beginFrame();
+  if(useDlss)
+    frameCount = static_cast<int>(fc.frameIndex);
+  // Patch only the 8-byte jitter slot; the rest of SceneFrameInfo was already written by renderer.cpp::renderFrame this frame.
+  vkCmdUpdateBuffer(cmd, resources.bFrameInfo.buffer, offsetof(shaderio::SceneFrameInfo, jitter), sizeof(glm::vec2), &fc.jitter);
 #endif
 
 #if defined(USE_OPTIX_DENOISER)
@@ -1205,29 +1222,29 @@ void PathTracer::setupPushConstant(VkCommandBuffer cmd, Resources& resources)
   m_pushConst.skyParams    = (shaderio::SkyPhysicalParameters*)resources.bSkyParams.address;
   m_pushConst.gltfScene    = (shaderio::GltfScene*)resources.sceneVk.sceneDesc().address;
   m_pushConst.mouseCoord   = nvapp::ElementDbgPrintf::getMouseCoord();  // Use for debugging: printf in shader
+
+  // Angular size of one pixel (radians). Same formula as the previous shader-side computePixelAngle():
+  //   2 * |projInv[1][1]| / viewportHeight     where projInv[1][1] == tan(fovY/2) for a pinhole camera.
+  // Constant across the dispatch, so we compute it once on the CPU instead of per ray.
+  const glm::mat4 projInv = glm::inverse(resources.cameraManip->getPerspectiveMatrix());
+  m_pushConst.pixelAngle  = 2.0f * std::abs(projInv[1][1]) / std::max(static_cast<float>(renderingSize.height), 1.0f);
+
   vkCmdPushConstants(cmd, m_pipelineLayout, VK_SHADER_STAGE_ALL, 0, sizeof(shaderio::PathtracePushConstant), &m_pushConst);
 }
 
 //--------------------------------------------------------------------------------------------------
-// Determine if DLSS should actively denoise this frame
-// - if DLSS is enabled, return true
-// - if Optix is also enabled, only return true on frame 0
+// Returns true iff DLSS will actually denoise this frame (strict): NGX is up, the inner GBuffer
+// is populated, the user enabled DLSS-RR, AND the OptiX-exclusivity rule lets DLSS run.
 bool PathTracer::getEffectiveDlssEnabled(const Resources& resources) const
 {
 #if defined(USE_DLSS)
-  bool dlssEnabled = m_dlss->isEnabled();
+  bool dlssActive = m_dlss->isActive();
 #if defined(USE_OPTIX_DENOISER)
   bool optixEnabled = m_optix->isEnabled();
-
-  // When both enabled, DLSS only runs on frame 0
-  if(dlssEnabled && optixEnabled)
-  {
+  if(dlssActive && optixEnabled)
     return resources.frameCount == 0;
-  }
 #endif
-
-  // Normal behavior when OptiX is off
-  return dlssEnabled;
+  return dlssActive;
 #else
   return false;
 #endif
@@ -1240,10 +1257,13 @@ bool PathTracer::getEffectiveOptixEnabled(const Resources& resources) const
 #if defined(USE_OPTIX_DENOISER)
   bool optixEnabled = m_optix->isEnabled();
 #if defined(USE_DLSS)
-  bool dlssEnabled = m_dlss->isEnabled();
-
-  // When both enabled, OptiX only runs on frame 1+
-  if(dlssEnabled && optixEnabled)
+  // OptiX-exclusivity rule: when DLSS-RR is also currently engaged (loading or active), DLSS
+  // owns frame 0 and OptiX takes 1+. We treat eLoading the same as eActive here so the rule
+  // doesn't flip mid-init (otherwise OptiX would run on frame 0 during the DLSS-RR async-init
+  // window, then yield once DLSS becomes Active -- visibly inconsistent).
+  const auto s           = m_dlss->state();
+  const bool dlssEngaged = (s == Dlss::State::eLoading || s == Dlss::State::eActive);
+  if(dlssEngaged && optixEnabled)
   {
     return resources.frameCount > 0;
   }

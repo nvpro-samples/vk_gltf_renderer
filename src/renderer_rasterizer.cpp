@@ -62,6 +62,27 @@
 
 #include "nvvk/default_structs.hpp"
 
+#if defined(USE_DLSS)
+#include "dlss.hpp"
+#endif
+
+
+//--------------------------------------------------------------------------------------------------
+// Constructor: eagerly creates the DLSS-SR helper so that registerParameters() and
+// setSettingsHandler() (both called BEFORE onAttach by GltfRenderer) can register the
+// DLSS settings. The helper holds no Vulkan resources yet at this point; init() happens
+// later in onAttach() once we have a valid device.
+Rasterizer::Rasterizer()
+{
+#if defined(USE_DLSS)
+  m_dlss = std::make_unique<Dlss>(Dlss::Kind::SR);
+#endif
+}
+
+// Destructor in the cpp so the unique_ptr<Dlss> destructor sees the full type (dlss.hpp is
+// included above). Keeps dlss.hpp out of the rasterizer header.
+Rasterizer::~Rasterizer() = default;
+
 
 //--------------------------------------------------------------------------------------------------
 // Initialize the rasterizer with required resources and profiler
@@ -75,6 +96,11 @@ void Rasterizer::onAttach(Resources& resources, nvvk::ProfilerGpuTimer* profiler
   compileShader(resources, false);  // Compile the shader
   createOpaqueColorImage(resources);
   createSheenLut(resources);
+
+#if defined(USE_DLSS)
+  m_dlss->init(resources);
+#endif
+  // Motion-vector G-buffer is allocated on first onResize where we know the actual viewport size.
 }
 
 //--------------------------------------------------------------------------------------------------
@@ -83,6 +109,9 @@ void Rasterizer::registerParameters(nvutils::ParameterRegistry* paramReg)
 {
   // Rasterizer-specific command line parameters
   paramReg->add({"rasterUseRecordedCmd", "Rasterizer: Use recorded command buffers"}, &m_useRecordedCmd);
+#if defined(USE_DLSS)
+  m_dlss->registerParameters(paramReg);
+#endif
 }
 
 //--------------------------------------------------------------------------------------------------
@@ -92,6 +121,9 @@ void Rasterizer::setSettingsHandler(nvgui::SettingsHandler* settingsHandler)
 {
   if(settingsHandler)
     settingsHandler->setSetting("rasterUseRecordedCmd", &m_useRecordedCmd);
+#if defined(USE_DLSS)
+  m_dlss->setSettingsHandler(settingsHandler);
+#endif
 }
 
 //--------------------------------------------------------------------------------------------------
@@ -99,6 +131,11 @@ void Rasterizer::setSettingsHandler(nvgui::SettingsHandler* settingsHandler)
 // Destroys pipeline layout and shaders, and deinitializes the sky physical model
 void Rasterizer::onDetach(Resources& resources)
 {
+#if defined(USE_DLSS)
+  // Keep m_dlss alive past onDetach: SettingsHandler stored a raw pointer to its qualityMode
+  // for .ini persistence at app shutdown. The unique_ptr will release it via Rasterizer's dtor.
+  m_dlss->deinit(resources);
+#endif
   destroySheenLut(resources);
   destroyOpaqueColorImage(resources);
   vkDestroyPipelineLayout(m_device, m_graphicPipelineLayout, nullptr);
@@ -115,6 +152,18 @@ void Rasterizer::onDetach(Resources& resources)
 void Rasterizer::onResize(VkCommandBuffer cmd, const VkExtent2D& size, Resources& resources)
 {
   freeRecordCommandBuffer(resources);
+
+#if defined(USE_DLSS)
+  // DLSS-SR owns its internal color-input AND motion images
+  m_dlss->updateSize(cmd, resources, size);
+
+  // Wire current resources into the DLSS feature
+  m_dlss->setOutputImage(resources.gBuffers.getColorImage(Resources::eImgRendered),
+                         resources.gBuffers.getColorImageView(Resources::eImgRendered),
+                         resources.gBuffers.getColorFormat(Resources::eImgRendered));
+  // Depth is owned by the inner GBuffer now -- setResources binds it directly.
+  m_dlss->setResources();
+#endif
 }
 
 //--------------------------------------------------------------------------------------------------
@@ -138,8 +187,77 @@ bool Rasterizer::onUIRender(Resources& resources)
     PE::end();
   }
 
+#if defined(USE_DLSS)
+  // Mirrors PathTracer's "AI Denoisers" header so users get the same UX across the two renderers.
+  if(ImGui::CollapsingHeader("DLSS"))
+  {
+    if(m_dlss->onUi(resources))
+    {
+      // Quality / preset change
+      freeRecordCommandBuffer(resources);
+      changed = true;
+    }
+  }
+#endif
+
   return changed;
 }
+
+namespace {
+
+// Where the rasterizer renders this frame: outer GBuffer (DLSS off / build), or the inner
+// GBuffer owned by Dlss (DLSS-SR on).
+struct RasterTargets
+{
+  VkImage     colorImage{};
+  VkImageView colorView{};
+  VkImage     selectionImage{};
+  VkImageView selectionView{};
+  VkImage     depthImage{};
+  VkImageView depthView{};
+  VkExtent2D  extent{};
+
+#if defined(USE_DLSS)
+  VkImage     motionImage{VK_NULL_HANDLE};
+  VkImageView motionView{VK_NULL_HANDLE};
+#endif
+};
+
+// Outer GBuffer route (USE_DLSS=OFF, or USE_DLSS=ON without an SR helper).
+RasterTargets makeOuterTargets(Resources& resources)
+{
+  RasterTargets t{};
+  t.colorImage     = resources.gBuffers.getColorImage(Resources::eImgRendered);
+  t.colorView      = resources.gBuffers.getColorImageView(Resources::eImgRendered);
+  t.selectionImage = resources.gBuffers.getColorImage(Resources::eImgSelection);
+  t.selectionView  = resources.gBuffers.getColorImageView(Resources::eImgSelection);
+  t.depthImage     = resources.gBuffers.getDepthImage();
+  t.depthView      = resources.gBuffers.getDepthImageView();
+  t.extent         = resources.gBuffers.getSize();
+  return t;
+}
+
+#if defined(USE_DLSS)
+// Inner GBuffer route (DLSS-SR alive). Inner extent shrinks per quality mode.
+RasterTargets makeInnerTargets(Dlss& sr)
+{
+  using SrSlot = Dlss::SrSlot;
+  RasterTargets t{};
+  t.colorImage     = sr.getSrImage(SrSlot::eColor);
+  t.colorView      = sr.getSrImageView(SrSlot::eColor);
+  t.selectionImage = sr.getSrImage(SrSlot::eSelection);
+  t.selectionView  = sr.getSrImageView(SrSlot::eSelection);
+  t.depthImage     = sr.getSrImage(SrSlot::eDepth);
+  t.depthView      = sr.getSrImageView(SrSlot::eDepth);
+  t.motionImage    = sr.getSrImage(SrSlot::eMotion);
+  t.motionView     = sr.getSrImageView(SrSlot::eMotion);
+  t.extent         = sr.getRenderSize();
+  return t;
+}
+#endif
+
+}  // namespace
+
 
 //--------------------------------------------------------------------------------------------------
 // Main rendering function for the rasterizer
@@ -159,6 +277,21 @@ void Rasterizer::onRender(VkCommandBuffer cmd, Resources& resources)
     m_lastWireframe = resources.settings.wireframe;
   }
 
+  bool dlssActive = false;
+#if defined(USE_DLSS)
+  // Drive the DLSS state machine. tick() returns true ONCE on initial NGX-up or a UI-driven
+  // recreate; that's the cue to populate the GBuffer and rewire NGX inputs.
+  if(m_dlss->tick(resources))
+  {
+    m_dlss->updateSize(cmd, resources, resources.gBuffers.getSize());
+    m_dlss->setOutputImage(resources.gBuffers.getColorImage(Resources::eImgRendered),
+                           resources.gBuffers.getColorImageView(Resources::eImgRendered),
+                           resources.gBuffers.getColorFormat(Resources::eImgRendered));
+    m_dlss->setResources();
+  }
+  dlssActive = m_dlss->isActive();
+#endif
+
   // Depth-sort transparent nodes back-to-front each frame; re-record the secondary
   // command buffer when the order changes (e.g. camera moved through the scene).
   if(updateSortedBlendNodes(cmd, resources))
@@ -166,47 +299,86 @@ void Rasterizer::onRender(VkCommandBuffer cmd, Resources& resources)
     freeRecordCommandBuffer(resources);
   }
 
-  // Rendering the environment
+  // When Dlss (Kind::SR) is present we render into the inner GBuffer; a post-pass either
+  // evaluates DLSS (writes eImgRendered) or blits inner.color back. Otherwise direct to outer.
+#if defined(USE_DLSS)
+  const RasterTargets targets = makeInnerTargets(*m_dlss);
+#else
+  const RasterTargets targets = makeOuterTargets(resources);
+#endif
+
+  // Sky / HDR dome write into the color sink (storage image). Both targets are in GENERAL
+  // layout coming in (DLSS color was created in GENERAL; eImgRendered is returned to GENERAL
+  // by the previous frame's barrier).
   if(!resources.settings.useSolidBackground)
   {
     glm::mat4 viewMatrix = resources.cameraManip->getViewMatrix();
     glm::mat4 projMatrix = resources.cameraManip->getPerspectiveMatrix();
 
-    // Rendering dome or sky in the background, it is covering the entire screen
     if(resources.settings.envSystem == shaderio::EnvSystem::eSky)
     {
-      auto timerSection = m_profiler->cmdFrameSection(cmd, "Sky Physical");
-      m_skyPhysical.runCompute(cmd, resources.gBuffers.getSize(), viewMatrix, projMatrix, resources.skyParams,
-                               resources.gBuffers.getDescriptorImageInfo(Resources::eImgRendered));
+      auto                  timerSection = m_profiler->cmdFrameSection(cmd, "Sky Physical");
+      VkDescriptorImageInfo skyTarget{};
+      skyTarget.imageView   = targets.colorView;
+      skyTarget.imageLayout = VK_IMAGE_LAYOUT_GENERAL;
+      m_skyPhysical.runCompute(cmd, targets.extent, viewMatrix, projMatrix, resources.skyParams, skyTarget);
     }
     else if(resources.settings.envSystem == shaderio::EnvSystem::eHdr)
     {
       auto timerSection = m_profiler->cmdFrameSection(cmd, "HDR Dome");
-      resources.hdrDome.draw(cmd, viewMatrix, projMatrix, resources.gBuffers.getSize(), glm::vec4(resources.settings.hdrEnvIntensity),
+      // FIXME nvpro_core2: HdrEnvDome's outImage descriptor pool isn't UPDATE_AFTER_BIND, so any
+      // view change (DLSS toggle, HDR IBL reload, resize, quality switch) forces a queueWaitIdle
+      // before rebinding. Track lazily on view-handle change.
+      if(targets.colorView != m_lastHdrDomeView)
+      {
+        NVVK_CHECK(vkQueueWaitIdle(resources.app->getQueue(0).queue));
+        VkDescriptorImageInfo target{};
+        target.imageView   = targets.colorView;
+        target.imageLayout = VK_IMAGE_LAYOUT_GENERAL;
+        resources.hdrDome.setOutImage(target);
+        m_lastHdrDomeView = targets.colorView;
+      }
+      resources.hdrDome.draw(cmd, viewMatrix, projMatrix, targets.extent, glm::vec4(resources.settings.hdrEnvIntensity),
                              resources.settings.hdrEnvRotation, resources.settings.hdrBlur);
     }
   }
 
+  // 2 attachments in non-DLSS builds (color, selection); 3 when USE_DLSS=ON (+ motion at SV_TARGET2).
+#if defined(USE_DLSS)
+  static constexpr size_t kColorAttachmentCount = 3;
+#else
+  static constexpr size_t kColorAttachmentCount = 2;
+#endif
+  std::array<VkRenderingAttachmentInfo, kColorAttachmentCount> attachments;
+  attachments.fill(DEFAULT_VkRenderingAttachmentInfo);
 
-  // Two attachments, one for color and one for selection
-  std::array<VkRenderingAttachmentInfo, 2> attachments = {{DEFAULT_VkRenderingAttachmentInfo, DEFAULT_VkRenderingAttachmentInfo}};
-  // 0 - Color attachment
-  attachments[0].imageView  = resources.gBuffers.getColorImageView(Resources::eImgRendered);
+  attachments[0].imageView  = targets.colorView;
   attachments[0].clearValue = {{{resources.settings.solidBackgroundColor.x, resources.settings.solidBackgroundColor.y,
                                  resources.settings.solidBackgroundColor.z, 0.f}}};
   attachments[0].loadOp = resources.settings.useSolidBackground ? VK_ATTACHMENT_LOAD_OP_CLEAR : VK_ATTACHMENT_LOAD_OP_LOAD;
-  // 1 - Selection attachment
-  attachments[1].imageView = resources.gBuffers.getColorImageView(Resources::eImgSelection);
-  // X - Depth
+
+  attachments[1].imageView = targets.selectionView;
+
+#if defined(USE_DLSS)
+  // CLEAR gives DLSS a clean MV for fragments the rasterizer doesn't cover this frame.
+  attachments[2].imageView  = targets.motionView;
+  attachments[2].loadOp     = VK_ATTACHMENT_LOAD_OP_CLEAR;
+  attachments[2].clearValue = {{{0.f, 0.f, 0.f, 0.f}}};
+#endif
+
   VkRenderingAttachmentInfo depthAttachment = DEFAULT_VkRenderingAttachmentInfo;
-  depthAttachment.imageView                 = resources.gBuffers.getDepthImageView();
+  depthAttachment.imageView                 = targets.depthView;
   depthAttachment.clearValue                = {.depthStencil = DEFAULT_VkClearDepthStencilValue};
 
-  nvvk::cmdImageMemoryBarrier(cmd, {resources.gBuffers.getColorImage(Resources::eImgRendered), VK_IMAGE_LAYOUT_GENERAL,
-                                    VK_IMAGE_LAYOUT_COLOR_ATTACHMENT_OPTIMAL});
-  nvvk::cmdImageMemoryBarrier(cmd, {resources.gBuffers.getColorImage(Resources::eImgSelection), VK_IMAGE_LAYOUT_GENERAL,
-                                    VK_IMAGE_LAYOUT_COLOR_ATTACHMENT_OPTIMAL});
-  nvvk::cmdImageMemoryBarrier(cmd, {resources.gBuffers.getDepthImage(),
+  // Barriers: GENERAL -> COLOR_ATTACHMENT_OPTIMAL for all color sinks (+ motion when DLSS),
+  // plus depth init. selection / depth route to inner GBuffer when USE_DLSS=ON.
+  nvvk::cmdImageMemoryBarrier(cmd, {targets.colorImage, VK_IMAGE_LAYOUT_GENERAL, VK_IMAGE_LAYOUT_COLOR_ATTACHMENT_OPTIMAL});
+  nvvk::cmdImageMemoryBarrier(cmd, {targets.selectionImage, VK_IMAGE_LAYOUT_GENERAL, VK_IMAGE_LAYOUT_COLOR_ATTACHMENT_OPTIMAL});
+#if defined(USE_DLSS)
+  if(targets.motionImage != VK_NULL_HANDLE)
+    nvvk::cmdImageMemoryBarrier(cmd, {targets.motionImage, VK_IMAGE_LAYOUT_GENERAL, VK_IMAGE_LAYOUT_COLOR_ATTACHMENT_OPTIMAL});
+#endif
+  nvvk::cmdImageMemoryBarrier(cmd, {targets.depthImage,
                                     VK_IMAGE_LAYOUT_UNDEFINED,
                                     VK_IMAGE_LAYOUT_DEPTH_ATTACHMENT_OPTIMAL,
                                     {VK_IMAGE_ASPECT_DEPTH_BIT, 0, VK_REMAINING_MIP_LEVELS, 0, VK_REMAINING_ARRAY_LAYERS}});
@@ -215,7 +387,24 @@ void Rasterizer::onRender(VkCommandBuffer cmd, Resources& resources)
   // This is for the fragment shader to know if the opaque color is ready.
   m_pushConst.opaqueColorReady = 0;
 
-  // Setting up the push constant
+  // Patch jitter and imageSize into SceneFrameInfo for up-to-date shader access to current render extent and sub-pixel offset.
+  const glm::vec2 imageSizePx{static_cast<float>(targets.extent.width), static_cast<float>(targets.extent.height)};
+  vkCmdUpdateBuffer(cmd, resources.bFrameInfo.buffer, offsetof(shaderio::SceneFrameInfo, imageSize), sizeof(glm::vec2), &imageSizePx);
+
+  glm::vec2 jitterPx{0.0f};
+#if defined(USE_DLSS)
+  if(dlssActive)
+  {
+
+    // Dlss owns the Halton jitter + frame-index counter.
+    jitterPx = m_dlss->beginFrame().jitter;
+    vkCmdUpdateBuffer(cmd, resources.bFrameInfo.buffer, offsetof(shaderio::SceneFrameInfo, jitter), sizeof(glm::vec2), &jitterPx);
+  }
+#endif
+  nvvk::cmdMemoryBarrier(cmd, VK_PIPELINE_STAGE_2_TRANSFER_BIT,
+                         VK_PIPELINE_STAGE_2_VERTEX_SHADER_BIT | VK_PIPELINE_STAGE_2_FRAGMENT_SHADER_BIT);
+
+  // Setting up the push constant.
   m_pushConst.frameInfo  = (shaderio::SceneFrameInfo*)resources.bFrameInfo.address;
   m_pushConst.skyParams  = (shaderio::SkyPhysicalParameters*)resources.bSkyParams.address;
   m_pushConst.gltfScene  = (shaderio::GltfScene*)resources.sceneVk.sceneDesc().address;
@@ -229,43 +418,44 @@ void Rasterizer::onRender(VkCommandBuffer cmd, Resources& resources)
   const bool twoPass           = m_sceneHasTransmission;
   const bool recordedThisFrame = m_useRecordedCmd && !twoPass;
 
-  VkRenderingInfo renderingInfo      = DEFAULT_VkRenderingInfo;
-  renderingInfo.flags                = recordedThisFrame ? VK_RENDERING_CONTENTS_SECONDARY_COMMAND_BUFFERS_BIT : 0;
-  renderingInfo.renderArea           = DEFAULT_VkRect2D(resources.gBuffers.getSize());
+  VkRenderingInfo renderingInfo = DEFAULT_VkRenderingInfo;
+  renderingInfo.flags           = recordedThisFrame ? VK_RENDERING_CONTENTS_SECONDARY_COMMAND_BUFFERS_BIT : 0;
+  // renderArea matches the active extent (inner when DLSS-SR is wired, outer otherwise). The
+  // recorded secondary cmd buffer's viewport/scissor are issued from this same extent.
+  renderingInfo.renderArea           = DEFAULT_VkRect2D(targets.extent);
   renderingInfo.colorAttachmentCount = uint32_t(attachments.size());
   renderingInfo.pColorAttachments    = attachments.data();
   renderingInfo.pDepthAttachment     = &depthAttachment;
 
-  // Scene is recorded to avoid CPU overhead (only used when not splitting the pass).
   if(recordedThisFrame && m_recordedSceneCmd == VK_NULL_HANDLE)
   {
-    recordRasterScene(resources);
+    recordRasterScene(resources, targets.extent);
   }
 
 
   if(twoPass)
   {
-    // ** PASS 1: opaque + opaque-double-sided -> eImgRendered **
+    // ** PASS 1: opaque + opaque-double-sided -> color sink **
     {
       auto opaqueSection = m_profiler->cmdFrameSection(cmd, "Render Opaque Only");
       vkCmdBeginRendering(cmd, &renderingInfo);
-      renderOpaqueOnly(cmd, resources);
+      renderOpaqueOnly(cmd, resources, targets.extent);
       vkCmdEndRendering(cmd);
     }
 
-    // Capture the opaque framebuffer + generate mip chain. Restores eImgRendered to
-    // COLOR_ATTACHMENT_OPTIMAL after the blit.
+    // Capture the opaque framebuffer + generate mip chain. Sources the blit from the active
+    // color sink so transmission samples reflect the DLSS input image when DLSS is on (the
+    // transmission shader uses the unjittered viewProjMatrix so the lookup is geometrically
+    // correct even though the source has sub-pixel jitter baked in).
     captureAndMipOpaqueColor(cmd, resources);
 
     // ** PASS 2: blend bucket (transmission + transparency) reads m_opaqueColorImage **
-    // Color/depth attachments must LOAD existing contents.
-    attachments[0].loadOp           = VK_ATTACHMENT_LOAD_OP_LOAD;
-    attachments[1].loadOp           = VK_ATTACHMENT_LOAD_OP_LOAD;
+    for(auto& att : attachments)
+      att.loadOp = VK_ATTACHMENT_LOAD_OP_LOAD;
     depthAttachment.loadOp          = VK_ATTACHMENT_LOAD_OP_LOAD;
     renderingInfo.pColorAttachments = attachments.data();
     renderingInfo.pDepthAttachment  = &depthAttachment;
 
-    // Tell the fragment shader the transmission framebuffer is now valid; re-push.
     m_pushConst.opaqueColorReady = 1;
     vkCmdPushConstants(cmd, m_graphicPipelineLayout, VK_SHADER_STAGE_ALL_GRAPHICS, 0,
                        sizeof(shaderio::RasterPushConstant), &m_pushConst);
@@ -273,35 +463,63 @@ void Rasterizer::onRender(VkCommandBuffer cmd, Resources& resources)
     {
       auto blendSection = m_profiler->cmdFrameSection(cmd, "Render Blend Only");
       vkCmdBeginRendering(cmd, &renderingInfo);
-      renderBlendOnly(cmd, resources);
+      renderBlendOnly(cmd, resources, targets.extent);
       vkCmdEndRendering(cmd);
     }
   }
   else
   {
-    // ** BEGIN RENDERING **
+    auto timerSection = m_profiler->cmdFrameSection(cmd, "Raster Scene");
+
     vkCmdBeginRendering(cmd, &renderingInfo);
 
     if(recordedThisFrame && m_recordedSceneCmd != VK_NULL_HANDLE)
-    {
       vkCmdExecuteCommands(cmd, 1, &m_recordedSceneCmd);
-    }
     else
-    {
-      renderRasterScene(cmd, resources);
-    }
+      renderRasterScene(cmd, resources, targets.extent);
 
     vkCmdEndRendering(cmd);
   }
 
-  nvvk::cmdImageMemoryBarrier(cmd, {resources.gBuffers.getColorImage(Resources::eImgRendered),
-                                    VK_IMAGE_LAYOUT_COLOR_ATTACHMENT_OPTIMAL, VK_IMAGE_LAYOUT_GENERAL});
-  nvvk::cmdImageMemoryBarrier(cmd, {resources.gBuffers.getColorImage(Resources::eImgSelection),
-                                    VK_IMAGE_LAYOUT_COLOR_ATTACHMENT_OPTIMAL, VK_IMAGE_LAYOUT_GENERAL});
-  nvvk::cmdImageMemoryBarrier(cmd, {resources.gBuffers.getDepthImage(),
+  // Restore layouts to GENERAL on the same images we transitioned in.
+  nvvk::cmdImageMemoryBarrier(cmd, {targets.colorImage, VK_IMAGE_LAYOUT_COLOR_ATTACHMENT_OPTIMAL, VK_IMAGE_LAYOUT_GENERAL});
+  nvvk::cmdImageMemoryBarrier(cmd, {targets.selectionImage, VK_IMAGE_LAYOUT_COLOR_ATTACHMENT_OPTIMAL, VK_IMAGE_LAYOUT_GENERAL});
+#if defined(USE_DLSS)
+  if(targets.motionImage != VK_NULL_HANDLE)
+    nvvk::cmdImageMemoryBarrier(cmd, {targets.motionImage, VK_IMAGE_LAYOUT_COLOR_ATTACHMENT_OPTIMAL, VK_IMAGE_LAYOUT_GENERAL});
+#endif
+  nvvk::cmdImageMemoryBarrier(cmd, {targets.depthImage,
                                     VK_IMAGE_LAYOUT_DEPTH_ATTACHMENT_OPTIMAL,
                                     VK_IMAGE_LAYOUT_GENERAL,
                                     {VK_IMAGE_ASPECT_DEPTH_BIT, 0, VK_REMAINING_MIP_LEVELS, 0, VK_REMAINING_ARRAY_LAYERS}});
+
+#if defined(USE_DLSS)
+  // DLSS evaluate: reads inner.color/motion/depth (GENERAL), writes eImgRendered (also GENERAL).
+  if(dlssActive)
+  {
+    auto             dlaaSection = m_profiler->cmdFrameSection(cmd, "DLSS-SR Evaluate");
+    const glm::mat4& viewMat     = resources.cameraManip->getViewMatrix();
+    const glm::mat4& projMat     = resources.cameraManip->getPerspectiveMatrix();
+    m_dlss->evaluate(cmd, viewMat, projMat);
+  }
+
+  // Post-raster blits when the rasterizer rendered into the inner GBuffer:
+  //   1. inner.selection -> eImgSelection (always; silhouette + picking sample at outer extent).
+  //   2. inner.color     -> eImgRendered  (only when DLSS evaluate did not run; in that case
+  //                                        updateSize() sized inner == outer so it's 1:1).
+  // In SR fallback mode the rasterizer wrote to outer.{color,selection,depth} directly, so the
+  // blits are skipped entirely (the inner GBuffer holds only the motion attachment).
+  if(!m_dlss->isFallback())
+  {
+    using SrSlot             = Dlss::SrSlot;
+    const VkExtent2D outerSz = resources.gBuffers.getSize();
+    m_dlss->blitInnerToOuter(cmd, m_dlss->getSrImage(SrSlot::eSelection),
+                             resources.gBuffers.getColorImage(Resources::eImgSelection), outerSz);
+    if(!dlssActive)
+      m_dlss->blitInnerToOuter(cmd, m_dlss->getSrImage(SrSlot::eColor),
+                               resources.gBuffers.getColorImage(Resources::eImgRendered), outerSz);
+  }
+#endif
 }
 
 //--------------------------------------------------------------------------------------------------
@@ -404,6 +622,11 @@ void Rasterizer::createPipeline(Resources& resources)
   m_dynamicPipeline.colorWriteMasks.push_back(
       {VK_COLOR_COMPONENT_R_BIT | VK_COLOR_COMPONENT_G_BIT | VK_COLOR_COMPONENT_B_BIT | VK_COLOR_COMPONENT_A_BIT});
   m_dynamicPipeline.colorBlendEquations.push_back(VkColorBlendEquationEXT{});
+
+  // Attachment #2 - Motion vectors (R16G16_SFLOAT).
+  m_dynamicPipeline.colorBlendEnables.push_back(false);
+  m_dynamicPipeline.colorWriteMasks.push_back({VK_COLOR_COMPONENT_R_BIT | VK_COLOR_COMPONENT_G_BIT});
+  m_dynamicPipeline.colorBlendEquations.push_back(VkColorBlendEquationEXT{});
 }
 
 //--------------------------------------------------------------------------------------------------
@@ -476,14 +699,18 @@ void Rasterizer::compileShader(Resources& resources, bool fromFile)
 //--------------------------------------------------------------------------------------------------
 // Recording in a secondary command buffer, the raster rendering of the scene.
 //
-void Rasterizer::recordRasterScene(Resources& resources)
+void Rasterizer::recordRasterScene(Resources& resources, VkExtent2D renderExtent)
 {
   SCOPED_TIMER(__FUNCTION__);
 
   createRecordCommandBuffer();
 
+  // Two or three color attachment formats. USE_DLSS=ON builds always include the DLSS motion image format.
   std::vector<VkFormat> colorFormat = {resources.gBuffers.getColorFormat(Resources::eImgRendered),
                                        resources.gBuffers.getColorFormat(Resources::eImgSelection)};
+#if defined(USE_DLSS)
+  colorFormat.push_back(m_dlss->getSrFormat(Dlss::SrSlot::eMotion));
+#endif
 
   VkCommandBufferInheritanceRenderingInfo inheritanceRenderingInfo{
       .sType                   = VK_STRUCTURE_TYPE_COMMAND_BUFFER_INHERITANCE_RENDERING_INFO,
@@ -505,7 +732,7 @@ void Rasterizer::recordRasterScene(Resources& resources)
   };
 
   NVVK_CHECK(vkBeginCommandBuffer(m_recordedSceneCmd, &beginInfo));
-  renderRasterScene(m_recordedSceneCmd, resources);
+  renderRasterScene(m_recordedSceneCmd, resources, renderExtent);
   NVVK_CHECK(vkEndCommandBuffer(m_recordedSceneCmd));
 }
 
@@ -517,12 +744,13 @@ void Rasterizer::recordRasterScene(Resources& resources)
 static void cmdSetCommonRasterState(VkCommandBuffer              cmd,
                                     nvvk::GraphicsPipelineState& dyn,
                                     Resources&                   resources,
+                                    VkExtent2D                   renderExtent,
                                     VkPipelineLayout             layout,
                                     VkShaderEXT                  vs,
                                     VkShaderEXT                  fs)
 {
   dyn.cmdApplyAllStates(cmd);
-  dyn.cmdSetViewportAndScissor(cmd, resources.gBuffers.getSize());
+  dyn.cmdSetViewportAndScissor(cmd, renderExtent);
   dyn.cmdBindShaders(cmd, {.vertex = vs, .fragment = fs});
   vkCmdSetDepthTestEnable(cmd, VK_TRUE);
 
@@ -541,7 +769,7 @@ static void cmdSetCommonRasterState(VkCommandBuffer              cmd,
   vkCmdBindDescriptorSets(cmd, VK_PIPELINE_BIND_POINT_GRAPHICS, layout, 0, 1, &resources.descriptorSet, 0, nullptr);
 }
 
-void Rasterizer::renderOpaqueOnly(VkCommandBuffer cmd, Resources& resources)
+void Rasterizer::renderOpaqueOnly(VkCommandBuffer cmd, Resources& resources, VkExtent2D renderExtent)
 {
   // No profiler section here: this function is also recorded into a secondary command buffer
   // by recordRasterScene(). Profiler sections use host-side vkResetQueryPool + a one-time
@@ -554,7 +782,7 @@ void Rasterizer::renderOpaqueOnly(VkCommandBuffer cmd, Resources& resources)
   m_pushConst.mouseCoord = nvapp::ElementDbgPrintf::getMouseCoord();
   vkCmdPushConstants(cmd, m_graphicPipelineLayout, VK_SHADER_STAGE_ALL_GRAPHICS, 0, sizeof(shaderio::RasterPushConstant), &m_pushConst);
 
-  cmdSetCommonRasterState(cmd, m_dynamicPipeline, resources, m_graphicPipelineLayout, m_vertexShader, m_fragmentShader);
+  cmdSetCommonRasterState(cmd, m_dynamicPipeline, resources, renderExtent, m_graphicPipelineLayout, m_vertexShader, m_fragmentShader);
 
   vkCmdSetCullMode(cmd, VK_CULL_MODE_BACK_BIT);
   vkCmdSetDepthBias(cmd, -1.0f, 0.0f, 1.0f);
@@ -565,11 +793,11 @@ void Rasterizer::renderOpaqueOnly(VkCommandBuffer cmd, Resources& resources)
   renderNodes(cmd, resources, resources.getScene()->getShadedNodes(nvvkgltf::Scene::eRasterSolidDoubleSided));
 }
 
-void Rasterizer::renderBlendOnly(VkCommandBuffer cmd, Resources& resources)
+void Rasterizer::renderBlendOnly(VkCommandBuffer cmd, Resources& resources, VkExtent2D renderExtent)
 {
   // No profiler section here: see comment in renderOpaqueOnly() -- this is also called from
   // a secondary command buffer recorded once and replayed every frame.
-  cmdSetCommonRasterState(cmd, m_dynamicPipeline, resources, m_graphicPipelineLayout, m_vertexShader, m_fragmentShader);
+  cmdSetCommonRasterState(cmd, m_dynamicPipeline, resources, renderExtent, m_graphicPipelineLayout, m_vertexShader, m_fragmentShader);
 
   VkBool32 blendEnable  = VK_TRUE;
   VkBool32 blendDisable = VK_FALSE;
@@ -588,12 +816,12 @@ void Rasterizer::renderBlendOnly(VkCommandBuffer cmd, Resources& resources)
   }
 }
 
-void Rasterizer::renderRasterScene(VkCommandBuffer cmd, Resources& resources)
+void Rasterizer::renderRasterScene(VkCommandBuffer cmd, Resources& resources, VkExtent2D renderExtent)
 {
   // Single-pass legacy path used for scenes without transmission and for the recorded command
   // buffer route. Equivalent to renderOpaqueOnly() + renderBlendOnly() but reuses one push.
-  renderOpaqueOnly(cmd, resources);
-  renderBlendOnly(cmd, resources);
+  renderOpaqueOnly(cmd, resources, renderExtent);
+  renderBlendOnly(cmd, resources, renderExtent);
 }
 
 //--------------------------------------------------------------------------------------------------
@@ -718,10 +946,19 @@ void Rasterizer::captureAndMipOpaqueColor(VkCommandBuffer cmd, Resources& resour
   NVVK_DBG_SCOPE(cmd);
   const uint32_t mips = m_opaqueColorImage.mipLevels;
 
+  // Source image is whichever color sink was active during the opaque pass: the inner
+  // GBuffer color (Dlss-owned, Kind::SR) when USE_DLSS=ON, else eImgRendered. Both are
+  // R32G32B32A32_SFLOAT and get the same TRANSFER_SRC_OPTIMAL transition.
+  VkImage    src     = resources.gBuffers.getColorImage(Resources::eImgRendered);
+  VkExtent2D srcSize = resources.gBuffers.getSize();
+#if defined(USE_DLSS)
+  src     = m_dlss->getSrImage(Dlss::SrSlot::eColor);
+  srcSize = m_dlss->getRenderSize();  // inner extent in upscale modes; equals outer in DLAA / Off.
+#endif
+
   // Source image was last written by the opaque rendering pass; expect COLOR_ATTACHMENT_OPTIMAL
   // when the secondary rendering pass ends. Transition source to TRANSFER_SRC_OPTIMAL.
-  nvvk::cmdImageMemoryBarrier(cmd, {resources.gBuffers.getColorImage(Resources::eImgRendered),
-                                    VK_IMAGE_LAYOUT_COLOR_ATTACHMENT_OPTIMAL, VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL});
+  nvvk::cmdImageMemoryBarrier(cmd, {src, VK_IMAGE_LAYOUT_COLOR_ATTACHMENT_OPTIMAL, VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL});
 
   // Destination: transition the entire mip chain to TRANSFER_DST_OPTIMAL.
   nvvk::cmdImageMemoryBarrier(cmd, {m_opaqueColorImage.image,
@@ -730,17 +967,16 @@ void Rasterizer::captureAndMipOpaqueColor(VkCommandBuffer cmd, Resources& resour
                                     {VK_IMAGE_ASPECT_COLOR_BIT, 0, mips, 0, 1}});
 
   // Blit the rendered framebuffer to mip 0 of the opaque-color capture (downscale to 1024x1024).
-  const VkExtent2D srcSize = resources.gBuffers.getSize();
-  VkImageBlit2     region{
-          .sType          = VK_STRUCTURE_TYPE_IMAGE_BLIT_2,
-          .srcSubresource = {VK_IMAGE_ASPECT_COLOR_BIT, 0, 0, 1},
-          .srcOffsets     = {{0, 0, 0}, {int32_t(srcSize.width), int32_t(srcSize.height), 1}},
-          .dstSubresource = {VK_IMAGE_ASPECT_COLOR_BIT, 0, 0, 1},
-          .dstOffsets     = {{0, 0, 0}, {int32_t(OPAQUE_COLOR_SIZE), int32_t(OPAQUE_COLOR_SIZE), 1}},
+  VkImageBlit2 region{
+      .sType          = VK_STRUCTURE_TYPE_IMAGE_BLIT_2,
+      .srcSubresource = {VK_IMAGE_ASPECT_COLOR_BIT, 0, 0, 1},
+      .srcOffsets     = {{0, 0, 0}, {int32_t(srcSize.width), int32_t(srcSize.height), 1}},
+      .dstSubresource = {VK_IMAGE_ASPECT_COLOR_BIT, 0, 0, 1},
+      .dstOffsets     = {{0, 0, 0}, {int32_t(OPAQUE_COLOR_SIZE), int32_t(OPAQUE_COLOR_SIZE), 1}},
   };
   VkBlitImageInfo2 blitInfo{
       .sType          = VK_STRUCTURE_TYPE_BLIT_IMAGE_INFO_2,
-      .srcImage       = resources.gBuffers.getColorImage(Resources::eImgRendered),
+      .srcImage       = src,
       .srcImageLayout = VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL,
       .dstImage       = m_opaqueColorImage.image,
       .dstImageLayout = VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL,
@@ -765,9 +1001,8 @@ void Rasterizer::captureAndMipOpaqueColor(VkCommandBuffer cmd, Resources& resour
                                     {VK_IMAGE_ASPECT_COLOR_BIT, 0, mips, 0, 1}});
   m_opaqueColorImage.descriptor.imageLayout = VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL;
 
-  // Restore the rendered framebuffer to COLOR_ATTACHMENT_OPTIMAL for the second rendering pass.
-  nvvk::cmdImageMemoryBarrier(cmd, {resources.gBuffers.getColorImage(Resources::eImgRendered),
-                                    VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL, VK_IMAGE_LAYOUT_COLOR_ATTACHMENT_OPTIMAL});
+  // Restore the source framebuffer to COLOR_ATTACHMENT_OPTIMAL for the second rendering pass.
+  nvvk::cmdImageMemoryBarrier(cmd, {src, VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL, VK_IMAGE_LAYOUT_COLOR_ATTACHMENT_OPTIMAL});
 }
 
 //--------------------------------------------------------------------------------------------------
@@ -938,4 +1173,9 @@ void Rasterizer::onSceneInvalidated(Resources& resources)
   m_lastViewMatrix          = glm::mat4(0.f);
   m_lastShadedNodesRevision = 0;
   m_lastSceneGraphRevision  = 0;
+#if defined(USE_DLSS)
+  // Mirror PathTracer::onSceneInvalidated(): drop DLSS-SR/DLAA temporal history so the new
+  // scene's first frames don't ghost in pixels from the outgoing scene.
+  m_dlss->notifyReset();
+#endif
 }

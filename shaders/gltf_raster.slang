@@ -21,6 +21,9 @@
 #include "gltf_vertex_access.h.slang"
 #include "gltf_material_eval.h.slang"
 #include "shaderio.h"
+#ifdef HAS_DLSS_MOTION
+#include "dlss_util.h"  // calculateMotionVector (clip-pos overload) - only when DLAA motion attachment is built in
+#endif
 #include "get_hit.h.slang"
 #include "common.h.slang"
 
@@ -57,18 +60,38 @@ struct VertexInput
 
 // Define the data that will be interpolated and passed from vertex to fragment shader
 // Note: SV_Position is a special semantic in Slang/HLSL for the clip-space position
+//
+// currClipUnjit/prevClipUnjit are clip-space positions WITHOUT the DLSS sub-pixel jitter.
+// They are used in the fragment shader to compute screen-space motion vectors that the
+// DLSS network expects (NGX wants un-jittered MVs and de-jitters them itself via
+// InJitterOffsetX/Y). When DLAA is disabled `position` and `currClipUnjit` are identical
+// because frameInfo.jitter defaults to (0,0). The unjittered fields are only emitted in
+// builds that ship the motion attachment (USE_DLSS=ON); USE_DLSS=OFF builds drop them so
+// Slang's DCE removes the prevMVP multiply and the extra interpolators.
 struct VertexOutput
 {
-  float4 position : SV_Position;  // Clip space position (required)
+  float4 position : SV_Position;  // Clip space position (jittered when DLAA on) - required
   float3 worldPos;
+#ifdef HAS_DLSS_MOTION
+  float4 currClipUnjit;  // Current-frame unjittered clip-space position
+  float4 prevClipUnjit;  // Previous-frame unjittered clip-space position
+#endif
 };
 
-// Define the final output of the fragment shader
-// Note: SV_TARGET specifies this is the color output to the render target
+// Define the final output of the fragment shader. Color attachments:
+//   0 = shaded color (or DLAA input when enabled)
+//   1 = render-node ID for silhouette/picking
+//   2 = screen-space motion vector ([prev - curr] in normalized 0..1 screen UV) for DLAA -
+//       ONLY in USE_DLSS=ON builds. USE_DLSS=OFF binaries drop this attachment entirely so
+//       the rasterizer pipeline has 2 color outputs and the rasterizer's Dlss (Kind::SR)
+//       instance never allocates a motion image. HAS_DLSS_MOTION is passed by CMake when USE_DLSS=ON.
 struct PixelOutput
 {
-  float4 color : SV_TARGET0;      // First render target output (RGBA)
-  float4 selection : SV_TARGET1;  // Second render target output (RGBA)
+  float4 color : SV_TARGET0;
+  float4 selection : SV_TARGET1;
+#ifdef HAS_DLSS_MOTION
+  float2 motion : SV_TARGET2;
+#endif
 };
 
 
@@ -163,6 +186,15 @@ float3 getIBLVolumeRefraction(float3   n,
 
 //------------------------------------------------------------------------------
 // Vertex Shader
+//
+// SV_Position is the UN-JITTERED clip-space position with a post-projection NDC
+// shift applied from frameInfo.jitter so the rasterizer samples sub-pixel offsets
+// for DLAA. The shift mirrors the standard "translate viewProj in clip-space"
+// trick (`clip.xy -= jitter * 2/imageSize * clip.w`)
+//
+// NOTE: per-object animation/skinning is NOT yet propagated into prevMVP, so
+// MVs only reflect camera motion. Animated meshes will still antialias correctly
+// from the screen-space MV at the camera level; deferring object-level MVs.
 //------------------------------------------------------------------------------
 [shader("vertex")]
 VertexOutput vertexMain(VertexInput input)
@@ -173,8 +205,23 @@ VertexOutput vertexMain(VertexInput input)
 
   VertexOutput output;
   output.worldPos = pos;
-  output.position = mul(float4(pos, 1.0), pushConst.frameInfo.viewProjMatrix);
 
+#ifdef HAS_DLSS_MOTION
+  // DLSS path: emit unjittered clip-space positions for fragment-side MV calc, then
+  // post-multiply by the per-frame jitter shift to produce the rasterizer's sample positions.
+  output.currClipUnjit = mul(float4(pos, 1.0), pushConst.frameInfo.viewProjMatrix);
+  output.prevClipUnjit = mul(float4(pos, 1.0), pushConst.frameInfo.prevMVP);
+
+  // Apply DLAA sub-pixel jitter as a post-projection clip-space shift. Equivalent to multiplying
+  // by `translate(-jitter*(2/imgSize, 2/imgSize, 0)) * viewProj` on the host. When DLAA is
+  // disabled at runtime the host writes jitter=(0,0) so output.position == currClipUnjit.
+  float4 jittered = output.currClipUnjit;
+  jittered.xy -= pushConst.frameInfo.jitter * (2.0 / pushConst.frameInfo.imageSize) * jittered.w;
+  output.position = jittered;
+#else
+  // Non-DLSS build: no jitter, no MV - the standard rasterizer clip-space position is enough.
+  output.position = mul(float4(pos, 1.0), pushConst.frameInfo.viewProjMatrix);
+#endif
 
   return output;
 }
@@ -182,11 +229,18 @@ VertexOutput vertexMain(VertexInput input)
 //------------------------------------------------------------------------------
 // Fragment/Pixel Shader
 //------------------------------------------------------------------------------
+// Pixel-space motion vector shared with the path tracer (dlss_util.h::calculateMotionVector).
+// We pass UN-JITTERED clip-space positions before the perspective divide (interpolated across
+// the triangle by the rasterizer) so the projective interpolation is correct, then the helper
+// performs the /w per fragment. NGX's InMVScaleX/Y stays at 1.0, matching DLSS-RR.
 [shader("fragment")]
 PixelOutput fragmentMain(VertexOutput input, uint primitiveID: SV_PrimitiveID, float3 baryWeights: SV_Barycentrics)
 {
   PixelOutput output;
   output.color.a = 1.0;
+#ifdef HAS_DLSS_MOTION
+  output.motion = calculateMotionVector(input.currClipUnjit, input.prevClipUnjit, pushConst.frameInfo.imageSize);
+#endif
 
   // Setting up scene info
   GltfShadeMaterial material   = pushConst.gltfScene->materials[pushConst.materialID];      // Buffer of materials
@@ -399,11 +453,16 @@ PixelOutput fragmentMain(VertexOutput input, uint primitiveID: SV_PrimitiveID, f
 
 //------------------------------------------------------------------------------
 // Wireframe Shader
-// Return a constant color for wireframe rendering
+// Return a constant color for wireframe rendering. Selection/motion are zero - the
+// wireframe pass is a visual debug overlay and doesn't participate in DLAA.
 [shader("fragment")]
 PixelOutput fragmentWireframeMain(VertexOutput input)
 {
   PixelOutput output;
-  output.color = float4(0.4, 0.01, 0.01, 1);
+  output.color     = float4(0.4, 0.01, 0.01, 1);
+  output.selection = float4(0.0);
+#ifdef HAS_DLSS_MOTION
+  output.motion = float2(0.0);
+#endif
   return output;
 }

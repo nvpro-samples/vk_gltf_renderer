@@ -45,18 +45,18 @@ struct SceneDescriptorModel
 // One placed instance of a model: index into the models array plus TRS transform and optional name.
 struct SceneDescriptorInstance
 {
-  int         modelIndex = 0;   // Index into SceneDescriptor::models
-  glm::vec3   translation{0.f}; // Position
-  glm::quat   rotation{1.f, 0.f, 0.f, 0.f}; // Orientation (glTF order: xyzw)
-  glm::vec3   scale{1.f};       // Scale (uniform or per-axis)
-  std::string name;             // Optional instance name
+  int         modelIndex = 0;                // Index into SceneDescriptor::models
+  glm::vec3   translation{0.f};              // Position
+  glm::quat   rotation{1.f, 0.f, 0.f, 0.f};  // Orientation (glTF order: xyzw)
+  glm::vec3   scale{1.f};                    // Scale (uniform or per-axis)
+  std::string name;                          // Optional instance name
 };
 
 // Aggregated result of a scene descriptor: list of models and list of instances.
 struct SceneDescriptor
 {
-  std::vector<SceneDescriptorModel>    models;    // glTF files to load
-  std::vector<SceneDescriptorInstance> instances; // Placed instances (model index + transform)
+  std::vector<SceneDescriptorModel>    models;     // glTF files to load
+  std::vector<SceneDescriptorInstance> instances;  // Placed instances (model index + transform)
 
   // Groups instances by model index. Key = model index, value = pointers into instances.
   std::unordered_map<int, std::vector<const SceneDescriptorInstance*>> getInstancesByModel() const

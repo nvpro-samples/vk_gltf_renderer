@@ -1488,18 +1488,18 @@ nvvkgltf::Scene::PrimitiveKeyMap nvvkgltf::Scene::buildPrimitiveKeyMap()
 
 
 // Function to extract eye, center, and up vectors from a view matrix
-inline void extractCameraVectors(const glm::mat4& viewMatrix, const glm::vec3& sceneCenter, glm::vec3& eye, glm::vec3& center, glm::vec3& up)
+inline void extractCameraVectors(const glm::dmat4& viewMatrix, const glm::dvec3& sceneCenter, glm::dvec3& eye, glm::dvec3& center, glm::dvec3& up)
 {
-  eye                    = glm::vec3(viewMatrix[3]);
-  glm::mat3 rotationPart = glm::mat3(viewMatrix);
-  glm::vec3 forward      = -rotationPart * glm::vec3(0.0f, 0.0f, 1.0f);
+  eye                     = glm::dvec3(viewMatrix[3]);
+  glm::dmat3 rotationPart = glm::dmat3(viewMatrix);
+  glm::dvec3 forward      = -rotationPart * glm::dvec3(0.0, 0.0, 1.0);
 
   // Project sceneCenter onto the forward vector
-  glm::vec3 eyeToSceneCenter = sceneCenter - eye;
-  float     projectionLength = std::abs(glm::dot(eyeToSceneCenter, forward));
-  center                     = eye + projectionLength * forward;
+  glm::dvec3 eyeToSceneCenter = sceneCenter - eye;
+  double     projectionLength = std::abs(glm::dot(eyeToSceneCenter, forward));
+  center                      = eye + projectionLength * forward;
 
-  up = glm::vec3(0.0f, 1.0f, 0.0f);  // Assume the up vector is always (0, 1, 0)
+  up = glm::dvec3(0.0, 1.0, 0.0);  // Assume the up vector is always (0, 1, 0)
 }
 
 

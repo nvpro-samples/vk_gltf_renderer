@@ -72,7 +72,7 @@ public:
   void                                        rebuildVulkanSceneFull();
   std::shared_ptr<nvutils::CameraManipulator> getCameraManipulator() { return m_cameraManip; }
   void                                        registerRecentFilesHandler();
-  void setDlssHardwareAvailability(bool available);  // Set DLSS hardware/extension availability
+  void                                        setDlssHardwareAvailability(bool rrAvailable, bool srAvailable);
 
 private:
   void onAttach(nvapp::Application* app) override;
@@ -102,6 +102,10 @@ private:
   void silhouette(VkCommandBuffer cmd);
   void tonemap(VkCommandBuffer cmd);
   void renderVisualHelpers(VkCommandBuffer cmd);
+#if defined(USE_DLSS)
+  Dlss*       activeDlss();
+  const Dlss* activeDlss() const;
+#endif
   void updateGizmoAttachment();
   bool updateTextures();
   void updateHdrImages();

@@ -48,7 +48,7 @@ VkResult PipelineCacheManager::init(VkDevice device, const std::filesystem::path
       std::ifstream file(m_cacheFilePath, std::ios::binary | std::ios::ate);
       if(file.is_open())
       {
-        size_t fileSize = static_cast<size_t>(file.tellg());
+        size_t           fileSize                  = static_cast<size_t>(file.tellg());
         constexpr size_t kMaxPipelineCacheFileSize = 256ULL * 1024 * 1024;  // 256 MB cap to avoid unbounded allocation
         if(fileSize > 0 && fileSize <= kMaxPipelineCacheFileSize)
         {

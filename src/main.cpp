@@ -25,6 +25,8 @@
 #include <fmt/format.h>
 #include <stb/stb_image.h>
 #include <GLFW/glfw3.h>
+#include <unordered_set>
+#include <string>
 #undef APIENTRY
 
 #include <nvaftermath/aftermath.hpp>
@@ -218,32 +220,54 @@ auto main(int argc, char** argv) -> int
   vkSetup.instanceCreateInfoExt = validation.buildPNextChain();
 
 
-#if USE_DLSS
-  // Adding the DLSS extensions to the instance
-  static std::vector<VkExtensionProperties> extraInstanceExtensions;
-  DlssRayReconstruction::getRequiredInstanceExtensions({}, extraInstanceExtensions);
-  for(auto& ext : extraInstanceExtensions)
+#if defined(USE_DLSS)
+  // Probe BOTH DLSS Ray Reconstruction (RR) and DLSS Super Resolution (SR) extension
+  // requirements, union by extension name (RR and SR share most extensions) so we ask for each
+  // extension only once when creating the Vulkan instance + device. Track per-feature query
+  // success so we can split availability into dlssRrHardwareAvailable / dlssSrHardwareAvailable.
+  static std::vector<VkExtensionProperties> extraInstanceExtRr;
+  static std::vector<VkExtensionProperties> extraInstanceExtSr;
+  NgxContext::getRequiredInstanceExtensions(NVSDK_NGX_Feature_RayReconstruction, {}, extraInstanceExtRr);
+  NgxContext::getRequiredInstanceExtensions(NVSDK_NGX_Feature_SuperSampling, {}, extraInstanceExtSr);
   {
-    vkSetup.instanceExtensions.emplace_back(ext.extensionName);
+    std::unordered_set<std::string> seen;
+    auto                            appendOnce = [&seen, &vkSetup](const VkExtensionProperties& ext) {
+      if(seen.insert(ext.extensionName).second)
+        vkSetup.instanceExtensions.push_back(ext.extensionName);
+    };
+    for(auto& ext : extraInstanceExtRr)
+      appendOnce(ext);
+    for(auto& ext : extraInstanceExtSr)
+      appendOnce(ext);
   }
 
   // After selecting the device, we also request extensions DLSS needs using
-  // nvvk::Context's callback.
-  // Note at this stage NGX can report that DLSS is not available, so we need
-  // to handle that.
-  static bool                               dlssQueryExtensionsOk = false;
-  static std::vector<VkExtensionProperties> extraDeviceExtensions;
+  // nvvk::Context's callback. NGX may report that one or both features are not
+  // available on this GPU; we keep the device alive either way and just track
+  // per-feature query success.
+  static bool                               dlssRrQueryOk = false;
+  static bool                               dlssSrQueryOk = false;
+  static std::vector<VkExtensionProperties> extraDeviceExtRr;
+  static std::vector<VkExtensionProperties> extraDeviceExtSr;
   vkSetup.postSelectPhysicalDeviceCallback = [](VkInstance instance, VkPhysicalDevice physicalDevice, nvvk::ContextInitInfo& vkSetup) {
-    const NVSDK_NGX_Result result =
-        DlssRayReconstruction::getRequiredDeviceExtensions({}, instance, physicalDevice, extraDeviceExtensions);
-    if(NVSDK_NGX_Result_Success == result)
-    {
-      dlssQueryExtensionsOk = true;
-      for(auto& ext : extraDeviceExtensions)
-      {
+    dlssRrQueryOk = (NVSDK_NGX_Result_Success
+                     == NgxContext::getRequiredDeviceExtensions(NVSDK_NGX_Feature_RayReconstruction, {}, instance,
+                                                                physicalDevice, extraDeviceExtRr));
+    dlssSrQueryOk = (NVSDK_NGX_Result_Success
+                     == NgxContext::getRequiredDeviceExtensions(NVSDK_NGX_Feature_SuperSampling, {}, instance,
+                                                                physicalDevice, extraDeviceExtSr));
+
+    std::unordered_set<std::string> seen;
+    auto                            appendOnce = [&seen, &vkSetup](const VkExtensionProperties& ext) {
+      if(seen.insert(ext.extensionName).second)
         vkSetup.deviceExtensions.push_back({.extensionName = ext.extensionName, .required = false, .specVersion = ext.specVersion});
-      }
-    }
+    };
+    if(dlssRrQueryOk)
+      for(auto& ext : extraDeviceExtRr)
+        appendOnce(ext);
+    if(dlssSrQueryOk)
+      for(auto& ext : extraDeviceExtSr)
+        appendOnce(ext);
 
     return true;  // Continue with this device (even if DLSS is not available)
   };
@@ -258,22 +282,25 @@ auto main(int argc, char** argv) -> int
     return -1;
   }
 
-  // Check that DLSS extensions are enabled
-  bool dlssHardwareAvailable = false;  // Default: DLSS not available
-#if USE_DLSS
-  dlssHardwareAvailable = dlssQueryExtensionsOk;
-  for(auto& dlssExt : extraDeviceExtensions)
-  {
-    dlssHardwareAvailable &= vkContext.hasExtensionEnabled(dlssExt.extensionName);
-  }
+  // Check per-feature extension enablement after vkContext.init: the NGX query may have
+  // succeeded but the loader could still have dropped optional extensions on the floor.
+  bool dlssRrHardwareAvailable = false;
+  bool dlssSrHardwareAvailable = false;
+#if defined(USE_DLSS)
+  dlssRrHardwareAvailable = dlssRrQueryOk;
+  for(auto& ext : extraDeviceExtRr)
+    dlssRrHardwareAvailable &= vkContext.hasExtensionEnabled(ext.extensionName);
 
-  if(!dlssHardwareAvailable)
-  {
-    LOGW("DLSS: Required Vulkan extensions not available - DLSS will be disabled\n");
-  }
+  dlssSrHardwareAvailable = dlssSrQueryOk;
+  for(auto& ext : extraDeviceExtSr)
+    dlssSrHardwareAvailable &= vkContext.hasExtensionEnabled(ext.extensionName);
 
-  // Set DLSS hardware availability based on extension check
-  elemGltfRenderer->setDlssHardwareAvailability(dlssHardwareAvailable);
+  if(!dlssRrHardwareAvailable)
+    LOGW("DLSS-RR: Required Vulkan extensions not available - Ray Reconstruction will be disabled\n");
+  if(!dlssSrHardwareAvailable)
+    LOGW("DLSS-SR: Required Vulkan extensions not available - DLSS-SR will be disabled\n");
+
+  elemGltfRenderer->setDlssHardwareAvailability(dlssRrHardwareAvailable, dlssSrHardwareAvailable);
 #endif
 
 

@@ -38,7 +38,7 @@
 namespace nvvk {
 class ResourceAllocator;
 class GBuffer;
-}
+}  // namespace nvvk
 
 namespace nvvkgltf {
 

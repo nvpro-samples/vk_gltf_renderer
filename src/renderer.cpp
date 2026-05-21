@@ -271,7 +271,7 @@ void GltfRenderer::onAttach(nvapp::Application* app)
     nvvk::beginSingleTimeCommands(cmd, m_device, m_transientCmdPool);
     m_resources.gBuffers.update(cmd, {100, 100});
     nvvk::endSingleTimeCommands(cmd, m_device, m_transientCmdPool, m_app->getQueue(0).queue);
-    m_resources.appMemoryTracker.track("GBuffers", m_resources.gBuffers, 3);
+    m_resources.appMemoryTracker.track("GBuffers", m_resources.gBuffers, Resources::eImgCount);
   }
 
   // ===== Rendering Utilities =====
@@ -325,6 +325,10 @@ void GltfRenderer::onAttach(nvapp::Application* app)
     m_resources.slangCompiler.addCapability("spvGroupNonUniformBallot");  // # Ballot operations for subgroup functionality
     m_resources.slangCompiler.addCapability("spvGroupNonUniformArithmetic");  // # Arithmetic operations across subgroups
 
+#if defined(USE_DLSS)
+    m_resources.slangCompiler.addMacro({"HAS_DLSS_MOTION", "1"});
+#endif
+
 #if defined(AFTERMATH_AVAILABLE)
     // This aftermath callback is used to report the shader hash (Spirv) to the Aftermath library.
     m_resources.slangCompiler.setCompileCallback([&](const std::filesystem::path& sourceFile, const uint32_t* spirvCode, size_t spirvSize) {
@@ -345,6 +349,10 @@ void GltfRenderer::onAttach(nvapp::Application* app)
   m_pathTracer.onAttach(m_resources, &m_profilerGpuTimer);
   m_pathTracer.setProfilerTimeline(m_profilerTimeline);
   m_pathTracer.setBusyWindow(&m_busy);  // Show BusyWindow during async shader/pipeline compiles
+#if defined(USE_DLSS)
+  if(Dlss* rrDlss = m_pathTracer.getDlss())
+    rrDlss->setBusyWindow(&m_busy);
+#endif
   m_rasterizer.onAttach(m_resources, &m_profilerGpuTimer);
 
   m_pathTracer.createPipeline(m_resources);
@@ -415,9 +423,9 @@ void GltfRenderer::onDetach()
 // Resize the G-Buffer and the renderers
 void GltfRenderer::onResize(VkCommandBuffer cmd, const VkExtent2D& size)
 {
-  m_resources.appMemoryTracker.untrack("GBuffers", m_resources.gBuffers, 3);
+  m_resources.appMemoryTracker.untrack("GBuffers", m_resources.gBuffers, Resources::eImgCount);
   m_resources.gBuffers.update(cmd, size);
-  m_resources.appMemoryTracker.track("GBuffers", m_resources.gBuffers, 3);
+  m_resources.appMemoryTracker.track("GBuffers", m_resources.gBuffers, Resources::eImgCount);
   m_pathTracer.onResize(cmd, size, m_resources);
   m_rasterizer.onResize(cmd, size, m_resources);
   m_resources.hdrDome.setOutImage(m_resources.gBuffers.getDescriptorImageInfo(Resources::eImgRendered));
@@ -507,12 +515,16 @@ void GltfRenderer::onRender(VkCommandBuffer cmd)
     }
 
     // Update the scene frame information uniform buffer
+    const glm::mat4          viewProj = m_cameraManip->getPerspectiveMatrix() * m_cameraManip->getViewMatrix();
+    const VkExtent2D         gbufSize = m_resources.gBuffers.getSize();
     shaderio::SceneFrameInfo finfo{
         .viewMatrix     = m_cameraManip->getViewMatrix(),
         .projInv        = glm::inverse(m_cameraManip->getPerspectiveMatrix()),
         .viewInv        = glm::inverse(m_cameraManip->getViewMatrix()),
-        .viewProjMatrix = m_cameraManip->getPerspectiveMatrix() * m_cameraManip->getViewMatrix(),
+        .viewProjMatrix = viewProj,
         .prevMVP        = m_prevMVP,
+        .jitter         = {0.0f, 0.0f},
+        .imageSize      = {float(gbufSize.width), float(gbufSize.height)},
         .flags = ((m_cameraManip->getProjectionType() == nvutils::CameraManipulator::Orthographic) ? shaderio::eSceneIsOrthographic : 0)
                  | (m_resources.settings.useSolidBackground ? shaderio::eSceneUseSolidBackground : 0)
                  | ((m_resources.settings.envSystem == shaderio::EnvSystem::eHdr) ? shaderio::eSceneUseHdrEnvironment : 0)
@@ -735,6 +747,20 @@ bool GltfRenderer::save(const std::filesystem::path& filename)
   return false;
 }
 
+#if defined(USE_DLSS)
+//--------------------------------------------------------------------------------------------------
+// Returns the Dlss instance owned by whichever renderer is currently active.
+Dlss* GltfRenderer::activeDlss()
+{
+  return (m_resources.settings.renderSystem == RenderingMode::ePathtracer) ? m_pathTracer.getDlss() : m_rasterizer.getDlss();
+}
+
+const Dlss* GltfRenderer::activeDlss() const
+{
+  return (m_resources.settings.renderSystem == RenderingMode::ePathtracer) ? m_pathTracer.getDlss() : m_rasterizer.getDlss();
+}
+#endif
+
 //--------------------------------------------------------------------------------------------------
 // Apply the tonemapper on the rendered image
 void GltfRenderer::tonemap(VkCommandBuffer cmd)
@@ -747,45 +773,40 @@ void GltfRenderer::tonemap(VkCommandBuffer cmd)
   VkExtent2D            gbufSize         = m_resources.gBuffers.getSize();
   bool                  usingGuideBuffer = false;
 
-  // Check if we want to display a DLSS guide buffer or OptiX denoised output (only for pathtracer)
-  if(m_resources.settings.renderSystem == RenderingMode::ePathtracer && m_resources.settings.displayBuffer != DisplayBuffer::eRendered)
-  {
-    // Handle OptiX denoised output
+  // OptiX denoised output (path-tracer only). Routed via the global DisplayBuffer toggle the
+  // OptiXDenoiser writes when the user clicks its thumbnail; behavior is unchanged.
 #if defined(USE_OPTIX_DENOISER)
-    if(m_resources.settings.displayBuffer == DisplayBuffer::eOptixDenoised)
+  if(m_resources.settings.renderSystem == RenderingMode::ePathtracer && m_resources.settings.displayBuffer == DisplayBuffer::eOptixDenoised)
+  {
+    const OptiXDenoiser* optix = m_pathTracer.getOptiXDenoiser();
+    if(optix && optix->hasValidDenoisedOutput())
     {
-      const OptiXDenoiser* optix = m_pathTracer.getOptiXDenoiser();
-      if(optix && optix->hasValidDenoisedOutput())
-      {
-        inputBuffer      = optix->getDescriptorImageInfo(OptiXDenoiser::eGBufferDenoised);
-        usingGuideBuffer = false;  // We want to tonemap the denoised output, not the guide buffer
-      }
-    }
-    else
-#endif
-    {
-      // Handle DLSS guide buffers
-#if defined(USE_DLSS)
-      const DlssDenoiser* dlss = m_pathTracer.getDlssDenoiser();
-      if(dlss && dlss->isEnabled())
-      {
-        shaderio::OutputImage dlssBuffer = displayBufferToOutputImage(m_resources.settings.displayBuffer);
-        inputBuffer                      = dlss->getDescriptorImageInfo(dlssBuffer);
-        usingGuideBuffer                 = true;
-        gbufSize                         = dlss->getRenderSize();
-
-        // Clear output image since guide buffer may be smaller than display size
-        // Use distinct color to visually show the DLSS render resolution vs display resolution
-        VkImageSubresourceRange range = {.aspectMask = VK_IMAGE_ASPECT_COLOR_BIT, .levelCount = 1, .layerCount = 1};
-        vkCmdClearColorImage(cmd, m_resources.gBuffers.getColorImage(Resources::eImgTonemapped),
-                             VK_IMAGE_LAYOUT_GENERAL, &kBackgroundClearColor, 1, &range);
-        // Barrier: clear must complete before tonemapper compute shader runs
-        nvvk::cmdMemoryBarrier(cmd, VK_PIPELINE_STAGE_2_CLEAR_BIT, VK_PIPELINE_STAGE_2_COMPUTE_SHADER_BIT,
-                               VK_ACCESS_2_TRANSFER_WRITE_BIT, VK_ACCESS_2_SHADER_WRITE_BIT);
-      }
-#endif
+      inputBuffer = optix->getDescriptorImageInfo(OptiXDenoiser::eGBufferDenoised);
     }
   }
+#endif
+
+#if defined(USE_DLSS)
+  // Displaying or not DLSS guide buffer.
+  if(Dlss* dlss = activeDlss())
+  {
+    if(auto guide = dlss->activeGuideImage())
+    {
+      inputBuffer      = guide->image;
+      gbufSize         = guide->extent;
+      usingGuideBuffer = true;
+
+      // Clear the output image to a distinct color so the DLSS render-resolution borders are
+      // visible when the guide buffer is smaller than the display.
+      VkImageSubresourceRange range = {.aspectMask = VK_IMAGE_ASPECT_COLOR_BIT, .levelCount = 1, .layerCount = 1};
+      vkCmdClearColorImage(cmd, m_resources.gBuffers.getColorImage(Resources::eImgTonemapped), VK_IMAGE_LAYOUT_GENERAL,
+                           &kBackgroundClearColor, 1, &range);
+      // Barrier: clear must complete before tonemapper compute shader runs
+      nvvk::cmdMemoryBarrier(cmd, VK_PIPELINE_STAGE_2_CLEAR_BIT, VK_PIPELINE_STAGE_2_COMPUTE_SHADER_BIT,
+                             VK_ACCESS_2_TRANSFER_WRITE_BIT, VK_ACCESS_2_SHADER_WRITE_BIT);
+    }
+  }
+#endif
 
   // Disable tonemapping for debug buffers or guide buffers (display raw values)
   shaderio::TonemapperData tonemapperData = m_resources.tonemapperData;
@@ -894,8 +915,9 @@ void GltfRenderer::renderVisualHelpers(VkCommandBuffer cmd)
   glm::vec2        viewportSize(static_cast<float>(size.width), static_cast<float>(size.height));
   glm::vec2        depthBufferSize = viewportSize;
 #if defined(USE_DLSS)
-  const DlssDenoiser* dlss = m_pathTracer.getDlssDenoiser();
-  if(dlss && dlss->isEnabled())
+  // Align the depth-buffer extent the gizmo grid samples to whichever DLSS instance is active.
+  // isActive() is strict (false during async init), so we never pick up a 0x0 inner extent.
+  if(const Dlss* dlss = activeDlss(); dlss && dlss->isActive())
   {
     const VkExtent2D rs = dlss->getRenderSize();
     depthBufferSize     = {static_cast<float>(rs.width), static_cast<float>(rs.height)};
@@ -966,11 +988,12 @@ void GltfRenderer::updateGizmoAttachment()
 }
 
 //--------------------------------------------------------------------------------------------------
-// Set DLSS hardware/extension availability
-// This should be called early, before any DLSS initialization occurs
-void GltfRenderer::setDlssHardwareAvailability(bool available)
+// Set DLSS hardware/extension availability per NGX feature (Ray Reconstruction / Super Resolution).
+// This should be called early, before any DLSS initialization occurs.
+void GltfRenderer::setDlssHardwareAvailability(bool rrAvailable, bool srAvailable)
 {
-  m_resources.settings.dlssHardwareAvailable = available;
+  m_resources.settings.dlssRrHardwareAvailable = rrAvailable;
+  m_resources.settings.dlssSrHardwareAvailable = srAvailable;
 }
 
 //--------------------------------------------------------------------------------------------------
@@ -1649,6 +1672,7 @@ void GltfRenderer::createHDR(const std::filesystem::path& hdrFilename)
 
   updateHdrImages();
   m_resources.hdrDome.setOutImage(m_resources.gBuffers.getDescriptorImageInfo(Resources::eImgRendered));
+  m_rasterizer.resetHdr();
   // addToRecentFiles(hdrFilename);
 }
 
@@ -1678,7 +1702,7 @@ void GltfRenderer::destroyResources()
   m_silhouette.deinit(m_resources);
 
   m_resources.tonemapper.deinit();
-  m_resources.appMemoryTracker.untrack("GBuffers", m_resources.gBuffers, 3);
+  m_resources.appMemoryTracker.untrack("GBuffers", m_resources.gBuffers, Resources::eImgCount);
   m_resources.gBuffers.deinit();
   m_resources.transformCompute.deinit();
   m_resources.sceneGpu.deinit();

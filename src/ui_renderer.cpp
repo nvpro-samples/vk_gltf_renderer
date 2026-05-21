@@ -157,7 +157,7 @@ void GltfRenderer::mouseClickedInViewport()
     if(s_mouseClickState.isMouseDoubleClicked(ImGuiMouseButton_Left))
     {
       // Set the camera CENTER to the hit position
-      glm::vec3 eye, center, up;
+      glm::dvec3 eye, center, up;
       m_cameraManip->getLookat(eye, center, up);
       m_cameraManip->setLookat(eye, worldPos, up, false);  // Nice with CameraManip.updateAnim();
       m_cameraManip->setSpeed(pickResult.hitT);            // Re-adjust speed based on the new distance
@@ -1293,13 +1293,13 @@ void GltfRenderer::setGltfCameraFromView(int cameraIndex)
   node.translation = {cameraState.eye.x, cameraState.eye.y, cameraState.eye.z};
 
   // Calculate the rotation that points the camera from eye to center with the given up vector
-  glm::vec3 forward = glm::normalize(cameraState.ctr - cameraState.eye);
-  glm::vec3 right   = glm::normalize(glm::cross(forward, cameraState.up));
-  glm::vec3 up      = glm::normalize(glm::cross(right, forward));
+  glm::dvec3 forward = glm::normalize(cameraState.ctr - cameraState.eye);
+  glm::dvec3 right   = glm::normalize(glm::cross(forward, cameraState.up));
+  glm::dvec3 up      = glm::normalize(glm::cross(right, forward));
 
   // Create rotation matrix and convert to quaternion
-  glm::mat3 rotationMatrix(right, up, -forward);  // -forward because GLTF cameras look down -Z
-  glm::quat rotation = glm::quat_cast(rotationMatrix);
+  glm::dmat3 rotationMatrix(right, up, -forward);  // -forward because GLTF cameras look down -Z
+  glm::dquat rotation = glm::quat_cast(rotationMatrix);
 
   node.rotation = {rotation.x, rotation.y, rotation.z, rotation.w};
   node.scale    = {1.0, 1.0, 1.0};

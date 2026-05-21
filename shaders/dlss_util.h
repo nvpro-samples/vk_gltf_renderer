@@ -60,31 +60,30 @@ float3 EnvBRDFApprox2(float3 SpecularColor, float alpha, float NoV)
   return mad(SpecularColor, max(0, scale), max(0, bias));
 }
 
-// Function to calculate 2D motion vectors for DLSS denoising
+// Pixel-space motion vector for DLSS / DLAA. The two overloads share one piece of math:
+// `MV = (prev_NDC - curr_NDC) * 0.5 * resolution` (equivalent to `(prev_UV - curr_UV) * resolution`).
+// NGX expects pixel-space MVs when InMVScaleX/Y = 1.0, which is what both renderers configure.
+//
+// Overload 1 (raster vertex shader): the vertex shader has already transformed the world position
+// through the unjittered viewProj / prevMVP, so the fragment shader just consumes the two clip
+// positions interpolated by the rasterizer.
+inline float2 calculateMotionVector(float4 currClip, float4 prevClip, float2 resolution)
+{
+  float2 currNDC = currClip.xy / currClip.w;
+  float2 prevNDC = prevClip.xy / prevClip.w;
+  return (prevNDC - currNDC) * 0.5f * resolution;
+}
+
+// Overload 2 (path tracer): caller has a world-space hit position and the two MVP matrices.
+// Forwards to the clip-space overload above for a single source of truth on the MV math.
 inline float2 calculateMotionVector(float3   worldPos,    // Current world-space hit position
                                     float4x4 prevMVP,     // Previous frame's Model-View-Projection matrix
                                     float4x4 currentMVP,  // Current frame's Model-View-Projection matrix
                                     float2   resolution)    // Render target resolution
 {
-  // Transform current world position to clip space for current frame
   float4 currentClipPos = mul(float4(worldPos, 1.0f), currentMVP);
-  currentClipPos /= currentClipPos.w;
-
-  // Transform current world position to clip space for previous frame
-  float4 prevClipPos = mul(float4(worldPos, 1.0f), prevMVP);
-  prevClipPos /= prevClipPos.w;
-
-  // Convert clip space coordinates to screen space (0 to 1 range)
-  float2 currentScreenPos = float2(currentClipPos.xy) * 0.5f + 0.5f;
-  float2 prevScreenPos    = float2(prevClipPos.xy) * 0.5f + 0.5f;
-
-  // Calculate motion vector in screen space
-  float2 motionVector = prevScreenPos - currentScreenPos;
-
-  // Scale motion vector to pixel space
-  motionVector *= resolution;
-
-  return motionVector;
+  float4 prevClipPos    = mul(float4(worldPos, 1.0f), prevMVP);
+  return calculateMotionVector(currentClipPos, prevClipPos, resolution);
 }
 #endif
 
@@ -127,8 +126,8 @@ INLINE float2 sampleDelta(uint32_t frameIndex)
 
 INLINE float2 dlssJitter(uint32_t frameIndex)
 {
-    //return sampleDelta(frameIndex);
-    return halton(frameIndex) - float2(0.5,0.5);
+  //return sampleDelta(frameIndex);
+  return halton(frameIndex) - float2(0.5, 0.5);
 }
 
 NAMESPACE_SHADERIO_END()

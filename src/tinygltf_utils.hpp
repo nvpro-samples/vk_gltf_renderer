@@ -388,6 +388,8 @@ Returns:
 -------------------------------------------------------------------------------------------------*/
 tinygltf::Value convertToTinygltfValue(int numElements, const float* elements);
 
+// Same as convertToTinygltfValue(int, const float*), but takes doubles.
+tinygltf::Value convertToTinygltfValue(int numElements, const double* elements);
 
 /*-------------------------------------------------------------------------------------------------
 ## Function `getNodeTRS`

@@ -267,22 +267,28 @@ float2 sampleGaussian(float2 u)
 }
 
 //-----------------------------------------------------------------------
-// Ray-footprint texture LOD: compute the angular size of a single pixel in world space.
-// Camera-only quantity, constant across the entire frame.
+// Ray-cone footprint (Akenine-Moller et al. 2019, "Texture Level of Detail Strategies for
+// Real-Time Ray Tracing"). Each ray is a thin cone described by two scalars: `width` is the
+// footprint diameter at the ray origin (0 for a pinhole camera), `spreadAngle` is the angular
+// growth per unit distance (= pixelAngle for the primary ray).
+//
+// At a surface hit the world-space footprint diameter, with surface-slant correction, is:
+//   worldFoot = (cone.width + cone.spreadAngle * hitT) / |N.V|
+//
+// Setting `cone.width = worldFoot` before the next Trace() propagates the accumulated
+// footprint into the secondary ray, so reflections / refractions of textured surfaces get
+// the right mip instead of restarting at width = 0 (i.e. mip 0).
 //-----------------------------------------------------------------------
-float computePixelAngle(float4x4 projInv, float viewportHeight)
+struct RayCone
 {
-  return 2.0 * abs(projInv[1][1]) / max(viewportHeight, 1.0);
-}
+  float width       = 0.0f;  // footprint diameter at the ray origin (world units; 0 for a pinhole camera)
+  float spreadAngle = 0.0f;  // angular growth per unit distance (radians; pixelAngle for the primary ray)
+};
 
-//-----------------------------------------------------------------------
-// Ray-footprint texture LOD: compute the isotropic UV-space gradient magnitude for a ray hit.
-// Combines the camera pixel angle, ray travel distance, and triangle texel density
-// into a single scalar suitable for SampleGrad().
-//-----------------------------------------------------------------------
-float computeRayFootprintGrad(float hitT, float pixelAngle, float texelDensity)
+float rayConeWorldFootprint(RayCone cone, float hitT, float3 N, float3 V)
 {
-  return hitT * pixelAngle * texelDensity;
+  float w = cone.width + cone.spreadAngle * hitT;
+  return w / max(abs(dot(N, V)), 1e-3);
 }
 
 //-----------------------------------------------------------------------
@@ -909,16 +915,7 @@ bool checkInfinitePlaneIntersection(RayDesc ray, inout HitPayload payload, inout
 //    - Volumetric effects: transmission, attenuation, and scattering
 //    - Alpha transparency: stochastic alpha testing for correct compositing
 //
-SampleResult pathTrace(IRaytracer raytracer,
-                       RayDesc    ray,
-                       inout uint seed,
-                       float      pixelAngle
-#if WIREFRAME
-                       ,
-                       float3 wireDiffX,
-                       float3 wireDiffY
-#endif
-)
+SampleResult pathTrace(IRaytracer raytracer, RayDesc ray, inout uint seed)
 {
   float3      radiance     = float3(0.0F, 0.0F, 0.0F);
   float3      throughput   = float3(1.0F, 1.0F, 1.0F);
@@ -928,6 +925,11 @@ SampleResult pathTrace(IRaytracer raytracer,
   bool        solid        = true;
 
   float lastSamplePdf = DIRAC;
+
+  // Ray cone for texture-LOD propagation. Starts as a pinhole-camera primary cone
+  // (width=0, spreadAngle=pushConst.pixelAngle); width grows after each surface bounce so
+  // that secondary rays inherit the parent's accumulated footprint.
+  RayCone cone = { 0.0F, pushConst.pixelAngle };
 
 #if WIREFRAME
   float firstHitWireframeAlpha = 0.0;
@@ -966,14 +968,6 @@ SampleResult pathTrace(IRaytracer raytracer,
       SceneFrameInfo* frameInfo = pushConst.frameInfo;
       HitPayload      payload   = {};
 
-#if WIREFRAME
-      if(surfaceDepth == 0)
-      {
-        payload.differentialX = wireDiffX;
-        payload.differentialY = wireDiffY;
-      }
-#endif
-
       // Trace the ray through the scene
       raytracer.Trace(ray, payload, seed);
 
@@ -981,11 +975,6 @@ SampleResult pathTrace(IRaytracer raytracer,
       HitState hit = payload.hitState;
 
       bool firstRay = (surfaceDepth == 0);
-
-#if WIREFRAME
-      if(firstRay && payload.hitT != INFINITE)
-        firstHitWireframeAlpha = payload.wireframeAlpha;
-#endif
 
       // Check if we hit the infinite plane
       bool hitInfinitePlane = checkInfinitePlaneIntersection(ray, payload, hit, frameInfo);
@@ -1042,6 +1031,14 @@ SampleResult pathTrace(IRaytracer raytracer,
       GltfShadeMaterial material;  // The orginal glTF material
       PbrMaterial       pbrMat;    // The evalualted PBR material
 
+      // Ray-cone footprint at this hit. Computed once and reused: (a) as the texture-LOD
+      // gradient when we evaluate the material below, and (b) as the next-segment cone
+      // width when we propagate after a normal surface bounce.
+      // Use the geometric normal: the N·V slant term is a property of the surface plane,
+      // and a strong normal map can push the shading-normal slant into the clamp and
+      // inflate the footprint (Akenine-Möller et al. 2019).
+      float worldFoot = rayConeWorldFootprint(cone, payload.hitT, hit.geonrm, -ray.Direction);
+
       // If the ray hits the infinite plane
       if(hitInfinitePlane)
       {
@@ -1053,6 +1050,9 @@ SampleResult pathTrace(IRaytracer raytracer,
         // Shadow catcher: invisible plane that shows only shadows for compositing
         if(hasFlag(frameInfo->flags, SceneFrameInfoFlags::eSceneInfinitePlaneShadowCatcher))
         {
+          // Propagate the cone through the plane bounce before the shadow-catcher path
+          // potentially `continue`s past the normal propagation site below.
+          cone.width = worldFoot;
           bool continuePath = handleShadowCatcher(raytracer, hit, pbrMat, ray, radiance, throughput, lastSamplePdf, seed, frameInfo);
           if(!continuePath)
             break;
@@ -1075,11 +1075,25 @@ SampleResult pathTrace(IRaytracer raytracer,
 
         material.pbrBaseColorFactor *= hit.color;  // Modulate the base color with the vertex color
 
-        // Evaluate the material at the hit point (ray-footprint gradient for anisotropic texture LOD).
-        // texGradScale is a user knob: 0 falls through to Sample() (mip 0), 1 is the full physical gradient.
-        float texGrad  = computeRayFootprintGrad(payload.hitT, pixelAngle, hit.texelDensity) * pushConst.texGradScale;
-        MeshState mesh = MeshState(hit.nrm, hit.tangent, hit.bitangent, hit.geonrm, hit.uv, isInside, texGrad);
-        pbrMat         = evaluateMaterial(material, mesh, allTextures, texInfos);
+        // Texture LOD from the ray-cone footprint. texGradScale is a user knob: 0 falls
+        // through to Sample() (mip 0), 1 is the full physical gradient.
+        float     texGrad = worldFoot * hit.texelDensity * pushConst.texGradScale;
+        MeshState mesh    = MeshState(hit.nrm, hit.tangent, hit.bitangent, hit.geonrm, hit.uv, isInside, texGrad);
+        pbrMat            = evaluateMaterial(material, mesh, allTextures, texInfos);
+
+#if WIREFRAME
+        // Wireframe is only used for the camera-visible surface, so compute it once here on the
+        // first hit (instead of every Trace() like the old payload-routed version did). All inputs
+        // are already in scope, so this avoids carrying wireframeAlpha + pixelAngle in the payload.
+        if(firstRay)
+        {
+          uint3 triIdx = getTriangleIndices(renderPrim, payload.primitiveID);
+          firstHitWireframeAlpha =
+              computeMeshWireframe(renderNode.objectToWorld, getVertexPosition(renderPrim, triIdx.x),
+                                   getVertexPosition(renderPrim, triIdx.y), getVertexPosition(renderPrim, triIdx.z),
+                                   hit.pos, payload.hitT, pushConst.pixelAngle, hit.geonrm, -ray.Direction);
+        }
+#endif
       }
 
       // #DLSS - Capture specular hit distance on depth 1 (first reflection bounce)
@@ -1146,15 +1160,21 @@ SampleResult pathTrace(IRaytracer raytracer,
       // surface bounce budget; chains are bounded only by Russian Roulette past VOLUME_FREE_BUDGET events.
       if(isInside && (volumeMat.thickness > 0.0F))
       {
-        // Capture the pre-scatter direction: handleVolumeScatter overwrites ray.Direction on a real
-        // scatter event, but volumeScatterNEE needs the incoming wi to evaluate the HG phase cosine.
-        const float3 wiBeforeScatter = ray.Direction;
+        // Capture the pre-scatter direction and origin: handleVolumeScatter overwrites both on a
+        // real scatter event. volumeScatterNEE needs the incoming wi for the HG phase cosine, and
+        // we need the origin delta to advance the ray cone by the scatter distance.
+        const float3 wiBeforeScatter     = ray.Direction;
+        const float3 originBeforeScatter = ray.Origin;
 
         // volumeMat is the enclosing medium captured at boundary entry, not pbrMat (the surface we
         // just hit, which would have the wrong sigma_t / sigma_s for the in-volume segment).
         if(handleVolumeScatter(volumeMat, payload.hitT, ray, throughput, lastSamplePdf, seed))
         {
           scatterBounces++;
+
+          // Advance the cone by the in-volume travel distance. No slant correction (this is not
+          // a surface intersection) - the scatter just translates the cone along the ray.
+          cone.width += cone.spreadAngle * length(ray.Origin - originBeforeScatter);
 
           // NEE at the scatter point
           radiance += volumeScatterNEE(raytracer, volumeMat, ray.Origin, wiBeforeScatter, throughput, seed);
@@ -1172,6 +1192,11 @@ SampleResult pathTrace(IRaytracer raytracer,
         }
         // If no scatter, segment transmittance was applied inside handleVolumeScatter.
       }
+
+      // Normal surface bounce: propagate the cone footprint to the next segment. The new ray
+      // starts at hit.pos with the slant-corrected worldFoot as its starting width, so the
+      // next Trace()'s texture LOD inherits the full accumulated footprint.
+      cone.width = worldFoot;
 
       // Light contribution; can be environment or punctual lights
       DirectLight directLight;
@@ -1342,19 +1367,7 @@ SampleResult samplePixel(IRaytracer raytracer,
     ray.Direction = finalRayDir;
   }
 
-  float pixelAngle = computePixelAngle(projMatrixI, imageSize.y);
-
-#if WIREFRAME
-  float3 wireDiffX, wireDiffY;
-  computeDifferentials(samplePos, imageSize, viewMatrixI, projMatrixI, wireDiffX, wireDiffY);
-#endif
-
-  SampleResult sampleResult = pathTrace(raytracer, ray, seed, pixelAngle
-#if WIREFRAME
-                                        ,
-                                        wireDiffX, wireDiffY
-#endif
-  );
+  SampleResult sampleResult = pathTrace(raytracer, ray, seed);
 
   // Removing fireflies
   float lum = dot(sampleResult.radiance.xyz, float3(1.0F / 3.0F));
@@ -1396,7 +1409,7 @@ void processPixel(IRaytracer raytracer, float2 samplePos, float2 imageSize)
   // #DLSS - use the DLSS jitter and frame index (not resetting to zero)
   if(hasFlag(pushConst.flags, PathtracerFlags::ePtUseDlss))
   {
-    subpixelJitter += pushConst.jitter;
+    subpixelJitter += pushConst.frameInfo.jitter;
   }
   else
   {
@@ -1529,16 +1542,6 @@ void rchitMain(inout HitPayload payload, in BuiltInTriangleIntersectionAttribute
   payload.rnodeID     = instanceID;
   payload.primitiveID = primitiveID;
   payload.hitState    = hit;
-
-#if WIREFRAME
-  {
-    uint3 triIdx = getTriangleIndices(renderPrim, primitiveID);
-    payload.wireframeAlpha =
-        computeMeshWireframe(worldToObject, WorldRayOrigin(), getVertexPosition(renderPrim, triIdx.x),
-                             getVertexPosition(renderPrim, triIdx.y), getVertexPosition(renderPrim, triIdx.z),
-                             barycentrics, payload.differentialX, payload.differentialY);
-  }
-#endif
 }
 
 [shader("closesthit")]
