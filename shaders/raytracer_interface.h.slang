@@ -24,26 +24,15 @@
 #include "nvshaders/constants.h.slang"
 #include "nvshaders/random.h.slang"
 
-// Forward declarations
-float  getOpacity(GltfRenderNode renderNode, GltfRenderPrimitive renderPrim, int triangleID, float3 barycentrics);
-float3 getShadowTransmission(GltfRenderNode      renderNode,
-                             GltfRenderPrimitive renderPrim,
-                             int                 triangleID,
-                             float3              barycentrics,
-                             float               hitT,
-                             float4x3            worldToObject,
-                             float3              rayDirection,
-                             inout bool          isInside);
-
 // Payload for the path tracer
 struct HitPayload
 {
-  uint     seed;
-  float    hitT        = 0.0f;
-  int      rnodeID     = -1;
-  int      rprimID     = -1;
-  int      primitiveID = -1;
-  HitState hitState;
+  uint   seed;
+  float  hitT        = 0.0f;
+  int    rnodeID     = -1;
+  int    rprimID     = -1;
+  int    primitiveID = -1;
+  float2 bary        = float2(0);  // BuiltInTriangleIntersectionAttributes.barycentrics; third = 1 - x - y
 };
 
 // Shadow payload for the path tracer
@@ -54,50 +43,6 @@ struct ShadowPayload
   bool   isInside          = false;         // If true, the shadow ray is considered to start INSIDE a volume
   float3 totalTransmission = float3(1.0f);  // The total transmission of the shadow ray through the volume
 };
-
-#if WIREFRAME
-//-----------------------------------------------------------------------
-// Analytical wireframe alpha: closed-form barycentric deltas from the ray-cone footprint.
-//   worldFoot = hitT * pixelAngle / |N.V|              (slant-corrected, see rayConeWorldFootprint)
-//   d(bary_i) = worldFoot * |edge_opposite_i| / (2A)   (h_i = 2A / |edge_i|)
-// Inputs: object-space verts v0..v2 + objectToWorld (float4x4 from GltfRenderNode); world-space
-// hit position (barycentrics are recovered here via plane projection so the payload doesn't
-// have to carry them); N = world geometric normal; V = -ray.Direction.
-//-----------------------------------------------------------------------
-float computeMeshWireframe(float4x4 objectToWorld, float3 v0, float3 v1, float3 v2, float3 hitWorldPos, float hitT, float pixelAngle, float3 N, float3 V)
-{
-  // Triangle in world space (the cone footprint is a world-space quantity).
-  float3 wp0 = mul(float4(v0, 1.0), objectToWorld).xyz;
-  float3 wp1 = mul(float4(v1, 1.0), objectToWorld).xyz;
-  float3 wp2 = mul(float4(v2, 1.0), objectToWorld).xyz;
-
-  // Recover barycentrics from the world-space hit position (Ericson, "Real-Time Collision
-  // Detection", section 3.4). Saves carrying attr.barycentrics in the payload just for wireframe.
-  float3 e1       = wp1 - wp0;
-  float3 e2       = wp2 - wp0;
-  float3 ep       = hitWorldPos - wp0;
-  float  d11      = dot(e1, e1);
-  float  d12      = dot(e1, e2);
-  float  d22      = dot(e2, e2);
-  float  dp1      = dot(ep, e1);
-  float  dp2      = dot(ep, e2);
-  float  invDenom = 1.0 / max(d11 * d22 - d12 * d12, 1e-20);
-  float  baryV    = (d22 * dp1 - d12 * dp2) * invDenom;
-  float  baryW    = (d11 * dp2 - d12 * dp1) * invDenom;
-  float3 barys    = float3(1.0 - baryV - baryW, baryV, baryW);
-
-  // Slant-corrected ray-cone footprint on the surface.
-  float worldFoot = hitT * pixelAngle / max(abs(dot(N, V)), 1e-3);
-
-  // |grad(bary_i)| in world space is 1/h_i = |edge_opposite_i|/(2A); times worldFoot gives
-  // the per-pixel bary delta. Same role as fwidth(bary) in a raster pipeline.
-  float  twoArea  = length(cross(e1, e2));
-  float3 edgesOpp = float3(length(wp2 - wp1), length(wp0 - wp2), length(wp1 - wp0));
-  float3 deltas   = worldFoot * edgesOpp / max(twoArea, 1e-20);
-
-  return processWireframe(WIREFRAME_PRESETS[WIREFRAME_THIN], barys, deltas);
-}
-#endif
 
 // Raytracer interface definition
 interface IRaytracer
@@ -139,28 +84,11 @@ struct RayQueryRaytracer : IRaytracer
 
     if(rayQuery.CommittedStatus() == COMMITTED_TRIANGLE_HIT)
     {
-      float2   bary           = rayQuery.CommittedTriangleBarycentrics();
-      int      instanceID     = rayQuery.CommittedInstanceIndex();
-      int      renderPrimID   = rayQuery.CommittedInstanceID();
-      int      triID          = rayQuery.CommittedPrimitiveIndex();
-      float4x3 worldToObject  = rayQuery.CommittedWorldToObject4x3();
-      float4x3 objectToWorld  = rayQuery.CommittedObjectToWorld4x3();
-      float    hitT           = rayQuery.CommittedRayT();
-      float3   worldRayOrigin = ray.Origin;
-
-      // Retrieve the Primitive mesh buffer information
-      GltfRenderPrimitive renderPrim = pushConst.gltfScene->renderPrimitives[renderPrimID];
-
-      // Barycentric coordinate on the triangle
-      const float3 barycentrics = float3(1.0 - bary.x - bary.y, bary.x, bary.y);
-
-      HitState hit = getHitState(renderPrim, barycentrics, worldToObject, objectToWorld, triID, ray.Direction);
-
-      payload.hitT        = hitT;
-      payload.rprimID     = renderPrimID;
-      payload.rnodeID     = instanceID;
-      payload.primitiveID = triID;
-      payload.hitState    = hit;
+      payload.hitT        = rayQuery.CommittedRayT();
+      payload.rprimID     = rayQuery.CommittedInstanceID();
+      payload.rnodeID     = rayQuery.CommittedInstanceIndex();
+      payload.primitiveID = rayQuery.CommittedPrimitiveIndex();
+      payload.bary        = rayQuery.CommittedTriangleBarycentrics();
     }
   }
 
@@ -251,32 +179,14 @@ struct TraditionalRaytracer : IRaytracer
         return;
       }
 
-      // There is a hit: filling the payload with the hit information
-
-      // Barycentric coordinate on the triangle
+      // There is a hit: record only the raw triangle hit (HitState is rebuilt in pathTrace).
       BuiltInTriangleIntersectionAttributes attr = hitObj.GetAttributes<BuiltInTriangleIntersectionAttributes>();
-      float3 barycentrics = float3(1 - attr.barycentrics.x - attr.barycentrics.y, attr.barycentrics.x, attr.barycentrics.y);
 
-      int instanceID   = hitObj.GetInstanceIndex();
-      int renderPrimID = hitObj.GetInstanceID();
-      int primitiveID  = hitObj.GetPrimitiveIndex();
-
-      // Get the built-in ray tracing variables
-      float4x3 worldToObject  = hitObj.GetWorldToObject();
-      float4x3 objectToWorld  = hitObj.GetObjectToWorld();
-      float3   worldRayOrigin = ray.Origin;
-      float    hitT           = hitObj.GetRayDesc().TMax;  // Closest Hit point
-
-      // Retrieve the Primitive mesh buffer information
-      GltfRenderPrimitive renderPrim = pushConst.gltfScene->renderPrimitives[renderPrimID];
-
-      HitState hit = getHitState(renderPrim, barycentrics, worldToObject, objectToWorld, primitiveID, ray.Direction);
-
-      payload.hitT        = hitT;
-      payload.rprimID     = renderPrimID;
-      payload.rnodeID     = instanceID;
-      payload.primitiveID = primitiveID;
-      payload.hitState    = hit;
+      payload.hitT        = hitObj.GetRayDesc().TMax;
+      payload.rprimID     = hitObj.GetInstanceID();
+      payload.rnodeID     = hitObj.GetInstanceIndex();
+      payload.primitiveID = hitObj.GetPrimitiveIndex();
+      payload.bary        = attr.barycentrics;
     }
     else
     {
@@ -300,9 +210,9 @@ struct TraditionalRaytracer : IRaytracer
     }
     else
     {
-      // Accepted trade-off: this dispatches rchitMain which does full getHitState(),
-      // but only hitT/rnodeID are used. A dedicated minimal CHS would require an
-      // extra SBT entry. The SER path above already avoids this overhead.
+      // Accepted trade-off: this dispatches rchitMain, but only hitT/rnodeID are used.
+      // A dedicated minimal CHS would require an extra SBT entry. The SER path above
+      // already avoids that dispatch overhead.
       TraceRay(topLevelAS, RAY_FLAG_FORCE_OPAQUE | RAY_FLAG_CULL_BACK_FACING_TRIANGLES, 0xFF, 0, 0, 0, ray, payload);
     }
   }

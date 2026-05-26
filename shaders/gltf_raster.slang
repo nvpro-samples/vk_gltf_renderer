@@ -259,8 +259,8 @@ PixelOutput fragmentMain(VertexOutput input, uint primitiveID: SV_PrimitiveID, f
     worldRayDirection = normalize(input.worldPos - cameraPos);
   }
 
-  HitState hit = getHitState(renderPrimitive, baryWeights, float4x3(renderNode.worldToObject),
-                             float4x3(renderNode.objectToWorld), primitiveID, worldRayDirection);
+  HitState hit = getHitState(renderPrimitive, baryWeights, renderNode.worldToObject, renderNode.objectToWorld,
+                             primitiveID, worldRayDirection);
 
   // Modulate the material base color with the interpolated vertex color before evaluation so that
   // every downstream lobe (textures included) sees the COLOR_0 attribute. Matches the path tracer

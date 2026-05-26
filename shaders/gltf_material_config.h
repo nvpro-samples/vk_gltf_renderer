@@ -27,47 +27,52 @@ otherwise the material buffer layout will disagree.
 #ifndef GLTF_MATERIAL_CONFIG_H
 #define GLTF_MATERIAL_CONFIG_H
 
+// default for all MAT_EXT_* flags if not overridden by -D or predefinition0
+#define MATERIAL_EXTENSIONS_DEFAULT_VALUE 1
+
 #ifndef MAT_EXT_SPECULAR_GLOSSINESS
-#define MAT_EXT_SPECULAR_GLOSSINESS 1  // KHR_materials_pbrSpecularGlossiness
+#define MAT_EXT_SPECULAR_GLOSSINESS MATERIAL_EXTENSIONS_DEFAULT_VALUE  // KHR_materials_pbrSpecularGlossiness
 #endif
 #ifndef MAT_EXT_IOR
-#define MAT_EXT_IOR 1  // KHR_materials_ior
+#define MAT_EXT_IOR MATERIAL_EXTENSIONS_DEFAULT_VALUE  // KHR_materials_ior
 #endif
 #ifndef MAT_EXT_TRANSMISSION
-#define MAT_EXT_TRANSMISSION 1  // KHR_materials_transmission
+#define MAT_EXT_TRANSMISSION MATERIAL_EXTENSIONS_DEFAULT_VALUE  // KHR_materials_transmission
 #endif
 #ifndef MAT_EXT_VOLUME
-#define MAT_EXT_VOLUME 1  // KHR_materials_volume (attenuation + thickness)
+#define MAT_EXT_VOLUME MATERIAL_EXTENSIONS_DEFAULT_VALUE  // KHR_materials_volume (attenuation + thickness)
 #endif
 #ifndef MAT_EXT_VOLUME_SCATTER
-#define MAT_EXT_VOLUME_SCATTER 1  // KHR_materials_volume_scatter
+#define MAT_EXT_VOLUME_SCATTER MATERIAL_EXTENSIONS_DEFAULT_VALUE  // KHR_materials_volume_scatter
 #endif
 #ifndef MAT_EXT_CLEARCOAT
-#define MAT_EXT_CLEARCOAT 1  // KHR_materials_clearcoat
+#define MAT_EXT_CLEARCOAT MATERIAL_EXTENSIONS_DEFAULT_VALUE  // KHR_materials_clearcoat
 #endif
 #ifndef MAT_EXT_IRIDESCENCE
-#define MAT_EXT_IRIDESCENCE 1  // KHR_materials_iridescence
+#define MAT_EXT_IRIDESCENCE MATERIAL_EXTENSIONS_DEFAULT_VALUE  // KHR_materials_iridescence
 #endif
 #ifndef MAT_EXT_ANISOTROPY
-#define MAT_EXT_ANISOTROPY 1  // KHR_materials_anisotropy
+#define MAT_EXT_ANISOTROPY MATERIAL_EXTENSIONS_DEFAULT_VALUE  // KHR_materials_anisotropy
 #endif
 #ifndef MAT_EXT_SHEEN
-#define MAT_EXT_SHEEN 1  // KHR_materials_sheen
+#define MAT_EXT_SHEEN MATERIAL_EXTENSIONS_DEFAULT_VALUE  // KHR_materials_sheen
 #endif
 #ifndef MAT_EXT_DISPERSION
-#define MAT_EXT_DISPERSION 1  // KHR_materials_dispersion
+#define MAT_EXT_DISPERSION MATERIAL_EXTENSIONS_DEFAULT_VALUE  // KHR_materials_dispersion
 #endif
 #ifndef MAT_EXT_DIFFUSE_TRANSMISSION
-#define MAT_EXT_DIFFUSE_TRANSMISSION 1  // KHR_materials_diffuse_transmission
+#define MAT_EXT_DIFFUSE_TRANSMISSION MATERIAL_EXTENSIONS_DEFAULT_VALUE  // KHR_materials_diffuse_transmission
 #endif
 #ifndef MAT_EXT_UNLIT
-#define MAT_EXT_UNLIT 1  // KHR_materials_unlit
+#define MAT_EXT_UNLIT MATERIAL_EXTENSIONS_DEFAULT_VALUE  // KHR_materials_unlit
 #endif
 #ifndef MAT_EXT_SPECULAR
-#define MAT_EXT_SPECULAR 1  // KHR_materials_specular
+#define MAT_EXT_SPECULAR MATERIAL_EXTENSIONS_DEFAULT_VALUE  // KHR_materials_specular
 #endif
 #ifndef MAT_EXT_TEXTURE_TRANSFORM
-#define MAT_EXT_TEXTURE_TRANSFORM 1  // KHR_texture_transform (adds float3x2 to every GltfTextureInfo, ~24B/slot)
+#define MAT_EXT_TEXTURE_TRANSFORM                                                                                      \
+  MATERIAL_EXTENSIONS_DEFAULT_VALUE  // KHR_texture_transform (adds float3x2 to every GltfTextureInfo, ~24B/slot)
 #endif
+
 
 #endif  // GLTF_MATERIAL_CONFIG_H

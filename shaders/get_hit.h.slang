@@ -41,7 +41,7 @@ struct HitState
 // Compute the texel density of a triangle: the ratio of UV-space area to world-space area.
 // Returns sqrt(uvArea / worldArea). When multiplied by a world-space footprint
 // (hitT * pixelAngle), gives the UV-space gradient magnitude for SampleGrad().
-float computeTexelDensity(float3 pos0, float3 pos1, float3 pos2, float2 uv0, float2 uv1, float2 uv2, float4x3 objectToWorld)
+float computeTexelDensity(float3 pos0, float3 pos1, float3 pos2, float2 uv0, float2 uv1, float2 uv2, float4x4 objectToWorld)
 {
   float3 we1   = mul(float4(pos1 - pos0, 0.0), objectToWorld).xyz;
   float3 we2   = mul(float4(pos2 - pos0, 0.0), objectToWorld).xyz;
@@ -58,8 +58,8 @@ float computeTexelDensity(float3 pos0, float3 pos1, float3 pos2, float2 uv0, flo
 // Return hit information: position, normal, geonormal, uv, tangent, bitangent
 HitState getHitState(GltfRenderPrimitive renderPrim,  //
                      float3              barycentrics,
-                     float4x3            worldToObject,
-                     float4x3            objectToWorld,
+                     float4x4            worldToObject,
+                     float4x4            objectToWorld,
                      int                 triangleID,
                      float3              worldRayDirection)
 {
@@ -77,7 +77,7 @@ HitState getHitState(GltfRenderPrimitive renderPrim,  //
 
   // Geometric Normal
   const float3 geoNormal = normalize(cross(pos1 - pos0, pos2 - pos0));
-  hit.geonrm             = normalize(float3(mul(worldToObject, geoNormal).xyz));
+  hit.geonrm             = normalize(mul(worldToObject, float4(geoNormal, 0.0)).xyz);
 
   // Normal
   float3 nrm0   = geoNormal;
@@ -91,7 +91,7 @@ HitState getHitState(GltfRenderPrimitive renderPrim,  //
     nrm2   = getVertexNormal(renderPrim, triangleIndex.z);
     normal = nrm0 * barycentrics.x + nrm1 * barycentrics.y + nrm2 * barycentrics.z;
   }
-  hit.nrm = normalize(float3(mul(worldToObject, normal).xyz));
+  hit.nrm = normalize(mul(worldToObject, float4(normal, 0.0)).xyz);
 
   // Front-face is checked so the shadow-terminator `pointOffset` below can pre-flip
   // the per-vertex normals; without it, back-face hits on doubleSided meshes (e.g. leaf
@@ -104,7 +104,7 @@ HitState getHitState(GltfRenderPrimitive renderPrim,  //
   // side for back-face hits on doubleSided meshes.
   float3 shadowPos = pointOffset(position, pos0, pos1, pos2,
                                  nrm0 * sideFlip, nrm1 * sideFlip, nrm2 * sideFlip, barycentrics);
-  hit.shadowPos    = float3(mul(float4(shadowPos, 1.0), objectToWorld));
+  hit.shadowPos    = mul(float4(shadowPos, 1.0), objectToWorld).xyz;
 
   // TexCoord
   hit.uv[0] = getInterpolatedVertexTexCoord(renderPrim, 0, triangleIndex, barycentrics);
@@ -143,7 +143,7 @@ HitState getHitState(GltfRenderPrimitive renderPrim,  //
     tng[2]   = t;
   }
   hit.tangent   = normalize(mixBary(tng[0].xyz, tng[1].xyz, tng[2].xyz, barycentrics));
-  hit.tangent   = float3(mul(float4(hit.tangent, 0.0), objectToWorld));
+  hit.tangent   = mul(float4(hit.tangent, 0.0), objectToWorld).xyz;
   hit.tangent   = normalize(hit.tangent - hit.nrm * dot(hit.nrm, hit.tangent));
   hit.bitangent = cross(hit.nrm, hit.tangent) * tng[0].w;
 

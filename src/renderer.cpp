@@ -217,40 +217,36 @@ void GltfRenderer::onAttach(nvapp::Application* app)
   m_resources.instance = app->getInstance();
   m_resources.app      = app;
 
-  // ===== Settings Handler (ImGui persistant) =====
-  if(!m_app->isHeadless())
-  {
-    // Read/store the information in the settings file, only if not headless
-    m_settingsHandler.setHandlerName("GltfRenderer");
-    m_settingsHandler.setSetting("maxFrames", &m_resources.settings.maxFrames);
-    m_settingsHandler.setSetting("showAxis", &m_resources.settings.showAxis);
-    m_settingsHandler.setSetting("showGrid", &m_resources.settings.showGrid);
-    m_settingsHandler.setSetting("showGizmo", &m_resources.settings.showGizmo);
-    m_settingsHandler.setSetting("snapEnabled", &m_resources.settings.snapEnabled);
-    m_settingsHandler.setSetting("gridUnit", &m_resources.settings.gridUnit);
-    m_settingsHandler.setSetting("snapRotation", &m_resources.settings.snapRotation);
-    m_settingsHandler.setSetting("snapScale", &m_resources.settings.snapScale);
-    m_settingsHandler.setSetting("showGridSettingsWindow", &m_resources.settings.showGridSettingsWindow);
-    m_settingsHandler.setSetting("showMemStats", &m_resources.settings.showMemStats);
-    m_settingsHandler.setSetting("showCameraWindow", &m_resources.settings.showCameraWindow);
-    m_settingsHandler.setSetting("showSettingsWindow", &m_resources.settings.showSettingsWindow);
-    m_settingsHandler.setSetting("showEnvironmentWindow", &m_resources.settings.showEnvironmentWindow);
-    m_settingsHandler.setSetting("showTonemapperWindow", &m_resources.settings.showTonemapperWindow);
-    m_settingsHandler.setSetting("showStatisticsWindow", &m_resources.settings.showStatisticsWindow);
-    m_settingsHandler.setSetting("showSceneBrowserWindow", &m_resources.settings.showSceneBrowserWindow);
-    m_settingsHandler.setSetting("showInspectorWindow", &m_resources.settings.showInspectorWindow);
-    m_settingsHandler.setSetting("envSystem", (int*)&m_resources.settings.envSystem);
-    m_settingsHandler.setSetting("renderSystem", (int*)&m_resources.settings.renderSystem);
-    m_settingsHandler.setSetting("useSolidBackground", &m_resources.settings.useSolidBackground);
-    m_settingsHandler.setSetting("solidBackgroundColor", &m_resources.settings.solidBackgroundColor);
-    m_pathTracer.setSettingsHandler(&m_settingsHandler);
-    m_rasterizer.setSettingsHandler(&m_settingsHandler);
-    m_settingsHandler.setLoadFilter([this](const std::string& key) {
-      // Skip loading settings that were explicitly set via the command line
-      return !(m_parameterParser && m_parameterParser->wasParsed(key));
-    });
-    m_settingsHandler.addImGuiHandler();
-  }
+  // ===== Settings Handler (ImGui persistent) =====
+  m_settingsHandler.setHandlerName("GltfRenderer");
+  m_settingsHandler.setSetting("maxFrames", &m_resources.settings.maxFrames);
+  m_settingsHandler.setSetting("showAxis", &m_resources.settings.showAxis);
+  m_settingsHandler.setSetting("showGrid", &m_resources.settings.showGrid);
+  m_settingsHandler.setSetting("showGizmo", &m_resources.settings.showGizmo);
+  m_settingsHandler.setSetting("snapEnabled", &m_resources.settings.snapEnabled);
+  m_settingsHandler.setSetting("gridUnit", &m_resources.settings.gridUnit);
+  m_settingsHandler.setSetting("snapRotation", &m_resources.settings.snapRotation);
+  m_settingsHandler.setSetting("snapScale", &m_resources.settings.snapScale);
+  m_settingsHandler.setSetting("showGridSettingsWindow", &m_resources.settings.showGridSettingsWindow);
+  m_settingsHandler.setSetting("showMemStats", &m_resources.settings.showMemStats);
+  m_settingsHandler.setSetting("showCameraWindow", &m_resources.settings.showCameraWindow);
+  m_settingsHandler.setSetting("showSettingsWindow", &m_resources.settings.showSettingsWindow);
+  m_settingsHandler.setSetting("showEnvironmentWindow", &m_resources.settings.showEnvironmentWindow);
+  m_settingsHandler.setSetting("showTonemapperWindow", &m_resources.settings.showTonemapperWindow);
+  m_settingsHandler.setSetting("showStatisticsWindow", &m_resources.settings.showStatisticsWindow);
+  m_settingsHandler.setSetting("showSceneBrowserWindow", &m_resources.settings.showSceneBrowserWindow);
+  m_settingsHandler.setSetting("showInspectorWindow", &m_resources.settings.showInspectorWindow);
+  m_settingsHandler.setSetting("envSystem", (int*)&m_resources.settings.envSystem);
+  m_settingsHandler.setSetting("renderSystem", (int*)&m_resources.settings.renderSystem);
+  m_settingsHandler.setSetting("useSolidBackground", &m_resources.settings.useSolidBackground);
+  m_settingsHandler.setSetting("solidBackgroundColor", &m_resources.settings.solidBackgroundColor);
+  m_pathTracer.setSettingsHandler(&m_settingsHandler);
+  m_rasterizer.setSettingsHandler(&m_settingsHandler);
+  m_settingsHandler.setLoadFilter([this](const std::string& key) {
+    // Skip loading settings that were explicitly set via the command line
+    return !(m_parameterParser && m_parameterParser->wasParsed(key));
+  });
+  m_settingsHandler.addImGuiHandler();
 
   // Customize ImGui style for better visibility
   ImGui::GetStyle().Colors[ImGuiCol_ButtonActive] = (ImVec4)ImColor::HSV(0.3F, 0.5F, 0.5F);

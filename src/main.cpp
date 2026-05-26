@@ -429,6 +429,12 @@ auto main(int argc, char** argv) -> int
     elemGltfRenderer->createHDR(hdrFilename);
   }
 
+  // In headless mode, prevent ImGui from writing the .ini back to disk:
+  if(appInfo.headless)
+  {
+    ImGui::GetIO().IniFilename = nullptr;
+  }
+
   app.run();
   app.deinit();
 
