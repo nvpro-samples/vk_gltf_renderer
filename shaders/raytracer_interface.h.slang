@@ -50,7 +50,7 @@ struct HitPayload
 struct ShadowPayload
 {
   uint seed;
-  float prevHitT = 0.0f;  // The previous candidate hit's absolute RayT (in-order assumption); rahitShadow / TraceShadow use it to compute the segment length for Beer's-law volume attenuation between consecutive transmissive hits.
+  float prevHitT = 0.0f;  // The previous accepted any-hit's absolute RayT. rahitShadow takes abs(hitT - prevHitT) as the in-volume segment length for Beer's-law attenuation between consecutive transmissive hits. Spatial ordering of any-hit invocations is not guaranteed; abs() is an approximation that works well for thin/convex volumes.
   bool   isInside          = false;         // If true, the shadow ray is considered to start INSIDE a volume
   float3 totalTransmission = float3(1.0f);  // The total transmission of the shadow ray through the volume
 };

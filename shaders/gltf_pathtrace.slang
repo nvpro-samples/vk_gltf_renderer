@@ -1623,15 +1623,18 @@ void rahitShadow(inout ShadowPayload payload, in BuiltInTriangleIntersectionAttr
   float r       = rand(payload.seed);
   if(r < opacity)
   {
-    // anyhit invocations arrive in spatial order (TraceRay default), so the in-volume segment
-    // length is just the delta between consecutive accepted hit distances.
-    float segmentLength = max(0.0F, hitT - payload.prevHitT);
-    payload.prevHitT    = hitT;
+    // Segment length for Beer's law inside getShadowTransmission (only used when isInside == true).
+    // abs() guards against any-hit invocations arriving out of spatial order, which Vulkan/DXR
+    // do not guarantee. This is an approximation; a fully correct version would chain
+    // closest-hit traces along the ray instead of accumulating in any-hit.
+    float segmentLength = abs(hitT - payload.prevHitT);
+
     bool   isInside     = payload.isInside;
     float3 transmission = getShadowTransmission(renderNode, renderPrim, primitiveID, barycentrics, segmentLength,
                                                 worldToObject, worldRayDir, isInside);
 
     payload.isInside = isInside;
+    payload.prevHitT = hitT;  // keep the actual previous hit T, not the segment length
     payload.totalTransmission *= transmission;
 
     if(max(max(payload.totalTransmission.r, payload.totalTransmission.g), payload.totalTransmission.b) <= MIN_TRANSMISSION)
