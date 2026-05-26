@@ -524,6 +524,37 @@ All settings can be overridden from the command line using `--paramName value` s
 ./vk_gltf_renderer --headless --scenefile shader_ball.gltf --hdrfile daytime.hdr --envSystem 1 --frames 1000 --output render.jpg
 ```
 
+**Benchmarking (scripted regression)**
+
+| Parameter | Description |
+|---|---|
+| `--benchmark` | Enable scripted benchmark mode (requires `--sequencefile` or `--sequencestring`) |
+| `--sequencefile <path>` | Benchmark script (`.cfg`) with `SEQUENCE` blocks |
+| `--sequenceframes <N>` | Frames per sequence (script override) |
+| `--sequenceaverages <N>` | Profiler averaging window |
+| `--sequenceresetframes <N>` | Warmup frames after each sequence |
+| `--gltfCamera <index>` | Apply glTF camera (benchmark script) |
+| `--fitScene` | Fit camera to scene bounds (benchmark script) |
+| `--resetFrame` / `--updateData` | Reset path-tracer accumulation |
+| `--screenshot <path>` | Save tonemapped image (benchmark script) |
+
+Single-scene manual run:
+
+```bash
+./vk_gltf_renderer --benchmark 1 --size 1920 1080 \
+  --sequencefile utils/benchmark/quick.cfg \
+  --scenefile shader_ball.gltf --hdrfile std_env.hdr
+```
+
+Batch runs, CSV export, and baseline vs candidate comparison:
+
+```bash
+python utils/benchmark/benchmark.py headless --scene resources/shader_ball.gltf --frames 500
+python utils/benchmark/benchmark.py run quick.cfg --scene resources/shader_ball.gltf --hdr std_env.hdr
+```
+
+See [Benchmarking](benchmarking.md) for headless A/B timing, script format, and interpretation of results.
+
 ---
 
 ## Utilities

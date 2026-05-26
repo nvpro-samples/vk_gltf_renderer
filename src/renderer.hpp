@@ -41,10 +41,12 @@
 #include <nvvk/profiler_vk.hpp>
 #include "nvutils/parameter_parser.hpp"
 #include "nvutils/parameter_registry.hpp"
+#include "nvutils/parameter_sequencer.hpp"
 
 // Shader Input/Output
 #include "shaders/shaderio.h"  // Shared between host and device
 
+#include "benchmarking.hpp"
 #include "renderer_pathtracer.hpp"
 #include "renderer_rasterizer.hpp"
 #include "resources.hpp"
@@ -60,8 +62,11 @@
 class GltfRenderer : public nvapp::IAppElement
 {
 public:
-  GltfRenderer(nvutils::ParameterRegistry* parameterReg, const nvutils::ParameterParser* parameterParser);
+  GltfRenderer(nvutils::ParameterRegistry* parameterReg, const nvutils::ParameterParser* parameterParser, BenchmarkOptions& benchmarkOptions);
   ~GltfRenderer() override = default;
+
+  /// Emits parseable BENCHMARK_ADV memory block (called from ParameterSequencer post-callback).
+  void benchmarkAdvance(const nvutils::ParameterSequencer::State& state);
 
   void createScene(const std::filesystem::path& sceneFilename);
   void createSceneFromDescriptor(const std::filesystem::path& descriptorPath);
@@ -73,6 +78,8 @@ public:
   std::shared_ptr<nvutils::CameraManipulator> getCameraManipulator() { return m_cameraManip; }
   void                                        registerRecentFilesHandler();
   void                                        setDlssHardwareAvailability(bool rrAvailable, bool srAvailable);
+  /// Ensures path-tracer accumulation covers the full headless run (--maxFrames >= --frames).
+  void alignMaxFramesForHeadless(uint32_t headlessFrames);
 
 private:
   void onAttach(nvapp::Application* app) override;
@@ -113,6 +120,14 @@ private:
   bool updateSceneChanges(VkCommandBuffer cmd);
   bool updateAnimation(VkCommandBuffer cmd);
 
+  // Headless / scripted benchmark (shared automation paths)
+  [[nodiscard]] bool                             isBenchmarkMode() const;
+  [[nodiscard]] bool                             isHeadlessMode() const;
+  [[nodiscard]] bool                             isAutomatedRun() const;
+  BenchmarkController::HeadlessFrameInfo         benchmarkFrameInfo() const;
+  std::vector<BenchmarkController::MemorySample> benchmarkMemorySamples() const;
+  void                                           saveHeadlessOutputImage();
+
   // updateSceneChanges phase helpers (keep main function readable)
   void updateSceneChanges_BlasRebuild(const nvvkgltf::Scene::DirtyFlags& df);
   void updateSceneChanges_NodeTransforms(VkCommandBuffer cmd, nvvkgltf::Scene* scene, const nvvkgltf::Scene::DirtyFlags& df);
@@ -124,6 +139,7 @@ private:
 
   // UI
   void          renderUI();
+  void          renderBenchmarkViewport();  // Minimal fullscreen image (benchmark mode)
   void          renderMenu();
   void          renderFileMenu(bool                   validScene,
                                bool&                  newScene,
@@ -174,8 +190,9 @@ private:
   nvvk::ProfilerGpuTimer                      m_profilerGpuTimer{};  // GPU profiler
   std::shared_ptr<nvutils::CameraManipulator> m_cameraManip;         // Camera manipulator
 
-  nvutils::PerformanceTimer m_cpuTimer;               // CPU performance timer
+  nvutils::PerformanceTimer m_cpuTimer;               // CPU performance timer (path-tracer accumulation window)
   bool                      m_cpuTimePrinted{false};  // Track if CPU time has been printed
+
 #ifndef NDEBUG
   bool m_validateGpuSync{true};
   bool m_skipGpuSyncValidation{false};  // GPU transform path skipped uploadRenderNodes / CPU TLAS sync
@@ -224,4 +241,6 @@ private:
 
   nvgui::SettingsHandler          m_settingsHandler;    // Settings handler for ImGui.ini
   const nvutils::ParameterParser* m_parameterParser{};  // CLI parameter parser, for INI load filtering (see wasParsed)
+
+  BenchmarkController m_benchmark;
 };

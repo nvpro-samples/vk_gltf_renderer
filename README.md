@@ -100,6 +100,8 @@ cmake --build build
 
 For a **full walkthrough** of rendering modes, editor workflows, and feature screenshots, see the [User Guide](docs/user-guide.md).
 
+For **headless timing** and optional scripted GPU benchmarks, see [Benchmarking](docs/benchmarking.md) (`utils/benchmark/`).
+
 ## glTF Support
 
 ### Core

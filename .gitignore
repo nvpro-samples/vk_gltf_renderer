@@ -32,5 +32,9 @@ tests/build/
 tests/resources/temp/
 *.test
 *.benchmark
-
+_benchmark/
+utils/benchmark/output/
+__pycache__/
 _package/
+*.pyc
+

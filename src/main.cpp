@@ -34,9 +34,11 @@
 #include <nvapp/elem_dbgprintf.hpp>
 #include <nvapp/elem_logger.hpp>
 #include <nvapp/elem_profiler.hpp>
+#include <nvapp/elem_sequencer.hpp>
 #include <nvgpu_monitor/elem_gpu_monitor.hpp>
 #include <nvutils/file_operations.hpp>
 #include <nvutils/parameter_parser.hpp>
+#include <nvutils/parameter_sequencer.hpp>
 #include <nvvk/context.hpp>
 #include <nvvk/validation_settings.hpp>
 
@@ -76,6 +78,16 @@ auto main(int argc, char** argv) -> int
   logger.breakOnError(false);
 #endif
 
+  BenchmarkOptions benchmarkOptions;
+
+  nvutils::ParameterRegistry            parameterRegistry;
+  nvutils::ParameterParser              cli(nvutils::getExecutablePath().stem().string(), {".txt"});
+  nvutils::ParameterSequencer::InitInfo sequencerInfo{
+      .parameterParser   = &cli,
+      .parameterRegistry = &parameterRegistry,
+      .profilerManager   = &g_profilerManager,
+  };
+
   // Global variables
   std::filesystem::path sceneFilename{};             // "shader_ball.gltf"};  // Default scene
   std::filesystem::path hdrFilename{"std_env.hdr"};  // Default HDR
@@ -84,56 +96,79 @@ auto main(int argc, char** argv) -> int
   appInfo.preferredVsyncOffMode = VK_PRESENT_MODE_MAILBOX_KHR;
 
   // Command line parameters registration
-  nvutils::ParameterRegistry parameterRegistry;
   parameterRegistry.add({"scenefile", "Input scene filename"}, {".gltf"}, &sceneFilename);
   parameterRegistry.add({"hdrfile", "Input HDR filename"}, {".hdr"}, &hdrFilename);
   parameterRegistry.addVector({"size", "Size of the window to be created", "s"}, &appInfo.windowSize);
   parameterRegistry.add({"headless"}, &appInfo.headless, true);
   parameterRegistry.add({"frames", "Number of frames to run in headless mode"}, &appInfo.headlessFrameCount);
   parameterRegistry.add({"vsync"}, &appInfo.vSync);
+  parameterRegistry.add({"benchmark", "Enable benchmarking: scripted sequences, no vsync, minimal UI"},
+                        &benchmarkOptions.enabled);
   parameterRegistry.add({"vvl", "Activate Vulkan Validation Layer"}, &vkSetup.enableValidationLayers);
-  parameterRegistry.add({"logLevel", "Log level: [Info:0, Warning:1, Error:2]"}, reinterpret_cast<int*>(&logLevel));
+  parameterRegistry.add({"logLevel", "Log level: [Stats:1, Info:3, Warning:4, Error:5]"}, reinterpret_cast<int*>(&logLevel));
   parameterRegistry.add({"logShow", "Show extra log info (bitset): [0:None, 1:Time, 2:Level]"}, reinterpret_cast<int*>(&logShow));
   parameterRegistry.add({"device", "force a vulkan device via index into the device list"}, &vkSetup.forceGPU);
   parameterRegistry.add({"vsyncOffMode", "Preferred VSync Off mode: [0:Immediate, 1:Mailbox, 2:FIFO, 3:FIFO Relax]"},
                         reinterpret_cast<int*>(&appInfo.preferredVsyncOffMode));
   parameterRegistry.add({"floatingWindows", "Allow dock windows to be separate windows"}, &appInfo.hasUndockableViewport, true);
 
-
   // Don't show the profiler by default
   auto profilerSettings  = std::make_shared<nvapp::ElementProfiler::ViewSettings>();
   profilerSettings->show = false;
 
-  // The command line parser is declared here so its address can be passed to GltfRenderer,
-  // which queries `wasParsed()` at runtime (after `cli.parse()` has populated the parser).
-  nvutils::ParameterParser cli(nvutils::getExecutablePath().stem().string());
+  // Create renderer early so it can register CLI/benchmark parameters
+  auto elemGltfRenderer = std::make_shared<GltfRenderer>(&parameterRegistry, &cli, benchmarkOptions);
 
-  // Create all application elements
-  auto elemGltfRenderer = std::make_shared<GltfRenderer>(&parameterRegistry, &cli);
-  auto elemGpuMonitor   = std::make_shared<nvgpu_monitor::ElementGpuMonitor>();
-  auto elemProfiler     = std::make_shared<nvapp::ElementProfiler>(&g_profilerManager, profilerSettings);
-  auto elemLogger       = std::make_shared<nvapp::ElementLogger>(false);
-
-#ifdef USE_DBG_PRINTF
-  auto elemDbgPrintf = std::make_shared<nvapp::ElementDbgPrintf>();
-#endif
-
-  // Adding an element logger (UI), where all log will be redirected to
-  elemLogger->setLevelFilter(nvapp::ElementLogger::eBitERROR | nvapp::ElementLogger::eBitWARNING | nvapp::ElementLogger::eBitINFO);
-
-  // The logger will redirect the log to the Element Logger, to be displayed in the UI
-  nvutils::Logger::getInstance().setLogCallback([elemLogger](nvutils::Logger::LogLevel logLevel, const std::string& str) {
-    elemLogger->addLog(logLevel, "%s", str.c_str());
-  });
+  sequencerInfo.registerScriptParameters(parameterRegistry, cli);
+  sequencerInfo.postCallbacks.emplace_back(
+      [&](const nvutils::ParameterSequencer::State& state) { elemGltfRenderer->benchmarkAdvance(state); });
 
   // Adding the parameter registry to the command line parser and parsing arguments
   cli.add(parameterRegistry);
   cli.parse(argc, argv);
+  cli.setVerbose(benchmarkOptions.enabled);
+
+  if(appInfo.headless)
+  {
+    elemGltfRenderer->alignMaxFramesForHeadless(appInfo.headlessFrameCount);
+  }
+
+  if(benchmarkOptions.enabled)
+  {
+    logLevel = nvutils::Logger::LogLevel::eSTATS;
+    if(!sequencerInfo.hasScript())
+    {
+      LOGE("Benchmark mode requires --sequencefile or --sequencestring\n");
+      return -1;
+    }
+  }
 
   // Using the command line parameters
   logger.setMinimumLogLevel(logLevel);
   logger.setShowFlags(logShow);
 
+  std::shared_ptr<nvapp::ElementSequencer> elemSequencer;
+  if(sequencerInfo.hasScript())
+  {
+    elemSequencer = std::make_shared<nvapp::ElementSequencer>(sequencerInfo);
+  }
+
+  auto elemGpuMonitor = std::make_shared<nvgpu_monitor::ElementGpuMonitor>();
+  auto elemProfiler   = std::make_shared<nvapp::ElementProfiler>(&g_profilerManager, profilerSettings);
+  auto elemLogger     = std::make_shared<nvapp::ElementLogger>(false);
+
+#ifdef USE_DBG_PRINTF
+  auto elemDbgPrintf = std::make_shared<nvapp::ElementDbgPrintf>();
+#endif
+
+  if(!benchmarkOptions.enabled)
+  {
+    elemLogger->setLevelFilter(nvapp::ElementLogger::eBitERROR | nvapp::ElementLogger::eBitWARNING | nvapp::ElementLogger::eBitINFO);
+
+    nvutils::Logger::getInstance().setLogCallback([elemLogger](nvutils::Logger::LogLevel logLevelCb, const std::string& str) {
+      elemLogger->addLog(logLevelCb, "%s", str.c_str());
+    });
+  }
 
   // Extension feature needed.
   // clang-format off
@@ -310,7 +345,7 @@ auto main(int argc, char** argv) -> int
   appInfo.device         = vkContext.getDevice();
   appInfo.physicalDevice = vkContext.getPhysicalDevice();
   appInfo.queues         = vkContext.getQueueInfos();
-
+  appInfo.useMenu        = !benchmarkOptions.enabled;
 
   // Setting up the layout of the application
   appInfo.dockSetup = [](ImGuiID viewportID) {
@@ -354,13 +389,25 @@ auto main(int argc, char** argv) -> int
 
   elemGltfRenderer->registerRecentFilesHandler();
 
+  if(elemSequencer)
+  {
+    app.addElement(elemSequencer);
+  }
   app.addElement(elemGltfRenderer);
-  app.addElement(elemLogger);
-  app.addElement(elemGpuMonitor);
-  app.addElement(elemProfiler);
+  if(!benchmarkOptions.enabled)
+  {
+    app.addElement(elemLogger);
+    app.addElement(elemGpuMonitor);
+    app.addElement(elemProfiler);
 #ifdef USE_DBG_PRINTF
-  app.addElement(elemDbgPrintf);
+    app.addElement(elemDbgPrintf);
 #endif
+  }
+
+  if(benchmarkOptions.enabled)
+  {
+    app.setVsync(false);
+  }
 
   // Loading the scene and the HDR
 #ifdef USE_DEFAULT_SCENE

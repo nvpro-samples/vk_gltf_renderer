@@ -131,9 +131,24 @@ bool webPLoadCallback(nvvkgltf::SceneVk::SceneImage& image, const void* data, si
 }
 }  // namespace
 
+namespace {
+
+uint64_t sumTrackerCurrentBytes(const nvvkgltf::GpuMemoryTracker& tracker)
+{
+  return tracker.getTotalStats().currentBytes;
+}
+
+uint64_t sumTrackerPeakBytes(const nvvkgltf::GpuMemoryTracker& tracker)
+{
+  return tracker.getTotalStats().peakBytes;
+}
+
+}  // namespace
+
 // The constructor registers the parameters that can be set from the command line
-GltfRenderer::GltfRenderer(nvutils::ParameterRegistry* paramReg, const nvutils::ParameterParser* paramParser)
+GltfRenderer::GltfRenderer(nvutils::ParameterRegistry* paramReg, const nvutils::ParameterParser* paramParser, BenchmarkOptions& benchmarkOptions)
     : m_parameterParser(paramParser)
+    , m_benchmark(benchmarkOptions)
 {
   // All parameters that can be set from the command line
   paramReg->add({"envSystem", "Environment: [Sky:0, HDR:1]"}, (int*)&m_resources.settings.envSystem);
@@ -162,6 +177,29 @@ GltfRenderer::GltfRenderer(nvutils::ParameterRegistry* paramReg, const nvutils::
   // Register PathTracer-specific command line parameters
   m_pathTracer.registerParameters(paramReg);
   m_rasterizer.registerParameters(paramReg);
+
+  m_benchmark.registerParameters(
+      paramReg, {
+                    .applyGltfCamera = [this](int cameraIndex) { applyGltfCamera(cameraIndex); },
+                    .fitScene =
+                        [this]() {
+                          if(m_resources.getScene() && m_resources.getScene()->valid())
+                          {
+                            const nvutils::Bbox bbox = m_resources.getScene()->getSceneBounds();
+                            m_cameraManip->fit(bbox.min(), bbox.max(), false, true, m_cameraManip->getAspectRatio());
+                            resetFrame();
+                          }
+                        },
+                    .resetFrame = [this]() { resetFrame(); },
+                    .saveScreenshot =
+                        [this](const std::filesystem::path& filename) {
+                          if(m_app)
+                          {
+                            m_app->saveImageToFile(m_resources.gBuffers.getColorImage(Resources::eImgTonemapped),
+                                                   m_resources.gBuffers.getSize(), filename);
+                          }
+                        },
+                });
 
   // Initialize camera manipulator
   m_cameraManip           = std::make_shared<nvutils::CameraManipulator>();
@@ -216,7 +254,6 @@ void GltfRenderer::onAttach(nvapp::Application* app)
 
   // Customize ImGui style for better visibility
   ImGui::GetStyle().Colors[ImGuiCol_ButtonActive] = (ImVec4)ImColor::HSV(0.3F, 0.5F, 0.5F);
-
 
   // ===== Memory Allocation & Buffer Management =====
   m_resources.allocator.init({
@@ -452,8 +489,86 @@ void GltfRenderer::onResize(VkCommandBuffer cmd, const VkExtent2D& size)
 // 6. Processing changes from UI interactions and triggering re-rendering when needed
 // 7. Displaying the busy indicator during asynchronous operations
 // The UI layout is organized hierarchically with collapsible sections for better usability
+bool GltfRenderer::isBenchmarkMode() const
+{
+  return m_benchmark.isBenchmarkMode();
+}
+
+bool GltfRenderer::isHeadlessMode() const
+{
+  return m_app != nullptr && m_app->isHeadless();
+}
+
+bool GltfRenderer::isAutomatedRun() const
+{
+  return isHeadlessMode() || isBenchmarkMode();
+}
+
+void GltfRenderer::alignMaxFramesForHeadless(uint32_t headlessFrames)
+{
+  BenchmarkController::alignMaxFramesForHeadless(m_resources.settings.maxFrames, headlessFrames);
+}
+
+BenchmarkController::HeadlessFrameInfo GltfRenderer::benchmarkFrameInfo() const
+{
+  return {.totalFrames = m_app ? m_app->getHeadlessFrameCount() : 0,
+          .maxFrames   = m_resources.settings.maxFrames,
+          .ptSamples   = m_pathTracer.m_pushConst.numSamples,
+          .imageSize   = m_resources.gBuffers.getSize()};
+}
+
+std::vector<BenchmarkController::MemorySample> GltfRenderer::benchmarkMemorySamples() const
+{
+  std::vector<BenchmarkController::MemorySample> samples;
+  if(m_resources.getScene() && m_resources.getScene()->valid())
+  {
+    const uint64_t sceneUsed = sumTrackerCurrentBytes(m_resources.sceneVk.getMemoryTracker())
+                               + sumTrackerCurrentBytes(m_resources.sceneRtx.getMemoryTracker())
+                               + sumTrackerCurrentBytes(m_resources.transformCompute.getMemoryTracker())
+                               + sumTrackerCurrentBytes(m_resources.animationVk.getMemoryTracker());
+    const uint64_t scenePeak = sumTrackerPeakBytes(m_resources.sceneVk.getMemoryTracker())
+                               + sumTrackerPeakBytes(m_resources.sceneRtx.getMemoryTracker())
+                               + sumTrackerPeakBytes(m_resources.transformCompute.getMemoryTracker())
+                               + sumTrackerPeakBytes(m_resources.animationVk.getMemoryTracker());
+    samples.push_back({.category = "Scene", .deviceUsed = sceneUsed, .deviceAllocated = scenePeak});
+  }
+  else
+  {
+    samples.push_back({.category = "Scene"});
+  }
+
+  const auto& appStats = m_resources.appMemoryTracker.getTotalStats();
+  samples.push_back({.category = (m_resources.settings.renderSystem == RenderingMode::ePathtracer) ? "PathTracer" : "Rasterizer",
+                     .deviceUsed      = appStats.currentBytes,
+                     .deviceAllocated = appStats.peakBytes});
+  return samples;
+}
+
+void GltfRenderer::saveHeadlessOutputImage()
+{
+  std::string                 outputPath = m_resources.headlessOutputPath.empty() ?
+                                               nvutils::getExecutablePath().replace_extension(".jpg").string() :
+                                               m_resources.headlessOutputPath.string();
+  const std::filesystem::path parentDir  = std::filesystem::path(outputPath).parent_path();
+  if(!parentDir.empty() && !std::filesystem::exists(parentDir))
+  {
+    LOGW("GltfRenderer::saveHeadlessOutputImage(): output directory does not exist for path %s\n", outputPath.c_str());
+  }
+  if(!m_app)
+  {
+    LOGE("GltfRenderer::saveHeadlessOutputImage(): application is not set; cannot save image to %s\n", outputPath.c_str());
+    return;
+  }
+  m_app->saveImageToFile(m_resources.gBuffers.getColorImage(Resources::eImgTonemapped), m_resources.gBuffers.getSize(), outputPath);
+}
+
 void GltfRenderer::onUIRender()
 {
+  if(isBenchmarkMode())
+  {
+    renderBenchmarkViewport();
+    return;
+  }
   renderUI();
 }
 
@@ -478,7 +593,7 @@ void GltfRenderer::onRender(VkCommandBuffer cmd)
   }
 
   // Loading pipeline: submit queued work, poll completion, run callbacks
-  if(m_app->isHeadless())
+  if(isAutomatedRun())
     m_loadPipeline.drain();
   else if(m_loadPipeline.poll())
     return;  // Still loading -- give control back to the UI
@@ -492,6 +607,8 @@ void GltfRenderer::onRender(VkCommandBuffer cmd)
     clearGbuffer(cmd);
     return;
   }
+
+  m_benchmark.beginHeadlessTimingIfNeeded(isHeadlessMode(), benchmarkFrameInfo());
 
   // Start the profiler section for the GPU timer
   auto timerSection = m_profilerGpuTimer.cmdFrameSection(cmd, __FUNCTION__);
@@ -576,7 +693,20 @@ void GltfRenderer::onRender(VkCommandBuffer cmd)
   // Apply the post-processing effects
   tonemap(cmd);
   silhouette(cmd);
-  renderVisualHelpers(cmd);
+  if(!isAutomatedRun())
+  {
+    renderVisualHelpers(cmd);
+  }
+
+  m_benchmark.updateHeadlessProgressIfNeeded(benchmarkFrameInfo());
+}
+
+//--------------------------------------------------------------------------------------------------
+// Per-sequence benchmark memory report (parsed by utils/benchmark/benchmark.py)
+void GltfRenderer::benchmarkAdvance(const nvutils::ParameterSequencer::State& state)
+{
+  (void)state;
+  m_benchmark.emitSequenceMemory(benchmarkMemorySamples());
 }
 
 
@@ -591,14 +721,9 @@ void GltfRenderer::onUIMenu()
 // Called with headless rendering, to save the final image
 void GltfRenderer::onLastHeadlessFrame()
 {
-  std::string outputPath = m_resources.headlessOutputPath.empty() ?
-                               nvutils::getExecutablePath().replace_extension(".jpg").string() :
-                               m_resources.headlessOutputPath.string();
-  if(!std::filesystem::exists(std::filesystem::path(outputPath).parent_path()))
-  {
-    LOGW("GltfRenderer::onLastHeadlessFrame(): output directory does not exist for path %s\n", outputPath.c_str());
-  }
-  m_app->saveImageToFile(m_resources.gBuffers.getColorImage(Resources::eImgTonemapped), m_resources.gBuffers.getSize(), outputPath);
+  m_benchmark.logHeadlessSummary(benchmarkFrameInfo());
+  saveHeadlessOutputImage();
+  m_benchmark.finishHeadlessTiming();
 }
 
 //--------------------------------------------------------------------------------------------------
@@ -1494,14 +1619,14 @@ void GltfRenderer::createDescriptorSets()
   // and every nvvk::GBuffer UI descriptor (main: 3, DLSS: 8, OptiX: 2 + margin) is now a
   // single VK_DESCRIPTOR_TYPE_SAMPLED_IMAGE (post ImGui 2026-04-22 backend change), so we
   // reserve one SAMPLED_IMAGE descriptor per allocated UI set.
-  constexpr uint32_t kGBufferUiMaxSets = 15;
-  std::vector<VkDescriptorPoolSize> poolSize = m_resources.descriptorBinding[0].calculatePoolSizes();
+  constexpr uint32_t                kGBufferUiMaxSets = 15;
+  std::vector<VkDescriptorPoolSize> poolSize          = m_resources.descriptorBinding[0].calculatePoolSizes();
   poolSize.push_back({VK_DESCRIPTOR_TYPE_SAMPLED_IMAGE, kGBufferUiMaxSets});
   VkDescriptorPoolCreateInfo dpoolInfo = {
       .sType = VK_STRUCTURE_TYPE_DESCRIPTOR_POOL_CREATE_INFO,
       .flags = VK_DESCRIPTOR_POOL_CREATE_UPDATE_AFTER_BIND_BIT |  // allows descriptor sets to be updated after they have been bound to a command buffer
                VK_DESCRIPTOR_POOL_CREATE_FREE_DESCRIPTOR_SET_BIT,  // individual descriptor sets can be freed from the descriptor pool
-      .maxSets       = kGBufferUiMaxSets + 1,  // GBuffer UI sets + the scene texture set
+      .maxSets       = kGBufferUiMaxSets + 1,                      // GBuffer UI sets + the scene texture set
       .poolSizeCount = uint32_t(poolSize.size()),
       .pPoolSizes    = poolSize.data(),
   };

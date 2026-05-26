@@ -107,7 +107,15 @@ if(BUILD_TESTING)
 endif()
 
 # Adding all sources
-file(GLOB EXE_SOURCES "src/*.cpp" "src/*.hpp" "src/*.h" "*.md")
+# Collect all application source and markdown files.
+# The CONFIGURE_DEPENDS flag tells CMake to re-run the configure step if any of these files are added or removed.
+file(GLOB EXE_SOURCES CONFIGURE_DEPENDS
+  "src/*.cpp"
+  "src/*.hpp"
+  "src/*.h"
+  "*.md"
+)
+# EXE_SOURCES now contains all .cpp, .hpp, .h files in src/, plus top-level markdown files.
 list(FILTER EXE_SOURCES EXCLUDE REGEX "dlss*")
 list(FILTER EXE_SOURCES EXCLUDE REGEX "vk_cuda*")
 list(FILTER EXE_SOURCES EXCLUDE REGEX "optix_denoiser*")

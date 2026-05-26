@@ -274,6 +274,30 @@ void GltfRenderer::loadHdrFileDialog()
   }
 }
 
+void GltfRenderer::renderBenchmarkViewport()
+{
+  // GPU rendering runs in onRender(); the swapchain only shows content when ImGui draws
+  // the tonemapped G-buffer (see Application::renderToSwapchain).
+  m_cameraManip->updateAnim();
+
+  const ImGuiViewport* vp = ImGui::GetMainViewport();
+  ImGui::SetNextWindowPos(vp->WorkPos);
+  ImGui::SetNextWindowSize(vp->WorkSize);
+  ImGui::PushStyleVar(ImGuiStyleVar_WindowPadding, ImVec2(0.0F, 0.0F));
+  ImGui::Begin("Viewport", nullptr,
+               ImGuiWindowFlags_NoDecoration | ImGuiWindowFlags_NoMove | ImGuiWindowFlags_NoResize
+                   | ImGuiWindowFlags_NoSavedSettings | ImGuiWindowFlags_NoNav | ImGuiWindowFlags_NoBringToFrontOnFocus);
+
+  if(m_resources.getScene() && m_resources.getScene()->valid())
+  {
+    const ImVec2 imageSize = ImGui::GetContentRegionAvail();
+    ImGui::Image(ImTextureID(m_resources.gBuffers.getDescriptorSet(Resources::eImgTonemapped)), imageSize);
+  }
+
+  ImGui::End();
+  ImGui::PopStyleVar();
+}
+
 void GltfRenderer::renderUI()
 {
   static int frameCount = 0;

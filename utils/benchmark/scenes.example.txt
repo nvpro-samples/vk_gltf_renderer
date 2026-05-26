@@ -1,0 +1,3 @@
+# Example scenes list for:
+#   python utils/benchmark/benchmark.py run matrix.cfg --scenes-file utils/benchmark/scenes.example.txt --scenes-root .
+shader_ball resources/shader_ball.gltf
