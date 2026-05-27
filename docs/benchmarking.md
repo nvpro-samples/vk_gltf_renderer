@@ -2,7 +2,7 @@
 
 Two workflows:
 
-1. **Headless timing (recommended)** — total wall time for N frames at 1 or 5 samples per pixel; compare logs between builds.
+1. **Headless timing (recommended)** — post-warmup render throughput for N frames at 1 or 5 samples per pixel; compare logs between builds.
 2. **Scripted sequencer** — multi-step `.cfg` matrix with per-stage GPU profiler stats (optional, heavier).
 
 ## Headless timing (simple)
@@ -26,17 +26,19 @@ While rendering, periodic progress lines confirm the run is not stuck (every 50 
 HEADLESS_START frames=500 maxFrames=500 ptSamples=1
 HEADLESS_PROGRESS app_frame 50/500 (10%) elapsed_ms=1234.5 ms_per_frame=24.69
 ...
-HEADLESS_SUMMARY frames=500 maxFrames=500 ptSamples=1 effective_spp=500 resolution=1920x1080 wall_ms=12345.678 ms_per_frame=24.691 throughput_MSps=84.0 spp_per_sec=40.49
+HEADLESS_SUMMARY frames=500 maxFrames=500 ptSamples=1 effective_spp=500 measured_effective_spp=499 resolution=1920x1080 wall_ms=12320.987 ms_per_frame=24.691 total_wall_ms=12345.678 total_ms_per_frame=24.691 warmup_frames=1 measured_frames=499 throughput_MSps=84.0 spp_per_sec=40.49
 BENCHMARK_JSON {"schema":1,"type":"headless_summary",...}
 ```
 
 - **app_frame** — headless loop index (`--frames`).
 - In headless mode, `main()` raises `--maxFrames` to at least `--frames` if you set it lower, so every app frame can accumulate samples during timing runs.
-- **wall_ms** — wall-clock time for the headless render loop (what you want for A/B builds).
-- **ms_per_frame** — `wall_ms / frames`.
-- **effective_spp** — `min(frames, maxFrames) × ptSamples` (actual accumulated samples per pixel).
-- **throughput_MSps** — mega pixel-samples per second (`resolution × effective_spp / wall_s / 10⁶`; higher is faster).
-- **spp_per_sec** — `effective_spp / wall_s` at this resolution (how fast quality accumulates; higher is faster).
+- **wall_ms** — measured post-warmup render time. The first completed frame is excluded so one-time setup such as shader specialization is not charged to throughput.
+- **total_wall_ms** — full headless render-loop wall time, including warmup and any synchronous setup.
+- **ms_per_frame** — `wall_ms / measured_frames`.
+- **effective_spp** — total final-image accumulation: `min(frames, maxFrames) × ptSamples`.
+- **measured_effective_spp** — accumulation covered by the measured post-warmup window.
+- **throughput_MSps** — measured mega pixel-samples per second (`resolution × measured_effective_spp / wall_s / 10⁶`; higher is faster).
+- **spp_per_sec** — measured `measured_effective_spp / wall_s` at this resolution (how fast quality accumulates; higher is faster).
 
 Repeat with `--ptSamples 5` for 5 spp per frame (`effective_spp=2500`).
 

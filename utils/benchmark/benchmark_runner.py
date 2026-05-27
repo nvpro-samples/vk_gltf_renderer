@@ -140,9 +140,19 @@ def run_headless_timing(
                     f"  throughput_MSps={run.summary['throughput_MSps']}  "
                     f"spp/s={run.summary['spp_per_sec']}"
                 )
+            wall_label = "wall_ms"
+            wall_value = run.summary["wall_ms"]
+            if "total_wall_ms" in run.summary:
+                wall_label = "measured_wall_ms"
+                wall_value = run.summary["wall_ms"]
+                extra += (
+                    f"  total_wall_ms={run.summary['total_wall_ms']}  "
+                    f"warmup_frames={run.summary.get('warmup_frames', '0')}"
+                )
+            effective_spp = run.summary.get("measured_effective_spp", run.summary["effective_spp"])
             print(
-                f"  wall_ms={run.summary['wall_ms']}  ms/frame={run.summary['ms_per_frame']}  "
-                f"effective_spp={run.summary['effective_spp']}{extra}"
+                f"  {wall_label}={wall_value}  ms/frame={run.summary['ms_per_frame']}  "
+                f"measured_effective_spp={effective_spp}{extra}"
             )
         else:
             print("  Warning: headless summary not found in log (rebuild vk_gltf_renderer?)")

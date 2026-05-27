@@ -125,12 +125,16 @@ private:
   // every kHeadlessLogMinIntervalMs of wall time, whichever comes first.
   static constexpr uint32_t kHeadlessLogEveryNFrames  = 50;
   static constexpr double   kHeadlessLogMinIntervalMs = 5000.0;
+  static constexpr uint32_t kHeadlessWarmupFrames     = 1;
 
-  BenchmarkOptions&         m_options;                         // Shared with the application
-  Callbacks                 m_callbacks;                       // Renderer hooks (may be empty)
-  nvutils::PerformanceTimer m_headlessWallTimer;               // Wall-clock for the active headless run
-  bool                      m_headlessTimingActive{false};     // Guard for begin/update/summary calls
-  uint32_t                  m_headlessFramesDone{0};           // Frames completed in the active run
-  double                    m_headlessLastProgressLogMs{0.0};  // Wall time of the last progress log
-  int                       m_sequenceId{0};                   // Auto-incremented per emitSequenceMemory() call
+  BenchmarkOptions&         m_options;                              // Shared with the application
+  Callbacks                 m_callbacks;                            // Renderer hooks (may be empty)
+  nvutils::PerformanceTimer m_headlessWallTimer;                    // Wall-clock for the active headless run
+  nvutils::PerformanceTimer m_headlessMeasuredTimer;                // Wall-clock after warmup frames
+  bool                      m_headlessTimingActive{false};          // Guard for begin/update/summary calls
+  bool                      m_headlessMeasuredTimingActive{false};  // True once warmup is complete
+  uint32_t                  m_headlessFramesDone{0};                // Frames completed in the active run
+  uint32_t                  m_headlessMeasuredStartFrame{0};        // Completed frames excluded from measured timing
+  double                    m_headlessLastProgressLogMs{0.0};       // Wall time of the last progress log
+  int                       m_sequenceId{0};                        // Auto-incremented per emitSequenceMemory() call
 };

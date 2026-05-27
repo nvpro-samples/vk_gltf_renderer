@@ -31,8 +31,122 @@ def _record_value(record: dict[str, Any], key: str) -> str:
     return str(value)
 
 
+def _format_number(value: float, digits: int = 3) -> str:
+    return f"{value:.{digits}f}".rstrip("0").rstrip(".")
+
+
+def _parse_int(value: str | None, default: int = 0) -> int:
+    if value is None:
+        return default
+    try:
+        return int(float(value))
+    except ValueError:
+        return default
+
+
+def _parse_float(value: str | None, default: float = 0.0) -> float:
+    if value is None:
+        return default
+    try:
+        return float(value)
+    except ValueError:
+        return default
+
+
+def _add_measured_window_from_progress(summary: dict[str, str], records: Iterable[dict[str, Any]]) -> dict[str, str]:
+    """Derive post-warmup timing for older logs that only stored total wall time."""
+    if "measured_frames" in summary and "total_wall_ms" in summary:
+        return summary
+
+    progress = [
+        record
+        for record in records
+        if record.get("type") == "headless_progress"
+        and isinstance(record.get("app_frame"), int)
+        and isinstance(record.get("elapsed_ms"), (int, float))
+    ]
+    if len(progress) < 2:
+        return summary
+
+    progress.sort(key=lambda record: int(record["app_frame"]))
+    start = progress[0]
+    end = progress[-1]
+    start_frame = int(start["app_frame"])
+    end_frame = int(end["app_frame"])
+    start_elapsed = float(start["elapsed_ms"])
+    end_elapsed = float(end["elapsed_ms"])
+    measured_frames = end_frame - start_frame
+    total_wall_ms = _parse_float(summary.get("total_wall_ms") or summary.get("wall_ms"), 0.0)
+    measured_wall_ms = total_wall_ms - start_elapsed if total_wall_ms > end_elapsed else end_elapsed - start_elapsed
+    if measured_frames <= 0 or measured_wall_ms <= 0.0:
+        return summary
+
+    result = dict(summary)
+    result.setdefault("total_wall_ms", result.get("wall_ms", ""))
+    result.setdefault("total_ms_per_frame", result.get("ms_per_frame", ""))
+    result["warmup_frames"] = str(start_frame)
+    result["measured_frames"] = str(measured_frames)
+    result["wall_ms"] = _format_number(measured_wall_ms)
+    result["ms_per_frame"] = _format_number(measured_wall_ms / measured_frames)
+
+    pt_samples = max(_parse_int(result.get("ptSamples"), 1), 1)
+    total_accum_frames = _parse_int(result.get("effective_spp"), 0) // pt_samples
+    if total_accum_frames <= 0:
+        frames = _parse_int(result.get("frames"), end_frame)
+        max_frames = max(_parse_int(result.get("maxFrames"), frames), 0)
+        total_accum_frames = min(frames, max_frames)
+    measured_accum_frames = min(max(total_accum_frames - start_frame, 0), measured_frames)
+    measured_effective_spp = measured_accum_frames * pt_samples
+    result["measured_effective_spp"] = str(measured_effective_spp)
+
+    width = _parse_int(result.get("resolution_w"), 0)
+    height = _parse_int(result.get("resolution_h"), 0)
+    measured_wall_sec = measured_wall_ms / 1000.0
+    if width > 0 and height > 0 and measured_wall_sec > 0.0:
+        samples = float(width * height * measured_effective_spp)
+        result["throughput_MSps"] = _format_number(samples / measured_wall_sec / 1e6)
+    if measured_wall_sec > 0.0:
+        result["spp_per_sec"] = _format_number(measured_effective_spp / measured_wall_sec, 2)
+
+    return result
+
+
+def _parse_legacy_headless_summary(log_text: str) -> dict[str, str] | None:
+    for line in log_text.splitlines():
+        if "HEADLESS_SUMMARY" not in line:
+            continue
+        values = dict(re.findall(r"([A-Za-z_]+)=([^\s]+)", line))
+        required = ["frames", "maxFrames", "ptSamples", "effective_spp", "wall_ms", "ms_per_frame"]
+        if not all(key in values for key in required):
+            continue
+
+        result = {key: values[key] for key in required}
+        for key in [
+            "measured_effective_spp",
+            "total_wall_ms",
+            "total_ms_per_frame",
+            "warmup_frames",
+            "measured_frames",
+            "throughput_MSps",
+            "spp_per_sec",
+            "samples_per_ms",
+        ]:
+            if key in values:
+                result[key] = values[key]
+
+        if "resolution" in values and "x" in values["resolution"]:
+            width, height = values["resolution"].split("x", 1)
+            result["resolution_w"] = width
+            result["resolution_h"] = height
+        if "throughput_GSps" in values and "throughput_MSps" not in result:
+            result["throughput_MSps"] = str(float(values["throughput_GSps"]) * 1000.0)
+        return result
+    return None
+
+
 def parse_headless_summary(log_text: str) -> dict[str, str] | None:
-    for record in iter_benchmark_records(log_text):
+    records = list(iter_benchmark_records(log_text))
+    for record in records:
         if record.get("type") != "headless_summary":
             continue
         fields = [
@@ -40,48 +154,25 @@ def parse_headless_summary(log_text: str) -> dict[str, str] | None:
             "maxFrames",
             "ptSamples",
             "effective_spp",
+            "measured_effective_spp",
             "resolution_w",
             "resolution_h",
             "wall_ms",
             "ms_per_frame",
+            "total_wall_ms",
+            "total_ms_per_frame",
+            "warmup_frames",
+            "measured_frames",
             "throughput_MSps",
             "spp_per_sec",
         ]
-        return {key: _record_value(record, key) for key in fields if key in record}
+        summary = {key: _record_value(record, key) for key in fields if key in record}
+        return _add_measured_window_from_progress(summary, records)
 
-    match = re.search(
-        r"HEADLESS_SUMMARY frames=(\d+) maxFrames=(-?\d+) ptSamples=(-?\d+) "
-        r"effective_spp=(-?\d+) "
-        r"(?:resolution=(\d+)x(\d+) )?"
-        r"wall_ms=([\d.]+) ms_per_frame=([\d.]+)"
-        r"(?: throughput_MSps=([\d.]+) spp_per_sec=([\d.]+))?"
-        r"(?: throughput_GSps=([\d.]+)(?: ms_per_Mpx_spp=[\d.]+)? spp_per_sec=([\d.]+))?"
-        r"(?: samples_per_ms=([\d.]+))?",
-        log_text,
-    )
-    if not match:
+    legacy_summary = _parse_legacy_headless_summary(log_text)
+    if not legacy_summary:
         return None
-
-    result = {
-        "frames": match.group(1),
-        "maxFrames": match.group(2),
-        "ptSamples": match.group(3),
-        "effective_spp": match.group(4),
-        "wall_ms": match.group(7),
-        "ms_per_frame": match.group(8),
-    }
-    if match.group(5) and match.group(6):
-        result["resolution_w"] = match.group(5)
-        result["resolution_h"] = match.group(6)
-    if match.group(9):
-        result["throughput_MSps"] = match.group(9)
-        result["spp_per_sec"] = match.group(10)
-    elif match.group(11):
-        result["throughput_MSps"] = str(float(match.group(11)) * 1000.0)
-        result["spp_per_sec"] = match.group(12)
-    elif match.group(13):
-        result["samples_per_ms"] = match.group(13)
-    return result
+    return _add_measured_window_from_progress(legacy_summary, records)
 
 
 def _parse_json_memory_records(log_text: str) -> dict[int, dict[str, dict[str, int]]]:
@@ -318,18 +409,37 @@ def compare_headless_logs(baseline_log: str, candidate_log: str) -> int:
     candidate_wall = float(candidate["wall_ms"])
     delta_pct = ((candidate_wall - baseline_wall) / baseline_wall * 100.0) if baseline_wall > 0 else 0.0
     direction = "same" if abs(delta_pct) < 0.005 else ("slower" if delta_pct > 0 else "faster")
-    print(f"Baseline: {baseline['ptSamples']} spp/frame  wall_ms={baseline_wall:.3f}  ms/frame={baseline['ms_per_frame']}")
-    print(f"Candidate: {candidate['ptSamples']} spp/frame  wall_ms={candidate_wall:.3f}  ms/frame={candidate['ms_per_frame']}")
-    print(f"Delta: {delta_pct:+.2f}% wall time ({direction})")
+    baseline_total = float(baseline.get("total_wall_ms", baseline["wall_ms"]))
+    candidate_total = float(candidate.get("total_wall_ms", candidate["wall_ms"]))
+    total_delta = ((candidate_total - baseline_total) / baseline_total * 100.0) if baseline_total > 0 else 0.0
+
+    baseline_frames = baseline.get("measured_frames", baseline["frames"])
+    candidate_frames = candidate.get("measured_frames", candidate["frames"])
+    baseline_warmup = baseline.get("warmup_frames", "0")
+    candidate_warmup = candidate.get("warmup_frames", "0")
+    print(
+        f"Baseline: {baseline['ptSamples']} spp/frame  measured_wall_ms={baseline_wall:.3f}  "
+        f"ms/frame={baseline['ms_per_frame']}  measured_frames={baseline_frames}  warmup_frames={baseline_warmup}"
+    )
+    print(
+        f"Candidate: {candidate['ptSamples']} spp/frame  measured_wall_ms={candidate_wall:.3f}  "
+        f"ms/frame={candidate['ms_per_frame']}  measured_frames={candidate_frames}  warmup_frames={candidate_warmup}"
+    )
+    print(f"Measured delta: {delta_pct:+.2f}% wall time ({direction})")
+    if "total_wall_ms" in baseline or "total_wall_ms" in candidate:
+        print(
+            f"Total wall: baseline {baseline_total:.3f} ms  candidate {candidate_total:.3f} ms  "
+            f"delta={total_delta:+.2f}%"
+        )
 
     if "throughput_MSps" in baseline and "throughput_MSps" in candidate:
         baseline_msps = float(baseline["throughput_MSps"])
         candidate_msps = float(candidate["throughput_MSps"])
         msps_delta = ((candidate_msps - baseline_msps) / baseline_msps * 100.0) if baseline_msps > 0 else 0.0
-        print(f"Throughput: baseline {baseline_msps:.3f} MSps  candidate {candidate_msps:.3f} MSps  delta={msps_delta:+.2f}%")
+        print(f"Measured throughput: baseline {baseline_msps:.3f} MSps  candidate {candidate_msps:.3f} MSps  delta={msps_delta:+.2f}%")
     if "spp_per_sec" in baseline and "spp_per_sec" in candidate:
         baseline_sps = float(baseline["spp_per_sec"])
         candidate_sps = float(candidate["spp_per_sec"])
         sps_delta = ((candidate_sps - baseline_sps) / baseline_sps * 100.0) if baseline_sps > 0 else 0.0
-        print(f"Accum rate: baseline {baseline_sps:.2f} spp/s  candidate {candidate_sps:.2f} spp/s  delta={sps_delta:+.2f}%")
+        print(f"Measured accum rate: baseline {baseline_sps:.2f} spp/s  candidate {candidate_sps:.2f} spp/s  delta={sps_delta:+.2f}%")
     return 0

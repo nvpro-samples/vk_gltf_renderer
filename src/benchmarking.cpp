@@ -181,9 +181,12 @@ void BenchmarkController::beginHeadlessTimingIfNeeded(bool isHeadless, const Hea
   }
 
   m_headlessWallTimer.reset();
-  m_headlessTimingActive      = true;
-  m_headlessFramesDone        = 0;
-  m_headlessLastProgressLogMs = 0.0;
+  m_headlessMeasuredTimer.reset();
+  m_headlessTimingActive         = true;
+  m_headlessMeasuredTimingActive = false;
+  m_headlessFramesDone           = 0;
+  m_headlessMeasuredStartFrame   = 0;
+  m_headlessLastProgressLogMs    = 0.0;
 
   LOGI("HEADLESS_START frames=%u maxFrames=%d ptSamples=%d\n", info.totalFrames, info.maxFrames, info.ptSamples);
   emitJsonLine({{"type", "headless_start"}, {"frames", info.totalFrames}, {"maxFrames", info.maxFrames}, {"ptSamples", info.ptSamples}});
@@ -206,6 +209,13 @@ void BenchmarkController::updateHeadlessProgressIfNeeded(const HeadlessFrameInfo
   const bool   onInterval  = (m_headlessFramesDone % kHeadlessLogEveryNFrames) == 0;
   const bool   onTime      = (elapsedMs - m_headlessLastProgressLogMs) >= kHeadlessLogMinIntervalMs;
   const bool   firstOrLast = m_headlessFramesDone == 1 || m_headlessFramesDone >= info.totalFrames;
+
+  if(!m_headlessMeasuredTimingActive && m_headlessFramesDone >= kHeadlessWarmupFrames)
+  {
+    m_headlessMeasuredTimer.reset();
+    m_headlessMeasuredTimingActive = true;
+    m_headlessMeasuredStartFrame   = m_headlessFramesDone;
+  }
 
   if(!firstOrLast && !onInterval && !onTime)
   {
@@ -242,31 +252,53 @@ void BenchmarkController::logHeadlessSummary(const HeadlessFrameInfo& info)
     return;
   }
 
-  const double wallMs     = m_headlessWallTimer.getMilliseconds();
-  const double wallSec    = wallMs / 1000.0;
-  const double msPerFrame = info.totalFrames > 0 ? wallMs / static_cast<double>(info.totalFrames) : 0.0;
+  const double totalWallMs     = m_headlessWallTimer.getMilliseconds();
+  const double totalMsPerFrame = info.totalFrames > 0 ? totalWallMs / static_cast<double>(info.totalFrames) : 0.0;
 
-  const int      accumFrames  = std::min(static_cast<int>(info.totalFrames), std::max(info.maxFrames, 0));
-  const int      effectiveSpp = accumFrames * std::max(info.ptSamples, 1);
+  const uint32_t completedFrames = std::min(m_headlessFramesDone, info.totalFrames);
+  uint32_t       warmupFrames    = 0;
+  uint32_t       measuredFrames  = completedFrames;
+  double         measuredWallMs  = totalWallMs;
+  if(m_headlessMeasuredTimingActive && completedFrames >= m_headlessMeasuredStartFrame)
+  {
+    warmupFrames   = m_headlessMeasuredStartFrame;
+    measuredFrames = completedFrames - m_headlessMeasuredStartFrame;
+    measuredWallMs = measuredFrames > 0 ? m_headlessMeasuredTimer.getMilliseconds() : 0.0;
+  }
+
+  const double measuredWallSec    = measuredWallMs / 1000.0;
+  const double measuredMsPerFrame = measuredFrames > 0 ? measuredWallMs / static_cast<double>(measuredFrames) : 0.0;
+
+  const int accumFrames = std::min(static_cast<int>(info.totalFrames), std::max(info.maxFrames, 0));
+  const int measuredAccumFrames = std::clamp(accumFrames - static_cast<int>(warmupFrames), 0, static_cast<int>(measuredFrames));
+  const int      effectiveSpp         = accumFrames * std::max(info.ptSamples, 1);
+  const int      measuredEffectiveSpp = measuredAccumFrames * std::max(info.ptSamples, 1);
   const uint64_t pixels = static_cast<uint64_t>(info.imageSize.width) * static_cast<uint64_t>(info.imageSize.height);
-  const double   totalSamples   = static_cast<double>(pixels) * static_cast<double>(effectiveSpp);
-  const double   throughputMSps = wallSec > 0.0 ? totalSamples / wallSec / 1e6 : 0.0;
-  const double   sppPerSec      = wallSec > 0.0 ? static_cast<double>(effectiveSpp) / wallSec : 0.0;
+  const double   measuredSamples = static_cast<double>(pixels) * static_cast<double>(measuredEffectiveSpp);
+  const double   throughputMSps  = measuredWallSec > 0.0 ? measuredSamples / measuredWallSec / 1e6 : 0.0;
+  const double   sppPerSec = measuredWallSec > 0.0 ? static_cast<double>(measuredEffectiveSpp) / measuredWallSec : 0.0;
 
   LOGI(
-      "HEADLESS_SUMMARY frames=%u maxFrames=%d ptSamples=%d effective_spp=%d resolution=%ux%u wall_ms=%.3f "
-      "ms_per_frame=%.3f throughput_MSps=%.3f spp_per_sec=%.2f\n",
-      info.totalFrames, info.maxFrames, info.ptSamples, effectiveSpp, info.imageSize.width, info.imageSize.height,
-      wallMs, msPerFrame, throughputMSps, sppPerSec);
+      "HEADLESS_SUMMARY frames=%u maxFrames=%d ptSamples=%d effective_spp=%d measured_effective_spp=%d "
+      "resolution=%ux%u wall_ms=%.3f ms_per_frame=%.3f total_wall_ms=%.3f total_ms_per_frame=%.3f "
+      "warmup_frames=%u measured_frames=%u throughput_MSps=%.3f spp_per_sec=%.2f\n",
+      info.totalFrames, info.maxFrames, info.ptSamples, effectiveSpp, measuredEffectiveSpp, info.imageSize.width,
+      info.imageSize.height, measuredWallMs, measuredMsPerFrame, totalWallMs, totalMsPerFrame, warmupFrames,
+      measuredFrames, throughputMSps, sppPerSec);
   emitJsonLine({{"type", "headless_summary"},
                 {"frames", info.totalFrames},
                 {"maxFrames", info.maxFrames},
                 {"ptSamples", info.ptSamples},
                 {"effective_spp", effectiveSpp},
+                {"measured_effective_spp", measuredEffectiveSpp},
                 {"resolution_w", info.imageSize.width},
                 {"resolution_h", info.imageSize.height},
-                {"wall_ms", roundTo(wallMs, 1000.0)},
-                {"ms_per_frame", roundTo(msPerFrame, 1000.0)},
+                {"wall_ms", roundTo(measuredWallMs, 1000.0)},
+                {"ms_per_frame", roundTo(measuredMsPerFrame, 1000.0)},
+                {"total_wall_ms", roundTo(totalWallMs, 1000.0)},
+                {"total_ms_per_frame", roundTo(totalMsPerFrame, 1000.0)},
+                {"warmup_frames", warmupFrames},
+                {"measured_frames", measuredFrames},
                 {"throughput_MSps", roundTo(throughputMSps, 1000.0)},
                 {"spp_per_sec", roundTo(sppPerSec, 100.0)}});
 }
@@ -276,7 +308,8 @@ void BenchmarkController::logHeadlessSummary(const HeadlessFrameInfo& info)
 // until beginHeadlessTimingIfNeeded() is called again.
 void BenchmarkController::finishHeadlessTiming()
 {
-  m_headlessTimingActive = false;
+  m_headlessTimingActive         = false;
+  m_headlessMeasuredTimingActive = false;
 }
 
 //--------------------------------------------------------------------------------------------------

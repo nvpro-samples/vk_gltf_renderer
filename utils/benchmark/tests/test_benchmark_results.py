@@ -63,6 +63,31 @@ class BenchmarkResultTests(unittest.TestCase):
         self.assertEqual(summary["resolution_w"], "1920")
         self.assertEqual(summary["spp_per_sec"], "40.49")
 
+    def test_parse_headless_summary_derives_post_warmup_measurement(self) -> None:
+        log_text = (
+            'BENCHMARK_JSON {"schema":1,"type":"headless_progress","app_frame":1,'
+            '"frames":11,"elapsed_ms":100.0,"ms_per_frame":100.0,"percent":9.09}\n'
+            'BENCHMARK_JSON {"schema":1,"type":"headless_progress","app_frame":11,'
+            '"frames":11,"elapsed_ms":600.0,"ms_per_frame":54.545,"percent":100.0}\n'
+            'BENCHMARK_JSON {"schema":1,"type":"headless_summary","frames":11,'
+            '"maxFrames":11,"ptSamples":1,"effective_spp":11,"resolution_w":10,'
+            '"resolution_h":10,"wall_ms":1000.0,"ms_per_frame":90.909,'
+            '"throughput_MSps":0.001,"spp_per_sec":11.0}\n'
+        )
+
+        summary = parse_headless_summary(log_text)
+
+        self.assertIsNotNone(summary)
+        assert summary is not None
+        self.assertEqual(summary["total_wall_ms"], "1000")
+        self.assertEqual(summary["warmup_frames"], "1")
+        self.assertEqual(summary["measured_frames"], "10")
+        self.assertEqual(summary["measured_effective_spp"], "10")
+        self.assertEqual(summary["wall_ms"], "900")
+        self.assertEqual(summary["ms_per_frame"], "90")
+        self.assertEqual(summary["throughput_MSps"], "0.001")
+        self.assertEqual(summary["spp_per_sec"], "11.11")
+
     def test_compare_csv_flags_regression(self) -> None:
         with tempfile.TemporaryDirectory() as tmpdir:
             root = Path(tmpdir)
