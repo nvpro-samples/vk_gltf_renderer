@@ -113,6 +113,8 @@ private:
   Dlss*       activeDlss();
   const Dlss* activeDlss() const;
 #endif
+
+  bool dlssGuideRequired() const;  // True when the path tracer currently needs DLSS/OptiX guide-buffer capture code.
   void updateGizmoAttachment();
   bool updateTextures();
   void updateHdrImages();

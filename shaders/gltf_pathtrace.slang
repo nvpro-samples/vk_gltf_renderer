@@ -132,13 +132,15 @@ PathStepResult pathTraceOneBounce(IRaytracer raytracer, inout RayDesc ray, inout
       if(firstRay && tryPrimaryMissBackplate(ray, frameInfo, pt))
         return PathStepResult.eBreak;
 
+#if USE_DLSS_SHADER
       // #DLSS - If capturing specular hit and we hit environment, use max distance (65504 = fp16 max)
-      // This happens when a glossy reflection bounces into the sky
+      // This happens when a glossy reflection bounces into the sky.
       if(pt.dlss.captureSpecularHit)
       {
         pt.dlss.specularHitDist    = float16_t(65504.0f);
         pt.dlss.captureSpecularHit = false;
       }
+#endif
 
       // Add sky or HDR texture using refactored helper
       float3 envColor;
@@ -201,7 +203,7 @@ PathStepResult pathTraceOneBounce(IRaytracer raytracer, inout RayDesc ray, inout
       // Texture LOD from the ray-cone footprint. texGradScale is a user knob: 0 falls
       // through to Sample() (mip 0), 1 is the full physical gradient.
       float     texGrad = worldFoot * hit.texelDensity * pushConst.texGradScale;
-      MeshState mesh    = MeshState(hit.nrm, hit.tangent, hit.bitangent, hit.geonrm, hit.uv, pt.isInside, texGrad);
+      MeshState mesh    = MeshState(hit.nrm, hit.tangent, hit.bitangent, hit.geonrm, hit.uv, ptIsInside(pt), texGrad);
       pbrMat            = evaluateMaterial(material, mesh, allTextures, texInfos);
 
 #if WIREFRAME
@@ -219,18 +221,25 @@ PathStepResult pathTraceOneBounce(IRaytracer raytracer, inout RayDesc ray, inout
 #endif
     }
 
+#if USE_DLSS_SHADER
     // #DLSS - Capture specular hit distance on depth 1 (first reflection bounce)
     if(pt.dlss.captureSpecularHit)
     {
       pt.dlss.specularHitDist    = float16_t(payload.hitT);
       pt.dlss.captureSpecularHit = false;
     }
+#endif
 
     //-----------------------------------------------------------------------
-    // DLSS - Capture Guide Data
+    // First-hit captures (NDC-depth always; DLSS/OptiX guide buffers when on).
     //-----------------------------------------------------------------------
     if(firstRay)
     {
+      // Always record the first hit position; drives the NDC depth output used by
+      // selection/picking, independent of DLSS/OptiX.
+      pt.firstHitPos = hit.pos;
+
+#if USE_DLSS_SHADER
       // #DLSS - Gather data from first hit (store temporarily, write at end to reduce live state)
       // Apply KHR_materials_specular energy conservation clamping for DLSS guide buffer
       // Spec formula: dielectric_f0 = min(f0_from_ior * specularColor, 1.0) * specular
@@ -240,12 +249,12 @@ PathStepResult pathTraceOneBounce(IRaytracer raytracer, inout RayDesc ray, inout
       float3 guideAlbedo    = pbrMat.baseColor.xyz;
       if(USE_DLSS_TRANSP == 1 && !hasFlag(pushConst.flags, PathtracerFlags::ePtUseOptixDenoiser) && dlssIsClearGlass(pbrMat))
       {
-        guideAlbedo = dlssGetClearGlassGuideAlbedo(raytracer, pbrMat, hit, ray.Direction, frameInfo, seed, pt.isInside, specularAlbedo);
+        guideAlbedo = dlssGetClearGlassGuideAlbedo(raytracer, pbrMat, hit, ray.Direction, frameInfo, seed, ptIsInside(pt), specularAlbedo);
       }
       pt.dlss.specularAlbedo  = float16_t3(specularAlbedo);
       pt.dlss.normalRoughness = float16_t4(float16_t3(pbrMat.N), float16_t(pbrMat.roughness.x));
-      pt.dlss.hitPosition     = hit.pos;
       pt.dlss.albedo          = float16_t3(guideAlbedo);
+#endif  // USE_DLSS_SHADER
     }
 
     // Keep track of the maximum roughness to prevent firefly artifacts by forcing subsequent bounces to be at least as rough
@@ -284,44 +293,9 @@ PathStepResult pathTraceOneBounce(IRaytracer raytracer, inout RayDesc ray, inout
     }
 #endif
 
-    //-----------------------------------------------------------------------
-    // KHR_materials_volume + KHR_materials_volume_scatter
-    //-----------------------------------------------------------------------
-    if(pt.isInside && hasVolumeMedium(pt.volumeMedium))
-    {
-      // handleVolumeScatter potentially modifies ray.Direction and ray.Origin during a real scatter event,
-      // so we must save their pre-scatter values here. The volumeScatterNEE function requires the incoming
-      // direction (wi) before scatter in order to correctly evaluate the Henyey-Greenstein phase function cosine,
-      // and the difference between the updated and original ray.Origin is used to update the ray cone after scattering.
-      const float3 wiBeforeScatter     = ray.Direction;
-      const float3 originBeforeScatter = ray.Origin;
-
-      // pt.volumeMedium is the enclosing medium captured at boundary entry, not pbrMat (the surface we
-      // just hit, which would have the wrong sigma_t / sigma_s for the in-volume segment).
-      if(handleVolumeScatter(pt.volumeMedium, payload.hitT, ray, pt.throughput, pt.lastSamplePdf, seed))
-      {
-        pt.scatterBounces++;
-
-        // Advance the cone by the in-volume travel distance. No slant correction (this is not
-        // a surface intersection) - the scatter just translates the cone along the ray.
-        pt.cone.width += pt.cone.spreadAngle * length(ray.Origin - originBeforeScatter);
-
-        // NEE at the scatter point
-        pt.radiance += volumeScatterNEE(raytracer, pt.volumeMedium, ray.Origin, wiBeforeScatter, pt.throughput, seed);
-
-        // Russian roulette for runaway scatter chains. Surviving events still don't bill against
-        // pt.surfaceDepth; RR is the sole termination mechanism for long volume chains.
-        if(pt.scatterBounces >= VOLUME_FREE_BUDGET)
-        {
-          float rrPcont = min(max(pt.throughput.x, max(pt.throughput.y, pt.throughput.z)) + RR_PCONT_FLOOR, RR_PCONT_CAP);
-          if(rand(seed) >= rrPcont)
-            return PathStepResult.eBreak;
-          pt.throughput /= rrPcont;
-        }
-        return PathStepResult.eVolumeContinue;  // skips the pt.surfaceDepth++ at the bottom of the loop
-      }
-      // If no scatter, segment transmittance was applied inside handleVolumeScatter.
-    }
+    PathStepResult volumeStep = processVolumeSegment(raytracer, payload.hitT, ray, pt, seed);
+    if(volumeStep != PathStepResult.eOutOfVolume)
+      return volumeStep; // Skip the surface bounce if the ray is still in the volume (ray is scattered)
 
     // Normal surface bounce: propagate the cone footprint to the next segment. The new ray
     // starts at hit.pos with the slant-corrected worldFoot as its starting width, so the
@@ -383,12 +357,14 @@ PathStepResult pathTraceOneBounce(IRaytracer raytracer, inout RayDesc ray, inout
       ray.Direction    = sampleData.k2;  // new direction
       pt.lastSamplePdf = sampleData.pdf;
 
+#if USE_DLSS_SHADER
       // #DLSS - Enable specular hit distance capture on first bounce if this is a glossy reflection
       // Matches reference implementation: only capture for BSDF_EVENT_GLOSSY_REFLECTION
       if(firstRay && (sampleData.event_type == BSDF_EVENT_GLOSSY_REFLECTION || sampleData.event_type == BSDF_EVENT_IMPULSE_REFLECTION))
       {
         pt.dlss.captureSpecularHit = true;
       }
+#endif
 
       // The ray wasn't absorbed, so we can continue the path
       if(sampleData.event_type != BSDF_EVENT_ABSORB)
@@ -403,13 +379,22 @@ PathStepResult pathTraceOneBounce(IRaytracer raytracer, inout RayDesc ray, inout
 
         // Toggle 'pt.isInside' to track whether the ray is currently inside or outside geometry.
         // This update is necessary for correctly handling transmission (refraction) through solid (non-thin-walled) materials.
-        // For thin-walled surfaces—like decals or leaves—this state isn't toggled, because there's no real "inside".
+        // For thin-walled surfaces - like decals or leaves - this state isn't toggled, because there's no real "inside".
+        //
+        // Gated on PT_USE_TRANSMISSION because in optimal-mode scenes without transmission the BSDF
+        // is configured to never produce BSDF_EVENT_TRANSMISSION (no material flag set), so this
+        // branch is dead. The inner makeVolumeMedium capture only runs when PT_USE_VOLUME is also
+        // on (medium has nowhere to live otherwise).
+#if PT_USE_TRANSMISSION
         if(isTransmission)
         {
           pt.isInside = !pt.isInside;
+#if PT_USE_VOLUME
           if(pt.isInside)
             pt.volumeMedium = makeVolumeMedium(pbrMat);  // Entering volume: capture the medium for scatter/absorption
+#endif
         }
+#endif
       }
       else if(sampleData.event_type == BSDF_EVENT_ABSORB)  // If the ray is absorbed , then break
       {
@@ -432,7 +417,7 @@ PathStepResult pathTraceOneBounce(IRaytracer raytracer, inout RayDesc ray, inout
     bounce.shadowRayDist     = float16_t(directLight.distance);
   }
 
-  return PathStepResult.eContinue;
+  return PathStepResult.eOutOfVolume;
 }
 
 //-----------------------------------------------------------------------
@@ -446,7 +431,7 @@ PathStepResult pathTraceOneBounce(IRaytracer raytracer, inout RayDesc ray, inout
 //-----------------------------------------------------------------------
 SampleResult pathTrace(IRaytracer raytracer, RayDesc ray, inout uint seed)
 {
-  PathTracerState pt = initPathTracerState();
+    PathTracerState pt = {};
 
   while(pt.surfaceDepth < pushConst.maxDepth)
   {
@@ -600,8 +585,10 @@ void processPixel(IRaytracer raytracer, float2 samplePos, float2 imageSize)
   // Written to two targets: outDepth (main GBuffer, full viewport resolution, frame 0 only)
   // and eDlssDepth (DLSS guide buffer, DLSS render resolution, every frame when DLSS active).
   // Both use the same NDC value but the images differ in resolution.
-  float4 clipPos  = mul(float4(sampleResult.dlssOutput.hitPosition, 1.0), pushConst.frameInfo->viewProjMatrix);
-  float  ndcDepth = (sampleResult.radiance.w > 0) ? (clipPos.z / clipPos.w) : 1.0;
+  const bool hasFirstHit = sampleResult.radiance.w > 0.0f;
+  float4     clipPos     = hasFirstHit ? mul(float4(sampleResult.hitPosition, 1.0), pushConst.frameInfo->viewProjMatrix) :
+                                         float4(0, 0, 1, 1);
+  float      ndcDepth    = hasFirstHit ? (clipPos.z / clipPos.w) : 1.0f;
 
   // Only on the first frame, trace the selection ray to get the object IDs and save the NDC depth
   if(firstFrame)
@@ -626,12 +613,13 @@ void processPixel(IRaytracer raytracer, float2 samplePos, float2 imageSize)
         (old_color * pushConst.totalSamples + pixelColor * pushConst.numSamples) / totalSamplesAfter;
   }
 
+#if USE_DLSS_SHADER
   // #DLSS - Storing the GBuffer for the DLSS denoiser
   if(hasFlag(pushConst.flags, PathtracerFlags::ePtUseDlss))
   {
-    // Calculate motion vectors using the hit position (works for both geometry and environment)
-    float2 motionVec = calculateMotionVector(sampleResult.dlssOutput.hitPosition, pushConst.frameInfo->prevMVP,
-                                             pushConst.frameInfo->viewProjMatrix, imageSize);
+    float2 motionVec = hasFirstHit ? calculateMotionVector(sampleResult.hitPosition, pushConst.frameInfo->prevMVP,
+                                                           pushConst.frameInfo->viewProjMatrix, imageSize) :
+                                      float2(0.0f);
     outImages[int(OutputImage::eDlssDepth)][int2(samplePos)]           = float4(ndcDepth);
     outImages[int(OutputImage::eDlssMotion)][int2(samplePos)]          = float4(motionVec, 0, 0);
     outImages[int(OutputImage::eDlssNormalRoughness)][int2(samplePos)] = sampleResult.dlssOutput.normalRoughness;
@@ -650,6 +638,7 @@ void processPixel(IRaytracer raytracer, float2 samplePos, float2 imageSize)
     outImages[int(OutputImage::eOptixAlbedoNormal)][int2(samplePos)] =
         float4(sampleResult.dlssOutput.albedo.xyz, asfloat(normalEncoded));
   }
+#endif  // USE_DLSS_SHADER
 }
 
 //-----------------------------------------------------------------------

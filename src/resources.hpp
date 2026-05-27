@@ -51,6 +51,7 @@
 #include "ui_animation.hpp"
 #include "gltf_scene_transform_vk.hpp"
 #include "gpu_memory_tracker.hpp"
+#include "scene_feature_detection.hpp"
 #include <nvapp/application.hpp>
 
 
@@ -117,6 +118,10 @@ struct Settings
   bool dlssSrHardwareAvailable = false;  // DLSS Super Resolution / DLAA hardware/extensions available (set at startup)
   DisplayBuffer displayBuffer  = DisplayBuffer::eRendered;  // Which buffer to display in viewport
 
+  // Enable scene-based shader optimization. When true, only features used by the scene are
+  // enabled, reducing shader size and register usage at the cost of a one-time recompile per scene change.
+  bool optimalShader = false;
+
 #ifndef NDEBUG
   bool showGridStyleWindow  = false;  // Show Grid Style debug window
   bool showGizmoStyleWindow = false;  // Show Gizmo Style debug window
@@ -164,10 +169,6 @@ struct Resources
     eImgTonemapped,
     eImgRendered,
     eImgSelection,
-    // Motion-vector image is intentionally not here. When USE_DLSS=ON, the rasterizer's
-    // motion vectors live inside its Dlss (Kind::SR) instance (mirrors how the path tracer's
-    // Dlss (Kind::RR) instance owns its own 8-attachment guide GBuffer). When USE_DLSS=OFF, no
-    // motion image is allocated at all.
     eImgCount,  // Sentinel: number of GBuffer color attachments. KEEP LAST.
   };
 
@@ -244,4 +245,20 @@ struct Resources
   Settings settings;
 
   std::bitset<32> dirtyFlags;
+
+  // Scene feature set (KHR_materials_* and denoiser guide buffer);
+  // updated via recomputeSceneFeatures() on scene/material/denoiser changes.
+  nvvkgltf::SceneFeatureSet currentFeatureSet{};
+
+  // Update currentFeatureSet from the scene. Returns true if changed.
+  bool recomputeSceneFeatures(bool dlssGuideActive)
+  {
+    nvvkgltf::SceneFeatureSet newSet{};
+    if(scene)
+      newSet = nvvkgltf::detectSceneFeatures(scene->getModel());
+    newSet.dlssGuide   = dlssGuideActive;
+    const bool changed = (newSet != currentFeatureSet);
+    currentFeatureSet  = newSet;
+    return changed;
+  }
 };

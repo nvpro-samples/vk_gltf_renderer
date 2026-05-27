@@ -1,0 +1,107 @@
+/*
+ * Copyright (c) 2026, NVIDIA CORPORATION.  All rights reserved.
+ *
+ * Licensed under the Apache License, Version 2.0 (the "License");
+ * you may not use this file except in compliance with the License.
+ * You may obtain a copy of the License at
+ *
+ *     http://www.apache.org/licenses/LICENSE-2.0
+ *
+ * SPDX-FileCopyrightText: Copyright (c) 2026, NVIDIA CORPORATION.
+ * SPDX-License-Identifier: Apache-2.0
+ */
+
+#pragma once
+
+#include <cstdint>
+#include <string>
+#include <vector>
+
+namespace tinygltf {
+class Model;
+struct Material;
+}  // namespace tinygltf
+
+namespace nvvkgltf {
+
+/*-------------------------------------------------------------------------------------------------
+# struct nvvkgltf::SceneFeatureSet
+
+> Bitmask of which `KHR_materials_*` (+ `KHR_texture_transform`) extensions are used
+> by the loaded glTF scene, plus other shader-level toggles that scene-aware variant
+> compilation can flip (currently: whether DLSS/OptiX guide buffers need to exist).
+>
+> Used by the path tracer's optimal-mode shader rebuild: when "Optimize shader for
+> current scene" is enabled, the renderer detects which extensions actually appear
+> in the scene's materials, then recompiles `gltf_pathtrace.slang` with path-tracer-
+> private `-DPT_USE_X=0` gates for every extension that is NOT in the set, plus
+> `-DUSE_DLSS_SHADER=0` when neither denoiser needs guide buffers. This shrinks the
+> megakernel (drops fields from
+> `PathTracerState`, removes dead code blocks) which is what frees the live-register
+> headroom needed to climb the warps-per-SM occupancy curve.
+>
+> NOTE: this does NOT change the host-side `GltfShadeMaterial` struct layout. Host
+> `MAT_EXT_*` flags stay at build time (default all-on) because the material buffer
+> layout must remain compatible across all scene-load events. The set produced here
+> only flows into shader-side `-D` macros at recompile time; it controls code paths
+> and helper struct fields, not the material buffer.
+--------------------------------------------------------------------------------------------------*/
+struct SceneFeatureSet
+{
+  // KHR_materials_* usage booleans. Names mirror MAT_EXT_* but runtime optimal mode
+  // drives PT_USE_* gates (not MAT_EXT_*) from these fields.
+  bool transmission        = false;
+  bool volume              = false;
+  bool volumeScatter       = false;
+  bool clearcoat           = false;
+  bool iridescence         = false;
+  bool anisotropy          = false;
+  bool sheen               = false;
+  bool dispersion          = false;
+  bool diffuseTransmission = false;
+  bool unlit               = false;
+  bool specular            = false;
+  bool ior                 = false;
+  bool specularGlossiness  = false;
+  bool textureTransform    = false;
+
+  // Shader-side guide-buffer code (DlssScratch / dlssGetClearGlassGuideAlbedo / etc.).
+  // True when the active denoiser (DLSS or OptiX) wants the path tracer to populate
+  // first-hit guide buffers. The build-time CMake gate also controls this via
+  // USE_DLSS_SHADER, but runtime variant rebuild can be more aggressive (e.g. turn
+  // off when DLSS is compiled in but the user has disabled the denoiser).
+  bool dlssGuide = false;
+
+  // Stable hash usable as a cache key. Hash collisions are not used for correctness
+  // (the variant cache compares full sets on lookup), only as a quick bucket key.
+  uint64_t hash() const;
+
+  // True when `this` set already covers every feature `other` needs. Used to skip
+  // unnecessary recompiles when a smaller scene is merged into the current one.
+  bool isSupersetOf(const SceneFeatureSet& other) const;
+
+  bool operator==(const SceneFeatureSet& o) const;
+  bool operator!=(const SceneFeatureSet& o) const { return !(*this == o); }
+
+  // Comma-separated string for logs / UI feedback (e.g. "transmission,volume,clearcoat").
+  // Empty string when no extensions are used.
+  std::string toString() const;
+
+  // Number of material/texture extension gates that are currently unused.
+  // Excludes non-extension shader gates such as dlssGuide, which are optimized separately.
+  // 0 means every counted extension gate is used, not that optimal mode has no remaining shader gates.
+  int unusedExtensionCount() const;
+};
+
+// Walk a glTF material list and detect which gated extensions appear. A material is
+// flagged as using an extension if its `extensions` map contains the corresponding
+// KHR_materials_* key. KHR_texture_transform is checked on core material texture
+// infos and texture-info objects nested inside material extension payloads.
+//
+// `model` is retained for signature compatibility and may be nullptr.
+SceneFeatureSet detectSceneFeatures(const std::vector<tinygltf::Material>& materials, const tinygltf::Model* model = nullptr);
+
+// Convenience: detect features from a whole model.
+SceneFeatureSet detectSceneFeatures(const tinygltf::Model& model);
+
+}  // namespace nvvkgltf

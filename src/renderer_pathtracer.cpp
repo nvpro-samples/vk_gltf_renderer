@@ -176,6 +176,7 @@ void PathTracer::onDetach(Resources& resources)
   vkDestroyShaderModule(m_device, m_shaderModule, nullptr);
   vkDestroyPipeline(m_device, m_rtxPipeline, nullptr);
   vkDestroyPipeline(m_device, m_rqPipeline, nullptr);
+  destroyVariantCache(resources);
   m_pipelineCache.deinit();
 }
 
@@ -260,6 +261,26 @@ bool PathTracer::onUIRender(Resources& resources)
         m_rtxPipeline = VK_NULL_HANDLE;
       }
     }
+
+    // Scene-aware shader optimization.
+    PE::Checkbox("Optimize Shader for Current Scene", &resources.settings.optimalShader,
+                 "Recompile the shader to match scene features for better performance.\nMay take a few seconds.");
+
+
+#if !defined(NDEBUG)
+    // Status line : which scene features are active (informational)
+    if(resources.settings.optimalShader)
+    {
+      const auto&       fs           = resources.currentFeatureSet;
+      const std::string usedFeatures = fs.toString();
+      std::string sceneExtTooltip = fmt::format("Active scene feature(s): {}", usedFeatures.empty() ? "none" : usedFeatures);
+      nvgui::tooltip(sceneExtTooltip.c_str(), true);
+      std::string featureGatesTooltip = fmt::format("Feature gates: Transmission: {}, Volume: {}, VolumeScatter: {}, DLSS Guide: {}",
+                                                    fs.transmission ? "ON" : "off", fs.volume ? "ON" : "off",
+                                                    fs.volumeScatter ? "ON" : "off", fs.dlssGuide ? "ON" : "off");
+      nvgui::tooltip(featureGatesTooltip.c_str(), true);
+    }
+#endif
 
     changed |= PE::SliderInt("Max Depth", &m_pushConst.maxDepth, 0, 20, "%d", 0, "Maximum number of bounces");
     changed |= PE::SliderFloat("FireFly Clamp", &m_pushConst.fireflyClampThreshold, 0.0f, 10.0f, "%.2f", 0,
@@ -394,21 +415,43 @@ bool PathTracer::onUIRender(Resources& resources)
   return changed;
 }
 
+PathTracer::CompileStateSnapshot PathTracer::getCompileStateSnapshot()
+{
+  std::lock_guard<std::mutex> lock(m_compileMutex);
+  return {
+      m_compiledWireframe, m_compiledOptimal, m_compiledFeatures, m_rqPipeline, m_rtxPipeline,
+  };
+}
+
 //--------------------------------------------------------------------------------------------------
 // Ensure shader binaries and the selected technique pipeline are available.
 void PathTracer::ensureShadersAndPipelines(Resources& resources)
 {
-  // Recompile Slang->SPIR-V if the wireframe flag has changed. compileShader() also
-  // destroys existing pipelines, so pipeline creation below runs against fresh handles.
-  if(m_compiledWireframe != resources.settings.wireframe)
+  // Recompile Slang->SPIR-V when any of the following changed since the last compile:
+  //   - wireframe flag (drives WIREFRAME macro in the shader)
+  //   - optimal-shader mode toggle (default vs scene-specific)
+  //   - the scene's feature set, while optimal mode is on (scene load / merge /
+  //     material edit may have widened or narrowed which KHR_materials_* are used)
+  // compileShader() also destroys existing pipelines, so pipeline creation below
+  // runs against fresh handles.
+  const bool wantOptimal = resources.settings.optimalShader;
+  auto       state       = getCompileStateSnapshot();
+
+  const bool wireframeChanged  = (state.wireframe != resources.settings.wireframe);
+  const bool optimalChanged    = (state.optimal != wantOptimal);
+  const bool featureSetChanged = wantOptimal && (state.features != resources.currentFeatureSet);
+
+  const bool needCompile = wireframeChanged || optimalChanged || featureSetChanged;
+  if(needCompile)
   {
     if(m_busyWindow)
       m_busyWindow->setReason("Compiling Slang shaders...");
     compileShader(resources);
+    state = getCompileStateSnapshot();
   }
 
-  const bool rqMissing  = m_renderTechnique == RenderTechnique::RayQuery && m_rqPipeline == VK_NULL_HANDLE;
-  const bool rtxMissing = m_renderTechnique == RenderTechnique::RayTracing && m_rtxPipeline == VK_NULL_HANDLE;
+  const bool rqMissing  = m_renderTechnique == RenderTechnique::RayQuery && state.rqPipeline == VK_NULL_HANDLE;
+  const bool rtxMissing = m_renderTechnique == RenderTechnique::RayTracing && state.rtxPipeline == VK_NULL_HANDLE;
   if(rqMissing)
   {
     if(m_busyWindow)
@@ -447,9 +490,16 @@ void PathTracer::onRender(VkCommandBuffer cmd, Resources& resources)
 
   // Decide whether we need to (re)compile or (re)build a pipeline. Any of these triggers
   // an async job that shows the BusyWindow; we then skip rendering this frame.
-  const bool needRecompile = (m_compiledWireframe != resources.settings.wireframe);
-  const bool needPipeline  = (m_renderTechnique == RenderTechnique::RayQuery) ? (m_rqPipeline == VK_NULL_HANDLE) :
-                                                                                (m_rtxPipeline == VK_NULL_HANDLE);
+  // Mirrors the gating logic in ensureShadersAndPipelines().
+  const bool wantOptimal = resources.settings.optimalShader;
+  const auto state       = getCompileStateSnapshot();
+
+  const bool wireframeChanged  = (state.wireframe != resources.settings.wireframe);
+  const bool optimalChanged    = (state.optimal != wantOptimal);
+  const bool featureSetChanged = wantOptimal && (state.features != resources.currentFeatureSet);
+  const bool needRecompile     = wireframeChanged || optimalChanged || featureSetChanged;
+  const bool needPipeline = (m_renderTechnique == RenderTechnique::RayQuery) ? (state.rqPipeline == VK_NULL_HANDLE) :
+                                                                               (state.rtxPipeline == VK_NULL_HANDLE);
 
   if(needRecompile || needPipeline)
   {
@@ -702,8 +752,14 @@ void PathTracer::createRqPipeline(Resources& /*resources*/)
   };
 
   // NOTE: if the creation is slow, disable the validation layers for faster creation (--vvl 0)
-  NVVK_CHECK(vkCreateComputePipelines(m_device, m_pipelineCache.getCache(), 1, &cpCreateInfo, nullptr, &m_rqPipeline));
-  NVVK_DBG_NAME(m_rqPipeline);
+  VkPipeline rqPipeline = VK_NULL_HANDLE;
+  NVVK_CHECK(vkCreateComputePipelines(m_device, m_pipelineCache.getCache(), 1, &cpCreateInfo, nullptr, &rqPipeline));
+  NVVK_DBG_NAME(rqPipeline);
+
+  {
+    std::lock_guard<std::mutex> lock(m_compileMutex);
+    m_rqPipeline = rqPipeline;
+  }
 
   const bool valid = (feedback.flags & VK_PIPELINE_CREATION_FEEDBACK_VALID_BIT) != 0;
   const bool hit   = (feedback.flags & VK_PIPELINE_CREATION_FEEDBACK_APPLICATION_PIPELINE_CACHE_HIT_BIT) != 0;
@@ -825,7 +881,11 @@ void PathTracer::createRtxPipeline(Resources& resources)
       .maxPipelineRayRecursionDepth = 2,  // Ray depth
       .layout                       = m_pipelineLayout,
   };
-  vkDestroyPipeline(m_device, m_rtxPipeline, nullptr);
+  {
+    std::lock_guard<std::mutex> lock(m_compileMutex);
+    vkDestroyPipeline(m_device, m_rtxPipeline, nullptr);
+    m_rtxPipeline = VK_NULL_HANDLE;
+  }
 
 
   // Time the create (+ join, when deferred) wall-clock ourselves. The NVIDIA driver does
@@ -833,6 +893,7 @@ void PathTracer::createRtxPipeline(Resources& resources)
   // feedback.duration and the VALID_BIT cannot be relied on on the deferred path.
   // NOTE: if the creation is slow, disable the validation layers for faster creation (--vvl 0)
   const auto createStart = std::chrono::steady_clock::now();
+  VkPipeline rtxPipeline = VK_NULL_HANDLE;
 
 #if USE_DEFERRED_RTX_COMPILE
   // Deferred host operation: lets the driver split the SPIR-V->ISA compile across worker
@@ -842,7 +903,7 @@ void PathTracer::createRtxPipeline(Resources& resources)
   NVVK_CHECK(vkCreateDeferredOperationKHR(m_device, nullptr, &deferredOp));
 
   VkResult createResult = vkCreateRayTracingPipelinesKHR(m_device, deferredOp, m_pipelineCache.getCache(), 1,
-                                                         &rtPipelineCreateInfo, nullptr, &m_rtxPipeline);
+                                                         &rtPipelineCreateInfo, nullptr, &rtxPipeline);
 
   if(createResult == VK_OPERATION_DEFERRED_KHR)
   {
@@ -890,11 +951,11 @@ void PathTracer::createRtxPipeline(Resources& resources)
 #else
   // Synchronous path: no deferred op, driver is expected to populate VkPipelineCreationFeedback.
   NVVK_CHECK(vkCreateRayTracingPipelinesKHR(m_device, VK_NULL_HANDLE, m_pipelineCache.getCache(), 1,
-                                            &rtPipelineCreateInfo, nullptr, &m_rtxPipeline));
+                                            &rtPipelineCreateInfo, nullptr, &rtxPipeline));
   const bool wasDeferred = false;
 #endif
 
-  NVVK_DBG_NAME(m_rtxPipeline);
+  NVVK_DBG_NAME(rtxPipeline);
 
   const double elapsedMs = std::chrono::duration<double, std::milli>(std::chrono::steady_clock::now() - createStart).count();
 
@@ -909,28 +970,35 @@ void PathTracer::createRtxPipeline(Resources& resources)
 
   // Create the Shading Binding Table
   {
-    resources.allocator.destroyBuffer(m_sbtBuffer);
-
     // Shader Binding Table (SBT) setup
     nvvk::SBTGenerator sbtGenerator;
     sbtGenerator.init(m_device, m_rtPipelineProperties);
 
     // Prepare SBT data from ray pipeline
-    size_t bufferSize = sbtGenerator.calculateSBTBufferSize(m_rtxPipeline, rtPipelineCreateInfo);
+    size_t bufferSize = sbtGenerator.calculateSBTBufferSize(rtxPipeline, rtPipelineCreateInfo);
 
     // Create SBT buffer using the size from above
+    nvvk::Buffer sbtBuffer;
     NVVK_CHECK(resources.allocator.createBuffer(
-        m_sbtBuffer, bufferSize, VK_BUFFER_USAGE_2_SHADER_BINDING_TABLE_BIT_KHR, VMA_MEMORY_USAGE_AUTO_PREFER_DEVICE,
+        sbtBuffer, bufferSize, VK_BUFFER_USAGE_2_SHADER_BINDING_TABLE_BIT_KHR, VMA_MEMORY_USAGE_AUTO_PREFER_DEVICE,
         VMA_ALLOCATION_CREATE_MAPPED_BIT | VMA_ALLOCATION_CREATE_HOST_ACCESS_RANDOM_BIT, sbtGenerator.getBufferAlignment()));
-    NVVK_DBG_NAME(m_sbtBuffer.buffer);
+    NVVK_DBG_NAME(sbtBuffer.buffer);
 
     // Pass the manual mapped pointer to fill the SBT data
-    NVVK_CHECK(sbtGenerator.populateSBTBuffer(m_sbtBuffer.address, bufferSize, m_sbtBuffer.mapping));
+    NVVK_CHECK(sbtGenerator.populateSBTBuffer(sbtBuffer.address, bufferSize, sbtBuffer.mapping));
 
     // Retrieve the regions, which are using addresses based on the m_sbtBuffer.address
-    m_sbtRegions = sbtGenerator.getSBTRegions();
+    nvvk::SBTGenerator::Regions sbtRegions = sbtGenerator.getSBTRegions();
 
     sbtGenerator.deinit();
+
+    {
+      std::lock_guard<std::mutex> lock(m_compileMutex);
+      resources.allocator.destroyBuffer(m_sbtBuffer);
+      m_rtxPipeline = rtxPipeline;
+      m_sbtBuffer   = sbtBuffer;
+      m_sbtRegions  = sbtRegions;
+    }
   }
 }
 
@@ -940,6 +1008,26 @@ void PathTracer::createRtxPipeline(Resources& resources)
 void PathTracer::compileShader(Resources& resources, bool fromFile)
 {
   SCOPED_TIMER(__FUNCTION__);
+
+  // Variant cache: try to find a previously-compiled shader + pipelines for the variant the
+  // user wants this frame. On hit we skip both the Slang recompile and the RT pipeline link
+  // (the slow part - the driver can take several seconds per RTX pipeline). On miss we
+  // proceed with the normal compile path and the new entry will be stored on the next
+  // variant switch.
+  if(fromFile)
+  {
+    const VariantKey targetKey{
+        resources.settings.wireframe,
+        resources.settings.optimalShader,
+        resources.settings.optimalShader ? resources.currentFeatureSet : nvvkgltf::SceneFeatureSet{},
+    };
+    if(swapVariant(resources, targetKey))
+    {
+      LOGI("[PathTracer] Variant cache hit.\n");
+      return;
+    }
+    // Cache miss: handles were cleared; will rebuild below.
+  }
 
   VkPushConstantRange pushConstant{VK_SHADER_STAGE_ALL, 0, sizeof(shaderio::PathtracePushConstant)};
 
@@ -967,9 +1055,49 @@ void PathTracer::compileShader(Resources& resources, bool fromFile)
 
     resources.slangCompiler.clearMacros();
     std::vector<std::pair<std::string, std::string>> macros = {
-        {"AVAILABLE_SER", std::to_string(m_supportSER)}, {"WIREFRAME", std::to_string((int)resources.settings.wireframe)},
-        // {"USE_DLSS_TRANSP", std::to_string(m_dlss->useDlssTransparency())},
+        {"AVAILABLE_SER", std::to_string(m_supportSER)},
+        {"WIREFRAME", std::to_string((int)resources.settings.wireframe)},
     };
+
+    // Scene-aware optimal mode: pass only path-tracer-private -D PT_USE_X=0 gates
+    // where the loaded scene does NOT need extension X, plus -D USE_DLSS_SHADER=0
+    // when neither denoiser needs guide buffers. We do not emit runtime MAT_EXT_*
+    // macros here. In default mode (optimalShader=false), no extra macros are
+    // added so the embedded SPIR-V's build-time defaults apply.
+    //
+    // CRITICAL: we never pass MAT_EXT_X=0 here. MAT_EXT_* also gates fields on
+    // the GltfShadeMaterial / GltfTextureInfo shaderio structs (gltf_scene_io.h.slang),
+    // and the host C++ side always builds materials with the all-on layout. Setting
+    // MAT_EXT_X=0 in the shader would shift GPU buffer offsets and break BDA reads
+    // (manifests as VK_ERROR_DEVICE_LOST after the first frame). PT_USE_X is
+    // path-tracer-private: it only gates PathTracerState fields, the VolumeMedium
+    // helper struct (no material buffer dependency), and bounce-loop code paths.
+    //
+    // Note USE_DLSS_SHADER is asymmetric: the build-time CMake already sets it to 1
+    // when USE_DLSS or USE_OPTIX_DENOISER is on. In optimal mode we PASS the macro
+    // (either 0 or 1) to override; otherwise the embedded default holds.
+    if(resources.settings.optimalShader)
+    {
+      // SceneFeatureSet has already promoted the dependency chain
+      //   scatter => volume => transmission
+      // inside detectSceneFeatures(), so we can read fs.* directly without redoing it.
+      const auto& fs   = resources.currentFeatureSet;
+      auto        push = [&](const char* name, bool used) {
+        if(!used)
+          macros.push_back({name, "0"});
+      };
+
+      push("PT_USE_TRANSMISSION", fs.transmission);
+      push("PT_USE_VOLUME", fs.volume);
+      push("PT_USE_VOLUME_SCATTER", fs.volumeScatter);
+      macros.push_back({"USE_DLSS_SHADER", fs.dlssGuide ? "1" : "0"});
+
+      LOGI(
+          "[PathTracer] Optimal shader: scene uses [%s]; PT_USE_TRANSMISSION=%d "
+          "PT_USE_VOLUME=%d PT_USE_VOLUME_SCATTER=%d USE_DLSS_SHADER=%d.\n",
+          fs.toString().c_str(), fs.transmission ? 1 : 0, fs.volume ? 1 : 0, fs.volumeScatter ? 1 : 0, fs.dlssGuide ? 1 : 0);
+    }
+
     for(const auto& [k, v] : macros)
       resources.slangCompiler.addMacro({k.c_str(), v.c_str()});
 
@@ -999,18 +1127,155 @@ void PathTracer::compileShader(Resources& resources, bool fromFile)
     NVVK_DBG_NAME(m_shaderModule);
   }
 
-  m_compiledWireframe = compiledFromFile ? resources.settings.wireframe : false;
+  // Record what this compile was specialized against so the next-frame check in
+  // ensureShadersAndPipelines() knows whether a follow-up recompile is needed.
+  // If we fell back to the embedded SPIR-V (compiledFromFile=false), the running
+  // shader corresponds to the build-time defaults (not optimal, all-on features),
+  // so record that.
+  {
+    std::lock_guard<std::mutex> lock(m_compileMutex);
+    m_compiledWireframe = compiledFromFile ? resources.settings.wireframe : false;
+    m_compiledOptimal   = compiledFromFile ? resources.settings.optimalShader : false;
+    m_compiledFeatures  = (compiledFromFile && resources.settings.optimalShader) ? resources.currentFeatureSet :
+                                                                                   nvvkgltf::SceneFeatureSet{};
 
-  // Destroy pipeline since there is a new shader
-  destroyPipelines();
+    // Destroy pipeline since there is a new shader
+    destroyPipelinesLocked();
+  }
 }
 
-void PathTracer::destroyPipelines()
+void PathTracer::destroyPipelinesLocked()
 {
   vkDestroyPipeline(m_device, m_rtxPipeline, nullptr);
   m_rtxPipeline = VK_NULL_HANDLE;
   vkDestroyPipeline(m_device, m_rqPipeline, nullptr);
   m_rqPipeline = VK_NULL_HANDLE;
+}
+
+void PathTracer::destroyPipelines()
+{
+  std::lock_guard<std::mutex> lock(m_compileMutex);
+  destroyPipelinesLocked();
+}
+
+//--------------------------------------------------------------------------------------------------
+// Variant cache: park the active shader+pipelines+SBT under the variant they were built for, and
+// try to restore handles for a target variant. Returns true on cache hit (caller can skip the
+// expensive Slang recompile + RT pipeline link + SBT build).
+//
+// Reasoning for moving handles rather than copying: VkPipeline / VkShaderModule / nvvk::Buffer
+// are not reference-counted across copies. We always have exactly one "live" instance per
+// variant; the cache holds the others. On cache hit the current active handles are swapped with
+// the cached ones (active handles for the OLD variant get parked, NEW handles become active).
+//
+// The SBT belongs to the RTX pipeline that built it (shader group handles are pipeline-specific)
+// so we have to swap them together. Forgetting to swap the SBT causes a crash on the first
+// dispatched ray because traversal jumps to handles from a different pipeline.
+bool PathTracer::swapVariant(Resources& resources, const VariantKey& newKey)
+{
+  std::lock_guard<std::mutex> lock(m_compileMutex);
+
+  // 1) Park the currently-active shader/pipelines/SBT so we don't leak them.
+  // The current variant key reflects what compileShader() last recorded.
+  const VariantKey currentKey{m_compiledWireframe, m_compiledOptimal, m_compiledFeatures};
+  const bool       hasLive = m_shaderModule != VK_NULL_HANDLE || m_rtxPipeline != VK_NULL_HANDLE
+                       || m_rqPipeline != VK_NULL_HANDLE || m_sbtBuffer.buffer != VK_NULL_HANDLE;
+  if(hasLive)
+  {
+    // If the current variant already exists in the cache (possible after a switch that
+    // happened without our knowledge), update it in place rather than duplicating.
+    bool foundExisting = false;
+    for(auto& e : m_variantCache)
+    {
+      if(e.key == currentKey)
+      {
+        // Reclaim any stale handles already cached for this key before overwriting.
+        if(e.shaderModule != VK_NULL_HANDLE && e.shaderModule != m_shaderModule)
+          vkDestroyShaderModule(m_device, e.shaderModule, nullptr);
+        if(e.rtxPipeline != VK_NULL_HANDLE && e.rtxPipeline != m_rtxPipeline)
+          vkDestroyPipeline(m_device, e.rtxPipeline, nullptr);
+        if(e.rqPipeline != VK_NULL_HANDLE && e.rqPipeline != m_rqPipeline)
+          vkDestroyPipeline(m_device, e.rqPipeline, nullptr);
+        if(e.sbtBuffer.buffer != VK_NULL_HANDLE && e.sbtBuffer.buffer != m_sbtBuffer.buffer)
+          resources.allocator.destroyBuffer(e.sbtBuffer);
+        e.shaderModule = m_shaderModule;
+        e.rtxPipeline  = m_rtxPipeline;
+        e.rqPipeline   = m_rqPipeline;
+        e.sbtBuffer    = m_sbtBuffer;
+        e.sbtRegions   = m_sbtRegions;
+        foundExisting  = true;
+        break;
+      }
+    }
+    if(!foundExisting)
+    {
+      m_variantCache.push_back(VariantCacheEntry{currentKey, m_shaderModule, m_rtxPipeline, m_rqPipeline, m_sbtBuffer, m_sbtRegions});
+    }
+  }
+
+  // Detach handles from the live slots; if we find a hit we'll fill them from cache,
+  // otherwise the caller will rebuild fresh.
+  m_shaderModule = VK_NULL_HANDLE;
+  m_rtxPipeline  = VK_NULL_HANDLE;
+  m_rqPipeline   = VK_NULL_HANDLE;
+  m_sbtBuffer    = {};
+  m_sbtRegions   = {};
+
+  // 2) Look up newKey. On hit, lift its handles out of the cache slot (so we don't
+  // hold duplicate ownership) and remove the slot from the cache.
+  for(auto it = m_variantCache.begin(); it != m_variantCache.end(); ++it)
+  {
+    if(it->key == newKey)
+    {
+      m_shaderModule      = it->shaderModule;
+      m_rtxPipeline       = it->rtxPipeline;
+      m_rqPipeline        = it->rqPipeline;
+      m_sbtBuffer         = it->sbtBuffer;
+      m_sbtRegions        = it->sbtRegions;
+      m_compiledWireframe = newKey.wireframe;
+      m_compiledOptimal   = newKey.optimal;
+      m_compiledFeatures  = newKey.features;
+      m_variantCache.erase(it);
+      return true;
+    }
+  }
+
+  // 3) Enforce LRU bound: drop oldest entries if over capacity.
+  while(m_variantCache.size() > kVariantCacheMaxEntries)
+  {
+    auto& victim = m_variantCache.back();
+    if(victim.shaderModule != VK_NULL_HANDLE)
+      vkDestroyShaderModule(m_device, victim.shaderModule, nullptr);
+    if(victim.rtxPipeline != VK_NULL_HANDLE)
+      vkDestroyPipeline(m_device, victim.rtxPipeline, nullptr);
+    if(victim.rqPipeline != VK_NULL_HANDLE)
+      vkDestroyPipeline(m_device, victim.rqPipeline, nullptr);
+    if(victim.sbtBuffer.buffer != VK_NULL_HANDLE)
+      resources.allocator.destroyBuffer(victim.sbtBuffer);
+    m_variantCache.pop_back();
+  }
+
+  return false;  // miss: caller must (re)compile + (re)build pipelines + (re)build SBT
+}
+
+//--------------------------------------------------------------------------------------------------
+// Destroy every cached variant (called from onDetach). Live handles are NOT touched here -
+// destroyPipelines() / explicit vkDestroyShaderModule cover the active slots; the active SBT
+// is freed in onDetach via resources.allocator.destroyBuffer(m_sbtBuffer).
+void PathTracer::destroyVariantCache(Resources& resources)
+{
+  for(auto& e : m_variantCache)
+  {
+    if(e.shaderModule != VK_NULL_HANDLE)
+      vkDestroyShaderModule(m_device, e.shaderModule, nullptr);
+    if(e.rtxPipeline != VK_NULL_HANDLE)
+      vkDestroyPipeline(m_device, e.rtxPipeline, nullptr);
+    if(e.rqPipeline != VK_NULL_HANDLE)
+      vkDestroyPipeline(m_device, e.rqPipeline, nullptr);
+    if(e.sbtBuffer.buffer != VK_NULL_HANDLE)
+      resources.allocator.destroyBuffer(e.sbtBuffer);
+  }
+  m_variantCache.clear();
 }
 
 

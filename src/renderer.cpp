@@ -161,6 +161,10 @@ GltfRenderer::GltfRenderer(nvutils::ParameterRegistry* paramReg, const nvutils::
   paramReg->addVector({"silhouetteColor", "Color of the silhouette"}, &m_resources.settings.silhouetteColor);
   paramReg->add({"visualization", "Visualization Mode"}, (int*)&m_resources.settings.visualization);
   paramReg->add({"wireframe", "Enable wireframe overlay"}, &m_resources.settings.wireframe);
+  paramReg->add({"optimalShader",
+                 "Compile gltf_pathtrace.slang with PT_USE_* gates specialized per scene "
+                 "(no runtime MAT_EXT_* changes; triggers shader recompile on scene/material change). Default off."},
+                &m_resources.settings.optimalShader);
   paramReg->add({"useSolidBackground", "Use solid color background"}, &m_resources.settings.useSolidBackground, true);
   paramReg->addVector({"solidBackgroundColor", "Solid Background Color"}, &m_resources.settings.solidBackgroundColor);
   paramReg->add({"maxFrames", "Maximum number of iterations"}, &m_resources.settings.maxFrames);
@@ -240,6 +244,7 @@ void GltfRenderer::onAttach(nvapp::Application* app)
   m_settingsHandler.setSetting("renderSystem", (int*)&m_resources.settings.renderSystem);
   m_settingsHandler.setSetting("useSolidBackground", &m_resources.settings.useSolidBackground);
   m_settingsHandler.setSetting("solidBackgroundColor", &m_resources.settings.solidBackgroundColor);
+  m_settingsHandler.setSetting("optimalShader", &m_resources.settings.optimalShader);
   m_pathTracer.setSettingsHandler(&m_settingsHandler);
   m_rasterizer.setSettingsHandler(&m_settingsHandler);
   m_settingsHandler.setLoadFilter([this](const std::string& key) {
@@ -604,6 +609,10 @@ void GltfRenderer::onRender(VkCommandBuffer cmd)
     return;
   }
 
+  // Keep runtime denoiser guide usage synchronized with the optimal-shader feature set.
+  // PathTracer::ensureShadersAndPipelines() watches currentFeatureSet and recompiles when this flips.
+  m_resources.currentFeatureSet.dlssGuide = dlssGuideRequired();
+
   m_benchmark.beginHeadlessTimingIfNeeded(isHeadlessMode(), benchmarkFrameInfo());
 
   // Start the profiler section for the GPU timer
@@ -746,6 +755,9 @@ void GltfRenderer::onMergeScene(const std::filesystem::path& filename)
     {
       m_undoStack.clear();
       rebuildVulkanSceneFull();
+      // Merged-in glTF may bring extensions the previous scene didn't use; recompute
+      // so optimal-mode rebuilds the shader if the feature set widened.
+      m_resources.recomputeSceneFeatures(dlssGuideRequired());
       resetFrame();
       m_sceneSelection.selectNode(wrapperNodeIdx);
       m_sceneBrowser.focusOnSelection();
@@ -881,6 +893,26 @@ const Dlss* GltfRenderer::activeDlss() const
   return (m_resources.settings.renderSystem == RenderingMode::ePathtracer) ? m_pathTracer.getDlss() : m_rasterizer.getDlss();
 }
 #endif
+
+//--------------------------------------------------------------------------------------------------
+// Runtime gate for path-tracer guide-buffer shader code.
+bool GltfRenderer::dlssGuideRequired() const
+{
+  if(m_resources.settings.renderSystem != RenderingMode::ePathtracer)
+    return false;
+
+#if defined(USE_DLSS)
+  if(m_pathTracer.isDlssEnabled())
+    return true;
+#endif
+
+#if defined(USE_OPTIX_DENOISER)
+  if(const OptiXDenoiser* optix = m_pathTracer.getOptiXDenoiser(); optix && optix->isEnabled())
+    return true;
+#endif
+
+  return false;
+}
 
 //--------------------------------------------------------------------------------------------------
 // Apply the tonemapper on the rendered image
@@ -1185,6 +1217,11 @@ void GltfRenderer::createScene(const std::filesystem::path& sceneFilename)
   if(ui::animation::hasPlayableAnimation(m_resources.getScene()))
     m_resources.animationControl.showStrip = true;
 
+  // Detect which KHR_materials_* the loaded scene actually uses so the path tracer
+  // can specialize its shader when settings.optimalShader is on. Safe to call always:
+  // when optimalShader is off, the path tracer ignores currentFeatureSet.
+  m_resources.recomputeSceneFeatures(dlssGuideRequired());
+
   nvvkgltf::Scene* scene = m_resources.getScene();
   // Scene Browser system
   m_sceneBrowser.setScene(scene);
@@ -1284,6 +1321,10 @@ void GltfRenderer::createSceneFromDescriptor(const std::filesystem::path& descri
   createVulkanScene();
   if(ui::animation::hasPlayableAnimation(scene))
     m_resources.animationControl.showStrip = true;
+
+  // Detect which KHR_materials_* the loaded scene actually uses so the path tracer
+  // can specialize its shader when settings.optimalShader is on.
+  m_resources.recomputeSceneFeatures(dlssGuideRequired());
 
   m_sceneBrowser.setScene(scene);
   m_sceneBrowser.setSelection(&m_sceneSelection);
@@ -2054,6 +2095,12 @@ bool GltfRenderer::updateSceneChanges(VkCommandBuffer cmd)
   bool        stagingFlushed = false;
 
   const bool renderNodeOrNodeDirty = df.allRenderNodesDirty || !df.renderNodesVk.empty() || !df.nodes.empty();
+
+  // Material edit may have added or removed a KHR_materials_* extension; refresh the
+  // scene feature set so optimal-mode shader rebuild picks it up. Cheap check (walk
+  // a few maps per material); only runs when materials are actually dirty.
+  if(!df.materials.empty())
+    m_resources.recomputeSceneFeatures(dlssGuideRequired());
 
   updateSceneChanges_BlasRebuild(df);
   m_resources.sceneRtx.updateInstanceFlagsCache(*scene);

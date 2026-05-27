@@ -19,6 +19,7 @@
 
 #pragma once
 
+#include <mutex>
 #include <thread>
 
 #include <glm/glm.hpp>
@@ -31,6 +32,7 @@
 #include "renderer_base.hpp"
 #include "utils.hpp"
 #include "pipeline_cache_util.hpp"
+#include "scene_feature_detection.hpp"
 #include "ui_busy_window.hpp"
 
 // #DLSS
@@ -96,12 +98,47 @@ public:
   VkPhysicalDeviceRayTracingInvocationReorderPropertiesNV m_reorderProperties{
       VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_RAY_TRACING_INVOCATION_REORDER_PROPERTIES_NV};
 
-  bool m_supportSER{false};
-  bool m_useSER{false};
-  bool m_compiledWireframe{false};
+  bool                      m_supportSER{false};  // True when the device supports SER (Shader Execution Reordering).
+  bool                      m_useSER{false};      // True when the device is using SER.
+  bool                      m_compiledWireframe{false};  // True when the shader is the wireframe build.
+  bool                      m_compiledOptimal{false};    // True when the shader is the scene-aware optimized build.
+  nvvkgltf::SceneFeatureSet m_compiledFeatures{};        // The feature set the current shader was compiled against.
 
+  // Variant pipeline cache: avoids slow pipeline (re)compilation by reusing previously built
+  // VkShaderModule and pipelines for a given VariantKey. LRU-limited (see kVariantCacheMaxEntries).
+  struct VariantKey
+  {
+    bool                      wireframe = false;  // True when the shader is the wireframe build.
+    bool                      optimal   = false;  // True when the shader is the scene-aware optimized build.
+    nvvkgltf::SceneFeatureSet features{};         // only meaningful when `optimal == true`
+
+    bool operator==(const VariantKey& o) const
+    {
+      return wireframe == o.wireframe && optimal == o.optimal && (optimal ? (features == o.features) : true);
+    }
+  };
+
+  // Variant cache entry: stores a shader module, RTX/RQ pipelines, and SBT for a given VariantKey.
+  struct VariantCacheEntry
+  {
+    VariantKey                  key;
+    VkShaderModule              shaderModule = VK_NULL_HANDLE;
+    VkPipeline                  rtxPipeline  = VK_NULL_HANDLE;
+    VkPipeline                  rqPipeline   = VK_NULL_HANDLE;
+    nvvk::Buffer                sbtBuffer{};   // Buffer for the SBT (Shader Binding Table)
+    nvvk::SBTGenerator::Regions sbtRegions{};  // The SBT regions (raygen, miss, chit, ahit)
+  };
+  std::vector<VariantCacheEntry> m_variantCache;  // MRU front, LRU back
+  static constexpr size_t        kVariantCacheMaxEntries = 8;
+
+  // Saves active shader/pipeline/SBT to cache by VariantKey; switches to `newKey`.
+  // On hit, restores cached handles and returns true; on miss, clears handles for rebuild.
+  // LRU-evicted SBTs are freed via Resources.
+  bool swapVariant(Resources& resources, const VariantKey& newKey);
+  void destroyVariantCache(Resources& resources);
 
   BusyWindow* m_busyWindow{nullptr};  // Modal shown during async shader/pipeline compile.
+  std::mutex  m_compileMutex;         // Guards compile metadata and live pipeline handles.
   std::thread m_compileThread;        // Joined in onDetach().
 
   // The default rendering technique
@@ -175,13 +212,23 @@ public:
 
 
 private:
-  void ensureShadersAndPipelines(Resources& resources);
-  void startAsyncCompile(Resources& resources);
-  void updateStatistics(Resources& resources);
-  void renderRayQuery(VkCommandBuffer cmd, VkExtent2D renderingSize, Resources& resources);
-  void renderRayTrace(VkCommandBuffer cmd, VkExtent2D& renderingSize, Resources& resources);
-  void denoiseDlss(VkCommandBuffer cmd, Resources& resources);
-  void setupPushConstant(VkCommandBuffer cmd, Resources& resources, VkExtent2D renderingSize);
+  struct CompileStateSnapshot
+  {
+    bool                      wireframe = false;
+    bool                      optimal   = false;
+    nvvkgltf::SceneFeatureSet features{};
+    VkPipeline                rqPipeline  = VK_NULL_HANDLE;
+    VkPipeline                rtxPipeline = VK_NULL_HANDLE;
+  };
+
+  void                 ensureShadersAndPipelines(Resources& resources);
+  void                 startAsyncCompile(Resources& resources);
+  CompileStateSnapshot getCompileStateSnapshot();
+  void                 updateStatistics(Resources& resources);
+  void                 renderRayQuery(VkCommandBuffer cmd, VkExtent2D renderingSize, Resources& resources);
+  void                 renderRayTrace(VkCommandBuffer cmd, VkExtent2D& renderingSize, Resources& resources);
+  void                 denoiseDlss(VkCommandBuffer cmd, Resources& resources);
+  void                 setupPushConstant(VkCommandBuffer cmd, Resources& resources, VkExtent2D renderingSize);
   // Determine if DLSS should actively denoise this frame
   bool getEffectiveDlssEnabled(const Resources& resources) const;
   // Determine if OptiX should actively denoise this frame
@@ -189,5 +236,6 @@ private:
   // Upscale selection ID and depth from render resolution to display resolution (OptiX 2x mode)
   void upscaleSelectionAndDepth(VkCommandBuffer cmd, Resources& resources);
   // Destroy the pipelines for both Ray Query and Ray Tracing
+  void destroyPipelinesLocked();
   void destroyPipelines();
 };

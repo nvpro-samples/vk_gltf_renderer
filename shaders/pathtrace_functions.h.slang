@@ -7,6 +7,36 @@
 #ifndef PATHTRACE_FUNCTIONS_H
 #define PATHTRACE_FUNCTIONS_H 1
 
+//-----------------------------------------------------------------------
+// Path tracer optimal-mode gates
+//
+// PT_USE_* macros gate path-tracer-private state (PathTracerState fields), helper
+// structs that live entirely inside the path tracer (VolumeMedium), and bounce-loop
+// code paths. They do NOT affect the host-shared GltfShadeMaterial / GltfTextureInfo
+// layout in gltf_scene_io.h.slang -- those stay gated by MAT_EXT_* exclusively, which
+// is locked at host build time by static_asserts in src/gltf_material_cache.cpp.
+//
+// In default mode each PT_USE_X is 1 (all features supported). In scene-aware "optimal"
+// mode the renderer (renderer_pathtracer.cpp) passes -DPT_USE_X=0 for every extension
+// the loaded scene does not actually use, dropping live registers / dead code from the
+// megakernel without disturbing buffer offsets.
+//
+// PT_USE_X defaults to MAT_EXT_X so a build-time -DMAT_EXT_X=0 still disables both
+// the struct field and the path-tracer code in one shot (the historic "all-or-nothing"
+// build mode). Forcing PT_USE_X to 0 while MAT_EXT_X stays 1 is the new optimal-mode
+// configuration: material buffer keeps its full layout, the path tracer just skips the
+// dead code.
+//-----------------------------------------------------------------------
+#ifndef PT_USE_TRANSMISSION
+#define PT_USE_TRANSMISSION MAT_EXT_TRANSMISSION
+#endif
+#ifndef PT_USE_VOLUME
+#define PT_USE_VOLUME MAT_EXT_VOLUME
+#endif
+#ifndef PT_USE_VOLUME_SCATTER
+#define PT_USE_VOLUME_SCATTER MAT_EXT_VOLUME_SCATTER
+#endif
+
 
 //-----------------------------------------------------------------------
 // Types and tuning constants
@@ -32,7 +62,7 @@ struct LightingTechniqueProbabilities
   float envWeight;    // Normalized probability of sampling environment
 };
 
-static const float MIN_TRANSMISSION                = 0.01f;  // Minimum shadow transmission factor for transparent materials
+static const float MIN_TRANSMISSION = 0.01f;  // Minimum shadow transmission factor for transparent materials
 static const float ANTIALIASING_STANDARD_DEVIATION = 0.4246609f;  // Standard deviation for antialiasing
 static const int   RR_MIN_DEPTH                    = 3;           // Minimum depth for Russian Roulette
 static const float VOLUME_MIN_SCATTER              = 0.001f;      // Minimum scatter for volume rendering
@@ -43,13 +73,23 @@ static const float RR_PCONT_CAP                    = 0.95f;       // Maximum pro
 
 //-----------------------------------------------------------------------
 // #DLSS - Information for the DLSS
+//
+// The DLSS-only guide-buffer extras (DlssOutput / DlssScratch + the helpers further
+// down + the per-bounce captures in pathTraceOneBounce) only exist when USE_DLSS_SHADER
+// is defined (set by CMake when USE_DLSS or USE_OPTIX_DENOISER is ON, or by the
+// runtime scene-aware variant rebuild). When it's off we drop those scratch fields
+// from PathTracerState and SampleResult to shrink per-thread live state.
+//
+// Exception: hitPosition is promoted OUT of the DLSS-gated block because it is
+// also consumed by the always-on NDC depth output (used for selection/picking on
+// the first frame). Keeping it gated would break picking when DLSS/OptiX are off.
 //-----------------------------------------------------------------------
+#if USE_DLSS_SHADER
 struct DlssOutput
 {
   float16_t4 albedo          = float16_t4(0);
   float16_t3 specularAlbedo  = float16_t3(0);
   float16_t4 normalRoughness = float16_t4(0);
-  float3     hitPosition     = 1e34f;
   float      specularHitDist = 0.0f;  // Distance to reflected surface (0=no reflection, 65504=sky reflection)
 };
 
@@ -62,17 +102,20 @@ struct DlssScratch
   float16_t3 specularAlbedo     = float16_t3(0);
   float16_t4 normalRoughness    = float16_t4(0);
   float16_t  specularHitDist    = float16_t(0);
-  float3     hitPosition        = 1e32f;
   bool       captureSpecularHit = false;
 };
+#endif  // USE_DLSS_SHADER
 
 //-----------------------------------------------------------------------
 // This is the result of sampling a pixel
 //-----------------------------------------------------------------------
 struct SampleResult
 {
-  float4     radiance   = float4(0, 0, 0, 0);
+  float4 radiance    = float4(0, 0, 0, 0);
+  float3 hitPosition = 1e34f;  // World-space first-hit position; always present (drives NDC depth + DLSS motion).
+#if USE_DLSS_SHADER
   DlssOutput dlssOutput = {};
+#endif
 };
 
 //-----------------------------------------------------------------------
@@ -84,6 +127,11 @@ struct RayCone
   float spreadAngle = 0.0f;
 };
 
+// VolumeMedium and its helpers only exist when KHR_materials_volume is in use.
+// When PT_USE_VOLUME=0 (the scene has no volume materials in optimal mode) the medium
+// struct, the bounce-loop in-volume tracking, and the corresponding fields on
+// PathTracerState are dropped entirely (reduces per-thread live registers).
+#if PT_USE_VOLUME
 struct VolumeMedium
 {
   float16_t3 extinction;
@@ -94,9 +142,9 @@ struct VolumeMedium
 VolumeMedium makeVolumeMedium(PbrMaterial pbrMat)
 {
   VolumeMedium medium;
-  medium.extinction          = float16_t3(volumeExtinctionCoefficient(pbrMat));
-  medium.scatterCoefficient  = float16_t3(pbrMat.scatterCoefficient);
-  medium.scatterAnisotropy   = float16_t(pbrMat.scatterAnisotropy);
+  medium.extinction         = float16_t3(volumeExtinctionCoefficient(pbrMat));
+  medium.scatterCoefficient = float16_t3(pbrMat.scatterCoefficient);
+  medium.scatterAnisotropy  = float16_t(pbrMat.scatterAnisotropy);
   return medium;
 }
 
@@ -107,6 +155,7 @@ bool hasVolumeMedium(VolumeMedium medium)
   return max(max(extinction.x, extinction.y), extinction.z) > 0.0F
          || max(max(scatterCoeff.x, scatterCoeff.y), scatterCoeff.z) > 0.0F;
 }
+#endif  // PT_USE_VOLUME
 
 
 //-----------------------------------------------------------------------
@@ -556,15 +605,29 @@ bool checkInfinitePlaneIntersection(RayDesc ray, inout HitPayload payload, inout
 
 
 //-----------------------------------------------------------------------
-// Volume scatter
+// In-volume step: Beer's-law absorption (always when PT_USE_VOLUME) +
+// Henyey-Greenstein scatter sampling (only when PT_USE_VOLUME_SCATTER).
 //-----------------------------------------------------------------------
-
+// IMPORTANT: this function exists whenever PT_USE_VOLUME is on, NOT only when
+// PT_USE_VOLUME_SCATTER is on. KHR_materials_volume by itself (no scatter
+// extension) still needs per-segment Beer's-law absorption applied along the
+// camera ray, which is what makes a glass with attenuationColor="green" look
+// green. Earlier the entire function was gated on PT_USE_VOLUME_SCATTER which
+// silently dropped that absorption pass in optimal mode for any scene that
+// uses volume but not scatter (e.g. CompareVolume.gltf).
+//
+// Returns true only when a real scatter event happened (PT_USE_VOLUME_SCATTER
+// must be on for that to be possible). Returns false when only absorption was
+// applied. The bounce-loop caller uses the return value to decide whether to
+// run scatter-only follow-up work (NEE at the scatter point, scatterBounces++).
+#if PT_USE_VOLUME
 bool handleVolumeScatter(VolumeMedium medium, float hitDistance, inout RayDesc ray, inout float3 throughput, inout float lastSamplePdf, inout uint seed)
 {
-  float3 extinction   = float3(medium.extinction);
-  float3 scatterCoeff = float3(medium.scatterCoefficient);
+  float3 extinction = float3(medium.extinction);
 
-  float maxScatter = max(scatterCoeff.x, max(scatterCoeff.y, scatterCoeff.z));
+#if PT_USE_VOLUME_SCATTER
+  float3 scatterCoeff = float3(medium.scatterCoefficient);
+  float  maxScatter   = max(scatterCoeff.x, max(scatterCoeff.y, scatterCoeff.z));
   if(maxScatter > VOLUME_MIN_SCATTER)
   {
     float maxExtinction = max(extinction.x, max(extinction.y, extinction.z));
@@ -575,24 +638,35 @@ bool handleVolumeScatter(VolumeMedium medium, float hitDistance, inout RayDesc r
     {
       throughput *= float3(1.0) - (extinction - scatterCoeff) / maxExtinction;
 
-      ray.Origin    = ray.Origin + ray.Direction * scatterDist;
-      float3 wi     = ray.Direction;
-      float anisotropy = float(medium.scatterAnisotropy);
-      ray.Direction = sampleHenyeyGreenstein(float2(rand(seed), rand(seed)), anisotropy, wi);
+      ray.Origin        = ray.Origin + ray.Direction * scatterDist;
+      float3 wi         = ray.Direction;
+      float  anisotropy = float(medium.scatterAnisotropy);
+      ray.Direction     = sampleHenyeyGreenstein(float2(rand(seed), rand(seed)), anisotropy, wi);
 
       lastSamplePdf = henyeyGreensteinPdf(dot(wi, ray.Direction), anisotropy);
 
-      return true;
+      return true;  // scatter event
     }
 
+    // No scatter this segment: apply the absorption-only attenuation that the analytical
+    // null-collision tracker leaves behind (extinction - scatterCoeff = pure absorption).
     throughput *= exp(hitDistance * (float3(maxExtinction) - extinction));
     return false;
   }
+#endif  // PT_USE_VOLUME_SCATTER
 
+  // Pure-absorption path (no scatter coefficient, or PT_USE_VOLUME_SCATTER disabled):
+  // straight Beer's law applied over the segment length. This is the case for plain
+  // KHR_materials_volume materials and is what produces the colored tint of a glass
+  // filled with an absorbing medium.
   throughput *= exp(-hitDistance * extinction);
   return false;
 }
+#endif  // PT_USE_VOLUME
 
+// Scatter-only: next-event estimation at the scatter point. Only meaningful when a
+// scatter event can actually happen, so gated on PT_USE_VOLUME_SCATTER.
+#if PT_USE_VOLUME_SCATTER
 float3 volumeScatterNEE(IRaytracer raytracer, VolumeMedium medium, float3 scatterPos, float3 wiBeforeScatter, float3 throughput, inout uint seed)
 {
   DirectLight directLight;
@@ -615,12 +689,14 @@ float3 volumeScatterNEE(IRaytracer raytracer, VolumeMedium medium, float3 scatte
 
   return throughput * directLight.radianceOverPdf * misWeight * phasePdf * shadowFactor;
 }
+#endif  // PT_USE_VOLUME_SCATTER
 
 
 //-----------------------------------------------------------------------
 // DLSS guide buffers
 //-----------------------------------------------------------------------
 
+#if USE_DLSS_SHADER
 float3 dlssEnforceMinAlbedo(float3 albedo, float3 specularAlbedo)
 {
   float sumAlbedo = albedo.x + albedo.y + albedo.z;
@@ -688,6 +764,7 @@ float3 dlssGetClearGlassGuideAlbedo(IRaytracer      raytracer,
   float3 albedo   = lerp(bgAlbedo, pbrMat.baseColor.xyz, fresnel);
   return dlssEnforceMinAlbedo(albedo, specularAlbedo);
 }
+#endif  // USE_DLSS_SHADER
 
 
 //-----------------------------------------------------------------------
@@ -769,28 +846,49 @@ uint traceSelectionRay(IRaytracer raytracer, float2 samplePos, float2 imageSize)
 // Step results for the path tracing
 enum PathStepResult
 {
-  eContinue, // Continue tracing the ray
-  eVolumeContinue, // Continue tracing the ray through the volume
-  eEarlyContinue, // Early continue tracing the ray (infinite plane)
-  eBreak, // Break the path tracing
+  eOutOfVolume,     // Continue tracing after volume processing
+  eVolumeContinue,  // Continue tracing the ray through the volume
+  eEarlyContinue,   // Early continue tracing the ray (infinite plane)
+  eBreak,           // Break the path tracing
 };
 
 // Path tracer state
+//
+// isInside / volumeMedium / scatterBounces / dlss are only carried in builds that
+// actually use them. Each field dropped removes that many live registers from the
+// per-thread state that survives across every Trace() call in the bounce loop,
+// which is what determines warps-per-SM (occupancy) on the megakernel.
+//
+// isInside is conditional on either PT_USE_TRANSMISSION (toggled at refraction)
+// or PT_USE_VOLUME (used to gate the in-volume scatter check).
+//
+// firstHitPos is always present (drives the selection/picking NDC depth) even
+// when DLSS/OptiX is disabled; it is written on the first hit (or by the
+// primary-miss backplate path).
 struct PathTracerState
 {
-  float3      radiance;
-  float3      throughput;
-  bool        isInside;
-  VolumeMedium volumeMedium;
-  float       lastSamplePdf;
-  float2      maxRoughness;
-  bool        solid;
-  RayCone     cone;
-  int         surfaceDepth;
-  int         scatterBounces;
-  DlssScratch dlss;
+  float3  radiance      = float3(0.0F, 0.0F, 0.0F);
+  float3  throughput    = float3(1.0F, 1.0F, 1.0F);
+  float3  firstHitPos   = float3(1e34f);  // matches SampleResult::hitPosition sentinel
+  float   lastSamplePdf = DIRAC;
+  float2  maxRoughness  = float2(0.0);
+  bool    solid         = true;
+  RayCone cone          = { 0.0F, pushConst.pixelAngle };
+  int     surfaceDepth  = 0;
+#if PT_USE_TRANSMISSION || PT_USE_VOLUME
+  bool isInside = false;
+#endif
+#if PT_USE_VOLUME
+  VolumeMedium volumeMedium = {};
+#endif
+#if PT_USE_VOLUME_SCATTER
+  int scatterBounces = 0;
+#endif
+#if USE_DLSS_SHADER
+  DlssScratch dlss = {};
+#endif
 #if WIREFRAME
-  float firstHitWireframeAlpha;
+  float firstHitWireframeAlpha = 0.0;
 #endif
 };
 
@@ -803,32 +901,68 @@ struct BounceScratch
   float16_t  shadowRayDist;
 };
 
-PathTracerState initPathTracerState()
+// Safe accessor for pt.isInside. The field only exists when PT_USE_TRANSMISSION or
+// PT_USE_VOLUME is compiled in (without those, a ray can never enter a medium so the
+// answer is always false). Used by call sites that aren't themselves gated, e.g.
+// MeshState construction in the mesh-hit path or the DLSS clear-glass guide.
+bool ptIsInside(PathTracerState pt)
 {
-  PathTracerState pt;
-  pt.radiance       = float3(0.0F, 0.0F, 0.0F);
-  pt.throughput     = float3(1.0F, 1.0F, 1.0F);
-  pt.isInside       = false;
-  pt.volumeMedium   = {};
-  pt.lastSamplePdf  = DIRAC;
-  pt.maxRoughness   = float2(0.0);
-  pt.solid          = true;
-  pt.cone           = { 0.0F, pushConst.pixelAngle };
-  pt.surfaceDepth   = 0;
-  pt.scatterBounces = 0;
-  pt.dlss           = {};
-#if WIREFRAME
-  pt.firstHitWireframeAlpha = 0.0;
+#if PT_USE_TRANSMISSION || PT_USE_VOLUME
+  return pt.isInside;
+#else
+  return false;
 #endif
-  return pt;
 }
+
+// Handles the in-volume segment before normal surface shading:
+// - Always applies segment transmittance when PT_USE_VOLUME is enabled.
+// - Handles scatter-only follow-up (cone advance, NEE, RR) when a real scatter happens.
+PathStepResult processVolumeSegment(IRaytracer raytracer, float hitDistance, inout RayDesc ray, inout PathTracerState pt, inout uint seed)
+{
+#if PT_USE_VOLUME
+  if(pt.isInside && hasVolumeMedium(pt.volumeMedium))
+  {
+#if PT_USE_VOLUME_SCATTER
+    // handleVolumeScatter may rotate/translate the ray during a true scatter event.
+    // Keep the pre-scatter ray state for HG cosine evaluation and cone travel update.
+    const float3 wiBeforeScatter     = ray.Direction;
+    const float3 originBeforeScatter = ray.Origin;
+#endif
+
+    if(handleVolumeScatter(pt.volumeMedium, hitDistance, ray, pt.throughput, pt.lastSamplePdf, seed))
+    {
+#if PT_USE_VOLUME_SCATTER
+      pt.scatterBounces++;
+
+      // Scatter events translate the cone through the medium segment (no slant correction).
+      pt.cone.width += pt.cone.spreadAngle * length(ray.Origin - originBeforeScatter);
+      pt.radiance += volumeScatterNEE(raytracer, pt.volumeMedium, ray.Origin, wiBeforeScatter, pt.throughput, seed);
+
+      if(pt.scatterBounces >= VOLUME_FREE_BUDGET)
+      {
+        float rrPcont = min(max(pt.throughput.x, max(pt.throughput.y, pt.throughput.z)) + RR_PCONT_FLOOR, RR_PCONT_CAP);
+        if(rand(seed) >= rrPcont)
+          return PathStepResult.eBreak;
+        pt.throughput /= rrPcont;
+      }
+      return PathStepResult.eVolumeContinue;  // skips surface-depth increment in the main loop
+#endif                                        // PT_USE_VOLUME_SCATTER
+    }
+  }
+#endif  // PT_USE_VOLUME
+
+  return PathStepResult.eOutOfVolume;
+}
+
 
 // Primary ray missed geometry: DLSS far hit + optional backplate (not part of the lighting integral).
 // Returns true when radiance is final and path tracing should stop.
 bool tryPrimaryMissBackplate(RayDesc ray, SceneFrameInfo* frameInfo, inout PathTracerState pt)
 {
-  pt.solid            = false;
-  pt.dlss.hitPosition = ray.Origin + ray.Direction * 1000000.0f;
+  pt.solid = false;
+  // Far-hit world position: pushed out to infinity. Always written because it drives the
+  // NDC-depth output used by selection/picking, independent of DLSS/OptiX.
+  pt.firstHitPos = ray.Origin + ray.Direction * 1000000.0f;
 
   if(hasFlag(frameInfo->flags, SceneFrameInfoFlags::eSceneUseSolidBackground))
   {
@@ -838,8 +972,8 @@ bool tryPrimaryMissBackplate(RayDesc ray, SceneFrameInfo* frameInfo, inout PathT
 
   if(hasFlag(frameInfo->flags, SceneFrameInfoFlags::eSceneUseHdrEnvironment) && frameInfo->envBlur > 0)
   {
-    float3 dir = rotate(ray.Direction, float3(0, 1, 0), -frameInfo->envRotation);
-    float2 uv  = getSphericalUv(dir);
+    float3 dir  = rotate(ray.Direction, float3(0, 1, 0), -frameInfo->envRotation);
+    float2 uv   = getSphericalUv(dir);
     pt.radiance = smoothHDRBlur(texturesHdr[HDR_IMAGE_INDEX], uv, frameInfo->envBlur).xyz * frameInfo->envIntensity;
     return true;
   }
@@ -849,16 +983,17 @@ bool tryPrimaryMissBackplate(RayDesc ray, SceneFrameInfo* frameInfo, inout PathT
 
 SampleResult packSampleResult(PathTracerState pt)
 {
-  SampleResult sampleResult               = {};
-  sampleResult.radiance                   = float4(pt.radiance, pt.solid ? 1 : 0);
+  SampleResult sampleResult = {};
+  sampleResult.radiance     = float4(pt.radiance, pt.solid ? 1 : 0);
+  sampleResult.hitPosition  = pt.firstHitPos;
+#if USE_DLSS_SHADER
   sampleResult.dlssOutput.albedo          = float16_t4(pt.dlss.albedo, pt.solid ? 1.0h : 0.0h);
   sampleResult.dlssOutput.specularAlbedo  = pt.dlss.specularAlbedo;
   sampleResult.dlssOutput.normalRoughness = pt.dlss.normalRoughness;
-  sampleResult.dlssOutput.hitPosition     = pt.dlss.hitPosition;
   sampleResult.dlssOutput.specularHitDist = pt.dlss.specularHitDist;
+#endif
   return sampleResult;
 }
-
 
 
 #endif  // PATHTRACE_FUNCTIONS_H

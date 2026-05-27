@@ -192,15 +192,46 @@ set(SHADER_CAPABILITIES
   spvGroupNonUniform                # Enable subgroup operations (required for wave operations in shaders
 )
 
-# Declared here (above compile_slang) so HAS_DLSS_MOTION reaches the shader build. The DLSS
-# link/source wiring lives further down under "Adding DLSS if selected".
-option(USE_DLSS "Use DLSS-RR for denoising" ON)
-
-# When USE_DLSS=ON we define HAS_DLSS_MOTION so gltf_raster.slang emits the third color
-# attachment (SV_TARGET2 motion vector) for DLAA. USE_DLSS=OFF drops it entirely.
-set(SHADER_EXTRA_FLAGS "-I${NVSHADERS_DIR}")
+# Declared here (above compile_slang) so HAS_DLSS_MOTION / USE_DLSS_SHADER reach the
+# shader build. Backend availability is probed here too, so shader guide paths match
+# the host code that can actually be built. The DLSS / OptiX link/source wiring lives
+# further down under "Adding DLSS if selected" / OptiX denoiser blocks.
+option(USE_DLSS           "Use DLSS-RR for denoising"                OFF)
+option(USE_OPTIX_DENOISER "Use OptiX denoiser as alternative to DLSS" ON)
 if(USE_DLSS)
+  set(DLSS_VERSION "310.5.3")
+  find_package(NGX QUIET)
+endif()
+set(DLSS_AVAILABLE OFF)
+if(USE_DLSS AND NGX_FOUND)
+  set(DLSS_AVAILABLE ON)
+elseif(USE_DLSS)
+  message(WARNING "NGX SDK not found - DLSS disabled")
+endif()
+if(USE_OPTIX_DENOISER)
+  find_package(CUDAToolkit COMPONENTS CUDA::cudart)
+endif()
+set(OPTIX_DENOISER_AVAILABLE OFF)
+if(USE_OPTIX_DENOISER AND CUDAToolkit_FOUND)
+  set(OPTIX_DENOISER_AVAILABLE ON)
+endif()
+
+# When DLSS is available, define HAS_DLSS_MOTION so gltf_raster.slang emits the third
+# color attachment (SV_TARGET2 motion vector) for DLAA. Otherwise, drop it entirely.
+#
+# USE_DLSS_SHADER=1 gates the path tracer's per-bounce guide-buffer captures
+# (DlssScratch + DlssOutput, dlssGetClearGlassGuideAlbedo, etc.) in
+# gltf_pathtrace.slang. The OptiX denoiser reuses these guide fields (albedo +
+# normalRoughness), so this define is on whenever DLSS or OptiX is
+# actually available. The path tracer reads USE_DLSS_SHADER (not HAS_DLSS_MOTION)
+# so the two shader-side gates stay independently controllable (e.g. for the
+# scene-aware variant rebuild that can disable USE_DLSS_SHADER per scene).
+set(SHADER_EXTRA_FLAGS "-I${NVSHADERS_DIR}")
+if(DLSS_AVAILABLE)
   list(APPEND SHADER_EXTRA_FLAGS "-DHAS_DLSS_MOTION=1")
+endif()
+if(DLSS_AVAILABLE OR OPTIX_DENOISER_AVAILABLE)
+  list(APPEND SHADER_EXTRA_FLAGS "-DUSE_DLSS_SHADER=1")
 endif()
 
 # Compile all shaders to embedded headers (.h) and SPIR-V binaries (.spv) [optionally generate SPIR-V binaries (.spv) for debugging]
@@ -242,13 +273,11 @@ message(STATUS "OptiX Version     : ${OptiX_VERSION}")
 message(STATUS "      Source Dir  : ${OptiX_SOURCE_DIR}")
 target_include_directories(${PROJECT_NAME} PRIVATE ${OptiX_SOURCE_DIR}/optix-dev-${OptiX_VERSION}/include)
 
-# Find CUDA for OptiX interop
-find_package(CUDAToolkit COMPONENTS CUDA::cudart)
-
-# Add OptiX denoiser option
-option(USE_OPTIX_DENOISER "Use OptiX denoiser as alternative to DLSS" ON)
+# USE_OPTIX_DENOISER option and CUDA availability are evaluated earlier so they can
+# influence the shader compile defines. Here we just wire up the source files and
+# define the C++ USE_OPTIX_DENOISER preprocessor symbol.
 if(USE_OPTIX_DENOISER)
-  if(CUDAToolkit_FOUND)
+  if(OPTIX_DENOISER_AVAILABLE)
 
     # Add OptiX denoiser files
     target_compile_definitions(${PROJECT_NAME} PRIVATE USE_OPTIX_DENOISER)
@@ -274,7 +303,7 @@ if(USE_OPTIX_DENOISER)
     endif()
 
   else()
-    message(WARNING "CUDAToolkit not found - OptiX denoiser will not work properly")
+    message(WARNING "CUDAToolkit not found - OptiX denoiser disabled")
   endif()
 
 endif()
@@ -311,11 +340,9 @@ find_package(WebP REQUIRED)
 target_link_libraries(${PROJECT_NAME} PRIVATE webp)
 # target_link_libraries(${PROJECT_NAME} PRIVATE webp)
 #####################################################################################
-# DLSS link/source wiring. The option() itself lives further up so the slang build sees
-# HAS_DLSS_MOTION; this section only adds the C++/library bits.
-if(USE_DLSS)
-  set(DLSS_VERSION "310.5.3")
-  find_package(NGX REQUIRED)
+# DLSS link/source wiring. Availability is checked earlier so the slang build and
+# C++ build use the same backend gate.
+if(DLSS_AVAILABLE)
   target_link_libraries(${PROJECT_NAME} PRIVATE ngx)
   target_compile_definitions(${PROJECT_NAME} PRIVATE USE_DLSS)
   target_sources(${PROJECT_NAME} PRIVATE
