@@ -199,7 +199,7 @@ set(SHADER_CAPABILITIES
 option(USE_DLSS           "Use DLSS-RR for denoising"                OFF)
 option(USE_OPTIX_DENOISER "Use OptiX denoiser as alternative to DLSS" ON)
 if(USE_DLSS)
-  set(DLSS_VERSION "310.5.3")
+  set(DLSS_VERSION "310.6.0")
   find_package(NGX QUIET)
 endif()
 set(DLSS_AVAILABLE OFF)
