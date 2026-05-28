@@ -262,13 +262,9 @@ PixelOutput fragmentMain(VertexOutput input, uint primitiveID: SV_PrimitiveID, f
   HitState hit = getHitState(renderPrimitive, baryWeights, renderNode.worldToObject, renderNode.objectToWorld,
                              primitiveID, worldRayDirection);
 
-  // Modulate the material base color with the interpolated vertex color before evaluation so that
-  // every downstream lobe (textures included) sees the COLOR_0 attribute. Matches the path tracer
-  // (gltf_pathtrace.slang) and Khronos pbr.frag (getBaseColor() multiplies by getVertexColor()).
-  material.pbrBaseColorFactor *= hit.color;
-
   // Evaluate the material at the hit point
   MeshState   mesh   = MeshState(hit.nrm, hit.tangent, hit.bitangent, hit.geonrm, hit.uv, false, 0.0f);
+  mesh.baseColorVertexMul = hit.color;
   PbrMaterial pbrMat = evaluateMaterial(material, mesh, allTextures, pushConst.gltfScene->textureInfos);
 
   output.color.xyz = pbrMat.baseColor;
@@ -297,7 +293,7 @@ PixelOutput fragmentMain(VertexOutput input, uint primitiveID: SV_PrimitiveID, f
       discard;
   }
 
-#if MAT_EXT_UNLIT
+#if GLTF_USE_UNLIT
   // KHR_materials_unlit: skip lighting entirely. Match Khronos pbr.frag (color = baseColor + emissive).
   if(material.unlit > 0)
   {
@@ -330,7 +326,7 @@ PixelOutput fragmentMain(VertexOutput input, uint primitiveID: SV_PrimitiveID, f
   // Pre-compute the volume transmission ray (object-space refraction direction * thickness *
   // model scale). Used by both the screen-space sample and the punctual BTDF.
   float3 transmissionRay = float3(0.0);
-#if MAT_EXT_TRANSMISSION
+#if GLTF_USE_TRANSMISSION
   if(pbrMat.transmission > 0.0 && pbrMat.thickness > 0.0)
   {
     float3 refractionVector = refract(-V, normalize(pbrMat.N), 1.0 / max(effectiveIor, 1e-5));
@@ -342,7 +338,7 @@ PixelOutput fragmentMain(VertexOutput input, uint primitiveID: SV_PrimitiveID, f
   // env-mode branches when the opaque-color framebuffer was captured this frame.
   bool   haveTransmissionSample  = false;
   float3 f_specular_transmission = float3(0.0);
-#if MAT_EXT_TRANSMISSION
+#if GLTF_USE_TRANSMISSION
   if(pbrMat.transmission > 0.0 && pushConst.opaqueColorReady != 0)
   {
     float3x3 m3 = float3x3(renderNode.objectToWorld[0].xyz, renderNode.objectToWorld[1].xyz, renderNode.objectToWorld[2].xyz);
@@ -369,7 +365,7 @@ PixelOutput fragmentMain(VertexOutput input, uint primitiveID: SV_PrimitiveID, f
     contribution += bsdfEvaluatePunctualKhronos(pbrMat, V, pushConst.skyParams.sunDirection, pushConst.skyParams.sunDiskIntensity,
                                                 transmissionRay, dttThickness, texturesHdr[HDR_SHEEN_INDEX]);
 
-#if MAT_EXT_TRANSMISSION
+#if GLTF_USE_TRANSMISSION
     if(haveTransmissionSample)
       contribution = lerp(contribution, f_specular_transmission, pbrMat.transmission);
 #endif
@@ -384,7 +380,7 @@ PixelOutput fragmentMain(VertexOutput input, uint primitiveID: SV_PrimitiveID, f
                        texturesHdr[HDR_LUT_INDEX], texturesHdr[HDR_SHEEN_INDEX], pushConst.frameInfo.envRotation,
                        pushConst.frameInfo.envIntensity, dttThickness, f_specular_transmission, haveTransmissionSample);
 
-#if MAT_EXT_VOLUME_SCATTER
+#if GLTF_USE_VOLUME_SCATTER
     // KHR_materials_volume_scatter contribution is separate from the IBL composite (matches
     // `pbr.frag:352-356`). The clearcoat mask `(1 - clearcoat * F_coat)` is angle-dependent.
     float3 ccFmask   = float3(1.0) - pbrMat.clearcoat * khronosClearcoatFresnel(pbrMat, V);
@@ -440,7 +436,7 @@ PixelOutput fragmentMain(VertexOutput input, uint primitiveID: SV_PrimitiveID, f
   float finalAlpha = 1.0;
   if(material.alphaMode == AlphaMode::eAlphaModeBlend)
     finalAlpha = pbrMat.opacity;
-#if MAT_EXT_TRANSMISSION
+#if GLTF_USE_TRANSMISSION
   if(pbrMat.transmission > 0.0 && !haveTransmissionSample)
     finalAlpha *= (1.0 - pbrMat.transmission);
 #endif

@@ -34,6 +34,7 @@ Design notes for the fork:
  - Extension-specific branches are wrapped in #if MAT_EXT_*. The matching field is only
    present on GltfShadeMaterial when the same flag is 1, so host and device must be built
    with consistent flags.
+
 -------------------------------------------------------------------------------------------------*/
 
 #ifndef GLTF_MATERIAL_EVAL_H
@@ -41,6 +42,14 @@ Design notes for the fork:
 
 #include "nvshaders/pbr_material_types.h.slang"
 #include "gltf_scene_io.h.slang"
+#include "gltf_eval_config.h"
+
+/*-------------------------------------------------------------------------------------------------
+# `MICROFACET_MIN_ROUGHNESS` Define
+> Minimum roughness for microfacet models.
+-------------------------------------------------------------------------------------------------*/
+#define MICROFACET_MIN_ROUGHNESS 0.0014142f
+
 
 struct MeshState
 {
@@ -51,6 +60,7 @@ struct MeshState
   float2 tc[2];  // Texture coordinates
   bool   isInside = false;
   float  texGrad  = 0.0f;  // Ray footprint for SampleGrad; 0 -> Sample() (mip 0 in RT, proper mips in fragment)
+  float4 baseColorVertexMul = float4(1);  // COLOR_0 multiplier for baseColor or spec-gloss diffuse
 };
 
 
@@ -63,29 +73,25 @@ struct MeshState
 #define USE_TEXTURES
 #endif
 
-/*
-texGrad > 0: SampleGrad (path trace ray footprint). texGrad == 0: Sample() — fragment gets real mips;
-in ray trace / compute implicit LOD is undefined and effectively samples like mip 0, same as needed there.
-*/
 float4 getTexture(Sampler2D textures[], in GltfTextureInfo textureInfo, in float2 texCoords[2], float texGrad)
 {
 #ifdef USE_TEXTURES
   float2 tt = texCoords[textureInfo.texCoord];
-#if MAT_EXT_TEXTURE_TRANSFORM
+#if GLTF_USE_TEXTURE_TRANSFORM
   // KHR_texture_transform
   tt = mul(float3(tt, 1), textureInfo.uvTransform).xy;
 #endif
   if(texGrad > 0.0f)
   {
-#if MAT_EXT_TEXTURE_TRANSFORM
+#if GLTF_USE_TEXTURE_TRANSFORM
     float2 ddx_uv = textureInfo.uvTransform[0] * texGrad;
     float2 ddy_uv = textureInfo.uvTransform[1] * texGrad;
+    return textures[textureInfo.index].SampleGrad(tt, ddx_uv, ddy_uv);
 #else
-    // Identity transform: ddx/ddy are axis-aligned unit vectors scaled by the ray footprint.
     float2 ddx_uv = float2(texGrad, 0.0f);
     float2 ddy_uv = float2(0.0f, texGrad);
-#endif
     return textures[textureInfo.index].SampleGrad(tt, ddx_uv, ddy_uv);
+#endif
   }
   return textures[textureInfo.index].Sample(tt);
 #else
@@ -93,19 +99,19 @@ float4 getTexture(Sampler2D textures[], in GltfTextureInfo textureInfo, in float
 #endif
 }
 
-/* 
-Check if a texture is present.
-*/
+/*-------------------------------------------------------------------------------------------------
+ * Check if a texture is present.
+ * -------------------------------------------------------------------------------------------------*/
 bool isTexturePresent(uint16_t tinfo)
 {
   return tinfo > 0;
 }
 
-#if MAT_EXT_VOLUME_SCATTER
+#if GLTF_USE_VOLUME_SCATTER
 /*-------------------------------------------------------------------------------------------------
-* Convert multi-scatter albedo to single-scatter albedo
-* Formula from KHR_materials_volume_scatter specification
-* -------------------------------------------------------------------------------------------------*/
+ * Convert multi-scatter albedo to single-scatter albedo
+ * Formula from KHR_materials_volume_scatter specification
+ * -------------------------------------------------------------------------------------------------*/
 float3 multiToSingleScatterAlbedo(float3 rho_ms)
 {
   float3 t = 4.09712 + 4.20863 * rho_ms - sqrt(9.59217 + 41.6808 * rho_ms + 17.7126 * rho_ms * rho_ms);
@@ -113,14 +119,13 @@ float3 multiToSingleScatterAlbedo(float3 rho_ms)
 }
 #endif
 
-#if MAT_EXT_SPECULAR_GLOSSINESS
+#if GLTF_USE_SPECULAR_GLOSSINESS
 /*-------------------------------------------------------------------------------------------------
-* Convert PBR specular glossiness to metallic-roughness
-* -------------------------------------------------------------------------------------------------*/
+ * Convert PBR specular glossiness to metallic-roughness
+ * -------------------------------------------------------------------------------------------------*/
 float3 convertSGToMR(float3 diffuseColor, float3 specularColor, float glossiness, out float metallic, out float2 roughness)
 {
-  // Constants
-  const float dielectricSpecular = 0.04f;  // F0 for dielectrics
+  const float dielectricSpecular = 0.04f;
 
   // Compute metallic factor
   float specularIntensity = max(specularColor.r, max(specularColor.g, specularColor.b));
@@ -147,12 +152,6 @@ float3 convertSGToMR(float3 diffuseColor, float3 specularColor, float glossiness
 #endif
 
 /*-------------------------------------------------------------------------------------------------
-# `MICROFACET_MIN_ROUGHNESS` Define
-> Minimum roughness for microfacet models.
--------------------------------------------------------------------------------------------------*/
-#define MICROFACET_MIN_ROUGHNESS 0.0014142f
-
-/*-------------------------------------------------------------------------------------------------
 # Function `evaluateMaterial`
 > From the incoming `material` and `mesh` info, return a `PbrMaterial` struct for the BSDF system.
 -------------------------------------------------------------------------------------------------*/
@@ -162,40 +161,11 @@ PbrMaterial evaluateMaterial(in GltfShadeMaterial material, MeshState state, Sam
   // cannot leave downstream BSDF reads undefined.
   PbrMaterial pbrMat = defaultPbrMaterial();
 
-  // pbrMetallicRoughness (standard)
-#if MAT_EXT_SPECULAR_GLOSSINESS
-  if(material.pbrModel == PbrModel::ePbrModelMetallicRoughness)
-#endif
+#if GLTF_USE_SPECULAR_GLOSSINESS
+  // KHR_materials_pbrSpecularGlossiness (deprecated)
+  if(material.pbrModel == PbrModel::ePbrModelSpecularGlossiness)
   {
-    // Base Color/Albedo may be defined from a base texture or a flat color
-    float4 baseColor = material.pbrBaseColorFactor;
-    if(isTexturePresent(material.pbrBaseColorTexture))
-    {
-      baseColor *= getTexture(textures, texInfos[material.pbrBaseColorTexture], state.tc, state.texGrad);
-    }
-    pbrMat.baseColor = baseColor.rgb;
-    pbrMat.opacity   = baseColor.a;
-
-    // Metallic-Roughness
-    float roughness = material.pbrRoughnessFactor;
-    float metallic  = material.pbrMetallicFactor;
-    if(isTexturePresent(material.pbrMetallicRoughnessTexture))
-    {
-      // Roughness is stored in the 'g' channel, metallic is stored in the 'b' channel.
-      float4 metallicRoughnessSample =
-          getTexture(textures, texInfos[material.pbrMetallicRoughnessTexture], state.tc, state.texGrad);
-      roughness *= metallicRoughnessSample.g;
-      metallic *= metallicRoughnessSample.b;
-    }
-    roughness        = max(roughness, MICROFACET_MIN_ROUGHNESS);
-    pbrMat.roughness = float2(roughness * roughness);  // Square roughness for the microfacet model
-    pbrMat.metallic  = clamp(metallic, 0.0F, 1.0F);
-  }
-#if MAT_EXT_SPECULAR_GLOSSINESS
-  else
-  {
-    // KHR_materials_pbrSpecularGlossiness: deprecated but still used in many places
-    float4 diffuse    = material.pbrDiffuseFactor;
+    float4 diffuse    = material.pbrDiffuseFactor * state.baseColorVertexMul;
     float  glossiness = material.pbrGlossinessFactor;
     float3 specular   = material.pbrSpecularFactor;
 
@@ -215,10 +185,32 @@ PbrMaterial evaluateMaterial(in GltfShadeMaterial material, MeshState state, Sam
     pbrMat.baseColor = convertSGToMR(diffuse.rgb, specular, glossiness, pbrMat.metallic, pbrMat.roughness);
     pbrMat.opacity   = diffuse.a;
   }
+  else
 #endif
+  // This is the Metallic-Roughness
+  {
+    float4 baseColor = material.pbrBaseColorFactor * state.baseColorVertexMul;
+    if(isTexturePresent(material.pbrBaseColorTexture))
+    {
+      baseColor *= getTexture(textures, texInfos[material.pbrBaseColorTexture], state.tc, state.texGrad);
+    }
+    pbrMat.baseColor = baseColor.rgb;
+    pbrMat.opacity   = baseColor.a;
 
+    float roughness = material.pbrRoughnessFactor;
+    float metallic  = material.pbrMetallicFactor;
+    if(isTexturePresent(material.pbrMetallicRoughnessTexture))
+    {
+      float4 metallicRoughnessSample =
+          getTexture(textures, texInfos[material.pbrMetallicRoughnessTexture], state.tc, state.texGrad);
+      roughness *= metallicRoughnessSample.g;
+      metallic *= metallicRoughnessSample.b;
+    }
+    roughness        = max(roughness, MICROFACET_MIN_ROUGHNESS);
+    pbrMat.roughness = float2(roughness * roughness);
+    pbrMat.metallic  = clamp(metallic, 0.0F, 1.0F);
+  }
 
-  // Occlusion Map
   pbrMat.occlusion = material.occlusionStrength;
   if(isTexturePresent(material.occlusionTexture))
   {
@@ -238,11 +230,9 @@ PbrMaterial evaluateMaterial(in GltfShadeMaterial material, MeshState state, Sam
     float3 normal_vector = getTexture(textures, texInfos[material.normalTexture], state.tc, state.texGrad).xyz;
     normal_vector        = normal_vector * 2.0F - 1.0F;
     normal_vector *= float3(material.normalTextureScale, material.normalTextureScale, 1.0F);
-    float3x3 tbn = float3x3(state.T, state.B, state.N);
-    pbrMat.N     = normalize(mul(normal_vector, tbn));
-
-    // Mark that we need to update T and B due to normal perturbation
-    needsTangentUpdate = true;
+    float3x3 tbn       = float3x3(state.T, state.B, state.N);
+    pbrMat.N           = normalize(mul(normal_vector, tbn));
+    needsTangentUpdate = true;  // Mark that we need to update T and B due to normal perturbation
   }
 
   // Emissive term
@@ -253,22 +243,22 @@ PbrMaterial evaluateMaterial(in GltfShadeMaterial material, MeshState state, Sam
   }
   pbrMat.emissive = max(float3(0.0F), pbrMat.emissive);
 
-#if MAT_EXT_VOLUME
-  // KHR_materials_volume — set before the IOR block so the thin-walled check
-  // (`pbrMat.thickness == 0`) drives the inside/outside IOR swap below. When MAT_EXT_VOLUME is
+#if GLTF_USE_VOLUME
+  // KHR_materials_volume  set before the IOR block so the thin-walled check
+  // (`pbrMat.thickness == 0`) drives the inside/outside IOR swap below. When GLTF_USE_VOLUME is
   // gated out, pbrMat.thickness stays at defaultPbrMaterial()'s 0.0 default and the swap is
   // correctly disabled.
   pbrMat.attenuationColor    = material.attenuationColor;
   pbrMat.attenuationDistance = material.attenuationDistance;
-  // KHR_materials_volume spec: per-fragment thickness = thicknessFactor * thicknessTexture.g.
-  pbrMat.thickness = material.thicknessFactor;
+  pbrMat.thickness           = material.thicknessFactor;
   if(isTexturePresent(material.thicknessTexture))
   {
+    // KHR_materials_volume spec: per-fragment thickness = thicknessFactor * thicknessTexture.g.
     pbrMat.thickness *= getTexture(textures, texInfos[material.thicknessTexture], state.tc, state.texGrad).g;
   }
 #endif
 
-#if MAT_EXT_SPECULAR
+#if GLTF_USE_SPECULAR
   // KHR_materials_specular
   // https://github.com/KhronosGroup/glTF/tree/main/extensions/2.0/Khronos/KHR_materials_specular
   pbrMat.specularColor = material.specularColorFactor;
@@ -284,12 +274,12 @@ PbrMaterial evaluateMaterial(in GltfShadeMaterial material, MeshState state, Sam
   }
 #endif
 
-  // Dielectric Specular — inside/outside IOR swap is enabled only for materials with finite
+  // Dielectric Specular -- inside/outside IOR swap is enabled only for materials with finite
   // KHR_materials_volume thickness (thickness > 0). Thin-walled (thickness == 0) materials
   // never swap, matching the glTF specification.
   float ior1 = 1.0F;  // IOR of the current medium (e.g., air)
-#if MAT_EXT_IOR
-  float ior2 = material.ior;  // IOR of the material
+#if GLTF_USE_IOR
+  float ior2 = material.ior;
 #else
   float ior2 = 1.5F;  // glTF default IOR when KHR_materials_ior is gated out
 #endif
@@ -301,8 +291,7 @@ PbrMaterial evaluateMaterial(in GltfShadeMaterial material, MeshState state, Sam
   pbrMat.ior1 = ior1;
   pbrMat.ior2 = ior2;
 
-
-#if MAT_EXT_TRANSMISSION
+#if GLTF_USE_TRANSMISSION
   // KHR_materials_transmission
   pbrMat.transmission = material.transmissionFactor;
   if(isTexturePresent(material.transmissionTexture))
@@ -311,7 +300,7 @@ PbrMaterial evaluateMaterial(in GltfShadeMaterial material, MeshState state, Sam
   }
 #endif
 
-#if MAT_EXT_VOLUME_SCATTER
+#if GLTF_USE_VOLUME_SCATTER
   // KHR_materials_volume_scatter
   // Compute scattering coefficient from multi-scatter albedo and attenuation
   if(any(material.multiscatterColorFactor > float3(0.0)))
@@ -323,7 +312,7 @@ PbrMaterial evaluateMaterial(in GltfShadeMaterial material, MeshState state, Sam
   pbrMat.scatterAnisotropy = material.scatterAnisotropy;
 #endif
 
-#if MAT_EXT_CLEARCOAT
+#if GLTF_USE_CLEARCOAT
   // KHR_materials_clearcoat
   pbrMat.clearcoat          = material.clearcoatFactor;
   pbrMat.clearcoatRoughness = material.clearcoatRoughness;
@@ -347,7 +336,7 @@ PbrMaterial evaluateMaterial(in GltfShadeMaterial material, MeshState state, Sam
   pbrMat.clearcoatRoughness = max(pbrMat.clearcoatRoughness, 0.001F);
 #endif
 
-#if MAT_EXT_IRIDESCENCE
+#if GLTF_USE_IRIDESCENCE
   // KHR_materials_iridescence
   float iridescence          = material.iridescenceFactor;
   float iridescenceThickness = material.iridescenceThicknessMaximum;
@@ -361,11 +350,11 @@ PbrMaterial evaluateMaterial(in GltfShadeMaterial material, MeshState state, Sam
     const float t = getTexture(textures, texInfos[material.iridescenceThicknessTexture], state.tc, state.texGrad).y;
     iridescenceThickness = lerp(material.iridescenceThicknessMinimum, material.iridescenceThicknessMaximum, t);
   }
-  pbrMat.iridescence = (iridescenceThickness > 0.0f) ? iridescence : 0.0f;  // No iridescence when the thickness is zero.
+  pbrMat.iridescence          = (iridescenceThickness > 0.0f) ? iridescence : 0.0f;
   pbrMat.iridescenceThickness = iridescenceThickness;
 #endif
 
-#if MAT_EXT_ANISOTROPY
+#if GLTF_USE_ANISOTROPY
   // KHR_materials_anisotropy
   float anisotropyStrength = material.anisotropyStrength;
   // If the anisotropyStrength == 0.0f (default), the roughness is isotropic.
@@ -375,7 +364,6 @@ PbrMaterial evaluateMaterial(in GltfShadeMaterial material, MeshState state, Sam
     if(isTexturePresent(material.anisotropyTexture))
     {
       const float4 anisotropyTex = getTexture(textures, texInfos[material.anisotropyTexture], state.tc, state.texGrad);
-
       // .xy encodes the direction in (tangent, bitangent) space. Remap from [0, 1] to [-1, 1].
       anisotropyDirection = normalize(float2(anisotropyTex.xy) * 2.0f - 1.0f);
       // .z encodes the strength in range [0, 1].
@@ -386,16 +374,15 @@ PbrMaterial evaluateMaterial(in GltfShadeMaterial material, MeshState state, Sam
     pbrMat.roughness.x = lerp(pbrMat.roughness.y, 1.0f, anisotropyStrength * anisotropyStrength);
 
     // Rotate the anisotropy direction in the tangent space.
-    const float s       = material.anisotropyRotation.x;  // Sin and Cos of the rotation angle.
+    const float s       = material.anisotropyRotation.x;
     const float c       = material.anisotropyRotation.y;
     anisotropyDirection = float2(c * anisotropyDirection.x + s * anisotropyDirection.y,
                                  c * anisotropyDirection.y - s * anisotropyDirection.x);
 
     // Update the tangent to be along the anisotropy direction in tangent space.
     const float3 T_aniso = pbrMat.T * anisotropyDirection.x + pbrMat.B * anisotropyDirection.y;
-
-    pbrMat.T           = T_aniso;
-    needsTangentUpdate = true;
+    pbrMat.T             = T_aniso;
+    needsTangentUpdate   = true;
   }
 #endif
 
@@ -409,12 +396,13 @@ PbrMaterial evaluateMaterial(in GltfShadeMaterial material, MeshState state, Sam
     pbrMat.T            = normalize(cross(pbrMat.B, pbrMat.N) * bitangentSign);
   }
 
-#if MAT_EXT_SHEEN
+#if GLTF_USE_SHEEN
   // KHR_materials_sheen
   pbrMat.sheenColor = material.sheenColorFactor;
   if(isTexturePresent(material.sheenColorTexture))
   {
-    pbrMat.sheenColor *= float3(getTexture(textures, texInfos[material.sheenColorTexture], state.tc, state.texGrad).xyz);  // sRGB
+    // sRGB texture
+    pbrMat.sheenColor *= float3(getTexture(textures, texInfos[material.sheenColorTexture], state.tc, state.texGrad).xyz);
   }
 
   pbrMat.sheenRoughness = material.sheenRoughnessFactor;
@@ -425,12 +413,12 @@ PbrMaterial evaluateMaterial(in GltfShadeMaterial material, MeshState state, Sam
   pbrMat.sheenRoughness = max(MICROFACET_MIN_ROUGHNESS, pbrMat.sheenRoughness);
 #endif
 
-#if MAT_EXT_DISPERSION
+#if GLTF_USE_DISPERSION
   // KHR_materials_dispersion
   pbrMat.dispersion = material.dispersion;
 #endif
 
-#if MAT_EXT_DIFFUSE_TRANSMISSION
+#if GLTF_USE_DIFFUSE_TRANSMISSION
   // KHR_materials_diffuse_transmission
   pbrMat.diffuseTransmissionFactor = material.diffuseTransmissionFactor;
   if(isTexturePresent(material.diffuseTransmissionTexture))
@@ -447,6 +435,11 @@ PbrMaterial evaluateMaterial(in GltfShadeMaterial material, MeshState state, Sam
 #endif
 
   return pbrMat;
+}
+
+PbrMaterial evaluateMaterial(uint materialIndex, MeshState state, Sampler2D textures[], GltfTextureInfo* texInfos, GltfShadeMaterial* materials)
+{
+  return evaluateMaterial(materials[materialIndex], state, textures, texInfos);
 }
 
 

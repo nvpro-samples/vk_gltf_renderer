@@ -7,36 +7,7 @@
 #ifndef PATHTRACE_FUNCTIONS_H
 #define PATHTRACE_FUNCTIONS_H 1
 
-//-----------------------------------------------------------------------
-// Path tracer optimal-mode gates
-//
-// PT_USE_* macros gate path-tracer-private state (PathTracerState fields), helper
-// structs that live entirely inside the path tracer (VolumeMedium), and bounce-loop
-// code paths. They do NOT affect the host-shared GltfShadeMaterial / GltfTextureInfo
-// layout in gltf_scene_io.h.slang -- those stay gated by MAT_EXT_* exclusively, which
-// is locked at host build time by static_asserts in src/gltf_material_cache.cpp.
-//
-// In default mode each PT_USE_X is 1 (all features supported). In scene-aware "optimal"
-// mode the renderer (renderer_pathtracer.cpp) passes -DPT_USE_X=0 for every extension
-// the loaded scene does not actually use, dropping live registers / dead code from the
-// megakernel without disturbing buffer offsets.
-//
-// PT_USE_X defaults to MAT_EXT_X so a build-time -DMAT_EXT_X=0 still disables both
-// the struct field and the path-tracer code in one shot (the historic "all-or-nothing"
-// build mode). Forcing PT_USE_X to 0 while MAT_EXT_X stays 1 is the new optimal-mode
-// configuration: material buffer keeps its full layout, the path tracer just skips the
-// dead code.
-//-----------------------------------------------------------------------
-#ifndef PT_USE_TRANSMISSION
-#define PT_USE_TRANSMISSION MAT_EXT_TRANSMISSION
-#endif
-#ifndef PT_USE_VOLUME
-#define PT_USE_VOLUME MAT_EXT_VOLUME
-#endif
-#ifndef PT_USE_VOLUME_SCATTER
-#define PT_USE_VOLUME_SCATTER MAT_EXT_VOLUME_SCATTER
-#endif
-
+#include "gltf_eval_config.h"
 
 //-----------------------------------------------------------------------
 // Types and tuning constants
@@ -128,10 +99,10 @@ struct RayCone
 };
 
 // VolumeMedium and its helpers only exist when KHR_materials_volume is in use.
-// When PT_USE_VOLUME=0 (the scene has no volume materials in optimal mode) the medium
+// When GLTF_USE_VOLUME=0 (the scene has no volume materials in optimal mode) the medium
 // struct, the bounce-loop in-volume tracking, and the corresponding fields on
 // PathTracerState are dropped entirely (reduces per-thread live registers).
-#if PT_USE_VOLUME
+#if GLTF_USE_VOLUME
 struct VolumeMedium
 {
   float16_t3 extinction;
@@ -155,7 +126,7 @@ bool hasVolumeMedium(VolumeMedium medium)
   return max(max(extinction.x, extinction.y), extinction.z) > 0.0F
          || max(max(scatterCoeff.x, scatterCoeff.y), scatterCoeff.z) > 0.0F;
 }
-#endif  // PT_USE_VOLUME
+#endif  // GLTF_USE_VOLUME
 
 
 //-----------------------------------------------------------------------
@@ -216,8 +187,18 @@ float getOpacity(GltfRenderNode renderNode, GltfRenderPrimitive renderPrim, int 
   uint3 triangleIndex = getTriangleIndices(renderPrim, triangleID);
 
   float baseColorAlpha = 1;
-#if MAT_EXT_SPECULAR_GLOSSINESS
-  if(mat.pbrModel == PbrModel::ePbrModelMetallicRoughness)
+#if GLTF_USE_SPECULAR_GLOSSINESS
+  if(mat.pbrModel == PbrModel::ePbrModelSpecularGlossiness)
+  {
+    baseColorAlpha = mat.pbrDiffuseFactor.a;
+    if(isTexturePresent(mat.pbrDiffuseTexture))
+    {
+      GltfTextureInfo texInfo = texInfos[mat.pbrDiffuseTexture];
+      float2          uv = getInterpolatedVertexTexCoord(renderPrim, texInfo.texCoord, triangleIndex, barycentrics);
+      baseColorAlpha *= allTextures[texInfo.index].SampleLevel(uv, 0.0f).a;
+    }
+  }
+  else
 #endif
   {
     baseColorAlpha = mat.pbrBaseColorFactor.a;
@@ -229,18 +210,6 @@ float getOpacity(GltfRenderNode renderNode, GltfRenderPrimitive renderPrim, int 
       baseColorAlpha *= allTextures[texInfo.index].SampleLevel(uv, 0.0f).a;
     }
   }
-#if MAT_EXT_SPECULAR_GLOSSINESS
-  else
-  {
-    baseColorAlpha = mat.pbrDiffuseFactor.a;
-    if(isTexturePresent(mat.pbrDiffuseTexture))
-    {
-      GltfTextureInfo texInfo = texInfos[mat.pbrDiffuseTexture];
-      float2          uv = getInterpolatedVertexTexCoord(renderPrim, texInfo.texCoord, triangleIndex, barycentrics);
-      baseColorAlpha *= allTextures[texInfo.index].SampleLevel(uv, 0.0f).a;
-    }
-  }
-#endif
 
   baseColorAlpha *= getInterpolatedVertexColor(renderPrim, triangleIndex, barycentrics).a;
 
@@ -269,7 +238,7 @@ float3 getShadowTransmission(GltfRenderNode      renderNode,
                              float3              rayDirection,
                              inout bool          isInside)
 {
-#if !MAT_EXT_TRANSMISSION
+#if !GLTF_USE_TRANSMISSION
   return float3(0.0);
 #else
   uint               matIndex  = max(0, renderNode.materialID);
@@ -298,7 +267,7 @@ float3 getShadowTransmission(GltfRenderNode      renderNode,
   }
 
   float cosTheta = abs(dot(rayDirection, normal));
-#if MAT_EXT_IOR
+#if GLTF_USE_IOR
   float fresnel = schlickFresnel(mat.ior, cosTheta);
 #else
   float fresnel = schlickFresnel(1.5F, cosTheta);
@@ -307,14 +276,14 @@ float3 getShadowTransmission(GltfRenderNode      renderNode,
   float3 currentTransmission = tFactor * mat.pbrBaseColorFactor.rgb;
   currentTransmission *= (1.0F - fresnel);
 
-#if MAT_EXT_VOLUME
+#if GLTF_USE_VOLUME
   if(mat.thicknessFactor > 0.0)
   {
     if(isInside)
     {
       float3 absCoeff = -log(max(mat.attenuationColor, float3(0.001))) / max(mat.attenuationDistance, 0.001);
 
-#if MAT_EXT_VOLUME_SCATTER
+#if GLTF_USE_VOLUME_SCATTER
       float3 scatterCoeff = absCoeff * multiToSingleScatterAlbedo(mat.multiscatterColorFactor);
 #else
       float3 scatterCoeff = float3(0.0);
@@ -605,27 +574,27 @@ bool checkInfinitePlaneIntersection(RayDesc ray, inout HitPayload payload, inout
 
 
 //-----------------------------------------------------------------------
-// In-volume step: Beer's-law absorption (always when PT_USE_VOLUME) +
-// Henyey-Greenstein scatter sampling (only when PT_USE_VOLUME_SCATTER).
+// In-volume step: Beer's-law absorption (always when GLTF_USE_VOLUME) +
+// Henyey-Greenstein scatter sampling (only when GLTF_USE_VOLUME_SCATTER).
 //-----------------------------------------------------------------------
-// IMPORTANT: this function exists whenever PT_USE_VOLUME is on, NOT only when
-// PT_USE_VOLUME_SCATTER is on. KHR_materials_volume by itself (no scatter
+// IMPORTANT: this function exists whenever GLTF_USE_VOLUME is on, NOT only when
+// GLTF_USE_VOLUME_SCATTER is on. KHR_materials_volume by itself (no scatter
 // extension) still needs per-segment Beer's-law absorption applied along the
 // camera ray, which is what makes a glass with attenuationColor="green" look
-// green. Earlier the entire function was gated on PT_USE_VOLUME_SCATTER which
+// green. Earlier the entire function was gated on GLTF_USE_VOLUME_SCATTER which
 // silently dropped that absorption pass in optimal mode for any scene that
 // uses volume but not scatter (e.g. CompareVolume.gltf).
 //
-// Returns true only when a real scatter event happened (PT_USE_VOLUME_SCATTER
+// Returns true only when a real scatter event happened (GLTF_USE_VOLUME_SCATTER
 // must be on for that to be possible). Returns false when only absorption was
 // applied. The bounce-loop caller uses the return value to decide whether to
 // run scatter-only follow-up work (NEE at the scatter point, scatterBounces++).
-#if PT_USE_VOLUME
+#if GLTF_USE_VOLUME
 bool handleVolumeScatter(VolumeMedium medium, float hitDistance, inout RayDesc ray, inout float3 throughput, inout float lastSamplePdf, inout uint seed)
 {
   float3 extinction = float3(medium.extinction);
 
-#if PT_USE_VOLUME_SCATTER
+#if GLTF_USE_VOLUME_SCATTER
   float3 scatterCoeff = float3(medium.scatterCoefficient);
   float  maxScatter   = max(scatterCoeff.x, max(scatterCoeff.y, scatterCoeff.z));
   if(maxScatter > VOLUME_MIN_SCATTER)
@@ -653,20 +622,20 @@ bool handleVolumeScatter(VolumeMedium medium, float hitDistance, inout RayDesc r
     throughput *= exp(hitDistance * (float3(maxExtinction) - extinction));
     return false;
   }
-#endif  // PT_USE_VOLUME_SCATTER
+#endif  // GLTF_USE_VOLUME_SCATTER
 
-  // Pure-absorption path (no scatter coefficient, or PT_USE_VOLUME_SCATTER disabled):
+  // Pure-absorption path (no scatter coefficient, or GLTF_USE_VOLUME_SCATTER disabled):
   // straight Beer's law applied over the segment length. This is the case for plain
   // KHR_materials_volume materials and is what produces the colored tint of a glass
   // filled with an absorbing medium.
   throughput *= exp(-hitDistance * extinction);
   return false;
 }
-#endif  // PT_USE_VOLUME
+#endif  // GLTF_USE_VOLUME
 
 // Scatter-only: next-event estimation at the scatter point. Only meaningful when a
-// scatter event can actually happen, so gated on PT_USE_VOLUME_SCATTER.
-#if PT_USE_VOLUME_SCATTER
+// scatter event can actually happen, so gated on GLTF_USE_VOLUME_SCATTER.
+#if GLTF_USE_VOLUME_SCATTER
 float3 volumeScatterNEE(IRaytracer raytracer, VolumeMedium medium, float3 scatterPos, float3 wiBeforeScatter, float3 throughput, inout uint seed)
 {
   DirectLight directLight;
@@ -689,7 +658,7 @@ float3 volumeScatterNEE(IRaytracer raytracer, VolumeMedium medium, float3 scatte
 
   return throughput * directLight.radianceOverPdf * misWeight * phasePdf * shadowFactor;
 }
-#endif  // PT_USE_VOLUME_SCATTER
+#endif  // GLTF_USE_VOLUME_SCATTER
 
 
 //-----------------------------------------------------------------------
@@ -859,8 +828,8 @@ enum PathStepResult
 // per-thread state that survives across every Trace() call in the bounce loop,
 // which is what determines warps-per-SM (occupancy) on the megakernel.
 //
-// isInside is conditional on either PT_USE_TRANSMISSION (toggled at refraction)
-// or PT_USE_VOLUME (used to gate the in-volume scatter check).
+// isInside is conditional on either GLTF_USE_TRANSMISSION (toggled at refraction)
+// or GLTF_USE_VOLUME (used to gate the in-volume scatter check).
 //
 // firstHitPos is always present (drives the selection/picking NDC depth) even
 // when DLSS/OptiX is disabled; it is written on the first hit (or by the
@@ -875,13 +844,13 @@ struct PathTracerState
   bool    solid         = true;
   RayCone cone          = { 0.0F, pushConst.pixelAngle };
   int     surfaceDepth  = 0;
-#if PT_USE_TRANSMISSION || PT_USE_VOLUME
+#if GLTF_USE_TRANSMISSION || GLTF_USE_VOLUME
   bool isInside = false;
 #endif
-#if PT_USE_VOLUME
+#if GLTF_USE_VOLUME
   VolumeMedium volumeMedium = {};
 #endif
-#if PT_USE_VOLUME_SCATTER
+#if GLTF_USE_VOLUME_SCATTER
   int scatterBounces = 0;
 #endif
 #if USE_DLSS_SHADER
@@ -901,13 +870,13 @@ struct BounceScratch
   float16_t  shadowRayDist;
 };
 
-// Safe accessor for pt.isInside. The field only exists when PT_USE_TRANSMISSION or
-// PT_USE_VOLUME is compiled in (without those, a ray can never enter a medium so the
+// Safe accessor for pt.isInside. The field only exists when GLTF_USE_TRANSMISSION or
+// GLTF_USE_VOLUME is compiled in (without those, a ray can never enter a medium so the
 // answer is always false). Used by call sites that aren't themselves gated, e.g.
 // MeshState construction in the mesh-hit path or the DLSS clear-glass guide.
 bool ptIsInside(PathTracerState pt)
 {
-#if PT_USE_TRANSMISSION || PT_USE_VOLUME
+#if GLTF_USE_TRANSMISSION || GLTF_USE_VOLUME
   return pt.isInside;
 #else
   return false;
@@ -915,14 +884,14 @@ bool ptIsInside(PathTracerState pt)
 }
 
 // Handles the in-volume segment before normal surface shading:
-// - Always applies segment transmittance when PT_USE_VOLUME is enabled.
+// - Always applies segment transmittance when GLTF_USE_VOLUME is enabled.
 // - Handles scatter-only follow-up (cone advance, NEE, RR) when a real scatter happens.
 PathStepResult processVolumeSegment(IRaytracer raytracer, float hitDistance, inout RayDesc ray, inout PathTracerState pt, inout uint seed)
 {
-#if PT_USE_VOLUME
+#if GLTF_USE_VOLUME
   if(pt.isInside && hasVolumeMedium(pt.volumeMedium))
   {
-#if PT_USE_VOLUME_SCATTER
+#if GLTF_USE_VOLUME_SCATTER
     // handleVolumeScatter may rotate/translate the ray during a true scatter event.
     // Keep the pre-scatter ray state for HG cosine evaluation and cone travel update.
     const float3 wiBeforeScatter     = ray.Direction;
@@ -931,7 +900,7 @@ PathStepResult processVolumeSegment(IRaytracer raytracer, float hitDistance, ino
 
     if(handleVolumeScatter(pt.volumeMedium, hitDistance, ray, pt.throughput, pt.lastSamplePdf, seed))
     {
-#if PT_USE_VOLUME_SCATTER
+#if GLTF_USE_VOLUME_SCATTER
       pt.scatterBounces++;
 
       // Scatter events translate the cone through the medium segment (no slant correction).
@@ -946,10 +915,10 @@ PathStepResult processVolumeSegment(IRaytracer raytracer, float hitDistance, ino
         pt.throughput /= rrPcont;
       }
       return PathStepResult.eVolumeContinue;  // skips surface-depth increment in the main loop
-#endif                                        // PT_USE_VOLUME_SCATTER
+#endif                                        // GLTF_USE_VOLUME_SCATTER
     }
   }
-#endif  // PT_USE_VOLUME
+#endif  // GLTF_USE_VOLUME
 
   return PathStepResult.eOutOfVolume;
 }

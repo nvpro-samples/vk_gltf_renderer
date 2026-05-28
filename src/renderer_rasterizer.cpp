@@ -55,6 +55,8 @@
 
 #include "renderer_rasterizer.hpp"
 
+#include "scene_shader_macros.hpp"
+
 // Pre-compiled shaders
 #include "_autogen/gltf_raster.slang.h"
 #include "_autogen/sky_physical.slang.h"
@@ -666,6 +668,9 @@ void Rasterizer::compileShader(Resources& resources, bool fromFile)
 
   if(fromFile)
   {
+    resources.slangCompiler.clearMacros();
+    nvvkgltf::applyCommonShaderMacros(resources.slangCompiler);
+
     if(resources.slangCompiler.compileFile("gltf_raster.slang"))
     {
       shaderInfo.codeSize = resources.slangCompiler.getSpirvSize();

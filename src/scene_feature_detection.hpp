@@ -33,23 +33,20 @@ namespace nvvkgltf {
 >
 > Used by the path tracer's optimal-mode shader rebuild: when "Optimize shader for
 > current scene" is enabled, the renderer detects which extensions actually appear
-> in the scene's materials, then recompiles `gltf_pathtrace.slang` with path-tracer-
-> private `-DPT_USE_X=0` gates for every extension that is NOT in the set, plus
-> `-DUSE_DLSS_SHADER=0` when neither denoiser needs guide buffers. This shrinks the
-> megakernel (drops fields from
-> `PathTracerState`, removes dead code blocks) which is what frees the live-register
-> headroom needed to climb the warps-per-SM occupancy curve.
+> in the scene's materials, then recompiles `gltf_pathtrace.slang` with `-DGLTF_USE_X=0`
+> or `1` for every extension gate (explicit emission; defaults resolve to `MAT_EXT_*`), plus
+> `-DUSE_DLSS_SHADER=0/1` when guide
+> buffers are not needed. This shrinks the megakernel and material-eval paths without
+> changing `GltfShadeMaterial` buffer layout.
 >
 > NOTE: this does NOT change the host-side `GltfShadeMaterial` struct layout. Host
-> `MAT_EXT_*` flags stay at build time (default all-on) because the material buffer
-> layout must remain compatible across all scene-load events. The set produced here
-> only flows into shader-side `-D` macros at recompile time; it controls code paths
-> and helper struct fields, not the material buffer.
+> `MAT_EXT_*` flags stay at build time (default all-on). Runtime optimal mode must
+> never pass `MAT_EXT_X=0` to Slang recompiles.
 --------------------------------------------------------------------------------------------------*/
 struct SceneFeatureSet
 {
-  // KHR_materials_* usage booleans. Names mirror MAT_EXT_* but runtime optimal mode
-  // drives PT_USE_* gates (not MAT_EXT_*) from these fields.
+  // KHR_materials_* usage booleans. Names mirror MAT_EXT_*; runtime optimal mode drives
+  // GLTF_USE_* gates (not MAT_EXT_*) from these fields.
   bool transmission        = false;
   bool volume              = false;
   bool volumeScatter       = false;

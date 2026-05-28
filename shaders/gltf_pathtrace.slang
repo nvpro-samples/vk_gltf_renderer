@@ -155,8 +155,10 @@ PathStepResult pathTraceOneBounce(IRaytracer raytracer, inout RayDesc ray, inout
       return PathStepResult.eBreak;
     }
 
-    GltfShadeMaterial material;  // The orginal glTF material
-    PbrMaterial       pbrMat;    // The evalualted PBR material
+    GltfShadeMaterial* materials = pushConst.gltfScene->materials;
+    GltfTextureInfo*   texInfos  = pushConst.gltfScene->textureInfos;
+    int                materialIndex = -1;
+    PbrMaterial        pbrMat;
 
     // Compute the ray-cone footprint at the hit point which is used to compute the texture-LOD gradient
     float worldFoot = rayConeWorldFootprint(pt.cone, payload.hitT, hit.geonrm, -ray.Direction);
@@ -167,9 +169,8 @@ PathStepResult pathTraceOneBounce(IRaytracer raytracer, inout RayDesc ray, inout
     if(hitInfinitePlane)
     {
       // Replaced the material at the hit point with the infinite plane material
-      pbrMat   = defaultPbrMaterial(frameInfo->infinitePlaneBaseColor, frameInfo->infinitePlaneMetallic,
-                                    frameInfo->infinitePlaneRoughness, hit.nrm, hit.nrm);
-      material = {};  // struct member defaults apply
+      pbrMat = defaultPbrMaterial(frameInfo->infinitePlaneBaseColor, frameInfo->infinitePlaneMetallic,
+                                  frameInfo->infinitePlaneRoughness, hit.nrm, hit.nrm);
 
       // Shadow catcher: invisible plane that shows only shadows for compositing
       if(hasFlag(frameInfo->flags, SceneFrameInfoFlags::eSceneInfinitePlaneShadowCatcher))
@@ -190,21 +191,12 @@ PathStepResult pathTraceOneBounce(IRaytracer raytracer, inout RayDesc ray, inout
     {
       // Find material at the hit point and evaluate the material (PBR material evaluation)
 
-      // Getting the scene information
-      GltfShadeMaterial* materials = pushConst.gltfScene->materials;     // Buffer of materials
-      GltfTextureInfo*   texInfos  = pushConst.gltfScene->textureInfos;  // Buffer of texture infos
+      materialIndex = max(0, renderNode.materialID);
 
-      // Setting up the material (renderNode/renderPrim hoisted above)
-      int materialIndex = max(0, renderNode.materialID);  // Material ID of hit mesh
-      material          = materials[materialIndex];       // Material of the hit object
-
-      material.pbrBaseColorFactor *= hit.color;  // Modulate the base color with the vertex color
-
-      // Texture LOD from the ray-cone footprint. texGradScale is a user knob: 0 falls
-      // through to Sample() (mip 0), 1 is the full physical gradient.
       float     texGrad = worldFoot * hit.texelDensity * pushConst.texGradScale;
       MeshState mesh    = MeshState(hit.nrm, hit.tangent, hit.bitangent, hit.geonrm, hit.uv, ptIsInside(pt), texGrad);
-      pbrMat            = evaluateMaterial(material, mesh, allTextures, texInfos);
+      mesh.baseColorVertexMul = hit.color;
+      pbrMat                  = evaluateMaterial(materialIndex, mesh, allTextures, texInfos, materials);
 
 #if WIREFRAME
       // Wireframe is only used for the camera-visible surface, so compute it once here on the
@@ -285,8 +277,8 @@ PathStepResult pathTraceOneBounce(IRaytracer raytracer, inout RayDesc ray, inout
     //-----------------------------------------------------------------------
     // Unlit
     //-----------------------------------------------------------------------
-#if MAT_EXT_UNLIT
-    if(material.unlit > 0)
+#if GLTF_USE_UNLIT
+    if(materialIndex >= 0 && materials[materialIndex].unlit > 0)
     {
       pt.radiance += pbrMat.baseColor;
       return PathStepResult.eBreak;
@@ -381,15 +373,14 @@ PathStepResult pathTraceOneBounce(IRaytracer raytracer, inout RayDesc ray, inout
         // This update is necessary for correctly handling transmission (refraction) through solid (non-thin-walled) materials.
         // For thin-walled surfaces - like decals or leaves - this state isn't toggled, because there's no real "inside".
         //
-        // Gated on PT_USE_TRANSMISSION because in optimal-mode scenes without transmission the BSDF
-        // is configured to never produce BSDF_EVENT_TRANSMISSION (no material flag set), so this
-        // branch is dead. The inner makeVolumeMedium capture only runs when PT_USE_VOLUME is also
-        // on (medium has nowhere to live otherwise).
-#if PT_USE_TRANSMISSION
+        // Gated on GLTF_USE_TRANSMISSION: scenes without transmission never produce
+        // BSDF_EVENT_TRANSMISSION, so this branch is dead. makeVolumeMedium only when
+        // GLTF_USE_VOLUME is on (medium has nowhere to live otherwise).
+#if GLTF_USE_TRANSMISSION
         if(isTransmission)
         {
           pt.isInside = !pt.isInside;
-#if PT_USE_VOLUME
+#if GLTF_USE_VOLUME
           if(pt.isInside)
             pt.volumeMedium = makeVolumeMedium(pbrMat);  // Entering volume: capture the medium for scatter/absorption
 #endif

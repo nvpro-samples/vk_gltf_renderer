@@ -162,7 +162,7 @@ GltfRenderer::GltfRenderer(nvutils::ParameterRegistry* paramReg, const nvutils::
   paramReg->add({"visualization", "Visualization Mode"}, (int*)&m_resources.settings.visualization);
   paramReg->add({"wireframe", "Enable wireframe overlay"}, &m_resources.settings.wireframe);
   paramReg->add({"optimalShader",
-                 "Compile gltf_pathtrace.slang with PT_USE_* gates specialized per scene "
+                 "Compile gltf_pathtrace.slang with GLTF_USE_* gates specialized per scene "
                  "(no runtime MAT_EXT_* changes; triggers shader recompile on scene/material change). Default off."},
                 &m_resources.settings.optimalShader);
   paramReg->add({"useSolidBackground", "Use solid color background"}, &m_resources.settings.useSolidBackground, true);

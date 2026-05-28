@@ -40,6 +40,8 @@
 
 #include "renderer_pathtracer.hpp"
 
+#include "scene_shader_macros.hpp"
+
 // Pre-compiled shaders
 #include "_autogen/gltf_pathtrace.slang.h"
 
@@ -1054,48 +1056,25 @@ void PathTracer::compileShader(Resources& resources, bool fromFile)
     SCOPED_TIMER("Slang compile from file");
 
     resources.slangCompiler.clearMacros();
+    nvvkgltf::applyCommonShaderMacros(resources.slangCompiler);
+
     std::vector<std::pair<std::string, std::string>> macros = {
         {"AVAILABLE_SER", std::to_string(m_supportSER)},
         {"WIREFRAME", std::to_string((int)resources.settings.wireframe)},
     };
 
-    // Scene-aware optimal mode: pass only path-tracer-private -D PT_USE_X=0 gates
-    // where the loaded scene does NOT need extension X, plus -D USE_DLSS_SHADER=0
-    // when neither denoiser needs guide buffers. We do not emit runtime MAT_EXT_*
-    // macros here. In default mode (optimalShader=false), no extra macros are
-    // added so the embedded SPIR-V's build-time defaults apply.
-    //
-    // CRITICAL: we never pass MAT_EXT_X=0 here. MAT_EXT_* also gates fields on
-    // the GltfShadeMaterial / GltfTextureInfo shaderio structs (gltf_scene_io.h.slang),
-    // and the host C++ side always builds materials with the all-on layout. Setting
-    // MAT_EXT_X=0 in the shader would shift GPU buffer offsets and break BDA reads
-    // (manifests as VK_ERROR_DEVICE_LOST after the first frame). PT_USE_X is
-    // path-tracer-private: it only gates PathTracerState fields, the VolumeMedium
-    // helper struct (no material buffer dependency), and bounce-loop code paths.
-    //
-    // Note USE_DLSS_SHADER is asymmetric: the build-time CMake already sets it to 1
-    // when USE_DLSS or USE_OPTIX_DENOISER is on. In optimal mode we PASS the macro
-    // (either 0 or 1) to override; otherwise the embedded default holds.
+    // Scene-aware optimal mode: set every GLTF_USE_* to 0 or 1 from SceneFeatureSet.
+    // Never pass MAT_EXT_X=0 (that would change GltfShadeMaterial layout while the host
+    // uploads the all-on struct).
     if(resources.settings.optimalShader)
     {
-      // SceneFeatureSet has already promoted the dependency chain
-      //   scatter => volume => transmission
-      // inside detectSceneFeatures(), so we can read fs.* directly without redoing it.
-      const auto& fs   = resources.currentFeatureSet;
-      auto        push = [&](const char* name, bool used) {
-        if(!used)
-          macros.push_back({name, "0"});
-      };
-
-      push("PT_USE_TRANSMISSION", fs.transmission);
-      push("PT_USE_VOLUME", fs.volume);
-      push("PT_USE_VOLUME_SCATTER", fs.volumeScatter);
-      macros.push_back({"USE_DLSS_SHADER", fs.dlssGuide ? "1" : "0"});
+      const auto& fs = resources.currentFeatureSet;
+      nvvkgltf::appendPathTracerOptimalMacros(macros, fs);
 
       LOGI(
-          "[PathTracer] Optimal shader: scene uses [%s]; PT_USE_TRANSMISSION=%d "
-          "PT_USE_VOLUME=%d PT_USE_VOLUME_SCATTER=%d USE_DLSS_SHADER=%d.\n",
-          fs.toString().c_str(), fs.transmission ? 1 : 0, fs.volume ? 1 : 0, fs.volumeScatter ? 1 : 0, fs.dlssGuide ? 1 : 0);
+          "[PathTracer] Optimal shader: scene uses [%s]; %d GLTF_USE_* gates off "
+          "(each set explicitly to 0 or 1).\n",
+          fs.toString().c_str(), fs.unusedExtensionCount());
     }
 
     for(const auto& [k, v] : macros)

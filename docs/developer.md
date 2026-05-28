@@ -194,6 +194,12 @@ are **forked locally** into `shaders/gltf_*.h.slang` rather than using the upstr
    (`GltfShadeMaterial` for `KHR_materials_*`, `GltfTextureInfo` for `KHR_texture_transform`)
    and its code paths drop out of `evaluateMaterial()` / `getTexture()` / `getShadowTransmission()`.
    Defaults are all `1`, reproducing the upstream behavior byte-for-byte.
+3. **Behavior gating (runtime-safe)**: `GLTF_USE_*` in
+   [`shaders/gltf_eval_config.h`](../shaders/gltf_eval_config.h) gates material eval, path-tracer
+   state (`PathTracerState`, volume segment, shadow transmission), and raster extension paths
+   without changing buffer layout. Optimal mode passes each gate as `-DGLTF_USE_X=0` or `1`
+   from `SceneFeatureSet` (never `-DMAT_EXT_X=0` at runtime). `MAT_EXT_*` remains layout authority
+   on host and device only.
 
 ### Key design points
 
@@ -219,15 +225,19 @@ are **forked locally** into `shaders/gltf_*.h.slang` rather than using the upstr
    default `1`.
 2. In [`gltf_scene_io.h.slang`](../shaders/gltf_scene_io.h.slang), add the new struct fields
    (+ any texture slots) inside `#if MAT_EXT_<NAME>` with inline default values.
-3. In [`gltf_material_eval.h.slang`](../shaders/gltf_material_eval.h.slang), add the
-   evaluation block inside `#if MAT_EXT_<NAME>`, overriding the relevant `PbrMaterial`
-   fields. Respect the existing block order (volume block runs before IOR, etc.).
-4. In [`src/gltf_material_cache.cpp`](../src/gltf_material_cache.cpp), add the matching
-   CPU-side population block under the same `#if MAT_EXT_<NAME>` — the `tinygltf::utils::get*`
-   call, all field writes, and all `handleTexture(...)` calls go inside the guard.
-5. If the path tracer reads the new field directly outside `evaluateMaterial()` (e.g.
-   `getShadowTransmission()` in `gltf_pathtrace.slang`), gate those accesses too.
-6. Update documentation in [`README.md`](../README.md) (extension support list) and
+3. Add `GLTF_USE_<NAME>` in [`gltf_eval_config.h`](../shaders/gltf_eval_config.h) (default
+   `MAT_EXT_<NAME>`) and the matching `#error` guard.
+4. In [`gltf_material_eval.h.slang`](../shaders/gltf_material_eval.h.slang), add the evaluation
+   block inside `#if GLTF_USE_<NAME>`, overriding the relevant `PbrMaterial` fields. Respect
+   the existing block order (volume block runs before IOR, etc.).
+5. In [`src/gltf_material_cache.cpp`](../src/gltf_material_cache.cpp), add the matching CPU-side
+   population block under `#if MAT_EXT_<NAME>` — layout only; never toggle `MAT_EXT_*` at runtime.
+6. In [`src/scene_feature_detection.cpp`](../src/scene_feature_detection.cpp) and
+   [`src/scene_shader_macros.cpp`](../src/scene_shader_macros.cpp), detect scene usage and emit
+   `-DGLTF_USE_<NAME>=0|1` in optimal mode.
+7. If the path tracer or raster reads the new field outside `evaluateMaterial()` (e.g.
+   `getShadowTransmission()` in `pathtrace_functions.h.slang`), gate with `#if GLTF_USE_<NAME>`.
+8. Update documentation in [`README.md`](../README.md) (extension support list) and
    [`user-guide.md`](user-guide.md).
 
 ---
