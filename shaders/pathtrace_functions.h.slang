@@ -865,9 +865,10 @@ struct BounceScratch
 {
   bool       nextEventValid;
   float3     contribution;
-  float16_t3 shadowRayPos;
-  float16_t3 shadowRayDir;
-  float16_t  shadowRayDist;
+  // Keep shadow rays full precision: half packing erases the self-intersection offset.
+  float3     shadowRayPos;
+  float3     shadowRayDir;
+  float      shadowRayDist;
 };
 
 // Safe accessor for pt.isInside. The field only exists when GLTF_USE_TRANSMISSION or

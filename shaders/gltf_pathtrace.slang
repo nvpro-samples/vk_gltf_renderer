@@ -89,9 +89,9 @@ PathStepResult pathTraceOneBounce(IRaytracer raytracer, inout RayDesc ray, inout
   // Initialize the bounce scratch data
   bounce.nextEventValid = false;
   bounce.contribution   = float3(0);
-  bounce.shadowRayPos   = float16_t3(0);
-  bounce.shadowRayDir   = float16_t3(0);
-  bounce.shadowRayDist  = float16_t(0);
+  bounce.shadowRayPos   = float3(0);
+  bounce.shadowRayDir   = float3(0);
+  bounce.shadowRayDist  = 0.0f;
 
   {
     //DirectLight directLight;
@@ -403,9 +403,9 @@ PathStepResult pathTraceOneBounce(IRaytracer raytracer, inout RayDesc ray, inout
     bool   shadowSideForward = dot(directLight.direction, hit.nrm) > 0.0F;
     float3 shadowOffsetDir   = shadowSideForward ? hit.geonrm : -hit.geonrm;
     float3 shadowOffsetBase  = shadowSideForward ? hit.shadowPos : hit.pos;
-    bounce.shadowRayPos      = float16_t3(safeOffsetRay(shadowOffsetBase, shadowOffsetDir));
-    bounce.shadowRayDir      = float16_t3(directLight.direction);
-    bounce.shadowRayDist     = float16_t(directLight.distance);
+    bounce.shadowRayPos      = safeOffsetRay(shadowOffsetBase, shadowOffsetDir);
+    bounce.shadowRayDir      = directLight.direction;
+    bounce.shadowRayDist     = directLight.distance;
   }
 
   return PathStepResult.eOutOfVolume;
