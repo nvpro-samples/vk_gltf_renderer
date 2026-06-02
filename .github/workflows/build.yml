@@ -112,6 +112,8 @@ jobs:
             libgl-dev
 
       # CUDA Toolkit is required at link time for OptiX denoiser interop.
+      # NVML headers/import libraries are required so the GPU monitor is present
+      # in release binaries; the runtime library still comes from the user driver.
       # cudart is delay-loaded on Windows and bundled at install on Linux,
       # so the resulting binary still runs on machines without CUDA installed.
       - name: Install CUDA Toolkit
@@ -119,7 +121,7 @@ jobs:
         with:
           cuda: '12.6.0'
           method: 'network'
-          sub-packages: '["cudart", "nvcc"]'
+          sub-packages: '["cudart", "nvcc", "nvml_dev"]'
 
       - name: Configure (Windows)
         if: runner.os == 'Windows'
@@ -131,6 +133,7 @@ jobs:
           -DUSE_DLSS=ON
           -DUSE_DRACO=ON
           -DBUILD_TESTING=OFF
+          -DREQUIRE_NVML_MONITOR=ON
           -DRELEASE_VERSION="${{ steps.version.outputs.release_version }}"
 
       # Note: we use Unix Makefiles instead of Ninja because nvpro_core2's
@@ -150,6 +153,7 @@ jobs:
           -DUSE_DLSS=ON
           -DUSE_DRACO=ON
           -DBUILD_TESTING=OFF
+          -DREQUIRE_NVML_MONITOR=ON
           -DRELEASE_VERSION="${{ steps.version.outputs.release_version }}"
 
       - name: Build
@@ -157,16 +161,23 @@ jobs:
         run: cmake --build build --config Release --parallel
 
       # CMake's install(TARGETS ... RUNTIME_DEPENDENCIES) resolves every shared
-      # library the binary links against. libcuda.so.1 lives in the NVIDIA
-      # driver (not the CUDA Toolkit) and isn't on a GPU-less CI runner, so
-      # resolution fails. Symlink the CUDA Toolkit's linker stub at a system
-      # path; the path matches POST_EXCLUDE_REGEXES "^/usr/lib" inside
-      # nvpro_core2's copy_to_runtime_and_install, so the stub is found by
-      # the resolver but NOT copied into the install tree -- libcuda.so.1
-      # will come from the end user's NVIDIA driver at runtime.
+      # library the binary links against. libcuda.so.1 and libnvidia-ml.so.1
+      # live in the NVIDIA driver (not the CUDA Toolkit) and aren't on a
+      # GPU-less CI runner, so resolution fails. Symlink the CUDA Toolkit's
+      # linker stubs at system paths; those paths match POST_EXCLUDE_REGEXES
+      # "^/usr/lib" inside nvpro_core2's copy_to_runtime_and_install, so the
+      # stubs are found by the resolver but NOT copied into the install tree.
+      # The actual libraries will come from the end user's NVIDIA driver.
       - name: Provide CUDA driver stub for install resolution
         if: runner.os == 'Linux'
-        run: sudo ln -sf "$CUDA_PATH/lib64/stubs/libcuda.so" /usr/lib/x86_64-linux-gnu/libcuda.so.1
+        run: |
+          sudo ln -sf "$CUDA_PATH/lib64/stubs/libcuda.so" /usr/lib/x86_64-linux-gnu/libcuda.so.1
+          nvml_stub="$(find "$CUDA_PATH" -path "*/stubs/libnvidia-ml.so" -print -quit)"
+          if [ -z "$nvml_stub" ]; then
+            echo "ERROR: libnvidia-ml.so stub not found under CUDA_PATH=$CUDA_PATH" >&2
+            exit 1
+          fi
+          sudo ln -sf "$nvml_stub" /usr/lib/x86_64-linux-gnu/libnvidia-ml.so.1
 
       - name: Install
         working-directory: vk_gltf_renderer

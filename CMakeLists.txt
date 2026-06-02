@@ -13,6 +13,7 @@ set(CMAKE_EXPORT_COMPILE_COMMANDS ON)
 
 option(NVPRO2_ENABLE_nvgl off)
 option(USE_DEFAULT_SCENE "Using a default scene at startup" ON)
+option(REQUIRE_NVML_MONITOR "Fail configuration if NVML support is unavailable" OFF)
 
 # Path to glTF-Sample-Assets repository (for testing)
 # Optional. Set via -DGLTF_SAMPLE_ASSETS_PATH=..., environment variable GLTF_SAMPLE_ASSETS_PATH, or CMake GUI.
@@ -27,6 +28,16 @@ option(NVPRO2_ENABLE_nvvkglsl "Disable nvvkglsl from nvpro_core2" OFF)
 # Add the cmake folder to the module path
 list(APPEND CMAKE_MODULE_PATH "${CMAKE_CURRENT_SOURCE_DIR}/cmake")
 find_package(NvproCore2 REQUIRED)
+
+if(REQUIRE_NVML_MONITOR)
+  get_target_property(_NVGPU_MONITOR_DEFS nvpro2::nvgpu_monitor INTERFACE_COMPILE_DEFINITIONS)
+  if(NOT _NVGPU_MONITOR_DEFS)
+    set(_NVGPU_MONITOR_DEFS "")
+  endif()
+  if(NOT "NVML_SUPPORTED" IN_LIST _NVGPU_MONITOR_DEFS)
+    message(FATAL_ERROR "REQUIRE_NVML_MONITOR is ON, but nvpro2::nvgpu_monitor was configured without NVML support. Install the CUDA NVML development component.")
+  endif()
+endif()
 
 # Get the name of the current directory
 get_filename_component(PROJECT_NAME ${CMAKE_CURRENT_SOURCE_DIR} NAME)
@@ -196,7 +207,7 @@ set(SHADER_CAPABILITIES
 # shader build. Backend availability is probed here too, so shader guide paths match
 # the host code that can actually be built. The DLSS / OptiX link/source wiring lives
 # further down under "Adding DLSS if selected" / OptiX denoiser blocks.
-option(USE_DLSS           "Use DLSS-RR for denoising"                OFF)
+option(USE_DLSS           "Use DLSS-RR for denoising"                ON)
 option(USE_OPTIX_DENOISER "Use OptiX denoiser as alternative to DLSS" ON)
 if(USE_DLSS)
   set(DLSS_VERSION "310.6.0")
@@ -390,4 +401,3 @@ set(CPACK_PACKAGE_VENDOR "NVIDIA")
 set(CPACK_GENERATOR "ZIP")
 set(CPACK_PACKAGE_DIRECTORY "${CMAKE_SOURCE_DIR}/_package")
 include(CPack)
-
