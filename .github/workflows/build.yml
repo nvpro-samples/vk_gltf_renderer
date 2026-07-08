@@ -11,10 +11,8 @@ permissions:
   contents: write
 
 env:
-  # 1.4.341 is the first SDK that ships VK_EXT_descriptor_heap, which
-  # nvpro_core2/nvvk/descriptor_heap_writer.hpp requires. Bump as needed
-  # when nvpro_core2 starts using newer Vulkan symbols.
-  VULKAN_SDK_VERSION: 1.4.341.1
+  # Vulkan SDK to use
+  VULKAN_SDK_VERSION: 1.4.350.0
   # nvpro_core2 is checked out as a sibling so FindNvproCore2.cmake picks it up.
   # Head is fine; bump this if you ever need to pin to a specific tag/SHA.
   NVPRO_CORE2_REF: main
@@ -116,18 +114,33 @@ jobs:
       # in release binaries; the runtime library still comes from the user driver.
       # cudart is delay-loaded on Windows and bundled at install on Linux,
       # so the resulting binary still runs on machines without CUDA installed.
-      - name: Install CUDA Toolkit
+      # Sub-package names differ per platform: the Windows installer uses the
+      # underscore form (nvml_dev), while on Linux the action prepends "cuda-"
+      # to build an apt package name, so it needs the hyphen form (nvml-dev)
+      # to resolve cuda-nvml-dev-12-6. Passing "nvml_dev" on Linux requests the
+      # non-existent cuda-nvml_dev-12-6 and fails the whole build.
+      - name: Install CUDA Toolkit (Windows)
+        if: runner.os == 'Windows'
         uses: Jimver/cuda-toolkit@v0.2.19
         with:
           cuda: '12.6.0'
           method: 'network'
           sub-packages: '["cudart", "nvcc", "nvml_dev"]'
 
+      - name: Install CUDA Toolkit (Linux)
+        if: runner.os == 'Linux'
+        uses: Jimver/cuda-toolkit@v0.2.19
+        with:
+          cuda: '12.6.0'
+          method: 'network'
+          sub-packages: '["cudart", "nvcc", "nvml-dev"]'
+
+      # Windows configuration
       - name: Configure (Windows)
         if: runner.os == 'Windows'
         working-directory: vk_gltf_renderer
         run: >
-          cmake -S . -B build -G "Visual Studio 17 2022" -A x64
+          cmake -S . -B build -A x64
           -DUSE_DEFAULT_SCENE=OFF
           -DUSE_OPTIX_DENOISER=ON
           -DUSE_DLSS=ON
