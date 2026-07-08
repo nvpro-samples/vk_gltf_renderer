@@ -313,6 +313,24 @@ void tinygltf::utils::setDispersion(tinygltf::Material& tmat, const KHR_material
   tinygltf::utils::setValue(ext, "dispersion", dispersion.dispersion);
 }
 
+EXT_materials_retroreflection tinygltf::utils::getRetroreflection(const tinygltf::Material& tmat)
+{
+  EXT_materials_retroreflection gmat;
+  if(const auto* ext = tinygltf::utils::findExtension(tmat.extensions, EXT_materials_retroreflection_EXTENSION_NAME))
+  {
+    tinygltf::utils::getValue(*ext, "retroreflectionFactor", gmat.retroreflectionFactor);
+    tinygltf::utils::getValue(*ext, "retroreflectionTexture", gmat.retroreflectionTexture);
+  }
+  return gmat;
+}
+
+void tinygltf::utils::setRetroreflection(tinygltf::Material& tmat, const EXT_materials_retroreflection& retro)
+{
+  tinygltf::Value& ext = tinygltf::utils::ensureExtension(tmat.extensions, EXT_materials_retroreflection_EXTENSION_NAME);
+  tinygltf::utils::setValue(ext, "retroreflectionFactor", retro.retroreflectionFactor);
+  tinygltf::utils::setValue(ext, "retroreflectionTexture", retro.retroreflectionTexture);
+}
+
 KHR_node_visibility tinygltf::utils::getNodeVisibility(const tinygltf::Node& node)
 {
   KHR_node_visibility gnode;

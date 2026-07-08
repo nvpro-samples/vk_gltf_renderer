@@ -181,6 +181,7 @@ nvvkgltf::Scene::Scene()
       "KHR_materials_dispersion",
       "KHR_node_visibility",
       "EXT_mesh_gpu_instancing",
+      "EXT_materials_retroreflection",
       "NV_attributes_iray",
       "MSFT_texture_dds",
       "KHR_materials_pbrSpecularGlossiness",

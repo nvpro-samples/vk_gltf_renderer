@@ -41,7 +41,7 @@
 #include <nvslang/slang.hpp>
 #include <nvutils/camera_manipulator.hpp>
 #include <nvvk/descriptors.hpp>
-#include <nvvk/gbuffers.hpp>
+#include <nvvk/render_target.hpp>
 #include <nvvk/hdr_ibl.hpp>
 #include <nvvk/resource_allocator.hpp>
 #include <nvvk/sampler_pool.hpp>
@@ -53,6 +53,7 @@
 #include "gpu_memory_tracker.hpp"
 #include "scene_feature_detection.hpp"
 #include <nvapp/application.hpp>
+#include <nvapp/imgui_texture.hpp>
 
 
 enum class RenderingMode
@@ -169,7 +170,7 @@ struct Resources
     eImgTonemapped,
     eImgRendered,
     eImgSelection,
-    eImgCount,  // Sentinel: number of GBuffer color attachments. KEEP LAST.
+    eImgCount,  // Sentinel: number of frame-target color attachments. KEEP LAST.
   };
 
   nvapp::Application* app{nullptr};
@@ -193,13 +194,20 @@ struct Resources
   const nvvkgltf::Scene* getScene() const { return scene.get(); }
 
   // Resources
-  nvvk::HdrIbl                                hdrIbl;  // HDR environment map
-  nvshaders::HdrEnvDome                       hdrDome;
-  nvvk::GBuffer                               gBuffers;                           // G-Buffers: color + depth
-  nvvk::Buffer                                bFrameInfo;                         // Scene/Frame information
-  nvvk::Buffer                                bSkyParams;                         // Sky parameters
-  shaderio::SkyPhysicalParameters             skyParams{};                        // Sky parameters
-  nvshaders::Tonemapper                       tonemapper{};                       // Tonemapper
+  nvvk::HdrIbl          hdrIbl;  // HDR environment map
+  nvshaders::HdrEnvDome hdrDome;
+  // Main frame target (tonemapped + rendered + selection + depth). Accessor cheat sheet:
+  //   raster attachment  -> getColorAttachmentView() / getDepthImageView()
+  //   compute write      -> getColorStorageImageInfo()
+  //   sampled read       -> getColorSampleDescriptorImageInfo(..., linearSampler)
+  //   ImGui              -> getUiImageView() + tonemappedUi
+  nvvk::RenderTarget                          gBuffers;
+  nvapp::ImTexture                            tonemappedUi{};   // Viewport display (eImgTonemapped only)
+  VkSampler                                   linearSampler{};  // Linear sampler (visual helpers, etc.)
+  nvvk::Buffer                                bFrameInfo;       // Scene/Frame information
+  nvvk::Buffer                                bSkyParams;       // Sky parameters
+  shaderio::SkyPhysicalParameters             skyParams{};      // Sky parameters
+  nvshaders::Tonemapper                       tonemapper{};     // Tonemapper
   shaderio::TonemapperData                    tonemapperData{.autoExposure = 1};  // Tonemapper data
   std::shared_ptr<nvutils::CameraManipulator> cameraManip;         // Camera manipulator (owned by GltfRenderer)
   std::filesystem::path                       headlessOutputPath;  // --output: override for headless image save path
@@ -214,6 +222,9 @@ struct Resources
   AnimationControl animationControl{};
 
   int frameCount{0};
+
+  // #DLSS: True if any node transforms changed this frame (for DLSS per-instance motion).
+  bool dlssInstanceMotionActive{false};
 
   // Selection: set of render node indices (TLAS order). One primitive = set of size 1; node + branch = many.
   std::unordered_set<int> selectedRenderNodes;
@@ -240,7 +251,7 @@ struct Resources
     }
   }
 
-  nvvkgltf::GpuMemoryTracker appMemoryTracker;  // Application-level GPU memory tracking (GBuffers, etc.)
+  nvvkgltf::GpuMemoryTracker appMemoryTracker;  // Application-level GPU memory tracking (frame targets, denoisers, etc.)
 
   Settings settings;
 
@@ -256,7 +267,7 @@ struct Resources
     nvvkgltf::SceneFeatureSet newSet{};
     if(scene)
       newSet = nvvkgltf::detectSceneFeatures(scene->getModel());
-    newSet.dlssGuide   = dlssGuideActive;
+    newSet.set(nvvkgltf::SceneFeatureSet::eDlssGuide, dlssGuideActive);
     const bool changed = (newSet != currentFeatureSet);
     currentFeatureSet  = newSet;
     return changed;

@@ -89,6 +89,7 @@
 
 #if defined(USE_DLSS)
 
+#include <array>
 #include <atomic>
 #include <cassert>
 #include <optional>
@@ -97,7 +98,8 @@
 
 #include <glm/glm.hpp>
 
-#include "nvvk/gbuffers.hpp"
+#include "nvvk/render_target.hpp"
+#include <nvapp/imgui_texture.hpp>
 #include "nvutils/parameter_registry.hpp"
 
 #include "dlss_wrapper.hpp"
@@ -329,6 +331,8 @@ private:
   // RR-only "release on disable" helpers. For SR, the buffers are always needed.
   void releaseRrInnerGBuffer();
   void reacquireRrInnerGBuffer(Resources& resources);
+  void deinitGuideTextures();
+  void syncGuideTextures(uint32_t colorCount);
 
   // SR-only NGX quality-enum mapping (eOff/eDLAA never reach NGX; kept for completeness).
   static NVSDK_NGX_PerfQuality_Value qualityToNgx(Quality q);
@@ -357,8 +361,11 @@ private:
   VkQueue                     m_graphicsQueue    = VK_NULL_HANDLE;
   nvvkgltf::GpuMemoryTracker* m_appMemoryTracker = nullptr;
 
-  nvvk::GBuffer m_innerGBuffer{};
-  bool          m_innerTracked = false;
+  nvvk::RenderTarget                              m_innerGBuffer{};
+  static constexpr uint32_t                       kMaxGuideTextures = 8;
+  std::array<nvapp::ImTexture, kMaxGuideTextures> m_guideTextures{};
+  uint32_t                                        m_guideTextureCount = 0;
+  bool                                            m_innerTracked      = false;
 
   // ---- Per-frame state owned by beginFrame() / consumed by evaluate() ------------------------
   uint32_t  m_frameIndex    = 0;             // starts at 0 and is incremented in beginFrame()

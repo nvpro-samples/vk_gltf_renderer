@@ -191,6 +191,7 @@ struct PathtracePushConstant
   SceneFrameInfo*        frameInfo;            // Camera info (incl. SceneFrameInfo::jitter when DLSS is active)
   SkyPhysicalParameters* skyParams;            // Sky physical parameters
   GltfScene*             gltfScene;            // GLTF scene
+  float4x4* prevRenderNodeObjectToWorld;       // #DLSS instance motion: previous-frame objectToWorld per render node
 };
 
 // Push constant

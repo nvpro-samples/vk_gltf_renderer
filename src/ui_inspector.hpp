@@ -115,6 +115,7 @@ private:
   bool materialSheen(tinygltf::Material& material);
   bool materialSpecular(tinygltf::Material& material);
   bool materialTransmission(tinygltf::Material& material);
+  bool materialRetroreflection(tinygltf::Material& material);
   bool materialUnlit(tinygltf::Material& material);
   bool materialVolume(tinygltf::Material& material, int matIdx);  // Needs matIdx for special RTX dirty marking
   bool materialVolumeScatter(tinygltf::Material& material);

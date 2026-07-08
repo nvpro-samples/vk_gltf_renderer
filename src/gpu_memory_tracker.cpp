@@ -19,21 +19,21 @@
 
 #include "gpu_memory_tracker.hpp"
 
-#include <nvvk/gbuffers.hpp>
+#include <nvvk/render_target.hpp>
 
 namespace nvvkgltf {
 
-void GpuMemoryTracker::track(std::string_view category, const nvvk::GBuffer& gbuffer, uint32_t colorCount)
+void GpuMemoryTracker::track(std::string_view category, const nvvk::RenderTarget& renderTarget, uint32_t colorCount)
 {
-  VkExtent2D sz = gbuffer.getSize();
+  VkExtent2D sz = renderTarget.getSize();
   if(sz.width == 0 || sz.height == 0)
     return;
 
   for(uint32_t i = 0; i < colorCount; ++i)
-    track(category, gbuffer.getColorNvvkImage(i).allocation);
+    track(category, renderTarget.getColorAllocation(i));
 
-  if(gbuffer.getDepthImage() != VK_NULL_HANDLE)
-    track(category, gbuffer.getDepthNvvkImage().allocation);
+  if(renderTarget.getDepthImage() != VK_NULL_HANDLE)
+    track(category, renderTarget.getDepthAllocation());
 }
 
 void GpuMemoryTracker::track(std::string_view category, VmaAllocation allocation)
@@ -58,17 +58,17 @@ void GpuMemoryTracker::track(std::string_view category, VmaAllocation allocation
     stats.peakCount = stats.currentCount;
 }
 
-void GpuMemoryTracker::untrack(std::string_view category, const nvvk::GBuffer& gbuffer, uint32_t colorCount)
+void GpuMemoryTracker::untrack(std::string_view category, const nvvk::RenderTarget& renderTarget, uint32_t colorCount)
 {
-  VkExtent2D sz = gbuffer.getSize();
+  VkExtent2D sz = renderTarget.getSize();
   if(sz.width == 0 || sz.height == 0)
     return;
 
   for(uint32_t i = 0; i < colorCount; ++i)
-    untrack(category, gbuffer.getColorNvvkImage(i).allocation);
+    untrack(category, renderTarget.getColorAllocation(i));
 
-  if(gbuffer.getDepthImage() != VK_NULL_HANDLE)
-    untrack(category, gbuffer.getDepthNvvkImage().allocation);
+  if(renderTarget.getDepthImage() != VK_NULL_HANDLE)
+    untrack(category, renderTarget.getDepthAllocation());
 }
 
 void GpuMemoryTracker::untrack(std::string_view category, VmaAllocation allocation)

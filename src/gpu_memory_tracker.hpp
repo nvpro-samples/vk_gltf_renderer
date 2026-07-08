@@ -37,7 +37,7 @@
 
 namespace nvvk {
 class ResourceAllocator;
-class GBuffer;
+class RenderTarget;
 }  // namespace nvvk
 
 namespace nvvkgltf {
@@ -78,12 +78,12 @@ public:
   // Untrack a deallocation - queries VMA for actual size
   void untrack(std::string_view category, VmaAllocation allocation);
 
-  // Track all allocations (color + depth) in a GBuffer.
-  // colorCount: number of color attachments (GBuffer doesn't expose this).
-  void track(std::string_view category, const nvvk::GBuffer& gbuffer, uint32_t colorCount);
+  // Track all allocations (color + depth) in a RenderTarget.
+  // colorCount: number of color attachments (RenderTarget doesn't expose this).
+  void track(std::string_view category, const nvvk::RenderTarget& renderTarget, uint32_t colorCount);
 
-  // Untrack all allocations (color + depth) in a GBuffer.
-  void untrack(std::string_view category, const nvvk::GBuffer& gbuffer, uint32_t colorCount);
+  // Untrack all allocations (color + depth) in a RenderTarget.
+  void untrack(std::string_view category, const nvvk::RenderTarget& renderTarget, uint32_t colorCount);
 
   // Get statistics for a specific category
   GpuMemoryStats getStats(std::string_view category) const;

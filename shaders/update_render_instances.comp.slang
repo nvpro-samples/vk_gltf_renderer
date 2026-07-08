@@ -33,9 +33,7 @@ __generic<T : __BuiltinFloatingPointType, let N : int>[require(spirv)] matrix<T,
   __target_switch
   {
     case spirv:
-      return spirv_asm {
-      OpExtInst $$matrix<T, N, N> result glsl450 MatrixInverse $m
-    };
+      return spirv_asm { OpExtInst $$matrix<T, N, N> result glsl450 MatrixInverse $m };
   }
 }
 

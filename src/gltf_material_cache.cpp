@@ -219,6 +219,12 @@ void populateShaderMaterial(shaderio::GltfShadeMaterial& dstMat, const tinygltf:
   handleTexture(dstMat.diffuseTransmissionColorTexture, diffuseTransmission.diffuseTransmissionColorTexture);
 #endif
 
+#if MAT_EXT_RETROREFLECTION
+  EXT_materials_retroreflection retro = tinygltf::utils::getRetroreflection(srcMat);
+  dstMat.retroreflectionFactor        = retro.retroreflectionFactor;
+  handleTexture(dstMat.retroreflectionTexture, retro.retroreflectionTexture);
+#endif
+
 #if MAT_EXT_VOLUME_SCATTER
   KHR_materials_volume_scatter volumeScatter = tinygltf::utils::getVolumeScatter(srcMat);
   dstMat.multiscatterColorFactor             = volumeScatter.multiscatterColorFactor;

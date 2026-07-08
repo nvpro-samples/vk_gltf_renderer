@@ -273,7 +273,7 @@ target_sources(${PROJECT_NAME} PRIVATE
 
 #####################################################################################
 # Add OptiX header
-set(OptiX_VERSION 9.0.0)
+set(OptiX_VERSION 9.1.0)
 download_package(
   NAME OptiX
   URLS https://github.com/NVIDIA/optix-dev/archive/refs/tags/v${OptiX_VERSION}.zip

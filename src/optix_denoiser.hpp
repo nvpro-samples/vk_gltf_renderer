@@ -24,8 +24,9 @@
 #include <vector>
 
 #include <nvutils/parameter_registry.hpp>
-#include <nvvk/gbuffers.hpp>
+#include <nvvk/render_target.hpp>
 #include <nvvk/resource_allocator.hpp>
+#include <nvapp/imgui_texture.hpp>
 
 // OptiX includes
 #include <optix.h>
@@ -57,23 +58,20 @@
 // 2. Configure resolution:
 //    denoiser.updateSize(cmd, extent);
 //
-// 3. Provide input G-buffers:
-//    denoiser.setInputResources(gBuffers);
-//
-// 4. One-shot denoising (simple path):
+// 3. Denoise (reads path-tracer output from Resources::gBuffers, writes owned outputs):
 //    denoiser.denoiseOneShot(resources);
 //
-// 5. Manual denoising (advanced control):
+// 4. Manual denoising (advanced control):
 //    DenoisingInputs inputs = {renderedImage, albedoNormalImage};
 //    DenoisingOutputs outputs = {outputImage};
 //    denoiser.prepareDenoisingInputs(cmd, inputs);
 //    denoiser.executeDenoising();
 //    denoiser.finalizeDenoisedOutput(cmd, outputs);
 //
-// 6. Retrieve results:
+// 5. Retrieve results:
 //    VkDescriptorImageInfo denoisedImage = denoiser.getDescriptorImageInfo(eGBufferDenoised);
 //
-// 7. Cleanup:
+// 6. Cleanup:
 //    denoiser.deinit(resources);
 //
 // Timing / one-frame lag:
@@ -81,8 +79,8 @@
 // denoiseOneShot() is called from the renderer's onRender(), which is in the middle of
 // recording the frame's main command buffer.  The ray tracing commands for the current
 // frame are recorded but NOT yet submitted, so denoiseOneShot — which creates its own
-// temporary command buffers, calls vkQueueWaitIdle, and reads the GBuffer — always
-// operates on the *previous* frame's data.
+// temporary command buffers, calls vkQueueWaitIdle, and reads the path-tracer output —
+// always operates on the *previous* frame's data.
 //
 // Eliminating this one-frame lag would require one of:
 //   (a) Splitting the command buffer: submit ray tracing, wait, denoise, then start a
@@ -107,7 +105,7 @@
 class OptiXDenoiser
 {
 public:
-  // GBuffer indices for OptiX denoiser outputs
+  // GBuffer indices for OptiX denoiser-owned RenderTarget outputs
   enum GBufferIndex
   {
     eGBufferDenoised     = 0,  // Denoised output
@@ -280,17 +278,15 @@ private:
   // Vulkan resources
   VkDevice m_device = VK_NULL_HANDLE;
 
-  // Input G-Buffers reference
-  const nvvk::GBuffer* m_inputGBuffers = nullptr;
-
-  // Memory tracking: GBuffer images use the main allocator (tracked via appTracker), export buffers use m_allocExport.
+  // Memory tracking: RenderTarget images use the main allocator (tracked via appTracker), export buffers use m_allocExport.
   nvvkgltf::GpuMemoryTracker* m_appMemoryTracker = nullptr;
   nvvkgltf::GpuMemoryTracker  m_exportMemoryTracker;
 
-  // Output image
-  nvvk::GBuffer m_inputOutputGbuffers;  // See GBufferIndex
-  nvvk::GBuffer m_upscaleStaging;       // Half-res staging for selection/depth upscale blit (see StagingIndex)
-  VkSampler     m_linearSampler{};
+  // Denoiser-owned outputs (denoised RGB + albedo/normal guide). See GBufferIndex.
+  nvvk::RenderTarget m_denoiserTarget;
+  nvvk::RenderTarget m_upscaleStaging;  // Half-res staging for selection/depth upscale blit (see StagingIndex)
+  nvapp::ImTexture   m_denoisedUi{};
+  VkSampler          m_linearSampler{};
 
 
   // Compute pipeline for image-to-buffer copy

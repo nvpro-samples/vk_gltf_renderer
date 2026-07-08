@@ -31,7 +31,6 @@
 #include <cstdint>
 #include <cstring>
 
-#include <glm/glm.hpp>
 
 #include <nvvk/barriers.hpp>
 #include <nvvk/check_error.hpp>
@@ -39,8 +38,14 @@
 
 #include <vulkan/vulkan_core.h>
 
+// ShaderIO struct definitions for the GPU transform path (push constants, SSBO layouts).
+#include "shaders/world_matrix_io.h.slang"
+
+// Pre-compiled compute shaders (SPIR-V) for the three stages of the GPU transform path.
+#include "_autogen/snapshot_prev_transforms.comp.slang.h"
 #include "_autogen/update_render_instances.comp.slang.h"
 #include "_autogen/world_matrix_propagate.comp.slang.h"
+
 
 #include "gltf_scene_vk.hpp"
 
@@ -152,6 +157,7 @@ void TransformComputeVk::createPipelines()
 {
   VkDevice device = m_alloc->getDevice();
 
+  // Pipeline 1: Propagate world matrices level-by-level through the scene-graph topology.
   {
     VkPushConstantRange        pushRange{.stageFlags = VK_SHADER_STAGE_COMPUTE_BIT,
                                          .offset     = 0,
@@ -177,6 +183,7 @@ void TransformComputeVk::createPipelines()
     NVVK_DBG_NAME(m_propagatePipeline);
   }
 
+  // Pipeline 2: Write render-node SSBO + TLAS instance transforms (BLAS ref preserved on GPU).
   {
     VkPushConstantRange        pushRange{.stageFlags = VK_SHADER_STAGE_COMPUTE_BIT,
                                          .offset     = 0,
@@ -201,6 +208,32 @@ void TransformComputeVk::createPipelines()
     NVVK_CHECK(vkCreateComputePipelines(device, nullptr, 1, &pipeInfo, nullptr, &m_updatePipeline));
     NVVK_DBG_NAME(m_updatePipeline);
   }
+
+  // Pipeline 3: Snapshot the previous-frame render-node object-to-world transforms for DLSS instance motion.
+  {
+    VkPushConstantRange        pushRange{.stageFlags = VK_SHADER_STAGE_COMPUTE_BIT,
+                                         .offset     = 0,
+                                         .size       = sizeof(shaderio::SnapshotPrevTransformsPushConstant)};
+    VkPipelineLayoutCreateInfo layoutInfo{.sType                  = VK_STRUCTURE_TYPE_PIPELINE_LAYOUT_CREATE_INFO,
+                                          .pushConstantRangeCount = 1,
+                                          .pPushConstantRanges    = &pushRange};
+    NVVK_CHECK(vkCreatePipelineLayout(device, &layoutInfo, nullptr, &m_snapshotLayout));
+    NVVK_DBG_NAME(m_snapshotLayout);
+
+    VkShaderModuleCreateInfo shaderInfo{.sType = VK_STRUCTURE_TYPE_SHADER_MODULE_CREATE_INFO};
+    shaderInfo.codeSize = snapshot_prev_transforms_comp_slang_sizeInBytes;
+    shaderInfo.pCode    = snapshot_prev_transforms_comp_slang;
+
+    VkComputePipelineCreateInfo pipeInfo{.sType = VK_STRUCTURE_TYPE_COMPUTE_PIPELINE_CREATE_INFO};
+    pipeInfo.stage.sType = VK_STRUCTURE_TYPE_PIPELINE_SHADER_STAGE_CREATE_INFO;
+    pipeInfo.stage.stage = VK_SHADER_STAGE_COMPUTE_BIT;
+    pipeInfo.stage.pName = "main";
+    pipeInfo.stage.pNext = &shaderInfo;
+    pipeInfo.layout      = m_snapshotLayout;
+
+    NVVK_CHECK(vkCreateComputePipelines(device, nullptr, 1, &pipeInfo, nullptr, &m_snapshotPipeline));
+    NVVK_DBG_NAME(m_snapshotPipeline);
+  }
 }
 
 //--------------------------------------------------------------------------------------------------
@@ -215,15 +248,21 @@ void TransformComputeVk::destroyPipelines()
     vkDestroyPipeline(device, m_propagatePipeline, nullptr);
   if(m_updatePipeline)
     vkDestroyPipeline(device, m_updatePipeline, nullptr);
+  if(m_snapshotPipeline)
+    vkDestroyPipeline(device, m_snapshotPipeline, nullptr);
   if(m_propagateLayout)
     vkDestroyPipelineLayout(device, m_propagateLayout, nullptr);
   if(m_updateLayout)
     vkDestroyPipelineLayout(device, m_updateLayout, nullptr);
+  if(m_snapshotLayout)
+    vkDestroyPipelineLayout(device, m_snapshotLayout, nullptr);
 
   m_propagatePipeline = {};
   m_updatePipeline    = {};
+  m_snapshotPipeline  = {};
   m_propagateLayout   = {};
   m_updateLayout      = {};
+  m_snapshotLayout    = {};
 }
 
 //--------------------------------------------------------------------------------------------------
@@ -238,10 +277,12 @@ void TransformComputeVk::markGpuStale()
 // Recreate GPU buffers if the scene topology changed (node/render-node count or graph revision).
 void TransformComputeVk::ensureGpuBuffersMatchScene(nvvk::StagingUploader& staging, const Scene& scn)
 {
-  const size_t   nRn = scn.getRenderNodes().size();
-  const size_t   nNd = scn.getModel().nodes.size();
-  const uint64_t rev = scn.getSceneGraphRevision();
-  if(!hasSceneGpuBuffers() || nRn != m_cachedNumRenderNodes || nNd != m_cachedNumNodes || rev != m_cachedSceneGraphRevision)
+  const size_t   nRn   = scn.getRenderNodes().size();
+  const size_t   nNd   = scn.getModel().nodes.size();
+  const size_t   nTopo = scn.getTopoNodeOrder().size();
+  const uint64_t rev   = scn.getSceneGraphRevision();
+  if(!hasSceneGpuBuffers() || nRn != m_cachedNumRenderNodes || nNd != m_cachedNumNodes || nTopo != m_cachedTopoOrderSize
+     || rev != m_cachedSceneGraphRevision)
   {
     createGpuBuffers(staging, scn);
   }
@@ -262,6 +303,7 @@ void TransformComputeVk::destroyGpuBuffers()
   m_memoryTracker.untrack(kMemCategoryMatrices, m_bLocalMatrices.allocation);
   m_memoryTracker.untrack(kMemCategoryMatrices, m_bWorldMatrices.allocation);
   m_memoryTracker.untrack(kMemCategoryMatrices, m_bGpuInstLocalMatrices.allocation);
+  m_memoryTracker.untrack(kMemCategoryMatrices, m_bPrevRenderNodeO2W.allocation);
 
   // Capture handles by value, clear members immediately so createGpuBuffers can allocate replacements.
   // Actual vkDestroyBuffer must be deferred while command buffers may still reference the old SSBOs
@@ -272,6 +314,7 @@ void TransformComputeVk::destroyGpuBuffers()
   nvvk::Buffer oldWorlds     = m_bWorldMatrices;
   nvvk::Buffer oldMappings   = m_bRenderNodeMappings;
   nvvk::Buffer oldInstLocals = m_bGpuInstLocalMatrices;
+  nvvk::Buffer oldPrevO2W    = m_bPrevRenderNodeO2W;
 
   m_bNodeParents          = {};
   m_bTopoNodeOrder        = {};
@@ -279,10 +322,13 @@ void TransformComputeVk::destroyGpuBuffers()
   m_bWorldMatrices        = {};
   m_bRenderNodeMappings   = {};
   m_bGpuInstLocalMatrices = {};
+  m_bPrevRenderNodeO2W    = {};
 
   m_cachedSceneGraphRevision = 0;
   m_cachedNumRenderNodes     = 0;
   m_cachedNumNodes           = 0;
+  m_cachedTopoOrderSize      = 0;
+  m_cachedPrevO2WCount       = 0;
 
   // Deferred cleanup lambda, so buffers are only destroyed after GPU work referencing them has completed.
   nvvk::ResourceAllocator* alloc   = m_alloc;
@@ -293,6 +339,7 @@ void TransformComputeVk::destroyGpuBuffers()
     alloc->destroyBuffer(oldWorlds);
     alloc->destroyBuffer(oldMappings);
     alloc->destroyBuffer(oldInstLocals);
+    alloc->destroyBuffer(oldPrevO2W);
   };
 
   if(m_deferredFree)
@@ -331,10 +378,13 @@ void TransformComputeVk::destroyGpuBuffersImmediate()
   destroyBuf(m_bLocalMatrices, kMemCategoryMatrices);
   destroyBuf(m_bWorldMatrices, kMemCategoryMatrices);
   destroyBuf(m_bGpuInstLocalMatrices, kMemCategoryMatrices);
+  destroyBuf(m_bPrevRenderNodeO2W, kMemCategoryMatrices);
 
   m_cachedSceneGraphRevision = 0;
   m_cachedNumRenderNodes     = 0;
   m_cachedNumNodes           = 0;
+  m_cachedTopoOrderSize      = 0;
+  m_cachedPrevO2WCount       = 0;
 }
 
 //--------------------------------------------------------------------------------------------------
@@ -399,6 +449,7 @@ void TransformComputeVk::createGpuBuffers(nvvk::StagingUploader& staging, const 
   m_cachedSceneGraphRevision = scn.getSceneGraphRevision();
   m_cachedNumRenderNodes     = numRenderNodes;
   m_cachedNumNodes           = numNodes;
+  m_cachedTopoOrderSize      = topoOrder.size();
 }
 
 //--------------------------------------------------------------------------------------------------
@@ -518,6 +569,68 @@ void TransformComputeVk::dispatchTransformUpdate(VkCommandBuffer cmd, nvvk::Stag
 
   df.renderNodesVk.clear();
   df.renderNodesRtx.clear();
+}
+
+//--------------------------------------------------------------------------------------------------
+// DLSS instance motion vectors: snapshot the current render-node objectToWorld matrices into a
+// dedicated buffer BEFORE the per-frame transform update overwrites them. Lazily (re)allocates the
+// buffer to match the render-node count. Issues a compute barrier so (a) the subsequent transform
+// update's write to objectToWorld is ordered after this read, and (b) the path tracer's read of the
+// previous-transform buffer is ordered after this write.
+void TransformComputeVk::cmdSnapshotPrevObjectToWorld(VkCommandBuffer cmd, const SceneVk& scnVk, size_t numRenderNodes)
+{
+  if(!m_alloc || numRenderNodes == 0 || scnVk.renderNodeBuffer().buffer == VK_NULL_HANDLE)
+    return;
+
+  // Lazily allocate / resize the previous-transform buffer to match the current render-node count.
+  if(m_bPrevRenderNodeO2W.buffer == VK_NULL_HANDLE || m_cachedPrevO2WCount != numRenderNodes)
+  {
+    if(m_bPrevRenderNodeO2W.buffer != VK_NULL_HANDLE)
+    {
+      m_memoryTracker.untrack(kMemCategoryMatrices, m_bPrevRenderNodeO2W.allocation);
+      nvvk::Buffer             oldPrev = m_bPrevRenderNodeO2W;
+      nvvk::ResourceAllocator* alloc   = m_alloc;
+      auto                     cleanup = [=]() mutable { alloc->destroyBuffer(oldPrev); };
+      if(m_deferredFree)
+        m_deferredFree(std::move(cleanup));
+      else
+      {
+        if(m_graphicsQueue)
+          vkQueueWaitIdle(m_graphicsQueue);
+        else
+          vkDeviceWaitIdle(m_alloc->getDevice());
+        cleanup();
+      }
+      m_bPrevRenderNodeO2W = {};
+    }
+
+    NVVK_CHECK(m_alloc->createBuffer(m_bPrevRenderNodeO2W, numRenderNodes * sizeof(glm::mat4), kSsboUsage));
+    NVVK_DBG_NAME(m_bPrevRenderNodeO2W.buffer);
+    m_memoryTracker.track(kMemCategoryMatrices, m_bPrevRenderNodeO2W.allocation);
+    m_cachedPrevO2WCount = numRenderNodes;
+  }
+
+  vkCmdBindPipeline(cmd, VK_PIPELINE_BIND_POINT_COMPUTE, m_snapshotPipeline);
+
+  shaderio::SnapshotPrevTransformsPushConstant spc{};
+  spc.inRenderNodes        = reinterpret_cast<shaderio::GltfRenderNode*>(scnVk.renderNodeBuffer().address);
+  spc.outPrevObjectToWorld = reinterpret_cast<glm::mat4*>(m_bPrevRenderNodeO2W.address);
+  spc.renderNodeCount      = static_cast<uint32_t>(numRenderNodes);
+  spc.pad0                 = 0;
+
+  vkCmdPushConstants(cmd, m_snapshotLayout, VK_SHADER_STAGE_COMPUTE_BIT, 0, sizeof(spc), &spc);
+  vkCmdDispatch(cmd, static_cast<uint32_t>((numRenderNodes + WORLD_MATRIX_WORKGROUP_SIZE - 1) / WORLD_MATRIX_WORKGROUP_SIZE), 1, 1);
+
+  // Two hazards to cover, hence the broad destination scope:
+  //  - WAR: this snapshot READS renderNodes.objectToWorld; the per-frame transform update writes it
+  //    right after, either via the GPU compute path (SHADER_WRITE) or the CPU staging path
+  //    (TRANSFER_WRITE). Order the write after this read.
+  //  - RAW: this snapshot WRITES the prev-transform buffer; the path tracer reads it later in a
+  //    compute (ray-query) or ray-tracing pipeline. Make the write visible to that read.
+  nvvk::cmdMemoryBarrier(cmd, VK_PIPELINE_STAGE_2_COMPUTE_SHADER_BIT,
+                         VK_PIPELINE_STAGE_2_COMPUTE_SHADER_BIT | VK_PIPELINE_STAGE_2_TRANSFER_BIT | VK_PIPELINE_STAGE_2_RAY_TRACING_SHADER_BIT_KHR,
+                         VK_ACCESS_2_SHADER_READ_BIT | VK_ACCESS_2_SHADER_WRITE_BIT,
+                         VK_ACCESS_2_SHADER_READ_BIT | VK_ACCESS_2_SHADER_WRITE_BIT | VK_ACCESS_2_TRANSFER_WRITE_BIT);
 }
 
 }  // namespace nvvkgltf

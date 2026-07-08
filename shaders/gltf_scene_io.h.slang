@@ -235,9 +235,13 @@ struct GltfShadeMaterial
   float  diffuseTransmissionFactor = 0;
 #endif
 
+#if MAT_EXT_RETROREFLECTION
+  float retroreflectionFactor = 0;
+#endif
+
 #if MAT_EXT_VOLUME_SCATTER
   float3 multiscatterColorFactor = float3(0);
-  float  scatterAnisotropy = 0;
+  float  scatterAnisotropy       = 0;
 #endif
 
   // Texture infos (uint16_t, 2 bytes each). Index 0 is the sentinel "no texture" slot
@@ -290,6 +294,10 @@ struct GltfShadeMaterial
 #if MAT_EXT_DIFFUSE_TRANSMISSION
   uint16_t diffuseTransmissionTexture      = 0;
   uint16_t diffuseTransmissionColorTexture = 0;
+#endif
+
+#if MAT_EXT_RETROREFLECTION
+  uint16_t retroreflectionTexture = 0;
 #endif
 
   // Trailing 8-byte explicit pad. Two reasons for uint64_t (rather than just uint32_t):

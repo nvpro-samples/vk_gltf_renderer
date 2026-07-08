@@ -40,7 +40,7 @@ void applyCommonShaderMacros(nvslang::SlangCompiler& compiler);
 > Append scene-aware optimal-mode macros for path tracer recompiles.
 >
 > When "Optimize shader for current scene" is on, every `GLTF_USE_*` gate is set explicitly to
-> `"0"` or `"1"` from `SceneFeatureSet`, plus `USE_DLSS_SHADER`. Shader behavior uses
+> `"0"` or `"1"` from `SceneFeatureSet`. Shader behavior uses
 > `#if GLTF_USE_*` only; `MAT_EXT_*` remains the host/layout authority and must never be
 > forced to `0` at runtime (that would change `GltfShadeMaterial` layout while the host
 > uploads the all-on struct).
@@ -50,5 +50,15 @@ void applyCommonShaderMacros(nvslang::SlangCompiler& compiler);
 > `USE_DLSS_TRANSP`) or Slang link-time constants to avoid per-scene Slang recompiles.
 -------------------------------------------------------------------------------------------------*/
 void appendPathTracerOptimalMacros(std::vector<std::pair<std::string, std::string>>& macros, const SceneFeatureSet& features);
+
+/*-------------------------------------------------------------------------------------------------
+# function appendPathTracerDlssShaderMacro
+
+> Set `USE_DLSS_SHADER` for every path-tracer file compile (hot-reload and variant rebuild).
+> Matches the CMake build when optimal mode is off; in optimal mode uses `SceneFeatureSet::eDlssGuide`.
+-------------------------------------------------------------------------------------------------*/
+void appendPathTracerDlssShaderMacro(std::vector<std::pair<std::string, std::string>>& macros,
+                                     bool                                              optimalShader,
+                                     const SceneFeatureSet&                            features);
 
 }  // namespace nvvkgltf

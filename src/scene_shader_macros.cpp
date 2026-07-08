@@ -19,6 +19,8 @@
 
 #include "scene_shader_macros.hpp"
 
+#include <array>
+
 namespace nvvkgltf {
 
 namespace {
@@ -28,6 +30,30 @@ void pushExplicit(std::vector<std::pair<std::string, std::string>>& macros, cons
 {
   macros.push_back({name, used ? "1" : "0"});
 }
+
+struct FeatureMacro
+{
+  SceneFeatureSet::Feature feature;
+  const char*              macro;
+};
+
+constexpr std::array<FeatureMacro, SceneFeatureSet::kExtensionFeatureCount> kPathTracerFeatureMacros{{
+    {SceneFeatureSet::eTransmission, "GLTF_USE_TRANSMISSION"},
+    {SceneFeatureSet::eVolume, "GLTF_USE_VOLUME"},
+    {SceneFeatureSet::eVolumeScatter, "GLTF_USE_VOLUME_SCATTER"},
+    {SceneFeatureSet::eClearcoat, "GLTF_USE_CLEARCOAT"},
+    {SceneFeatureSet::eIridescence, "GLTF_USE_IRIDESCENCE"},
+    {SceneFeatureSet::eAnisotropy, "GLTF_USE_ANISOTROPY"},
+    {SceneFeatureSet::eSheen, "GLTF_USE_SHEEN"},
+    {SceneFeatureSet::eDispersion, "GLTF_USE_DISPERSION"},
+    {SceneFeatureSet::eDiffuseTransmission, "GLTF_USE_DIFFUSE_TRANSMISSION"},
+    {SceneFeatureSet::eRetroreflection, "GLTF_USE_RETROREFLECTION"},
+    {SceneFeatureSet::eUnlit, "GLTF_USE_UNLIT"},
+    {SceneFeatureSet::eSpecular, "GLTF_USE_SPECULAR"},
+    {SceneFeatureSet::eIor, "GLTF_USE_IOR"},
+    {SceneFeatureSet::eSpecularGlossiness, "GLTF_USE_SPECULAR_GLOSSINESS"},
+    {SceneFeatureSet::eTextureTransform, "GLTF_USE_TEXTURE_TRANSFORM"},
+}};
 
 }  // namespace
 
@@ -40,22 +66,20 @@ void applyCommonShaderMacros(nvslang::SlangCompiler& compiler)
 
 void appendPathTracerOptimalMacros(std::vector<std::pair<std::string, std::string>>& macros, const SceneFeatureSet& features)
 {
-  pushExplicit(macros, "GLTF_USE_TRANSMISSION", features.transmission);
-  pushExplicit(macros, "GLTF_USE_VOLUME", features.volume);
-  pushExplicit(macros, "GLTF_USE_VOLUME_SCATTER", features.volumeScatter);
-  pushExplicit(macros, "GLTF_USE_CLEARCOAT", features.clearcoat);
-  pushExplicit(macros, "GLTF_USE_IRIDESCENCE", features.iridescence);
-  pushExplicit(macros, "GLTF_USE_ANISOTROPY", features.anisotropy);
-  pushExplicit(macros, "GLTF_USE_SHEEN", features.sheen);
-  pushExplicit(macros, "GLTF_USE_DISPERSION", features.dispersion);
-  pushExplicit(macros, "GLTF_USE_DIFFUSE_TRANSMISSION", features.diffuseTransmission);
-  pushExplicit(macros, "GLTF_USE_UNLIT", features.unlit);
-  pushExplicit(macros, "GLTF_USE_SPECULAR", features.specular);
-  pushExplicit(macros, "GLTF_USE_IOR", features.ior);
-  pushExplicit(macros, "GLTF_USE_SPECULAR_GLOSSINESS", features.specularGlossiness);
-  pushExplicit(macros, "GLTF_USE_TEXTURE_TRANSFORM", features.textureTransform);
+  for(const FeatureMacro& entry : kPathTracerFeatureMacros)
+  {
+    pushExplicit(macros, entry.macro, features.has(entry.feature));
+  }
+}
 
-  macros.push_back({"USE_DLSS_SHADER", features.dlssGuide ? "1" : "0"});
+void appendPathTracerDlssShaderMacro(std::vector<std::pair<std::string, std::string>>& macros, bool optimalShader, const SceneFeatureSet& features)
+{
+#if defined(USE_DLSS) || defined(USE_OPTIX_DENOISER)
+  const bool useDlssShader = optimalShader ? features.has(SceneFeatureSet::eDlssGuide) : true;
+#else
+  const bool useDlssShader = false;
+#endif
+  pushExplicit(macros, "USE_DLSS_SHADER", useDlssShader);
 }
 
 }  // namespace nvvkgltf

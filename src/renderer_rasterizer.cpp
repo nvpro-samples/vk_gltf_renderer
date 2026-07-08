@@ -161,7 +161,7 @@ void Rasterizer::onResize(VkCommandBuffer cmd, const VkExtent2D& size, Resources
 
   // Wire current resources into the DLSS feature
   m_dlss->setOutputImage(resources.gBuffers.getColorImage(Resources::eImgRendered),
-                         resources.gBuffers.getColorImageView(Resources::eImgRendered),
+                         resources.gBuffers.getColorAttachmentView(Resources::eImgRendered),
                          resources.gBuffers.getColorFormat(Resources::eImgRendered));
   // Depth is owned by the inner GBuffer now -- setResources binds it directly.
   m_dlss->setResources();
@@ -230,9 +230,9 @@ RasterTargets makeOuterTargets(Resources& resources)
 {
   RasterTargets t{};
   t.colorImage     = resources.gBuffers.getColorImage(Resources::eImgRendered);
-  t.colorView      = resources.gBuffers.getColorImageView(Resources::eImgRendered);
+  t.colorView      = resources.gBuffers.getColorAttachmentView(Resources::eImgRendered);
   t.selectionImage = resources.gBuffers.getColorImage(Resources::eImgSelection);
-  t.selectionView  = resources.gBuffers.getColorImageView(Resources::eImgSelection);
+  t.selectionView  = resources.gBuffers.getColorAttachmentView(Resources::eImgSelection);
   t.depthImage     = resources.gBuffers.getDepthImage();
   t.depthView      = resources.gBuffers.getDepthImageView();
   t.extent         = resources.gBuffers.getSize();
@@ -287,7 +287,7 @@ void Rasterizer::onRender(VkCommandBuffer cmd, Resources& resources)
   {
     m_dlss->updateSize(cmd, resources, resources.gBuffers.getSize());
     m_dlss->setOutputImage(resources.gBuffers.getColorImage(Resources::eImgRendered),
-                           resources.gBuffers.getColorImageView(Resources::eImgRendered),
+                           resources.gBuffers.getColorAttachmentView(Resources::eImgRendered),
                            resources.gBuffers.getColorFormat(Resources::eImgRendered));
     m_dlss->setResources();
   }

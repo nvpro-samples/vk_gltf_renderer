@@ -74,15 +74,24 @@ inline float2 calculateMotionVector(float4 currClip, float4 prevClip, float2 res
   return (prevNDC - currNDC) * 0.5f * resolution;
 }
 
-// Overload 2 (path tracer): caller has a world-space hit position and the two MVP matrices.
-// Forwards to the clip-space overload above for a single source of truth on the MV math.
-inline float2 calculateMotionVector(float3   worldPos,    // Current world-space hit position
-                                    float4x4 prevMVP,     // Previous frame's Model-View-Projection matrix
-                                    float4x4 currentMVP,  // Current frame's Model-View-Projection matrix
-                                    float2   resolution)    // Render target resolution
+// Overload 2 (path tracer): homogeneous current/previous positions reprojected through the two
+// cameras. The w component selects the behavior, which is the elegant part:
+//   - Surface hits pass w = 1. The previous position is the same surface point under the previous
+//     object transform, so the single screen-space difference is the combined camera + object motion
+//     (correct under perspective, NOT an additive sum of two MVs). A static surface passes
+//     prevWorldPos == currWorldPos and reduces to camera-only motion.
+//   - Sky / background pass w = 0: a point at infinity along the (world-space) view direction. Camera
+//     translation then cancels out of the projection (only rotation moves the sky), which is the
+//     physically correct behavior and is fully projection-independent -- no far-plane distance or
+//     magic constants. (Approach from the vk_denoise_dlssrr sample.)
+inline float2 calculateMotionVector(float4   currWorldPos,  // Current homogeneous position (w=1 surface, w=0 sky)
+                                    float4   prevWorldPos,  // Previous homogeneous position of the same point
+                                    float4x4 prevMVP,       // Previous frame's view-projection matrix
+                                    float4x4 currentMVP,    // Current frame's view-projection matrix
+                                    float2   resolution)      // Render target resolution
 {
-  float4 currentClipPos = mul(float4(worldPos, 1.0f), currentMVP);
-  float4 prevClipPos    = mul(float4(worldPos, 1.0f), prevMVP);
+  float4 currentClipPos = mul(currWorldPos, currentMVP);
+  float4 prevClipPos    = mul(prevWorldPos, prevMVP);
   return calculateMotionVector(currentClipPos, prevClipPos, resolution);
 }
 #endif

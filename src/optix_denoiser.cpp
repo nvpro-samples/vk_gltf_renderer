@@ -86,26 +86,26 @@ void OptiXDenoiser::init(Resources& resources)
     return;
   }
 
-  // Memory tracking: GBuffer images are on the main allocator, export buffers on m_allocExport.
+  // Memory tracking: denoiser RenderTargets use the main allocator; export buffers use m_allocExport.
   m_appMemoryTracker = &resources.appMemoryTracker;
 
-  // Create GBuffers for denoiser output and guides
+  // Create render targets for denoiser output and guides
   resources.samplerPool.acquireSampler(m_linearSampler);
-  m_inputOutputGbuffers.init({.allocator = &resources.allocator,
-                              .colorFormats =
-                                  {
-                                      VK_FORMAT_R32G32B32A32_SFLOAT,  // Output denoised image (index 0)
-                                      VK_FORMAT_R32G32B32A32_SFLOAT,  // OptiX Albedo+Normal (index 1)
-                                  },
-                              .imageSampler   = m_linearSampler,
-                              .descriptorPool = resources.descriptorPool});
+  NVVK_CHECK(m_denoiserTarget.init({.device = resources.allocator.getDevice(),
+                                    .alloc  = &resources.allocator,
+                                    .colorFormats =
+                                        {
+                                            VK_FORMAT_R32G32B32A32_SFLOAT,  // Output denoised image (index 0)
+                                            VK_FORMAT_R32G32B32A32_SFLOAT,  // OptiX Albedo+Normal (index 1)
+                                        },
+                                    .debugName = "OptiX-IO"}));
 
-  // Staging GBuffer at render (half) resolution for upscale blit of selection/depth
-  m_upscaleStaging.init({.allocator      = &resources.allocator,
-                         .colorFormats   = {VK_FORMAT_R32_SFLOAT},
-                         .depthFormat    = resources.gBuffers.getDepthFormat(),
-                         .imageSampler   = m_linearSampler,
-                         .descriptorPool = resources.descriptorPool});
+  // Staging render target at render (half) resolution for upscale blit of selection/depth
+  NVVK_CHECK(m_upscaleStaging.init({.device       = resources.allocator.getDevice(),
+                                    .alloc        = &resources.allocator,
+                                    .colorFormats = {VK_FORMAT_R32_SFLOAT},
+                                    .depthFormat  = resources.gBuffers.getDepthFormat(),
+                                    .debugName    = "OptiX-Staging"}));
 
 
   // Create export allocator for Vulkan-CUDA interop
@@ -305,11 +305,13 @@ void OptiXDenoiser::updateSize(VkCommandBuffer cmd, VkExtent2D size)
   if(m_settings.enable)
   {
     if(m_appMemoryTracker)
-      m_appMemoryTracker->untrack("OptiX/GBuffers", m_inputOutputGbuffers, 2);
-    m_inputOutputGbuffers.update(cmd, size);
-    NVVK_DBG_NAME_STR(m_inputOutputGbuffers.getColorImage(), "Optix::m_outputImage");
+      m_appMemoryTracker->untrack("OptiX/GBuffers", m_denoiserTarget, 2);
+    NVVK_CHECK(m_denoiserTarget.update(cmd, size));
+    m_denoiserTarget.cmdClear(cmd);
+    NVVK_DBG_NAME_STR(m_denoiserTarget.getColorImage(), "Optix::m_outputImage");
     if(m_appMemoryTracker)
-      m_appMemoryTracker->track("OptiX/GBuffers", m_inputOutputGbuffers, 2);
+      m_appMemoryTracker->track("OptiX/GBuffers", m_denoiserTarget, 2);
+    m_denoisedUi.update(m_denoiserTarget.getUiImageView(eGBufferDenoised));
   }
 
   // Compute input (render) resolution based on model kind
@@ -320,7 +322,8 @@ void OptiXDenoiser::updateSize(VkCommandBuffer cmd, VkExtent2D size)
   {
     if(m_appMemoryTracker)
       m_appMemoryTracker->untrack("OptiX/Staging", m_upscaleStaging, 1);
-    m_upscaleStaging.update(cmd, inputSize);
+    NVVK_CHECK(m_upscaleStaging.update(cmd, inputSize));
+    m_upscaleStaging.cmdClear(cmd);
     NVVK_DBG_NAME_STR(m_upscaleStaging.getColorImage(eStagingSelection), "Optix::m_stagingSelection");
     if(m_appMemoryTracker)
       m_appMemoryTracker->track("OptiX/Staging", m_upscaleStaging, 1);
@@ -413,8 +416,8 @@ bool OptiXDenoiser::denoiseOneShot(Resources& resources)
     VkCommandBuffer cmd = resources.app->createTempCmdBuffer();
 
     DenoisingInputs inputs = {
-        .renderedImage     = resources.gBuffers.getDescriptorImageInfo(Resources::eImgRendered),
-        .albedoNormalImage = m_inputOutputGbuffers.getDescriptorImageInfo(eGBufferAlbedoNormal),
+        .renderedImage     = resources.gBuffers.getColorStorageImageInfo(Resources::eImgRendered),
+        .albedoNormalImage = m_denoiserTarget.getColorStorageImageInfo(eGBufferAlbedoNormal),
     };
 
     if(!prepareDenoisingInputs(cmd, inputs))
@@ -436,7 +439,7 @@ bool OptiXDenoiser::denoiseOneShot(Resources& resources)
   {
     VkCommandBuffer cmd = resources.app->createTempCmdBuffer();
 
-    DenoisingOutputs outputs = {.outputImage = m_inputOutputGbuffers.getColorImage(eGBufferDenoised)};
+    DenoisingOutputs outputs = {.outputImage = m_denoiserTarget.getColorImage(eGBufferDenoised)};
 
     if(!finalizeDenoisedOutput(cmd, outputs))
     {
@@ -650,7 +653,7 @@ void OptiXDenoiser::createComputePipeline()
 
 VkDescriptorImageInfo OptiXDenoiser::getDescriptorImageInfo(GBufferIndex index) const
 {
-  return m_inputOutputGbuffers.getDescriptorImageInfo(index);
+  return m_denoiserTarget.getColorStorageImageInfo(index);
 }
 
 void OptiXDenoiser::cleanupOptiX()
@@ -690,10 +693,11 @@ void OptiXDenoiser::cleanupOptiX()
 
   if(m_appMemoryTracker)
   {
-    m_appMemoryTracker->untrack("OptiX/GBuffers", m_inputOutputGbuffers, 2);
+    m_appMemoryTracker->untrack("OptiX/GBuffers", m_denoiserTarget, 2);
     m_appMemoryTracker->untrack("OptiX/Staging", m_upscaleStaging, 1);
   }
-  m_inputOutputGbuffers.deinit();
+  m_denoisedUi.deinit();
+  m_denoiserTarget.deinit();
   m_upscaleStaging.deinit();
 
   m_availability = Availability::eNotChecked;
@@ -903,7 +907,7 @@ bool OptiXDenoiser::onUi(Resources& resources)
         }
 
         ImGui::Text("Denoised Result%s", isActive ? " (Active)" : "");
-        if(ImGui::ImageButton("OptiXDenoised", ImTextureID(m_inputOutputGbuffers.getDescriptorSet(eGBufferDenoised)), thumbnailSize))
+        if(ImGui::ImageButton("OptiXDenoised", m_denoisedUi, thumbnailSize))
         {
           resources.settings.displayBuffer = isActive ? DisplayBuffer::eRendered : DisplayBuffer::eOptixDenoised;
         }

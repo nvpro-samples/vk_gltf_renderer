@@ -258,7 +258,9 @@ Dlss::State Dlss::state() const
 // Advance the asynchronous NGX initialization state machine and notify the renderer if DLSS resources
 // should be (re-)configured this frame. The logic below proceeds through the following phases:
 //
-//   eOff/eUnsupported : DLSS is disabled or unsupported, nothing to do, return false.
+//   eOff/eUnsupported : DLSS is disabled or unsupported, normally nothing to do.
+//                       SR still returns true for an off-transition recreate so updateSizeSr()
+//                       can restore the inner render target to native size.
 //   pending result    : Consume the async worker result on the main thread, update m_state, and return true on success.
 //   already settled   : Initialization already completed, nothing changed, return false.
 //   worker running    : Initialization still in progress, return false and renderer operates at native resolution.
@@ -268,10 +270,14 @@ Dlss::State Dlss::state() const
 // so tick() reflects both "first-time successful init" as well as feature recreation events.
 bool Dlss::tick(Resources& resources)
 {
-  // (a) Off / Unsupported: nothing for the worker to do.
+  // (a) Off / Unsupported: nothing for the worker to do. SR quality changes are the exception:
+  // turning SR off must still run updateSizeSr() once so the rasterizer stops presenting the
+  // previous lower-resolution DLSS input image.
   const State s = state();
-  if(s == State::eOff || s == State::eUnsupported)
+  if(s == State::eUnsupported)
     return false;
+  if(s == State::eOff)
+    return m_kind == Kind::SR && needsRecreate();
 
   bool justInitedNgx = false;
 
@@ -447,9 +453,8 @@ void Dlss::buildGuideEntries()
     return;
   }
 
-  // SR: only attachments that are color-format and live in the inner GBuffer make sense as
-  // thumbnails (the depth attachment is depth-format and not directly samplable through the
-  // GBuffer's ImGui descriptor set). We keep this minimal; depth is excluded by design.
+  // SR: only color attachments in the inner render target make sense as guide thumbnails
+  // (depth is excluded — depth-format, sampled via ImTexture + linearSampler elsewhere).
   if(m_fallback)
   {
     // Fallback mode: only motion lives in the inner GBuffer (color/selection route to outer).
@@ -469,7 +474,7 @@ std::optional<Dlss::GuideImage> Dlss::activeGuideImage() const
 
   const GuideEntry& entry = m_guideEntries[m_selectedGuide];
   return GuideImage{
-      .image  = m_innerGBuffer.getDescriptorImageInfo(entry.gbufColorIdx),
+      .image  = m_innerGBuffer.getColorSampleDescriptorImageInfo(entry.gbufColorIdx, m_linearSampler),
       .extent = m_innerGBuffer.getSize(),
       .name   = entry.label,
   };
@@ -510,8 +515,7 @@ bool Dlss::drawGuideThumbnails()
       }
 
       ImGui::Text("%s%s", entry.label, isActive ? " (Active)" : "");
-      const VkDescriptorSet thumbDs = m_innerGBuffer.getDescriptorSet(entry.gbufColorIdx);
-      if(ImGui::ImageButton(entry.label, ImTextureID(thumbDs), thumbnailSize))
+      if(ImGui::ImageButton(entry.label, m_guideTextures[entry.gbufColorIdx], thumbnailSize))
       {
         // Toggle: re-clicking the active thumbnail goes back to the rendered image.
         m_selectedGuide = isActive ? -1 : i;
@@ -679,13 +683,13 @@ void Dlss::initRr(Resources& resources)
     return;
   }
 
-  // GBufferInitInfo wants a std::vector; copy from the file-scope constexpr span so the formats
+  // RenderTarget CreateInfo wants a std::vector; copy from the file-scope constexpr span so the formats
   // table stays the single source of truth.
   const auto& rrFormats = kindConfig(Kind::RR).innerColorFormats;
-  m_innerGBuffer.init({.allocator      = &resources.allocator,
-                       .colorFormats   = std::vector<VkFormat>(rrFormats.begin(), rrFormats.end()),
-                       .imageSampler   = m_linearSampler,
-                       .descriptorPool = resources.descriptorPool});
+  NVVK_CHECK(m_innerGBuffer.init({.device       = resources.allocator.getDevice(),
+                                  .alloc        = &resources.allocator,
+                                  .colorFormats = std::vector<VkFormat>(rrFormats.begin(), rrFormats.end()),
+                                  .debugName    = "DLSS-RR"}));
 }
 
 void Dlss::deinitRr(Resources& /*resources*/)
@@ -693,6 +697,7 @@ void Dlss::deinitRr(Resources& /*resources*/)
   if(m_appMemoryTracker)
     m_appMemoryTracker->untrack("DLSS/GBuffers", m_innerGBuffer,
                                 static_cast<uint32_t>(kindConfig(Kind::RR).innerColorFormats.size()));
+  deinitGuideTextures();
   m_innerGBuffer.deinit();
   if(m_state != InitStatus::eUnavailable)
     teardownNgx();
@@ -746,7 +751,9 @@ VkExtent2D Dlss::updateSizeRr(VkCommandBuffer cmd, VkExtent2D size)
   const uint32_t dlssColorCount = static_cast<uint32_t>(kindConfig(Kind::RR).innerColorFormats.size());
   if(m_appMemoryTracker)
     m_appMemoryTracker->untrack("DLSS/GBuffers", m_innerGBuffer, dlssColorCount);
-  m_innerGBuffer.update(cmd, renderingSize);
+  NVVK_CHECK(m_innerGBuffer.update(cmd, renderingSize));
+  m_innerGBuffer.cmdClear(cmd);
+  syncGuideTextures(dlssColorCount);
   if(m_appMemoryTracker)
     m_appMemoryTracker->track("DLSS/GBuffers", m_innerGBuffer, dlssColorCount);
 
@@ -762,8 +769,8 @@ void Dlss::setResourcesRr()
     return;
 
   auto bind = [&](DlssFeature::ResourceType resource, shaderio::OutputImage gbufIndex) {
-    m_dlss.setResource({resource, m_innerGBuffer.getColorImage(gbufIndex), m_innerGBuffer.getColorImageView(gbufIndex),
-                        m_innerGBuffer.getColorFormat(gbufIndex)});
+    m_dlss.setResource({resource, m_innerGBuffer.getColorImage(gbufIndex),
+                        m_innerGBuffer.getColorAttachmentView(gbufIndex), m_innerGBuffer.getColorFormat(gbufIndex)});
   };
 
   bind(DlssFeature::ResourceType::eColorIn, shaderio::OutputImage::eResultImage);
@@ -890,6 +897,7 @@ void Dlss::releaseRrInnerGBuffer()
     m_appMemoryTracker->untrack("DLSS/GBuffers", m_innerGBuffer,
                                 static_cast<uint32_t>(kindConfig(Kind::RR).innerColorFormats.size()));
 
+  deinitGuideTextures();
   m_innerGBuffer.deinit();
   m_guideEntries.clear();
   m_selectedGuide = -1;
@@ -905,12 +913,12 @@ void Dlss::reacquireRrInnerGBuffer(Resources& resources)
   // Clean up the old GBuffer
   m_innerGBuffer.deinit();
 
-  // Create a new GBuffer
+  // Create a new inner render target
   const auto& rrFormats = kindConfig(Kind::RR).innerColorFormats;
-  m_innerGBuffer.init({.allocator      = &resources.allocator,
-                       .colorFormats   = std::vector<VkFormat>(rrFormats.begin(), rrFormats.end()),
-                       .imageSampler   = m_linearSampler,
-                       .descriptorPool = resources.descriptorPool});
+  NVVK_CHECK(m_innerGBuffer.init({.device       = resources.allocator.getDevice(),
+                                  .alloc        = &resources.allocator,
+                                  .colorFormats = std::vector<VkFormat>(rrFormats.begin(), rrFormats.end()),
+                                  .debugName    = "DLSS-RR"}));
 
   buildGuideEntries();     // rebuilds the 6-entry RR table; safe -- the GBuffer is init()'d.
   m_needsRecreate = true;  // setupPushConstant -> updateDlssResources -> updateSizeRr next frame.
@@ -926,7 +934,7 @@ VkImage Dlss::getRrImage(shaderio::OutputImage which) const
 VkDescriptorImageInfo Dlss::getRrAttachment(shaderio::OutputImage which) const
 {
   assertKind(Kind::RR);
-  return m_innerGBuffer.getDescriptorImageInfo(static_cast<uint32_t>(which));
+  return m_innerGBuffer.getColorStorageImageInfo(static_cast<uint32_t>(which));
 }
 
 
@@ -947,11 +955,11 @@ void Dlss::initSr(Resources& resources)
   const std::vector<VkFormat> colorFormats = m_fallback ?
                                                  std::vector<VkFormat>{kSrMotionFormat} :
                                                  std::vector<VkFormat>{kSrColorFormat, kSrSelectionFormat, kSrMotionFormat};
-  m_innerGBuffer.init({.allocator      = &resources.allocator,
-                       .colorFormats   = colorFormats,
-                       .depthFormat    = m_fallback ? VK_FORMAT_UNDEFINED : m_innerDepthFormat,
-                       .imageSampler   = m_linearSampler,
-                       .descriptorPool = resources.descriptorPool});
+  NVVK_CHECK(m_innerGBuffer.init({.device       = resources.allocator.getDevice(),
+                                  .alloc        = &resources.allocator,
+                                  .colorFormats = colorFormats,
+                                  .depthFormat  = m_fallback ? VK_FORMAT_UNDEFINED : m_innerDepthFormat,
+                                  .debugName    = "DLSS-SR"}));
 
   if(m_fallback)
   {
@@ -962,6 +970,7 @@ void Dlss::initSr(Resources& resources)
 void Dlss::deinitSr(Resources& /*resources*/)
 {
   destroyImagesSr();
+  deinitGuideTextures();
   m_innerGBuffer.deinit();
   if(m_dlssCreated)
   {
@@ -977,9 +986,9 @@ void Dlss::refreshOuterRefs(Resources& resources)
   if(!m_fallback)
     return;
   m_outerRefs.colorImage     = resources.gBuffers.getColorImage(Resources::eImgRendered);
-  m_outerRefs.colorView      = resources.gBuffers.getColorImageView(Resources::eImgRendered);
+  m_outerRefs.colorView      = resources.gBuffers.getColorAttachmentView(Resources::eImgRendered);
   m_outerRefs.selectionImage = resources.gBuffers.getColorImage(Resources::eImgSelection);
-  m_outerRefs.selectionView  = resources.gBuffers.getColorImageView(Resources::eImgSelection);
+  m_outerRefs.selectionView  = resources.gBuffers.getColorAttachmentView(Resources::eImgSelection);
   m_outerRefs.depthImage     = resources.gBuffers.getDepthImage();
   m_outerRefs.depthView      = resources.gBuffers.getDepthImageView();
 }
@@ -1000,11 +1009,14 @@ void Dlss::createImagesSr(VkCommandBuffer cmd, VkExtent2D size)
   destroyImagesSr();
 
   // Create new color + depth images at `size`, transitioning every image to VK_IMAGE_LAYOUT_GENERAL.
-  m_innerGBuffer.update(cmd, size);
+  NVVK_CHECK(m_innerGBuffer.update(cmd, size));
+  m_innerGBuffer.cmdClear(cmd);
+
+  const uint32_t count = m_fallback ? 1u : kInnerColorCount;
+  syncGuideTextures(count);
 
   if(m_appMemoryTracker)
   {
-    const uint32_t count = m_fallback ? 1u : kInnerColorCount;
     m_appMemoryTracker->track("DLSS-SR/Inner", m_innerGBuffer, count);
     m_innerTracked = true;
   }
@@ -1085,14 +1097,14 @@ void Dlss::setResourcesSr()
   m_dlss.setResource({
       .type      = DlssFeature::ResourceType::eColorIn,
       .image     = m_innerGBuffer.getColorImage(kInnerColorIdx),
-      .imageView = m_innerGBuffer.getColorImageView(kInnerColorIdx),
+      .imageView = m_innerGBuffer.getColorAttachmentView(kInnerColorIdx),
       .format    = kSrColorFormat,
   });
 
   m_dlss.setResource({
       .type      = DlssFeature::ResourceType::eMotionVector,
       .image     = m_innerGBuffer.getColorImage(kInnerMotionIdx),
-      .imageView = m_innerGBuffer.getColorImageView(kInnerMotionIdx),
+      .imageView = m_innerGBuffer.getColorAttachmentView(kInnerMotionIdx),
       .format    = kSrMotionFormat,
   });
 
@@ -1128,11 +1140,11 @@ VkImageView Dlss::getSrImageView(SrSlot slot) const
   switch(slot)
   {
     case SrSlot::eColor:
-      return m_fallback ? m_outerRefs.colorView : m_innerGBuffer.getColorImageView(kInnerColorIdx);
+      return m_fallback ? m_outerRefs.colorView : m_innerGBuffer.getColorAttachmentView(kInnerColorIdx);
     case SrSlot::eSelection:
-      return m_fallback ? m_outerRefs.selectionView : m_innerGBuffer.getColorImageView(kInnerSelectionIdx);
+      return m_fallback ? m_outerRefs.selectionView : m_innerGBuffer.getColorAttachmentView(kInnerSelectionIdx);
     case SrSlot::eMotion:
-      return m_innerGBuffer.getColorImageView(m_fallback ? kFallbackMotionIdx : kInnerMotionIdx);
+      return m_innerGBuffer.getColorAttachmentView(m_fallback ? kFallbackMotionIdx : kInnerMotionIdx);
     case SrSlot::eDepth:
       return m_fallback ? m_outerRefs.depthView : m_innerGBuffer.getDepthImageView();
   }
@@ -1244,6 +1256,22 @@ bool Dlss::onUiSr(Resources& resources)
     changed = true;
 
   return changed;
+}
+
+void Dlss::deinitGuideTextures()
+{
+  for(uint32_t i = 0; i < m_guideTextureCount; ++i)
+    m_guideTextures[i].deinit();
+  m_guideTextureCount = 0;
+}
+
+void Dlss::syncGuideTextures(uint32_t colorCount)
+{
+  deinitGuideTextures();
+  assert(colorCount <= kMaxGuideTextures);
+  for(uint32_t i = 0; i < colorCount; ++i)
+    m_guideTextures[i].init(m_innerGBuffer.getUiImageView(i));
+  m_guideTextureCount = colorCount;
 }
 
 #endif  // USE_DLSS

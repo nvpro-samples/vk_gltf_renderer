@@ -210,7 +210,7 @@ void PathTracer::updateDlssResources(VkCommandBuffer cmd, Resources& resources)
   m_dlss->updateSize(cmd, resources, size);
   m_dlss->setResources();
   m_dlss->setOutputImage(resources.gBuffers.getColorImage(Resources::eImgRendered),
-                         resources.gBuffers.getColorImageView(Resources::eImgRendered),
+                         resources.gBuffers.getColorAttachmentView(Resources::eImgRendered),
                          resources.gBuffers.getColorFormat(Resources::eImgRendered));
 #endif
 }
@@ -238,9 +238,9 @@ bool PathTracer::onUIRender(Resources& resources)
   if(PE::begin())
   {
     // Rendering technique selector
-    const char* techniques[] = {"Ray Query", "Ray Tracing"};
+    const char* techniques[] = {"Compute / Ray Query", "Ray Tracing Pipeline"};
     int         current      = static_cast<int>(m_renderTechnique);
-    if(PE::Combo("Rendering Technique", &current, techniques, IM_ARRAYSIZE(techniques)))
+    if(PE::Combo("Rendering Pipeline", &current, techniques, IM_ARRAYSIZE(techniques)))
     {
       m_renderTechnique = static_cast<RenderTechnique>(current);
       changed           = true;
@@ -278,8 +278,10 @@ bool PathTracer::onUIRender(Resources& resources)
       std::string sceneExtTooltip = fmt::format("Active scene feature(s): {}", usedFeatures.empty() ? "none" : usedFeatures);
       nvgui::tooltip(sceneExtTooltip.c_str(), true);
       std::string featureGatesTooltip = fmt::format("Feature gates: Transmission: {}, Volume: {}, VolumeScatter: {}, DLSS Guide: {}",
-                                                    fs.transmission ? "ON" : "off", fs.volume ? "ON" : "off",
-                                                    fs.volumeScatter ? "ON" : "off", fs.dlssGuide ? "ON" : "off");
+                                                    fs.has(nvvkgltf::SceneFeatureSet::eTransmission) ? "ON" : "off",
+                                                    fs.has(nvvkgltf::SceneFeatureSet::eVolume) ? "ON" : "off",
+                                                    fs.has(nvvkgltf::SceneFeatureSet::eVolumeScatter) ? "ON" : "off",
+                                                    fs.has(nvvkgltf::SceneFeatureSet::eDlssGuide) ? "ON" : "off");
       nvgui::tooltip(featureGatesTooltip.c_str(), true);
     }
 #endif
@@ -651,8 +653,8 @@ void PathTracer::pushDescriptorSet(VkCommandBuffer cmd, Resources& resources, Vk
 
   // Normal rendering: output images (ObjectID written to eSelectImage slot as float in .r)
   std::vector<VkDescriptorImageInfo> outputImages = {
-      resources.gBuffers.getDescriptorImageInfo(Resources::eImgRendered),   // eResultImage
-      resources.gBuffers.getDescriptorImageInfo(Resources::eImgSelection),  // eSelectImage (ObjectID)
+      resources.gBuffers.getColorStorageImageInfo(Resources::eImgRendered),   // eResultImage
+      resources.gBuffers.getColorStorageImageInfo(Resources::eImgSelection),  // eSelectImage (ObjectID)
   };
 
 #if defined(USE_DLSS)
@@ -660,8 +662,8 @@ void PathTracer::pushDescriptorSet(VkCommandBuffer cmd, Resources& resources, Vk
   {
     using namespace shaderio;
     // Re-route every output image at the path tracer's RR guide-buffer slots. The Dlss adapter
-    // hides the inner GBuffer behind getRrAttachment() so we can iterate the OutputImage enum
-    // values without ever touching a raw nvvk::GBuffer here.
+    // hides the inner RenderTarget behind getRrAttachment() so we can iterate the OutputImage enum
+    // values without touching m_innerGBuffer directly.
     static constexpr OutputImage kRrSlots[] = {
         eResultImage,         eSelectImage, eDlssAlbedo, eDlssSpecAlbedo,
         eDlssNormalRoughness, eDlssMotion,  eDlssDepth,  eDlssSpecularHitDist,
@@ -1007,16 +1009,31 @@ void PathTracer::createRtxPipeline(Resources& resources)
 
 //--------------------------------------------------------------------------------------------------
 // Compile the shader
+void PathTracer::reloadShader(Resources& resources)
+{
+  if(m_compileThread.joinable())
+    m_compileThread.join();
+
+  // SYNC NOTE: User-initiated shader reload — cached pipelines may still be in flight from a
+  // recent variant switch; live handles are destroyed in compileShader() below.
+  NVVK_CHECK(vkQueueWaitIdle(resources.app->getQueue(0).queue));
+  destroyVariantCache(resources);
+  m_skipVariantCache = true;
+  compileShader(resources, true);
+  m_skipVariantCache = false;
+}
+
+//--------------------------------------------------------------------------------------------------
+// Compile the shader
 void PathTracer::compileShader(Resources& resources, bool fromFile)
 {
   SCOPED_TIMER(__FUNCTION__);
-
   // Variant cache: try to find a previously-compiled shader + pipelines for the variant the
   // user wants this frame. On hit we skip both the Slang recompile and the RT pipeline link
   // (the slow part - the driver can take several seconds per RTX pipeline). On miss we
   // proceed with the normal compile path and the new entry will be stored on the next
   // variant switch.
-  if(fromFile)
+  if(fromFile && !m_skipVariantCache)
   {
     const VariantKey targetKey{
         resources.settings.wireframe,
@@ -1062,6 +1079,7 @@ void PathTracer::compileShader(Resources& resources, bool fromFile)
         {"AVAILABLE_SER", std::to_string(m_supportSER)},
         {"WIREFRAME", std::to_string((int)resources.settings.wireframe)},
     };
+    nvvkgltf::appendPathTracerDlssShaderMacro(macros, resources.settings.optimalShader, resources.currentFeatureSet);
 
     // Scene-aware optimal mode: set every GLTF_USE_* to 0 or 1 from SceneFeatureSet.
     // Never pass MAT_EXT_X=0 (that would change GltfShadeMaterial layout while the host
@@ -1481,6 +1499,18 @@ void PathTracer::setupPushConstant(VkCommandBuffer cmd, Resources& resources, Vk
   m_pushConst.skyParams    = (shaderio::SkyPhysicalParameters*)resources.bSkyParams.address;
   m_pushConst.gltfScene    = (shaderio::GltfScene*)resources.sceneVk.sceneDesc().address;
   m_pushConst.mouseCoord   = nvapp::ElementDbgPrintf::getMouseCoord();  // Use for debugging: printf in shader
+
+  // #DLSS instance motion vectors: previous-frame render-node transforms (snapshotted at frame start
+  // in GltfRenderer::onRender, only on frames where transforms actually changed). Bound only when DLSS
+  // runs this frame AND the snapshot ran (dlssInstanceMotionActive); null otherwise so the shader
+  // falls back to exact camera-only motion. The shader null-checks the pointer, so this is crash-safe.
+#if defined(USE_DLSS)
+  m_pushConst.prevRenderNodeObjectToWorld = (useDlss && resources.dlssInstanceMotionActive) ?
+                                                (shaderio::float4x4*)resources.transformCompute.prevObjectToWorldAddress() :
+                                                nullptr;
+#else
+  m_pushConst.prevRenderNodeObjectToWorld = nullptr;
+#endif
 
   // Angular size of one pixel (radians). Same formula as the previous shader-side computePixelAngle():
   //   2 * |projInv[1][1]| / viewportHeight     where projInv[1][1] == tan(fovY/2) for a pinhole camera.

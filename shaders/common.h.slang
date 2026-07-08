@@ -27,9 +27,10 @@ enum VisualizationResult
   eRenderedOutput,    // No override: continue full-quality shading
   eColorOverride,     // Flat color returned in overrideColor; caller should use it directly
   eMaterialOverride,  // pbrMat was mutated in-place; caller should continue shading with it
-};
+}
 
-float3 hashToColor(uint id)
+float3
+hashToColor(uint id)
 {
   uint h = id;
   h      = h * 747796405u + 2891336453u;
@@ -133,7 +134,7 @@ VisualizationResult applyVisualization(inout PbrMaterial pbrMat, HitState hit, V
       // PbrMaterial doesn't store the strength scalar (folded into roughness.xy); recover it
       // from the inflation: strength² = (rx - ry) / (1 - ry).
       {
-        float den = max(1.0 - pbrMat.roughness.y, 1e-5);
+        float den     = max(1.0 - pbrMat.roughness.y, 1e-5);
         overrideColor = float3(sqrt(saturate((pbrMat.roughness.x - pbrMat.roughness.y) / den)));
       }
       return VisualizationResult::eColorOverride;

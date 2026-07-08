@@ -13,7 +13,8 @@
 
 #pragma once
 
-#include <cstdint>
+#include <bitset>
+#include <cstddef>
 #include <string>
 #include <vector>
 
@@ -45,33 +46,42 @@ namespace nvvkgltf {
 --------------------------------------------------------------------------------------------------*/
 struct SceneFeatureSet
 {
-  // KHR_materials_* usage booleans. Names mirror MAT_EXT_*; runtime optimal mode drives
-  // GLTF_USE_* gates (not MAT_EXT_*) from these fields.
-  bool transmission        = false;
-  bool volume              = false;
-  bool volumeScatter       = false;
-  bool clearcoat           = false;
-  bool iridescence         = false;
-  bool anisotropy          = false;
-  bool sheen               = false;
-  bool dispersion          = false;
-  bool diffuseTransmission = false;
-  bool unlit               = false;
-  bool specular            = false;
-  bool ior                 = false;
-  bool specularGlossiness  = false;
-  bool textureTransform    = false;
+  enum Feature : std::size_t
+  {
+    // KHR_materials_* usage bits. Names mirror MAT_EXT_*; runtime optimal mode drives
+    // GLTF_USE_* gates (not MAT_EXT_*) from these flags.
+    eTransmission,
+    eVolume,
+    eVolumeScatter,
+    eClearcoat,
+    eIridescence,
+    eAnisotropy,
+    eSheen,
+    eDispersion,
+    eDiffuseTransmission,
+    eRetroreflection,
+    eUnlit,
+    eSpecular,
+    eIor,
+    eSpecularGlossiness,
+    eTextureTransform,
 
-  // Shader-side guide-buffer code (DlssScratch / dlssGetClearGlassGuideAlbedo / etc.).
-  // True when the active denoiser (DLSS or OptiX) wants the path tracer to populate
-  // first-hit guide buffers. The build-time CMake gate also controls this via
-  // USE_DLSS_SHADER, but runtime variant rebuild can be more aggressive (e.g. turn
-  // off when DLSS is compiled in but the user has disabled the denoiser).
-  bool dlssGuide = false;
+    // Shader-side guide-buffer code (DlssScratch / dlssGetClearGlassGuideAlbedo / etc.).
+    // True when the active denoiser (DLSS or OptiX) wants the path tracer to populate
+    // first-hit guide buffers. The build-time CMake gate also controls this via
+    // USE_DLSS_SHADER, but runtime variant rebuild can be more aggressive (e.g. turn
+    // off when DLSS is compiled in but the user has disabled the denoiser).
+    eDlssGuide,
 
-  // Stable hash usable as a cache key. Hash collisions are not used for correctness
-  // (the variant cache compares full sets on lookup), only as a quick bucket key.
-  uint64_t hash() const;
+    eCount
+  };
+
+  static constexpr std::size_t kFeatureCount          = static_cast<std::size_t>(eCount);
+  static constexpr std::size_t kExtensionFeatureCount = static_cast<std::size_t>(eDlssGuide);
+
+  void enable(Feature feature) { m_bits.set(static_cast<std::size_t>(feature)); }
+  void set(Feature feature, bool enabled) { m_bits.set(static_cast<std::size_t>(feature), enabled); }
+  bool has(Feature feature) const { return m_bits.test(static_cast<std::size_t>(feature)); }
 
   // True when `this` set already covers every feature `other` needs. Used to skip
   // unnecessary recompiles when a smaller scene is merged into the current one.
@@ -88,6 +98,9 @@ struct SceneFeatureSet
   // Excludes non-extension shader gates such as dlssGuide, which are optimized separately.
   // 0 means every counted extension gate is used, not that optimal mode has no remaining shader gates.
   int unusedExtensionCount() const;
+
+private:
+  std::bitset<kFeatureCount> m_bits{};
 };
 
 // Walk a glTF material list and detect which gated extensions appear. A material is

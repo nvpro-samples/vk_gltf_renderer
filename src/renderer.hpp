@@ -31,7 +31,7 @@
 #include <nvshaders_host/tonemapper.hpp>
 #include <nvslang/slang.hpp>
 #include <nvvk/descriptors.hpp>
-#include <nvvk/gbuffers.hpp>
+#include <nvvk/render_target.hpp>
 #include <nvvk/hdr_ibl.hpp>
 #include <nvvk/ray_picker.hpp>
 #include <nvvk/resource_allocator.hpp>
@@ -149,6 +149,7 @@ private:
                                bool&                  mergeFile,
                                bool&                  loadHdrFile,
                                bool&                  saveFile,
+                               bool&                  saveAsFile,
                                bool&                  saveScreenFile,
                                bool&                  saveImageFile,
                                bool&                  closeApp,

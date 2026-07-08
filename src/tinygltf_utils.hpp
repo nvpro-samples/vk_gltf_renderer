@@ -219,6 +219,14 @@ struct KHR_materials_diffuse_transmission
   tinygltf::TextureInfo diffuseTransmissionColorTexture = {};
 };
 
+// EXT_materials_retroreflection — Minimal Retroreflective Microfacet (Portsmouth et al. 2026)
+#define EXT_materials_retroreflection_EXTENSION_NAME "EXT_materials_retroreflection"
+struct EXT_materials_retroreflection
+{
+  float                 retroreflectionFactor  = 0.0f;
+  tinygltf::TextureInfo retroreflectionTexture = {};
+};
+
 // https://github.com/KhronosGroup/glTF/tree/main/extensions/2.0/Vendor/EXT_meshopt_compression
 // Both EXT and KHR variants use the same data format; we support either extension name.
 #define KHR_MESHOPT_COMPRESSION_EXTENSION_NAME "KHR_meshopt_compression"
@@ -1133,6 +1141,8 @@ KHR_materials_pbrSpecularGlossiness getPbrSpecularGlossiness(const tinygltf::Mat
 void setPbrSpecularGlossiness(tinygltf::Material& tmat, const KHR_materials_pbrSpecularGlossiness& dispersion);
 KHR_materials_diffuse_transmission getDiffuseTransmission(const tinygltf::Material& tmat);
 void setDiffuseTransmission(tinygltf::Material& tmat, const KHR_materials_diffuse_transmission& diffuseTransmission);
+EXT_materials_retroreflection getRetroreflection(const tinygltf::Material& tmat);
+void                          setRetroreflection(tinygltf::Material& tmat, const EXT_materials_retroreflection& retro);
 
 
 template <typename T>

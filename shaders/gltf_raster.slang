@@ -19,6 +19,10 @@
 
 #include "gltf_scene_io.h.slang"
 #include "gltf_vertex_access.h.slang"
+// Raster runs in a fragment shader, where implicit-LOD .Sample() has valid screen-space
+// derivatives and gives correct hardware mipmapping. Opt into that path in getTexture();
+// the path tracer (compute/raygen) has no such derivatives and uses explicit mip 0 instead.
+#define RASTER_PIPELINE 1
 #include "gltf_material_eval.h.slang"
 #include "shaderio.h"
 #ifdef HAS_DLSS_MOTION
@@ -119,6 +123,58 @@ float3 volumeScatterApprox(PbrMaterial mat, float3 hemisphericalIrradiance)
   float  mask      = (1.0 - mat.metallic) * (1.0 - mat.iridescence) * (1.0 - mat.transmission);
   return scattered * mask;
 }
+
+#if GLTF_USE_RETROREFLECTION
+PbrMaterial disableBtdf(PbrMaterial mat)
+{
+  mat.transmission              = 0.0f;
+  mat.diffuseTransmissionFactor = 0.0f;
+  return mat;
+}
+
+// MRM (Portsmouth et al. 2026): blend reflection lobes only; keep regular BTDF (Portsmouth Sec. 5).
+float3 bsdfEvalPunctualKhronosMRM(PbrMaterial mat, float3 V, float3 pointToLight, float3 lightIntensity, float3 transmissionRay, float dttThickness, Sampler2D sheenLUT)
+{
+  float3 cf = bsdfEvaluatePunctualKhronos(mat, V, pointToLight, lightIntensity, transmissionRay, dttThickness, sheenLUT);
+  if(mat.retroreflection <= 0.0f)
+    return cf;
+
+  PbrMaterial matBrdf = disableBtdf(mat);
+  float3 cfBrdf = bsdfEvaluatePunctualKhronos(matBrdf, V, pointToLight, lightIntensity, transmissionRay, dttThickness, sheenLUT);
+
+  // V is outgoing (toward camera); MRM uses the incident view ray: reflect(-V, N).
+  float3 Vp = reflect(-V, mat.N);
+  float3 crBrdf = bsdfEvaluatePunctualKhronos(matBrdf, Vp, pointToLight, lightIntensity, transmissionRay, dttThickness, sheenLUT);
+  return (cf - cfBrdf) + lerp(cfBrdf, crBrdf, mat.retroreflection);
+}
+
+float3 evalKhronosIBLMRM(PbrMaterial mat,
+                         float3      V,
+                         SamplerCube diffuseCube,
+                         SamplerCube glossyCube,
+                         Sampler2D   lut,
+                         Sampler2D   sheenLUT,
+                         float       envRotation,
+                         float       envIntensity,
+                         float       dttThickness,
+                         float3      f_specular_transmission,
+                         bool        haveTransmissionSample)
+{
+  float3 cf = evalKhronosIBL(mat, V, diffuseCube, glossyCube, lut, sheenLUT, envRotation, envIntensity, dttThickness,
+                             f_specular_transmission, haveTransmissionSample);
+  if(mat.retroreflection <= 0.0f)
+    return cf;
+
+  PbrMaterial matBrdf = disableBtdf(mat);
+  float3      cfBrdf  = evalKhronosIBL(matBrdf, V, diffuseCube, glossyCube, lut, sheenLUT, envRotation, envIntensity,
+                                       dttThickness, float3(0.0f), false);
+
+  float3 Vp     = reflect(-V, mat.N);
+  float3 crBrdf = evalKhronosIBL(matBrdf, Vp, diffuseCube, glossyCube, lut, sheenLUT, envRotation, envIntensity,
+                                 dttThickness, float3(0.0f), false);
+  return (cf - cfBrdf) + lerp(cfBrdf, crBrdf, mat.retroreflection);
+}
+#endif
 
 float3 getIBLVolumeRefraction(float3   n,
                               float3   v,
@@ -263,9 +319,9 @@ PixelOutput fragmentMain(VertexOutput input, uint primitiveID: SV_PrimitiveID, f
                              primitiveID, worldRayDirection);
 
   // Evaluate the material at the hit point
-  MeshState   mesh   = MeshState(hit.nrm, hit.tangent, hit.bitangent, hit.geonrm, hit.uv, false, 0.0f);
+  MeshState mesh          = MeshState(hit.nrm, hit.tangent, hit.bitangent, hit.geonrm, hit.uv, false, 0.0f);
   mesh.baseColorVertexMul = hit.color;
-  PbrMaterial pbrMat = evaluateMaterial(material, mesh, allTextures, pushConst.gltfScene->textureInfos);
+  PbrMaterial pbrMat      = evaluateMaterial(material, mesh, allTextures, pushConst.gltfScene->textureInfos);
 
   output.color.xyz = pbrMat.baseColor;
   output.color.a   = pbrMat.opacity * (1.0 - pbrMat.transmission);
@@ -362,8 +418,13 @@ PixelOutput fragmentMain(VertexOutput input, uint primitiveID: SV_PrimitiveID, f
 
     // Sun direction is the unit vector "toward sun" (directional-light convention). Pass
     // unshifted; the evaluator applies `transmissionRay` internally for the BTDF lobe only.
+#if GLTF_USE_RETROREFLECTION
+    contribution += bsdfEvalPunctualKhronosMRM(pbrMat, V, pushConst.skyParams.sunDirection, pushConst.skyParams.sunDiskIntensity,
+                                               transmissionRay, dttThickness, texturesHdr[HDR_SHEEN_INDEX]);
+#else
     contribution += bsdfEvaluatePunctualKhronos(pbrMat, V, pushConst.skyParams.sunDirection, pushConst.skyParams.sunDiskIntensity,
                                                 transmissionRay, dttThickness, texturesHdr[HDR_SHEEN_INDEX]);
+#endif
 
 #if GLTF_USE_TRANSMISSION
     if(haveTransmissionSample)
@@ -375,10 +436,17 @@ PixelOutput fragmentMain(VertexOutput input, uint primitiveID: SV_PrimitiveID, f
     // HDR IBL mode: single-call Khronos split-sum evaluator (matches `pbr.frag:162-228`).
     // Handles diffuse, specular (isotropic/anisotropic), sheen, clearcoat, iridescence,
     // diffuse-transmission volume attenuation, and optional screen-space transmission mixing.
+#if GLTF_USE_RETROREFLECTION
+    contribution += evalKhronosIBLMRM(pbrMat, V, texturesCube[HDR_DIFFUSE_INDEX], texturesCube[HDR_GLOSSY_INDEX],
+                                      texturesHdr[HDR_LUT_INDEX], texturesHdr[HDR_SHEEN_INDEX],
+                                      pushConst.frameInfo.envRotation, pushConst.frameInfo.envIntensity, dttThickness,
+                                      f_specular_transmission, haveTransmissionSample);
+#else
     contribution +=
         evalKhronosIBL(pbrMat, V, texturesCube[HDR_DIFFUSE_INDEX], texturesCube[HDR_GLOSSY_INDEX],
                        texturesHdr[HDR_LUT_INDEX], texturesHdr[HDR_SHEEN_INDEX], pushConst.frameInfo.envRotation,
                        pushConst.frameInfo.envIntensity, dttThickness, f_specular_transmission, haveTransmissionSample);
+#endif
 
 #if GLTF_USE_VOLUME_SCATTER
     // KHR_materials_volume_scatter contribution is separate from the IBL composite (matches
@@ -417,8 +485,13 @@ PixelOutput fragmentMain(VertexOutput input, uint primitiveID: SV_PrimitiveID, f
     else
       pointToLight = -contrib.incidentVector * contrib.distance;
 
+#if GLTF_USE_RETROREFLECTION
+    contribution += bsdfEvalPunctualKhronosMRM(pbrMat, V, pointToLight, contrib.intensity, transmissionRay,
+                                               dttThickness, texturesHdr[HDR_SHEEN_INDEX]);
+#else
     contribution += bsdfEvaluatePunctualKhronos(pbrMat, V, pointToLight, contrib.intensity, transmissionRay,
                                                 dttThickness, texturesHdr[HDR_SHEEN_INDEX]);
+#endif
   }
 
 

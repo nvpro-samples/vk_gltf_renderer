@@ -85,7 +85,8 @@ struct SampleResult
   float4 radiance    = float4(0, 0, 0, 0);
   float3 hitPosition = 1e34f;  // World-space first-hit position; always present (drives NDC depth + DLSS motion).
 #if USE_DLSS_SHADER
-  DlssOutput dlssOutput = {};
+  float3     hitPositionPrev = 1e34f;  // Previous-frame world-space position of the first-hit point (instance motion).
+  DlssOutput dlssOutput      = {};
 #endif
 };
 
@@ -819,7 +820,8 @@ enum PathStepResult
   eVolumeContinue,  // Continue tracing the ray through the volume
   eEarlyContinue,   // Early continue tracing the ray (infinite plane)
   eBreak,           // Break the path tracing
-};
+}
+
 
 // Path tracer state
 //
@@ -842,7 +844,7 @@ struct PathTracerState
   float   lastSamplePdf = DIRAC;
   float2  maxRoughness  = float2(0.0);
   bool    solid         = true;
-  RayCone cone          = { 0.0F, pushConst.pixelAngle };
+  RayCone cone          = {0.0F, pushConst.pixelAngle};
   int     surfaceDepth  = 0;
 #if GLTF_USE_TRANSMISSION || GLTF_USE_VOLUME
   bool isInside = false;
@@ -854,7 +856,8 @@ struct PathTracerState
   int scatterBounces = 0;
 #endif
 #if USE_DLSS_SHADER
-  DlssScratch dlss = {};
+  DlssScratch dlss            = {};
+  float3      firstHitPosPrev = float3(1e34f);  // Previous-frame world position of the first hit (instance motion).
 #endif
 #if WIREFRAME
   float firstHitWireframeAlpha = 0.0;
@@ -863,12 +866,12 @@ struct PathTracerState
 
 struct BounceScratch
 {
-  bool       nextEventValid;
-  float3     contribution;
+  bool   nextEventValid;
+  float3 contribution;
   // Keep shadow rays full precision: half packing erases the self-intersection offset.
-  float3     shadowRayPos;
-  float3     shadowRayDir;
-  float      shadowRayDist;
+  float3 shadowRayPos;
+  float3 shadowRayDir;
+  float  shadowRayDist;
 };
 
 // Safe accessor for pt.isInside. The field only exists when GLTF_USE_TRANSMISSION or
@@ -930,9 +933,14 @@ PathStepResult processVolumeSegment(IRaytracer raytracer, float hitDistance, ino
 bool tryPrimaryMissBackplate(RayDesc ray, SceneFrameInfo* frameInfo, inout PathTracerState pt)
 {
   pt.solid = false;
-  // Far-hit world position: pushed out to infinity. Always written because it drives the
-  // NDC-depth output used by selection/picking, independent of DLSS/OptiX.
-  pt.firstHitPos = ray.Origin + ray.Direction * 1000000.0f;
+  // Sky/background: represent it as a point at infinity along the (world-space) view direction.
+  // processPixel projects this with w=0 (camera translation cancels). NDC depth for a miss is written
+  // as far (1.0) on the !hasSolidHit branch, so this value is consumed only by motion vectors.
+  pt.firstHitPos = ray.Direction;
+#if USE_DLSS_SHADER
+  // Sky is fixed in world space; the previous-frame view direction is identical (w=0 yields camera-only motion).
+  pt.firstHitPosPrev = ray.Direction;
+#endif
 
   if(hasFlag(frameInfo->flags, SceneFrameInfoFlags::eSceneUseSolidBackground))
   {
@@ -957,6 +965,7 @@ SampleResult packSampleResult(PathTracerState pt)
   sampleResult.radiance     = float4(pt.radiance, pt.solid ? 1 : 0);
   sampleResult.hitPosition  = pt.firstHitPos;
 #if USE_DLSS_SHADER
+  sampleResult.hitPositionPrev            = pt.firstHitPosPrev;
   sampleResult.dlssOutput.albedo          = float16_t4(pt.dlss.albedo, pt.solid ? 1.0h : 0.0h);
   sampleResult.dlssOutput.specularAlbedo  = pt.dlss.specularAlbedo;
   sampleResult.dlssOutput.normalRoughness = pt.dlss.normalRoughness;

@@ -5,7 +5,7 @@
 [![C++](https://img.shields.io/badge/C%2B%2B-20-orange.svg)](#build-and-run)
 [![Vulkan](https://img.shields.io/badge/Vulkan-1.4%2B-red.svg)](#requirements)
 
-> Open-source **Vulkan ray tracing** renderer for **glTF 2.0** scenes — RTX path tracing, physically based rendering, AI denoising, and a built-in scene editor.
+> Open-source **Vulkan ray tracing** renderer for **glTF 2.0** scenes — Reference for glTF PBR materials, RTX path tracing, physically based rendering, AI denoising, and a built-in scene editor.
 
 | glTF Renderer |
 |---|
@@ -21,7 +21,7 @@ Built in C++ on [nvpro_core2](https://github.com/nvpro-samples/nvpro_core2) with
 - **AI denoising** — DLSS Ray Reconstruction and OptiX AI Denoiser produce clean images at interactive rates.
 - **Rasterizer preview** — Fast PBR rasterizer shares scene resources for instant iteration.
 - **Scene editor** — Hierarchy manipulation, transform gizmo, material editing, undo/redo, save back to glTF.
-- **27 glTF extensions** — Anisotropy, clearcoat, transmission, volume, sheen, iridescence, dispersion, Draco, and more.
+- **28 glTF extensions** — Anisotropy, clearcoat, transmission, volume, sheen, iridescence, dispersion, retroreflection, Draco, and more.
 - **Developer tools** — GPU profiler, memory tracker, shader hot-reload (F5), headless batch mode.
 
 ## Quick Tour
@@ -81,9 +81,9 @@ cmake --build build
 - Profiler, GPU monitor, GPU memory tracking, and statistics.
 - Shader hot-reload (F5) for developers who want to experiment.
 - AI denoisers: DLSS Ray Reconstruction and OptiX AI Denoiser.
-- Rasterizer fallback mode enables fast scene interaction and validation.
+- Rasterizer fallback for fast scene interaction and editing.
 - A scene asset editor with hierarchy operations, a transform gizmo, material editing, merging, and saving back to glTF (non-destructive).
-- Support for 27 glTF extensions, including anisotropy, clearcoat, transmission, volume, sheen, iridescence, dispersion, diffuse transmission, material variant and scattering.
+- Support for 28 glTF extensions, including anisotropy, clearcoat, transmission, volume, sheen, iridescence, dispersion, diffuse transmission, retroreflection, material variant and scattering.
 - HDR environments, a physical sun and sky model, depth of field, and multiple tone mappers.
 - Animation support includes skeletal, morph targets, and KHR_animation_pointer.
 - GPU compute accelerates both skinning/morphing and per-level world-matrix propagation.
@@ -103,6 +103,8 @@ For a **full walkthrough** of rendering modes, editor workflows, and feature scr
 For **headless timing** and optional scripted GPU benchmarks, see [Benchmarking](docs/benchmarking.md) (`utils/benchmark/`).
 
 ## glTF Support
+
+**Reference scope:** The list below reflects what this renderer loads and displays. The **path tracer** is the authoritative PBR implementation — especially for ray-traced material evaluation, sampling, and new extensions (e.g. [EXT_materials_retroreflection](https://github.com/KhronosGroup/glTF/blob/main/extensions/2.0/Vendor/EXT_materials_retroreflection/README.md)). The **rasterizer** is a preview path for interaction, not the primary material reference.
 
 ### Core
 
@@ -145,6 +147,7 @@ For **headless timing** and optional scripted GPU benchmarks, see [Benchmarking]
 - ✅ KHR_texture_basisu
 - ✅ KHR_texture_transform
 - ✅ KHR_xmp_json_ld
+- ✅ EXT_materials_retroreflection
 - ✅ EXT_mesh_gpu_instancing
 - ✅ EXT_texture_webp
 - ✅ MSFT_texture_dds

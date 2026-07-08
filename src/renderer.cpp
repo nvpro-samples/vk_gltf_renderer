@@ -290,27 +290,30 @@ void GltfRenderer::onAttach(nvapp::Application* app)
   m_resources.hdrIbl.init(&m_resources.allocator, &m_resources.samplerPool);
   m_resources.hdrDome.init(&m_resources.allocator, &m_resources.samplerPool, m_app->getQueue(0));
 
-  // Application-level memory tracker (GBuffers, DLSS, OptiX images)
+  // Application-level memory tracker (frame targets, DLSS, OptiX images)
   m_resources.appMemoryTracker.init(&m_resources.allocator);
 
   // G-Buffer
-  m_resources.gBuffers.init({.allocator = &m_resources.allocator,
-                             .colorFormats =
-                                 {
-                                     VK_FORMAT_R8G8B8A8_UNORM,       // Tonemapped (eImgTonemapped)
-                                     VK_FORMAT_R32G32B32A32_SFLOAT,  // Rendered image (eImgRendered)
-                                     VK_FORMAT_R32_SFLOAT,  // ObjectID for selection/silhouette (eImgSelection), .r = render node ID+1
-                                 },
-                             .depthFormat    = nvvk::findDepthFormat(app->getPhysicalDevice()),
-                             .imageSampler   = linearSampler,
-                             .descriptorPool = m_app->getTextureDescriptorPool()});
+  NVVK_CHECK(m_resources.gBuffers.init({.device = m_device,
+                                        .alloc  = &m_resources.allocator,
+                                        .colorFormats =
+                                            {
+                                                VK_FORMAT_R8G8B8A8_UNORM,       // Tonemapped (eImgTonemapped)
+                                                VK_FORMAT_R32G32B32A32_SFLOAT,  // Rendered image (eImgRendered)
+                                                VK_FORMAT_R32_SFLOAT,  // ObjectID for selection/silhouette (eImgSelection), .r = render node ID+1
+                                            },
+                                        .depthFormat = nvvk::findDepthFormat(app->getPhysicalDevice()),
+                                        .debugName   = "GBuffers"}));
+  m_resources.linearSampler = linearSampler;
   {
     VkCommandBuffer cmd{};
     nvvk::beginSingleTimeCommands(cmd, m_device, m_transientCmdPool);
-    m_resources.gBuffers.update(cmd, {100, 100});
+    NVVK_CHECK(m_resources.gBuffers.update(cmd, {100, 100}));
+    m_resources.gBuffers.cmdClear(cmd);
     nvvk::endSingleTimeCommands(cmd, m_device, m_transientCmdPool, m_app->getQueue(0).queue);
     m_resources.appMemoryTracker.track("GBuffers", m_resources.gBuffers, Resources::eImgCount);
   }
+  m_resources.tonemappedUi.init(m_resources.gBuffers.getUiImageView(Resources::eImgTonemapped));
 
   // ===== Rendering Utilities =====
 
@@ -462,15 +465,17 @@ void GltfRenderer::onDetach()
 void GltfRenderer::onResize(VkCommandBuffer cmd, const VkExtent2D& size)
 {
   m_resources.appMemoryTracker.untrack("GBuffers", m_resources.gBuffers, Resources::eImgCount);
-  m_resources.gBuffers.update(cmd, size);
+  NVVK_CHECK(m_resources.gBuffers.update(cmd, size));
+  m_resources.gBuffers.cmdClear(cmd);
   m_resources.appMemoryTracker.track("GBuffers", m_resources.gBuffers, Resources::eImgCount);
   m_pathTracer.onResize(cmd, size, m_resources);
   m_rasterizer.onResize(cmd, size, m_resources);
-  m_resources.hdrDome.setOutImage(m_resources.gBuffers.getDescriptorImageInfo(Resources::eImgRendered));
+  m_resources.hdrDome.setOutImage(m_resources.gBuffers.getColorStorageImageInfo(Resources::eImgRendered));
+  m_resources.tonemappedUi.update(m_resources.gBuffers.getUiImageView(Resources::eImgTonemapped));
 
   // Resize visual helpers (depth buffer + scene depth descriptor set)
-  VkSampler sampler = m_resources.gBuffers.getDescriptorImageInfo(Resources::eImgTonemapped).sampler;
-  m_visualHelpers.onResize(cmd, size, m_resources.gBuffers.getDepthImage(), m_resources.gBuffers.getDepthImageView(), sampler);
+  m_visualHelpers.onResize(cmd, size, m_resources.gBuffers.getDepthImage(), m_resources.gBuffers.getDepthImageView(),
+                           m_resources.linearSampler);
 
   // Camera (was handled by ElementCamera, now owned by the renderer)
   m_cameraManip->setWindowSize({size.width, size.height});
@@ -611,12 +616,38 @@ void GltfRenderer::onRender(VkCommandBuffer cmd)
 
   // Keep runtime denoiser guide usage synchronized with the optimal-shader feature set.
   // PathTracer::ensureShadersAndPipelines() watches currentFeatureSet and recompiles when this flips.
-  m_resources.currentFeatureSet.dlssGuide = dlssGuideRequired();
+  m_resources.currentFeatureSet.set(nvvkgltf::SceneFeatureSet::eDlssGuide, dlssGuideRequired());
 
   m_benchmark.beginHeadlessTimingIfNeeded(isHeadlessMode(), benchmarkFrameInfo());
 
   // Start the profiler section for the GPU timer
   auto timerSection = m_profilerGpuTimer.cmdFrameSection(cmd, __FUNCTION__);
+
+  // #DLSS instance motion vectors: snapshot the previous-frame render-node transforms BEFORE any
+  // animation / gizmo edit rewrites them this frame. The previous transforms feed per-instance motion
+  // vectors in the path tracer (camera + object motion combined). This is only meaningful when node
+  // transforms are actually changing this frame -- animation advancing, or a pending gizmo/editor
+  // edit (markNodeDirty populates DirtyFlags::nodes during UI, before onRender). When nothing moves,
+  // prev == curr, so we skip both the snapshot pass and the per-instance reprojection and let the
+  // path tracer produce exact camera-only motion (prevRenderNodeObjectToWorld stays unbound). The
+  // snapshot reads the live render-node buffer each frame independently, so skipping static frames is
+  // safe with no trailing-frame artifact. Gated on DLSS specifically (not dlssGuideRequired(), which
+  // also covers OptiX) since only the DLSS path consumes these vectors. See gltf_pathtrace.slang.
+  m_resources.dlssInstanceMotionActive = false;
+  if(m_resources.settings.renderSystem == RenderingMode::ePathtracer && m_pathTracer.isDlssEnabled())
+  {
+    nvvkgltf::Scene*                   scn = m_resources.getScene();
+    const nvvkgltf::Scene::DirtyFlags& df  = scn->getDirtyFlags();
+    const bool animActive = ui::animation::hasPlayableAnimation(scn) && m_resources.animationControl.doAnimation();
+    const bool nodesDirty = !df.nodes.empty() || df.allRenderNodesDirty;
+    m_resources.dlssInstanceMotionActive = animActive || nodesDirty;
+
+    if(m_resources.dlssInstanceMotionActive)
+    {
+      auto snapSection = m_profilerGpuTimer.cmdFrameSection(cmd, "Snapshot prev transforms");
+      m_resources.transformCompute.cmdSnapshotPrevObjectToWorld(cmd, m_resources.sceneVk, scn->getRenderNodes().size());
+    }
+  }
 
   // Check for changes
   bool changed{false};
@@ -662,7 +693,7 @@ void GltfRenderer::onRender(VkCommandBuffer cmd)
         .infinitePlaneBaseColor    = m_resources.settings.infinitePlaneBaseColor,
         .infinitePlaneMetallic     = m_resources.settings.infinitePlaneMetallic,
         .infinitePlaneRoughness    = m_resources.settings.infinitePlaneRoughness,
-        .shadowCatcherDarkenAmount = 1.0f - exp2f(-std::max(m_resources.settings.shadowCatcherDarkness, 0.0f)),
+        .shadowCatcherDarkenAmount = std::max(m_resources.settings.shadowCatcherDarkness, 0.0f),
     };
     // Update the camera information
     m_prevMVP = finfo.viewProjMatrix;
@@ -922,9 +953,10 @@ void GltfRenderer::tonemap(VkCommandBuffer cmd)
   auto timerSection = m_profilerGpuTimer.cmdFrameSection(cmd, __FUNCTION__);
 
   // Select which buffer to tonemap based on user selection
-  VkDescriptorImageInfo inputBuffer      = m_resources.gBuffers.getDescriptorImageInfo(Resources::eImgRendered);
-  VkExtent2D            gbufSize         = m_resources.gBuffers.getSize();
-  bool                  usingGuideBuffer = false;
+  VkDescriptorImageInfo inputBuffer =
+      m_resources.gBuffers.getColorSampleDescriptorImageInfo(Resources::eImgRendered, m_resources.linearSampler);
+  VkExtent2D gbufSize         = m_resources.gBuffers.getSize();
+  bool       usingGuideBuffer = false;
 
   // OptiX denoised output (path-tracer only). Routed via the global DisplayBuffer toggle the
   // OptiXDenoiser writes when the user clicks its thumbnail; behavior is unchanged.
@@ -934,7 +966,8 @@ void GltfRenderer::tonemap(VkCommandBuffer cmd)
     const OptiXDenoiser* optix = m_pathTracer.getOptiXDenoiser();
     if(optix && optix->hasValidDenoisedOutput())
     {
-      inputBuffer = optix->getDescriptorImageInfo(OptiXDenoiser::eGBufferDenoised);
+      inputBuffer         = optix->getDescriptorImageInfo(OptiXDenoiser::eGBufferDenoised);
+      inputBuffer.sampler = m_resources.linearSampler;
     }
   }
 #endif
@@ -945,9 +978,10 @@ void GltfRenderer::tonemap(VkCommandBuffer cmd)
   {
     if(auto guide = dlss->activeGuideImage())
     {
-      inputBuffer      = guide->image;
-      gbufSize         = guide->extent;
-      usingGuideBuffer = true;
+      inputBuffer         = guide->image;
+      inputBuffer.sampler = m_resources.linearSampler;
+      gbufSize            = guide->extent;
+      usingGuideBuffer    = true;
 
       // Clear the output image to a distinct color so the DLSS render-resolution borders are
       // visible when the guide buffer is smaller than the display.
@@ -971,7 +1005,7 @@ void GltfRenderer::tonemap(VkCommandBuffer cmd)
   }
 
   m_resources.tonemapper.runCompute(cmd, gbufSize, tonemapperData, inputBuffer,
-                                    m_resources.gBuffers.getDescriptorImageInfo(Resources::eImgTonemapped));
+                                    m_resources.gBuffers.getColorStorageImageInfo(Resources::eImgTonemapped));
 
   // Memory barrier to ensure compute shader writes are complete before fragment shader reads
   nvvk::cmdMemoryBarrier(cmd, VK_PIPELINE_STAGE_2_COMPUTE_SHADER_BIT, VK_PIPELINE_STAGE_2_FRAGMENT_SHADER_BIT);
@@ -1035,8 +1069,8 @@ void GltfRenderer::silhouette(VkCommandBuffer cmd)
     }
 
     std::vector<VkDescriptorImageInfo> imageInfos = {
-        m_resources.gBuffers.getDescriptorImageInfo(Resources::eImgSelection),
-        m_resources.gBuffers.getDescriptorImageInfo(Resources::eImgTonemapped),
+        m_resources.gBuffers.getColorStorageImageInfo(Resources::eImgSelection),
+        m_resources.gBuffers.getColorStorageImageInfo(Resources::eImgTonemapped),
     };
     VkDescriptorBufferInfo bitmaskBufferInfo = {m_resources.bSelectionBitMask.buffer, 0, bitmaskBytes};
     m_silhouette.dispatch(cmd, m_resources.gBuffers.getSize(), imageInfos, bitmaskBufferInfo,
@@ -1078,7 +1112,7 @@ void GltfRenderer::renderVisualHelpers(VkCommandBuffer cmd)
 #endif
 
   m_visualHelpers.render(cmd, m_resources.gBuffers.getColorImage(Resources::eImgTonemapped),
-                         m_resources.gBuffers.getColorImageView(Resources::eImgTonemapped), m_resources.descriptorSet,
+                         m_resources.gBuffers.getColorAttachmentView(Resources::eImgTonemapped), m_resources.descriptorSet,
                          m_cameraManip->getViewMatrix(), m_cameraManip->getPerspectiveMatrix(), viewportSize, depthBufferSize);
 }
 
@@ -1652,18 +1686,17 @@ void GltfRenderer::createDescriptorSets()
       m_device, VK_DESCRIPTOR_SET_LAYOUT_CREATE_UPDATE_AFTER_BIND_POOL_BIT, &m_resources.descriptorSetLayout[0]));
   NVVK_DBG_NAME(m_resources.descriptorSetLayout[0]);
 
-  // Pool sizes: the scene's texture set (descriptorBinding[0]) needs COMBINED_IMAGE_SAMPLER,
-  // and every nvvk::GBuffer UI descriptor (main: 3, DLSS: 8, OptiX: 2 + margin) is now a
-  // single VK_DESCRIPTOR_TYPE_SAMPLED_IMAGE (post ImGui 2026-04-22 backend change), so we
-  // reserve one SAMPLED_IMAGE descriptor per allocated UI set.
-  constexpr uint32_t                kGBufferUiMaxSets = 15;
+  // Pool sizes: the scene's texture set (descriptorBinding[0]) needs COMBINED_IMAGE_SAMPLER.
+  // Each nvapp::ImTexture (viewport: 1, DLSS guides: 8, OptiX denoised: 1 + margin) uses one
+  // VK_DESCRIPTOR_TYPE_SAMPLED_IMAGE descriptor (ImGui 2026-04-22 backend).
+  constexpr uint32_t                kImTextureMaxSets = 15;
   std::vector<VkDescriptorPoolSize> poolSize          = m_resources.descriptorBinding[0].calculatePoolSizes();
-  poolSize.push_back({VK_DESCRIPTOR_TYPE_SAMPLED_IMAGE, kGBufferUiMaxSets});
+  poolSize.push_back({VK_DESCRIPTOR_TYPE_SAMPLED_IMAGE, kImTextureMaxSets});
   VkDescriptorPoolCreateInfo dpoolInfo = {
       .sType = VK_STRUCTURE_TYPE_DESCRIPTOR_POOL_CREATE_INFO,
       .flags = VK_DESCRIPTOR_POOL_CREATE_UPDATE_AFTER_BIND_BIT |  // allows descriptor sets to be updated after they have been bound to a command buffer
                VK_DESCRIPTOR_POOL_CREATE_FREE_DESCRIPTOR_SET_BIT,  // individual descriptor sets can be freed from the descriptor pool
-      .maxSets       = kGBufferUiMaxSets + 1,                      // GBuffer UI sets + the scene texture set
+      .maxSets       = kImTextureMaxSets + 1,                      // ImTexture sets + the scene texture set
       .poolSizeCount = uint32_t(poolSize.size()),
       .pPoolSizes    = poolSize.data(),
   };
@@ -1700,11 +1733,11 @@ void GltfRenderer::compileShaders()
   nvutils::ScopedTimer st(__FUNCTION__);
   if(m_resources.settings.renderSystem == RenderingMode::ePathtracer)
   {
-    m_pathTracer.compileShader(m_resources);
+    m_pathTracer.reloadShader(m_resources);
   }
   else
   {
-    m_rasterizer.compileShader(m_resources);
+    m_rasterizer.compileShader(m_resources, true);
   }
 }
 
@@ -1839,7 +1872,7 @@ void GltfRenderer::createHDR(const std::filesystem::path& hdrFilename)
                              std::span(hdr_integrate_brdf_slang), std::span(hdr_dome_slang));
 
   updateHdrImages();
-  m_resources.hdrDome.setOutImage(m_resources.gBuffers.getDescriptorImageInfo(Resources::eImgRendered));
+  m_resources.hdrDome.setOutImage(m_resources.gBuffers.getColorStorageImageInfo(Resources::eImgRendered));
   m_rasterizer.resetHdr();
   // addToRecentFiles(hdrFilename);
 }
@@ -1871,6 +1904,7 @@ void GltfRenderer::destroyResources()
 
   m_resources.tonemapper.deinit();
   m_resources.appMemoryTracker.untrack("GBuffers", m_resources.gBuffers, Resources::eImgCount);
+  m_resources.tonemappedUi.deinit();
   m_resources.gBuffers.deinit();
   m_resources.transformCompute.deinit();
   m_resources.sceneGpu.deinit();

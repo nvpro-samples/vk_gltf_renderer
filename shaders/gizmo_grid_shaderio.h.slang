@@ -31,24 +31,24 @@ namespace shaderio::grid {
 //--------------------------------------------------------------------------------------------------
 // Grid flags (gridFlag in push constants)
 //--------------------------------------------------------------------------------------------------
-#define GRID_FLAG_SHOW_GRID  (1 << 0)
-#define GRID_FLAG_AXIS_X     (1 << 1)
-#define GRID_FLAG_AXIS_Y     (1 << 2)
-#define GRID_FLAG_AXIS_Z     (1 << 3)
+#define GRID_FLAG_SHOW_GRID (1 << 0)
+#define GRID_FLAG_AXIS_X (1 << 1)
+#define GRID_FLAG_AXIS_Y (1 << 2)
+#define GRID_FLAG_AXIS_Z (1 << 3)
 
 //--------------------------------------------------------------------------------------------------
 // Grid UBO
 //--------------------------------------------------------------------------------------------------
 struct GridUBO
 {
-  float steps[4];      // Per-level step sizes (4 levels for decade spacing)
-  float2 offset;        // Camera XZ on grid plane
-  float2 clipRect;      // Clip distance per axis
-  float  level;        // Fractional level from camera distance
-  uint   numLines;      // Lines per level per axis (e.g. 151)
+  float  steps[4];  // Per-level step sizes (4 levels for decade spacing)
+  float2 offset;    // Camera XZ on grid plane
+  float2 clipRect;  // Clip distance per axis
+  float  level;     // Fractional level from camera distance
+  uint   numLines;  // Lines per level per axis (e.g. 151)
   int    padding0;
   int    padding1;
-  float3 axisColorX;    // Axis line colors
+  float3 axisColorX;  // Axis line colors
   float  padAxis0;
   float3 axisColorY;
   float  padAxis1;
@@ -61,18 +61,16 @@ struct GridUBO
 //--------------------------------------------------------------------------------------------------
 struct GridPushConstants
 {
-  float4x4 viewProj;         // Combined view-projection
-  float3   cameraPos;        // For steep-angle V and clip fade
-  float    farClip;          // Far clip distance
+  float4x4 viewProj;   // Combined view-projection
+  float3   cameraPos;  // For steep-angle V and clip fade
+  float    farClip;    // Far clip distance
   float2   viewportSize;
   float2   depthBufferSize;
-  int      gridFlag;         // GRID_FLAG_SHOW_GRID | AXIS_X | AXIS_Y | AXIS_Z
-  int      isPerspective;    // 1 = perspective, 0 = ortho
-  float3   minorColor;       // Grid minor line color
-  float    padMinorColor;    // std430: 4-byte padding so majorColor is 16-byte aligned
-  float3   majorColor;       // Grid major line color
-  float    padMajorColor;    // std430: 4-byte padding so ubo (8-byte ptr) is 8-byte aligned
-  GridUBO* ubo;              // Buffer device address
+  int      gridFlag;       // GRID_FLAG_SHOW_GRID | AXIS_X | AXIS_Y | AXIS_Z
+  int      isPerspective;  // 1 = perspective, 0 = ortho
+  float3   minorColor;     // Grid minor line color
+  float3   majorColor;     // Grid major line color
+  GridUBO* ubo;            // Buffer device address
 };
 
 #ifdef __cplusplus

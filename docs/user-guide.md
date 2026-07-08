@@ -402,8 +402,8 @@ Press **F5** or use `Tools > Recompile Shaders` to hot-reload all Slang shaders 
 
 | Action | Shortcut | Description |
 |---|---|---|
-| **Save Image** | `Ctrl+Shift+S` | Save the current tonemapped render to a PNG file (alpha channel preserved for compositing). |
-| **Save Screen** | `Ctrl+Alt+Shift+S` | Save a screenshot of the full application window including UI. |
+| **Save Image** | `Ctrl+Alt+I` | Save the current tonemapped render to a PNG file (alpha channel preserved for compositing). |
+| **Save Screen** | `Ctrl+Alt+Shift+I` | Save a screenshot of the full application window including UI. |
 
 Both are also available from **File > Save Image** and **File > Save Screen**.
 

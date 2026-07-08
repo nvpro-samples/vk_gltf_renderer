@@ -73,6 +73,8 @@ public:
   void createRqPipeline(Resources& resources);
   void createRtxPipeline(Resources& resources);
   void compileShader(Resources& resources, bool fromFile = true) override;
+  // User-initiated hot reload: drop cached variants and recompile from Slang source.
+  void reloadShader(Resources& resources);
   void setBusyWindow(BusyWindow* busy) { m_busyWindow = busy; }
 
   // Register command line parameters
@@ -238,4 +240,5 @@ private:
   // Destroy the pipelines for both Ray Query and Ray Tracing
   void destroyPipelinesLocked();
   void destroyPipelines();
+  bool m_skipVariantCache{false};  // Set during reloadShader(); bypasses swapVariant lookup.
 };

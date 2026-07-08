@@ -60,4 +60,3 @@ struct PushConstantVisualHelpers
 #ifdef __cplusplus
 }  // namespace shaderio::visual_helpers
 #endif
-

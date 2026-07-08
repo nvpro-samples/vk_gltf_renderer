@@ -155,8 +155,8 @@ PathStepResult pathTraceOneBounce(IRaytracer raytracer, inout RayDesc ray, inout
       return PathStepResult.eBreak;
     }
 
-    GltfShadeMaterial* materials = pushConst.gltfScene->materials;
-    GltfTextureInfo*   texInfos  = pushConst.gltfScene->textureInfos;
+    GltfShadeMaterial* materials     = pushConst.gltfScene->materials;
+    GltfTextureInfo*   texInfos      = pushConst.gltfScene->textureInfos;
     int                materialIndex = -1;
     PbrMaterial        pbrMat;
 
@@ -232,6 +232,14 @@ PathStepResult pathTraceOneBounce(IRaytracer raytracer, inout RayDesc ray, inout
       pt.firstHitPos = hit.pos;
 
 #if USE_DLSS_SHADER
+      // #DLSS instance motion - Previous-frame world position of this surface point.
+      pt.firstHitPosPrev = hit.pos;
+      if(!hitInfinitePlane && pushConst.prevRenderNodeObjectToWorld != nullptr)
+      {
+        float3 objPos      = mul(float4(hit.pos, 1.0), renderNode.worldToObject).xyz;
+        pt.firstHitPosPrev = mul(float4(objPos, 1.0), pushConst.prevRenderNodeObjectToWorld[payload.rnodeID]).xyz;
+      }
+
       // #DLSS - Gather data from first hit (store temporarily, write at end to reduce live state)
       // Apply KHR_materials_specular energy conservation clamping for DLSS guide buffer
       // Spec formula: dielectric_f0 = min(f0_from_ior * specularColor, 1.0) * specular
@@ -241,7 +249,8 @@ PathStepResult pathTraceOneBounce(IRaytracer raytracer, inout RayDesc ray, inout
       float3 guideAlbedo    = pbrMat.baseColor.xyz;
       if(USE_DLSS_TRANSP == 1 && !hasFlag(pushConst.flags, PathtracerFlags::ePtUseOptixDenoiser) && dlssIsClearGlass(pbrMat))
       {
-        guideAlbedo = dlssGetClearGlassGuideAlbedo(raytracer, pbrMat, hit, ray.Direction, frameInfo, seed, ptIsInside(pt), specularAlbedo);
+        guideAlbedo = dlssGetClearGlassGuideAlbedo(raytracer, pbrMat, hit, ray.Direction, frameInfo, seed,
+                                                   ptIsInside(pt), specularAlbedo);
       }
       pt.dlss.specularAlbedo  = float16_t3(specularAlbedo);
       pt.dlss.normalRoughness = float16_t4(float16_t3(pbrMat.N), float16_t(pbrMat.roughness.x));
@@ -287,7 +296,7 @@ PathStepResult pathTraceOneBounce(IRaytracer raytracer, inout RayDesc ray, inout
 
     PathStepResult volumeStep = processVolumeSegment(raytracer, payload.hitT, ray, pt, seed);
     if(volumeStep != PathStepResult.eOutOfVolume)
-      return volumeStep; // Skip the surface bounce if the ray is still in the volume (ray is scattered)
+      return volumeStep;  // Skip the surface bounce if the ray is still in the volume (ray is scattered)
 
     // Normal surface bounce: propagate the cone footprint to the next segment. The new ray
     // starts at hit.pos with the slant-corrected worldFoot as its starting width, so the
@@ -422,7 +431,7 @@ PathStepResult pathTraceOneBounce(IRaytracer raytracer, inout RayDesc ray, inout
 //-----------------------------------------------------------------------
 SampleResult pathTrace(IRaytracer raytracer, RayDesc ray, inout uint seed)
 {
-    PathTracerState pt = {};
+  PathTracerState pt = {};
 
   while(pt.surfaceDepth < pushConst.maxDepth)
   {
@@ -576,10 +585,10 @@ void processPixel(IRaytracer raytracer, float2 samplePos, float2 imageSize)
   // Written to two targets: outDepth (main GBuffer, full viewport resolution, frame 0 only)
   // and eDlssDepth (DLSS guide buffer, DLSS render resolution, every frame when DLSS active).
   // Both use the same NDC value but the images differ in resolution.
-  const bool hasFirstHit = sampleResult.radiance.w > 0.0f;
-  float4     clipPos     = hasFirstHit ? mul(float4(sampleResult.hitPosition, 1.0), pushConst.frameInfo->viewProjMatrix) :
-                                         float4(0, 0, 1, 1);
-  float      ndcDepth    = hasFirstHit ? (clipPos.z / clipPos.w) : 1.0f;
+  const bool hasSolidHit = sampleResult.radiance.w > 0.0f;
+  float4     clipPos =
+      hasSolidHit ? mul(float4(sampleResult.hitPosition, 1.0), pushConst.frameInfo->viewProjMatrix) : float4(0, 0, 1, 1);
+  float ndcDepth = hasSolidHit ? (clipPos.z / clipPos.w) : 1.0f;
 
   // Only on the first frame, trace the selection ray to get the object IDs and save the NDC depth
   if(firstFrame)
@@ -608,9 +617,13 @@ void processPixel(IRaytracer raytracer, float2 samplePos, float2 imageSize)
   // #DLSS - Storing the GBuffer for the DLSS denoiser
   if(hasFlag(pushConst.flags, PathtracerFlags::ePtUseDlss))
   {
-    float2 motionVec = hasFirstHit ? calculateMotionVector(sampleResult.hitPosition, pushConst.frameInfo->prevMVP,
-                                                           pushConst.frameInfo->viewProjMatrix, imageSize) :
-                                      float2(0.0f);
+    // Combined camera + instance motion. w selects the projection model: surface hits use w=1 (the
+    // previous position carries object motion); sky/background uses w=0, i.e. a point at infinity along
+    // the view direction, so camera translation cancels and only rotation moves the sky (no far-plane
+    // magic). sampleResult.hitPosition holds a world position for surfaces and a view direction for sky.
+    float hitW = hasSolidHit ? 1.0f : 0.0f;
+    float2 motionVec = calculateMotionVector(float4(sampleResult.hitPosition, hitW), float4(sampleResult.hitPositionPrev, hitW),
+                                             pushConst.frameInfo->prevMVP, pushConst.frameInfo->viewProjMatrix, imageSize);
     outImages[int(OutputImage::eDlssDepth)][int2(samplePos)]           = float4(ndcDepth);
     outImages[int(OutputImage::eDlssMotion)][int2(samplePos)]          = float4(motionVec, 0, 0);
     outImages[int(OutputImage::eDlssNormalRoughness)][int2(samplePos)] = sampleResult.dlssOutput.normalRoughness;

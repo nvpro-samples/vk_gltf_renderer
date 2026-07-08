@@ -38,6 +38,7 @@
 #include <nvgui/tonemapper.hpp>
 #include <nvgui/tooltip.hpp>
 #include <nvutils/bounding_box.hpp>
+#include <nvutils/file_operations.hpp>
 #include <nvvk/check_error.hpp>
 
 #include <nvapp/elem_camera.hpp>
@@ -291,7 +292,7 @@ void GltfRenderer::renderBenchmarkViewport()
   if(m_resources.getScene() && m_resources.getScene()->valid())
   {
     const ImVec2 imageSize = ImGui::GetContentRegionAvail();
-    ImGui::Image(ImTextureID(m_resources.gBuffers.getDescriptorSet(Resources::eImgTonemapped)), imageSize);
+    ImGui::Image(m_resources.tonemappedUi, imageSize);
   }
 
   ImGui::End();
@@ -473,14 +474,14 @@ void GltfRenderer::renderUI()
       }
     }
 
-    // Display the G-Buffer tonemapped image. The Animation Strip below is an
+    // Display the tonemapped viewport image. The Animation Strip below is an
     // overlay (drawn on top of the image), so the image uses the full content
-    // region and the G-Buffer always matches what is displayed. Capture the
+    // region and always matches what is displayed. Capture the
     // image's top-left before drawing so we can anchor the overlay with no
     // item-spacing fudge factor.
     const ImVec2 imageTopLeft = ImGui::GetCursorScreenPos();
     const ImVec2 imageSize    = ImGui::GetContentRegionAvail();
-    ImGui::Image(ImTextureID(m_resources.gBuffers.getDescriptorSet(Resources::eImgTonemapped)), imageSize);
+    ImGui::Image(m_resources.tonemappedUi, imageSize);
 
     // Axis gizmo: anchored to the 3D image's bottom-left, nudged up by one
     // frame-height when the Animation Strip is showing so the two don't overlap.
@@ -627,6 +628,7 @@ void GltfRenderer::renderFileMenu(bool                   validScene,
                                   bool&                  mergeFile,
                                   bool&                  loadHdrFile,
                                   bool&                  saveFile,
+                                  bool&                  saveAsFile,
                                   bool&                  saveScreenFile,
                                   bool&                  saveImageFile,
                                   bool&                  closeApp,
@@ -651,11 +653,12 @@ void GltfRenderer::renderFileMenu(bool                   validScene,
     ImGui::EndMenu();
   }
   ImGui::BeginDisabled(!validScene);
-  saveFile |= ImGui::MenuItem(ICON_MS_FILE_SAVE " Save As", "Ctrl+S");
+  saveFile |= ImGui::MenuItem(ICON_MS_SAVE " Save", "Ctrl+S");
+  saveAsFile |= ImGui::MenuItem(ICON_MS_FILE_SAVE " Save As...", "Ctrl+Shift+S");
   ImGui::EndDisabled();
   ImGui::Separator();
-  saveImageFile |= ImGui::MenuItem(ICON_MS_IMAGE " Save Image", "Ctrl+Shift+S");
-  saveScreenFile |= ImGui::MenuItem(ICON_MS_DESKTOP_WINDOWS " Save Screen", "Ctrl+Alt+Shift+S");
+  saveImageFile |= ImGui::MenuItem(ICON_MS_IMAGE " Save Image", "Ctrl+Alt+I");
+  saveScreenFile |= ImGui::MenuItem(ICON_MS_DESKTOP_WINDOWS " Save Screen Image", "Ctrl+Alt+Shift+I");
   ImGui::Separator();
   closeApp |= ImGui::MenuItem(ICON_MS_POWER_SETTINGS_NEW " Exit", "Ctrl+Q");
   ImGui::EndMenu();
@@ -937,8 +940,9 @@ void GltfRenderer::renderMenu()
   bool mergeFile      = false;
   bool loadHdrFile    = ImGui::IsKeyChordPressed(ImGuiMod_Ctrl | ImGuiMod_Shift | ImGuiKey_O);
   bool saveFile       = ImGui::IsKeyChordPressed(ImGuiMod_Ctrl | ImGuiKey_S);
-  bool saveScreenFile = ImGui::IsKeyChordPressed(ImGuiMod_Ctrl | ImGuiMod_Shift | ImGuiMod_Alt | ImGuiKey_S);
-  bool saveImageFile  = !saveScreenFile && ImGui::IsKeyChordPressed(ImGuiMod_Ctrl | ImGuiMod_Shift | ImGuiKey_S);
+  bool saveAsFile     = ImGui::IsKeyChordPressed(ImGuiMod_Ctrl | ImGuiMod_Shift | ImGuiKey_S);
+  bool saveScreenFile = ImGui::IsKeyChordPressed(ImGuiMod_Ctrl | ImGuiMod_Shift | ImGuiMod_Alt | ImGuiKey_I);
+  bool saveImageFile  = ImGui::IsKeyChordPressed(ImGuiMod_Ctrl | ImGuiMod_Alt | ImGuiKey_I);
   bool closeApp       = ImGui::IsKeyChordPressed(ImGuiMod_Ctrl | ImGuiKey_Q);
   bool fitScene       = ImGui::IsKeyChordPressed(ImGuiMod_Ctrl | ImGuiMod_Shift | ImGuiKey_F);
   bool fitObject      = ImGui::IsKeyChordPressed(ImGuiMod_Ctrl | ImGuiKey_F);
@@ -953,8 +957,8 @@ void GltfRenderer::renderMenu()
     v_sync = !v_sync;
   bool validScene = m_resources.getScene() && m_resources.getScene()->valid();
 
-  renderFileMenu(validScene, newScene, openFile, mergeFile, loadHdrFile, saveFile, saveScreenFile, saveImageFile,
-                 closeApp, sceneToLoadFilename, sceneToMergeFilename);
+  renderFileMenu(validScene, newScene, openFile, mergeFile, loadHdrFile, saveFile, saveAsFile, saveScreenFile,
+                 saveImageFile, closeApp, sceneToLoadFilename, sceneToMergeFilename);
   renderEditMenu(validScene);
 
   if(ImGui::IsKeyPressed(ImGuiKey_Escape))
@@ -1055,8 +1059,21 @@ void GltfRenderer::renderMenu()
 
   if(saveFile && validScene)
   {
+    // "Save": write directly to the current scene file when it is a glTF/glb we can overwrite.
+    // Otherwise (no path yet, or a non-glTF source like .obj/.scene.json) fall back to "Save As".
+    const std::filesystem::path& currentFilename = m_resources.getScene()->getFilename();
+    const bool isGltf = nvutils::extensionMatches(currentFilename, ".gltf") || nvutils::extensionMatches(currentFilename, ".glb");
+    if(!currentFilename.empty() && isGltf)
+      save(currentFilename);
+    else
+      saveAsFile = true;
+  }
+
+  if(saveAsFile && validScene)
+  {
     std::filesystem::path filename = nvgui::windowSaveFileDialog(m_app->getWindowHandle(), "Save glTF",
-                                                                 "glTF Files|*.gltf;*.glb|glTF Text|*.gltf|glTF Binary|*.glb");
+                                                                 "glTF Files|*.gltf;*.glb|glTF Text|*.gltf|glTF Binary|*.glb",
+                                                                 m_resources.getScene()->getFilename());
     if(!filename.empty())
       save(filename);
   }
@@ -1525,7 +1542,7 @@ void GltfRenderer::renderMemoryStatistics()
       ImGui::TextColored(ImVec4(1.0f, 0.9f, 0.6f, 1.0f), "%u", totalAnimation.currentCount);
     }
 
-    // --- Application (GBuffers, Denoisers) Section ---
+    // --- Application (frame targets, denoisers) Section ---
     auto totalApp = appTracker.getTotalStats();
     // OptiX export memory is only compiled in when USE_OPTIX_DENOISER is enabled (see CMakeLists.txt).
     GpuMemoryStats totalOptixExport{};

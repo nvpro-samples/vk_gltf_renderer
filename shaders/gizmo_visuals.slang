@@ -26,28 +26,29 @@
 // Vertex inputs (generic to support both grid and transform helper)
 struct VertexInput
 {
-  float3 position : POSITION;   // Vertex position (world space for grid, model space for transform)
-  float3 attrib0  : ATTRIB0;    // Grid: color (RGB), Transform: normal (XYZ)
+  float3 position : POSITION;  // Vertex position (world space for grid, model space for transform)
+  float3 attrib0 : ATTRIB0;    // Grid: color (RGB), Transform: normal (XYZ)
 };
 
 // Vertex outputs (transform helper only; grid uses separate procedural shader)
 struct VertexOutput
 {
   float4 position : SV_Position;
-  float3 attrib0  : ATTRIB0;
-  float4 color    : COLOR;
+  float3 attrib0 : ATTRIB0;
+  float4 color : COLOR;
 };
 
-[[vk::push_constant]] ConstantBuffer<PushConstantVisualHelpers> pc;
+[[vk::push_constant]]
+ConstantBuffer<PushConstantVisualHelpers> pc;
 
 [shader("vertex")]
 VertexOutput vertmain(VertexInput input)
 {
   VertexOutput output;
-  
+
   // Transform to clip space
   output.position = mul(float4(input.position, 1.0), pc.mvp);
-  
+
   output.attrib0 = input.attrib0;
   output.color   = pc.color;
   return output;
@@ -58,15 +59,17 @@ VertexOutput vertmain(VertexInput input)
 //--------------------------------------------------------------------------------------------------
 
 // Scene depth texture (for occlusion detection)
-[[vk::binding(0, 1)]] Texture2D<float> sceneDepth;
-[[vk::binding(1, 1)]] SamplerState depthSampler;
+[[vk::binding(0, 1)]]
+Texture2D<float> sceneDepth;
+[[vk::binding(1, 1)]]
+SamplerState depthSampler;
 
 // Fragment inputs
 struct FragmentInput
 {
   float4 position : SV_Position;
-  float3 attrib0  : ATTRIB0;
-  float4 color    : COLOR;
+  float3 attrib0 : ATTRIB0;
+  float4 color : COLOR;
 };
 
 // Fragment output
@@ -79,38 +82,37 @@ struct FragmentOutput
 FragmentOutput fragmain(FragmentInput input)
 {
   FragmentOutput output;
-  
+
   // Sample scene depth for occlusion test
   // DLSS-aware UV scaling: map viewport position to depth buffer position
-  float2 screenUV = input.position.xy / pc.viewportSize;
-  float2 depthScale = pc.depthBufferSize / pc.viewportSize;
-  float2 depthUV = screenUV * depthScale;
-  float sceneDepthValue = sceneDepth.Sample(depthSampler, depthUV);
-  
+  float2 screenUV        = input.position.xy / pc.viewportSize;
+  float2 depthScale      = pc.depthBufferSize / pc.viewportSize;
+  float2 depthUV         = screenUV * depthScale;
+  float  sceneDepthValue = sceneDepth.Sample(depthSampler, depthUV);
+
   // Get fragment depth
   float fragmentDepth = input.position.z;
 
   // Check if fragment is occluded (behind scene geometry)
   bool isOccluded = fragmentDepth > sceneDepthValue;
-  
-  if (isOccluded && pc.occlusionDither != 0)
+
+  if(isOccluded && pc.occlusionDither != 0)
   {
     int2 pixelCoord = int2(input.position.xy);
-    int checker = (pixelCoord.x + pixelCoord.y) % 2;
-    if (checker == 0)
+    int  checker    = (pixelCoord.x + pixelCoord.y) % 2;
+    if(checker == 0)
       discard;
   }
 
   // Dithered transparency for semi-transparent geometry (e.g. plane handles)
-  if (input.color.a < 0.99)
+  if(input.color.a < 0.99)
   {
     int2 pixelCoord = int2(input.position.xy);
-    int checker = (pixelCoord.x + pixelCoord.y) % 2;
-    if (checker == 0)
+    int  checker    = (pixelCoord.x + pixelCoord.y) % 2;
+    if(checker == 0)
       discard;
   }
 
   output.color = float4(input.color.rgb, 1.0);
   return output;
 }
-

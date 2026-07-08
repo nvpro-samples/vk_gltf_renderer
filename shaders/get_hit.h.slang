@@ -102,9 +102,8 @@ HitState getHitState(GltfRenderPrimitive renderPrim,  //
   // Hacking the shadow terminator (object-space offset; see Hanika 2021, "Hacking the
   // Shadow Terminator"). `nrm[i] * sideFlip` ensures the offset is on the camera-facing
   // side for back-face hits on doubleSided meshes.
-  float3 shadowPos = pointOffset(position, pos0, pos1, pos2,
-                                 nrm0 * sideFlip, nrm1 * sideFlip, nrm2 * sideFlip, barycentrics);
-  hit.shadowPos    = mul(float4(shadowPos, 1.0), objectToWorld).xyz;
+  float3 shadowPos = pointOffset(position, pos0, pos1, pos2, nrm0 * sideFlip, nrm1 * sideFlip, nrm2 * sideFlip, barycentrics);
+  hit.shadowPos = mul(float4(shadowPos, 1.0), objectToWorld).xyz;
 
   // TexCoord
   hit.uv[0] = getInterpolatedVertexTexCoord(renderPrim, 0, triangleIndex, barycentrics);

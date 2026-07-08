@@ -27,13 +27,13 @@
 
 // Bindings
 [[vk::binding(OptixBindingPoints::eInRgba)]]
-Texture2D<float4> inResultImage; // RGB rendered image
+Texture2D<float4> inResultImage;  // RGB rendered image
 [[vk::binding(OptixBindingPoints::eInAlbedoNormal)]]
-Texture2D<float4> inAlbedoNormalImage; // Albedo (RGB) + compressed normal (A)
+Texture2D<float4> inAlbedoNormalImage;  // Albedo (RGB) + compressed normal (A)
 [[vk::binding(OptixBindingPoints::eOutRgba, 0)]]
-RWStructuredBuffer<float4> outRgbBuffer; // Output RGB buffer (linear)
+RWStructuredBuffer<float4> outRgbBuffer;  // Output RGB buffer (linear)
 [[vk::binding(OptixBindingPoints::eOutAlbedo, 0)]]
-RWStructuredBuffer<float4> outAlbedoBuffer; // Output Albedo buffer (linear)
+RWStructuredBuffer<float4> outAlbedoBuffer;  // Output Albedo buffer (linear)
 [[vk::binding(OptixBindingPoints::eOutNormal, 0)]]
 RWStructuredBuffer<float4> outNormalBuffer;  // Output Normal buffer (linear)
 
@@ -75,4 +75,3 @@ void main(uint3 threadIdx: SV_DispatchThreadID)
   // Write normal (XYZ in RGB, alpha = 1.0)
   outNormalBuffer[bufferIndex] = float4(normal, 1.0);
 }
-

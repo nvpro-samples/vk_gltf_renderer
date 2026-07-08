@@ -19,6 +19,7 @@
 
 #include "scene_feature_detection.hpp"
 
+#include <array>
 #include <tinygltf/tiny_gltf.h>
 
 #include "tinygltf_utils.hpp"
@@ -26,6 +27,31 @@
 namespace nvvkgltf {
 
 namespace {
+
+struct FeatureName
+{
+  SceneFeatureSet::Feature feature;
+  const char*              name;
+};
+
+constexpr std::array<FeatureName, SceneFeatureSet::kFeatureCount> kFeatureNames{{
+    {SceneFeatureSet::eTransmission, "transmission"},
+    {SceneFeatureSet::eVolume, "volume"},
+    {SceneFeatureSet::eVolumeScatter, "volumeScatter"},
+    {SceneFeatureSet::eClearcoat, "clearcoat"},
+    {SceneFeatureSet::eIridescence, "iridescence"},
+    {SceneFeatureSet::eAnisotropy, "anisotropy"},
+    {SceneFeatureSet::eSheen, "sheen"},
+    {SceneFeatureSet::eDispersion, "dispersion"},
+    {SceneFeatureSet::eDiffuseTransmission, "diffuseTransmission"},
+    {SceneFeatureSet::eRetroreflection, "retroreflection"},
+    {SceneFeatureSet::eUnlit, "unlit"},
+    {SceneFeatureSet::eSpecular, "specular"},
+    {SceneFeatureSet::eIor, "ior"},
+    {SceneFeatureSet::eSpecularGlossiness, "specularGlossiness"},
+    {SceneFeatureSet::eTextureTransform, "textureTransform"},
+    {SceneFeatureSet::eDlssGuide, "dlssGuide"},
+}};
 
 // Probe a tinygltf extensions map for a given KHR extension name. We use
 // tinygltf::utils::hasElementName so we follow the same key-lookup convention
@@ -108,56 +134,17 @@ inline bool materialHasTextureTransform(const tinygltf::Material& m)
 }  // namespace
 
 //--------------------------------------------------------------------------------------------------
-// Stable hash key for scene-feature variant caching
-uint64_t SceneFeatureSet::hash() const
-{
-  // FNV-1a-style mix over packed bits; cheap and order-stable.
-  uint64_t bits = 0;
-  bits |= (uint64_t)transmission << 0;
-  bits |= (uint64_t)volume << 1;
-  bits |= (uint64_t)volumeScatter << 2;
-  bits |= (uint64_t)clearcoat << 3;
-  bits |= (uint64_t)iridescence << 4;
-  bits |= (uint64_t)anisotropy << 5;
-  bits |= (uint64_t)sheen << 6;
-  bits |= (uint64_t)dispersion << 7;
-  bits |= (uint64_t)diffuseTransmission << 8;
-  bits |= (uint64_t)unlit << 9;
-  bits |= (uint64_t)specular << 10;
-  bits |= (uint64_t)ior << 11;
-  bits |= (uint64_t)specularGlossiness << 12;
-  bits |= (uint64_t)textureTransform << 13;
-  bits |= (uint64_t)dlssGuide << 14;
-
-  // Simple splittable64 mix so neighboring sets hash to distant values.
-  uint64_t h = bits + 0x9E3779B97F4A7C15ULL;
-  h          = (h ^ (h >> 30)) * 0xBF58476D1CE4E5B9ULL;
-  h          = (h ^ (h >> 27)) * 0x94D049BB133111EBULL;
-  h          = h ^ (h >> 31);
-  return h;
-}
-
-//--------------------------------------------------------------------------------------------------
 // True when this feature set covers every feature in the other set
 bool SceneFeatureSet::isSupersetOf(const SceneFeatureSet& o) const
 {
-  auto covers = [](bool mine, bool theirs) { return !theirs || mine; };
-  return covers(transmission, o.transmission) && covers(volume, o.volume) && covers(volumeScatter, o.volumeScatter)
-         && covers(clearcoat, o.clearcoat) && covers(iridescence, o.iridescence) && covers(anisotropy, o.anisotropy)
-         && covers(sheen, o.sheen) && covers(dispersion, o.dispersion)
-         && covers(diffuseTransmission, o.diffuseTransmission) && covers(unlit, o.unlit) && covers(specular, o.specular)
-         && covers(ior, o.ior) && covers(specularGlossiness, o.specularGlossiness)
-         && covers(textureTransform, o.textureTransform) && covers(dlssGuide, o.dlssGuide);
+  return (m_bits & o.m_bits) == o.m_bits;
 }
 
 //--------------------------------------------------------------------------------------------------
 // Exact equality on all scene-feature toggles
 bool SceneFeatureSet::operator==(const SceneFeatureSet& o) const
 {
-  return transmission == o.transmission && volume == o.volume && volumeScatter == o.volumeScatter && clearcoat == o.clearcoat
-         && iridescence == o.iridescence && anisotropy == o.anisotropy && sheen == o.sheen && dispersion == o.dispersion
-         && diffuseTransmission == o.diffuseTransmission && unlit == o.unlit && specular == o.specular && ior == o.ior
-         && specularGlossiness == o.specularGlossiness && textureTransform == o.textureTransform && dlssGuide == o.dlssGuide;
+  return m_bits == o.m_bits;
 }
 
 //--------------------------------------------------------------------------------------------------
@@ -165,28 +152,14 @@ bool SceneFeatureSet::operator==(const SceneFeatureSet& o) const
 std::string SceneFeatureSet::toString() const
 {
   std::string out;
-  auto        add = [&](const char* name, bool v) {
-    if(!v)
-      return;
+  for(const FeatureName& featureName : kFeatureNames)
+  {
+    if(!has(featureName.feature))
+      continue;
     if(!out.empty())
       out += ",";
-    out += name;
-  };
-  add("transmission", transmission);
-  add("volume", volume);
-  add("volumeScatter", volumeScatter);
-  add("clearcoat", clearcoat);
-  add("iridescence", iridescence);
-  add("anisotropy", anisotropy);
-  add("sheen", sheen);
-  add("dispersion", dispersion);
-  add("diffuseTransmission", diffuseTransmission);
-  add("unlit", unlit);
-  add("specular", specular);
-  add("ior", ior);
-  add("specularGlossiness", specularGlossiness);
-  add("textureTransform", textureTransform);
-  add("dlssGuide", dlssGuide);
+    out += featureName.name;
+  }
   return out;
 }
 
@@ -196,22 +169,9 @@ int SceneFeatureSet::unusedExtensionCount() const
 {
   // Count of MAT_EXT_* style flags that are currently false. The dlssGuide flag is
   // intentionally not counted here because it is not a MAT_EXT_* (it's its own gate).
-  int unused = 0;
-  unused += transmission ? 0 : 1;
-  unused += volume ? 0 : 1;
-  unused += volumeScatter ? 0 : 1;
-  unused += clearcoat ? 0 : 1;
-  unused += iridescence ? 0 : 1;
-  unused += anisotropy ? 0 : 1;
-  unused += sheen ? 0 : 1;
-  unused += dispersion ? 0 : 1;
-  unused += diffuseTransmission ? 0 : 1;
-  unused += unlit ? 0 : 1;
-  unused += specular ? 0 : 1;
-  unused += ior ? 0 : 1;
-  unused += specularGlossiness ? 0 : 1;
-  unused += textureTransform ? 0 : 1;
-  return unused;
+  std::bitset<kFeatureCount> extensionBits = m_bits;
+  extensionBits.reset(static_cast<std::size_t>(eDlssGuide));
+  return static_cast<int>(kExtensionFeatureCount - extensionBits.count());
 }
 
 //--------------------------------------------------------------------------------------------------
@@ -224,50 +184,52 @@ SceneFeatureSet detectSceneFeatures(const std::vector<tinygltf::Material>& mater
   {
     const auto& ext = m.extensions;
     if(hasExt(ext, KHR_MATERIALS_TRANSMISSION_EXTENSION_NAME))
-      set.transmission = true;
+      set.enable(SceneFeatureSet::eTransmission);
     if(hasExt(ext, KHR_MATERIALS_VOLUME_EXTENSION_NAME))
-      set.volume = true;
+      set.enable(SceneFeatureSet::eVolume);
     if(hasExt(ext, KHR_MATERIALS_VOLUME_SCATTER_EXTENSION_NAME))
-      set.volumeScatter = true;
+      set.enable(SceneFeatureSet::eVolumeScatter);
     if(hasExt(ext, KHR_MATERIALS_CLEARCOAT_EXTENSION_NAME))
-      set.clearcoat = true;
+      set.enable(SceneFeatureSet::eClearcoat);
     if(hasExt(ext, KHR_MATERIALS_IRIDESCENCE_EXTENSION_NAME))
-      set.iridescence = true;
+      set.enable(SceneFeatureSet::eIridescence);
     if(hasExt(ext, KHR_MATERIALS_ANISOTROPY_EXTENSION_NAME))
-      set.anisotropy = true;
+      set.enable(SceneFeatureSet::eAnisotropy);
     if(hasExt(ext, KHR_MATERIALS_SHEEN_EXTENSION_NAME))
-      set.sheen = true;
+      set.enable(SceneFeatureSet::eSheen);
     if(hasExt(ext, KHR_MATERIALS_DISPERSION_EXTENSION_NAME))
-      set.dispersion = true;
+      set.enable(SceneFeatureSet::eDispersion);
     if(hasExt(ext, KHR_MATERIALS_DIFFUSE_TRANSMISSION_EXTENSION_NAME))
-      set.diffuseTransmission = true;
+      set.enable(SceneFeatureSet::eDiffuseTransmission);
+    if(hasExt(ext, EXT_materials_retroreflection_EXTENSION_NAME))
+      set.enable(SceneFeatureSet::eRetroreflection);
     if(hasExt(ext, KHR_MATERIALS_UNLIT_EXTENSION_NAME))
-      set.unlit = true;
+      set.enable(SceneFeatureSet::eUnlit);
     if(hasExt(ext, KHR_MATERIALS_SPECULAR_EXTENSION_NAME))
-      set.specular = true;
+      set.enable(SceneFeatureSet::eSpecular);
     if(hasExt(ext, KHR_MATERIALS_IOR_EXTENSION_NAME))
-      set.ior = true;
+      set.enable(SceneFeatureSet::eIor);
     if(hasExt(ext, KHR_MATERIALS_PBR_SPECULAR_GLOSSINESS_EXTENSION_NAME))
-      set.specularGlossiness = true;
+      set.enable(SceneFeatureSet::eSpecularGlossiness);
 
     if(materialHasTextureTransform(m))
-      set.textureTransform = true;
+      set.enable(SceneFeatureSet::eTextureTransform);
   }
 
   // Feature dependency promotion. The path tracer's bounce-loop code paths form a
   // strict containment chain, and consumers of this set should not have to re-derive
-  // it. We do it once here so SceneFeatureSet::hash() / operator== / toString() /
-  // unusedExtensionCount() all see the fully-promoted truth.
+  // it. We do it once here so operator== / toString() / unusedExtensionCount()
+  // all see the fully-promoted truth.
   //
   //   scatter  =>  volume   (scatter samples Henyey-Greenstein inside a medium - the
   //                          medium has to exist, makeVolumeMedium is gated on volume)
   //   volume   =>  transmission   (the bounce loop only enters a volume via the
   //                                transmission isInside toggle; without transmission
   //                                pt.isInside never flips so the volume code is dead)
-  if(set.volumeScatter)
-    set.volume = true;
-  if(set.volume)
-    set.transmission = true;
+  if(set.has(SceneFeatureSet::eVolumeScatter))
+    set.enable(SceneFeatureSet::eVolume);
+  if(set.has(SceneFeatureSet::eVolume))
+    set.enable(SceneFeatureSet::eTransmission);
 
   return set;
 }

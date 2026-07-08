@@ -62,6 +62,17 @@ struct UpdateRenderInstancesPushConstant
   uint                  pad0;
 };
 
+// DLSS instance motion vectors: snapshot each render node's current objectToWorld into a
+// dedicated buffer before the per-frame transform update overwrites it. Run once per rendered
+// frame (DLSS only) so outPrevObjectToWorld[i] holds the previous rendered frame's transform.
+struct SnapshotPrevTransformsPushConstant
+{
+  GltfRenderNode* inRenderNodes;         // current render nodes (holds last frame's objectToWorld at snapshot time)
+  float4x4*       outPrevObjectToWorld;  // one mat4 per render node
+  uint            renderNodeCount;
+  uint            pad0;
+};
+
 NAMESPACE_SHADERIO_END()
 
 #endif

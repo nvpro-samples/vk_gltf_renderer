@@ -59,7 +59,7 @@ struct MeshState
   float3 Ng;     // Geometric normal
   float2 tc[2];  // Texture coordinates
   bool   isInside = false;
-  float  texGrad  = 0.0f;  // Ray footprint for SampleGrad; 0 -> Sample() (mip 0 in RT, proper mips in fragment)
+  float  texGrad  = 0.0f;  // Ray footprint for SampleGrad; 0 -> mip 0 in path tracer, implicit HW mips in fragment
   float4 baseColorVertexMul = float4(1);  // COLOR_0 multiplier for baseColor or spec-gloss diffuse
 };
 
@@ -93,7 +93,17 @@ float4 getTexture(Sampler2D textures[], in GltfTextureInfo textureInfo, in float
     return textures[textureInfo.index].SampleGrad(tt, ddx_uv, ddy_uv);
 #endif
   }
+  // texGrad == 0 means "use the sharpest mip". In a fragment shader (RASTER_PIPELINE) the
+  // implicit-LOD Sample() has valid quad derivatives and yields proper hardware mipmapping.
+  // In the path tracer (compute Ray Query / raygen Ray Tracing) there are no such derivatives:
+  // raygen falls back to mip 0, but a compute dispatch emits quad derivatives that explode at
+  // geometry silhouettes/discontinuities, snapping to the coarsest mip and flattening the
+  // texture to its average (~base color). Force explicit mip 0 there so both RT paths match.
+#ifdef RASTER_PIPELINE
   return textures[textureInfo.index].Sample(tt);
+#else
+  return textures[textureInfo.index].SampleLevel(tt, 0.0f);
+#endif
 #else
   return float4(1.0F);
 #endif
@@ -431,6 +441,15 @@ PbrMaterial evaluateMaterial(in GltfShadeMaterial material, MeshState state, Sam
   {
     pbrMat.diffuseTransmissionColor *=
         getTexture(textures, texInfos[material.diffuseTransmissionColorTexture], state.tc, state.texGrad).rgb;
+  }
+#endif
+
+#if GLTF_USE_RETROREFLECTION
+  // EXT_materials_retroreflection (MRM, Portsmouth et al. 2026)
+  pbrMat.retroreflection = material.retroreflectionFactor;
+  if(isTexturePresent(material.retroreflectionTexture))
+  {
+    pbrMat.retroreflection *= getTexture(textures, texInfos[material.retroreflectionTexture], state.tc, state.texGrad).r;
   }
 #endif
 

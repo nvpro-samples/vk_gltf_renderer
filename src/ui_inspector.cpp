@@ -1169,7 +1169,7 @@ bool UiInspector::renderMaterialExtensions(tinygltf::Material& material, int mat
   ImGui::Separator();
   ImGui::Text("Material Extensions:");
 
-  // All 12 material extensions - collect changes
+  // All material extensions - collect changes
   bool anyChange = false;
   anyChange |= materialAnisotropy(material);
   anyChange |= materialClearcoat(material);
@@ -1181,6 +1181,7 @@ bool UiInspector::renderMaterialExtensions(tinygltf::Material& material, int mat
   anyChange |= materialSheen(material);
   anyChange |= materialSpecular(material);
   anyChange |= materialTransmission(material);
+  anyChange |= materialRetroreflection(material);
   anyChange |= materialUnlit(material);
   anyChange |= materialVolume(material, matIdx);  // Volume needs matIdx for special RTX dirty marking
   anyChange |= materialVolumeScatter(material);
@@ -1318,6 +1319,30 @@ bool UiInspector::materialTransmission(tinygltf::Material& material)
         return modif;
       },
       [&material]() { tinygltf::utils::setTransmission(material, {}); });
+}
+
+bool UiInspector::materialRetroreflection(tinygltf::Material& material)
+{
+  return renderMaterialExtensionSection(
+      material, "Retroreflection", EXT_materials_retroreflection_EXTENSION_NAME,
+      [this, &material]() {
+        EXT_materials_retroreflection retro = tinygltf::utils::getRetroreflection(material);
+        bool                          modif = false;
+        if(PE::begin())
+        {
+          modif |= PE::DragFloat("Factor", &retro.retroreflectionFactor, 0.01f, 0.0f, 1.0f, "%.3f", 0,
+                                 "Blend between forward microfacet (0) and the MRM retroreflective\n"
+                                 "microfacet (1). Modulated per-texel by Retroreflection texture (R channel).\n"
+                                 "Portsmouth et al. 2026 (JCGT, MRM model).");
+
+          modif |= renderTextureEditRow("Retroreflection", retro.retroreflectionTexture, m_scene->getModel(), m_textureNames);
+          PE::end();
+        }
+        if(modif)
+          tinygltf::utils::setRetroreflection(material, retro);
+        return modif;
+      },
+      [&material]() { tinygltf::utils::setRetroreflection(material, {}); });
 }
 
 bool UiInspector::materialDiffuseTransmission(tinygltf::Material& material)
