@@ -11,8 +11,10 @@ permissions:
   contents: write
 
 env:
-  # Vulkan SDK to use
-  VULKAN_SDK_VERSION: 1.4.350.0
+  # 1.4.341 is the first SDK that ships VK_EXT_descriptor_heap, which
+  # nvpro_core2/nvvk/descriptor_heap_writer.hpp requires. Bump as needed
+  # when nvpro_core2 starts using newer Vulkan symbols.
+  VULKAN_SDK_VERSION: 1.4.341.1
   # nvpro_core2 is checked out as a sibling so FindNvproCore2.cmake picks it up.
   # Head is fine; bump this if you ever need to pin to a specific tag/SHA.
   NVPRO_CORE2_REF: main
