@@ -571,6 +571,9 @@ void processPixel(IRaytracer raytracer, float2 samplePos, float2 imageSize)
   SampleResult sampleResult = samplePixel(raytracer, seed, samplePos, subpixelJitter, imageSize, pushConst.frameInfo->projInv,
                                           pushConst.frameInfo->viewInv, pushConst.focalDistance, pushConst.aperture);
   float4 pixelColor = sampleResult.radiance;
+
+  // DLSS uses only one sample per pixel
+#if !USE_DLSS_SHADER
   for(int s = 1; s < pushConst.numSamples; s++)
   {
     subpixelJitter = float2(rand(seed), rand(seed));
@@ -579,6 +582,7 @@ void processPixel(IRaytracer raytracer, float2 samplePos, float2 imageSize)
     pixelColor += sampleResult.radiance;
   }
   pixelColor /= pushConst.numSamples;
+#endif // USE_DLSS_SHADER
 
 
   // NDC depth from first-hit world position (Vulkan [0,1] range, 1.0 = far/miss).

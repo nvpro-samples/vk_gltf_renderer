@@ -27,6 +27,8 @@
 
 #include "tinygltf_utils.hpp"
 
+#include <unordered_set>
+
 #include <glm/gtx/norm.hpp>
 #include "nvutils/logger.hpp"
 #include "nvutils/parallel_work.hpp"
@@ -41,6 +43,37 @@ const char* const kTextureImageSourceExtensionNames[] = {
     MSFT_TEXTURE_DDS_NAME,
     KHR_TEXTURE_BASISU_EXTENSION_NAME,
 };
+
+// Recursively records extension names nested inside an extension's raw JSON value. This catches
+// extensions living on extension-owned TextureInfo slots (e.g. KHR_texture_transform on a
+// clearcoat/sheen/transmission texture), which are stored as opaque JSON inside mat.extensions[...]
+// and are therefore invisible to a walk of the typed ExtensionMap members alone.
+void collectNestedExtensionNames(const tinygltf::Value&           value,
+                                 std::vector<std::string>&        discovered,
+                                 std::unordered_set<std::string>& discoveredSet)
+{
+  if(value.IsObject())
+  {
+    for(const std::string& key : value.Keys())
+    {
+      const tinygltf::Value& child = value.Get(key);
+      if(key == "extensions" && child.IsObject())
+      {
+        for(const std::string& extName : child.Keys())
+        {
+          if(discoveredSet.insert(extName).second)
+            discovered.push_back(extName);
+        }
+      }
+      collectNestedExtensionNames(child, discovered, discoveredSet);
+    }
+  }
+  else if(value.IsArray())
+  {
+    for(size_t i = 0; i < value.ArrayLen(); i++)
+      collectNestedExtensionNames(value.Get(i), discovered, discoveredSet);
+  }
+}
 
 }  // namespace
 
@@ -313,10 +346,10 @@ void tinygltf::utils::setDispersion(tinygltf::Material& tmat, const KHR_material
   tinygltf::utils::setValue(ext, "dispersion", dispersion.dispersion);
 }
 
-EXT_materials_retroreflection tinygltf::utils::getRetroreflection(const tinygltf::Material& tmat)
+KHR_materials_retroreflection tinygltf::utils::getRetroreflection(const tinygltf::Material& tmat)
 {
-  EXT_materials_retroreflection gmat;
-  if(const auto* ext = tinygltf::utils::findExtension(tmat.extensions, EXT_materials_retroreflection_EXTENSION_NAME))
+  KHR_materials_retroreflection gmat;
+  if(const auto* ext = tinygltf::utils::findExtension(tmat.extensions, KHR_MATERIALS_RETROREFLECTION_EXTENSION_NAME))
   {
     tinygltf::utils::getValue(*ext, "retroreflectionFactor", gmat.retroreflectionFactor);
     tinygltf::utils::getValue(*ext, "retroreflectionTexture", gmat.retroreflectionTexture);
@@ -324,9 +357,9 @@ EXT_materials_retroreflection tinygltf::utils::getRetroreflection(const tinygltf
   return gmat;
 }
 
-void tinygltf::utils::setRetroreflection(tinygltf::Material& tmat, const EXT_materials_retroreflection& retro)
+void tinygltf::utils::setRetroreflection(tinygltf::Material& tmat, const KHR_materials_retroreflection& retro)
 {
-  tinygltf::Value& ext = tinygltf::utils::ensureExtension(tmat.extensions, EXT_materials_retroreflection_EXTENSION_NAME);
+  tinygltf::Value& ext = tinygltf::utils::ensureExtension(tmat.extensions, KHR_MATERIALS_RETROREFLECTION_EXTENSION_NAME);
   tinygltf::utils::setValue(ext, "retroreflectionFactor", retro.retroreflectionFactor);
   tinygltf::utils::setValue(ext, "retroreflectionTexture", retro.retroreflectionTexture);
 }
@@ -878,4 +911,150 @@ void tinygltf::utils::simpleCreateTangents(tinygltf::Model& model, tinygltf::Pri
     float handedness = t0.w;
     t0               = glm::vec4(ot0, handedness);
   });
+}
+
+void tinygltf::utils::syncExtensionsUsed(tinygltf::Model& model)
+{
+  // Extension names discovered by walking every object's `extensions` map.
+  // Kept in traversal order (deduplicated) so newly added names have a stable position.
+  std::vector<std::string>        discovered;
+  std::unordered_set<std::string> discoveredSet;
+
+  auto collect = [&discovered, &discoveredSet](const tinygltf::ExtensionMap& ext) {
+    for(const auto& kv : ext)
+    {
+      if(discoveredSet.insert(kv.first).second)
+        discovered.push_back(kv.first);
+      // Also scan the extension's JSON for extensions nested on extension-owned texture infos.
+      collectNestedExtensionNames(kv.second, discovered, discoveredSet);
+    }
+  };
+
+  // Top-level and asset-level extensions (e.g. KHR_lights_punctual, KHR_materials_variants, XMP).
+  collect(model.extensions);
+  collect(model.asset.extensions);
+
+  for(size_t i = 0; i < model.scenes.size(); i++)
+    collect(model.scenes[i].extensions);
+
+  for(size_t i = 0; i < model.nodes.size(); i++)
+    collect(model.nodes[i].extensions);
+
+  for(size_t i = 0; i < model.meshes.size(); i++)
+  {
+    const tinygltf::Mesh& mesh = model.meshes[i];
+    collect(mesh.extensions);
+    for(size_t p = 0; p < mesh.primitives.size(); p++)
+      collect(mesh.primitives[p].extensions);  // KHR_draco_mesh_compression, KHR_materials_variants
+  }
+
+  // Materials carry object-level extensions (KHR_materials_*) and texture-info extensions
+  // (KHR_texture_transform) on the typed PBR TextureInfo members below. Extensions nested on
+  // extension-owned texture infos (e.g. a transform on a clearcoat texture) live as opaque JSON
+  // inside mat.extensions and are picked up by collectNestedExtensionNames() via collect().
+  for(size_t i = 0; i < model.materials.size(); i++)
+  {
+    const tinygltf::Material& mat = model.materials[i];
+    collect(mat.extensions);
+    collect(mat.pbrMetallicRoughness.extensions);
+    collect(mat.pbrMetallicRoughness.baseColorTexture.extensions);
+    collect(mat.pbrMetallicRoughness.metallicRoughnessTexture.extensions);
+    collect(mat.normalTexture.extensions);
+    collect(mat.occlusionTexture.extensions);
+    collect(mat.emissiveTexture.extensions);
+  }
+
+  for(size_t i = 0; i < model.textures.size(); i++)
+    collect(model.textures[i].extensions);  // EXT_texture_webp, MSFT_texture_dds, KHR_texture_basisu
+  for(size_t i = 0; i < model.images.size(); i++)
+    collect(model.images[i].extensions);
+  for(size_t i = 0; i < model.samplers.size(); i++)
+    collect(model.samplers[i].extensions);
+
+  for(size_t i = 0; i < model.skins.size(); i++)
+    collect(model.skins[i].extensions);
+
+  for(size_t i = 0; i < model.animations.size(); i++)
+  {
+    const tinygltf::Animation& anim = model.animations[i];
+    collect(anim.extensions);
+    for(size_t c = 0; c < anim.channels.size(); c++)
+    {
+      collect(anim.channels[c].extensions);
+      collect(anim.channels[c].target_extensions);  // KHR_animation_pointer lives on the channel target
+    }
+    for(size_t s = 0; s < anim.samplers.size(); s++)
+      collect(anim.samplers[s].extensions);
+  }
+
+  for(size_t i = 0; i < model.accessors.size(); i++)
+  {
+    const tinygltf::Accessor& acc = model.accessors[i];
+    collect(acc.extensions);
+    if(acc.sparse.isSparse)
+    {
+      collect(acc.sparse.extensions);
+      collect(acc.sparse.indices.extensions);
+      collect(acc.sparse.values.extensions);
+    }
+  }
+
+  for(size_t i = 0; i < model.bufferViews.size(); i++)
+    collect(model.bufferViews[i].extensions);  // EXT/KHR_meshopt_compression
+  for(size_t i = 0; i < model.buffers.size(); i++)
+    collect(model.buffers[i].extensions);
+
+  for(size_t i = 0; i < model.cameras.size(); i++)
+  {
+    const tinygltf::Camera& cam = model.cameras[i];
+    collect(cam.extensions);
+    collect(cam.perspective.extensions);
+    collect(cam.orthographic.extensions);
+  }
+
+  for(size_t i = 0; i < model.lights.size(); i++)
+    collect(model.lights[i].extensions);
+
+  for(size_t i = 0; i < model.audioEmitters.size(); i++)
+  {
+    const tinygltf::AudioEmitter& emitter = model.audioEmitters[i];
+    collect(emitter.extensions);
+    collect(emitter.positional.extensions);
+  }
+  for(size_t i = 0; i < model.audioSources.size(); i++)
+    collect(model.audioSources[i].extensions);
+
+  // Recompute extensionsUsed:
+  //  1. keep previously listed names that are still used (preserve original order),
+  //  2. append newly discovered names (traversal order),
+  //  3. force in any author-declared required name we could not detect. This keeps the
+  //     spec invariant (extensionsRequired is a subset of extensionsUsed) and avoids losing
+  //     footprint-less required extensions such as KHR_mesh_quantization, which has no
+  //     `extensions` entry anywhere and is signaled only by quantized accessor types.
+  std::vector<std::string>        newUsed;
+  std::unordered_set<std::string> newUsedSet;
+  auto                            addUsed = [&newUsed, &newUsedSet](const std::string& name) {
+    if(newUsedSet.insert(name).second)
+      newUsed.push_back(name);
+  };
+
+  for(size_t i = 0; i < model.extensionsUsed.size(); i++)
+    if(discoveredSet.count(model.extensionsUsed[i]))
+      addUsed(model.extensionsUsed[i]);
+  for(size_t i = 0; i < discovered.size(); i++)
+    addUsed(discovered[i]);
+  for(size_t i = 0; i < model.extensionsRequired.size(); i++)
+    addUsed(model.extensionsRequired[i]);
+
+  // extensionsRequired is preserved as authored (deduplicated, order kept). We never add to it;
+  // "required" cannot be inferred from the data. The loop above guarantees every entry is also
+  // in extensionsUsed, so we simply keep the authored set.
+  std::vector<std::string>        newRequired;
+  std::unordered_set<std::string> newRequiredSet;
+  for(size_t i = 0; i < model.extensionsRequired.size(); i++)
+    if(newUsedSet.count(model.extensionsRequired[i]) && newRequiredSet.insert(model.extensionsRequired[i]).second)
+      newRequired.push_back(model.extensionsRequired[i]);
+
+  model.extensionsUsed     = std::move(newUsed);
+  model.extensionsRequired = std::move(newRequired);
 }

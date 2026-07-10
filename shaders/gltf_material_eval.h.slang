@@ -445,7 +445,7 @@ PbrMaterial evaluateMaterial(in GltfShadeMaterial material, MeshState state, Sam
 #endif
 
 #if GLTF_USE_RETROREFLECTION
-  // EXT_materials_retroreflection (MRM, Portsmouth et al. 2026)
+  // KHR_materials_retroreflection (MRM, Portsmouth et al. 2026)
   pbrMat.retroreflection = material.retroreflectionFactor;
   if(isTexturePresent(material.retroreflectionTexture))
   {

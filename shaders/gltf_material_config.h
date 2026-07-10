@@ -66,7 +66,7 @@ otherwise the material buffer layout will disagree.
 #define MAT_EXT_DIFFUSE_TRANSMISSION MAT_EXT_VAL  // KHR_materials_diffuse_transmission
 #endif
 #ifndef MAT_EXT_RETROREFLECTION
-#define MAT_EXT_RETROREFLECTION MAT_EXT_VAL  // EXT_materials_retroreflection
+#define MAT_EXT_RETROREFLECTION MAT_EXT_VAL  // KHR_materials_retroreflection
 #endif
 #ifndef MAT_EXT_UNLIT
 #define MAT_EXT_UNLIT MAT_EXT_VAL  // KHR_materials_unlit

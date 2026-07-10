@@ -218,10 +218,10 @@ are **forked locally** into `shaders/gltf_*.h.slang` rather than using the upstr
 - Host-side layout is asserted in [`src/gltf_material_cache.cpp`](../src/gltf_material_cache.cpp)
   via `static_assert(sizeof(...) % 4 == 0)` and anchor-offset checks, so flipping any
   `MAT_EXT_*` flag that breaks the stride rule fails the build immediately.
-- `MAT_EXT_RETROREFLECTION` — retroreflection material extension (Minimal Retroreflective
+- `MAT_EXT_RETROREFLECTION` — `KHR_materials_retroreflection` (Minimal Retroreflective
   Microfacet, Portsmouth et al. 2026). Adds one scalar and one texture slot, then applies
   the MRM substitution symmetrically to eval/sample/PDF paths. Disabled if the flag is 0.
-  See the [EXT_materials_retroreflection](https://github.com/KhronosGroup/glTF/blob/main/extensions/2.0/Vendor/EXT_materials_retroreflection/README.md) specification.
+  See the [KHR_materials_retroreflection](https://github.com/KhronosGroup/glTF/blob/main/extensions/2.0/Khronos/KHR_materials_retroreflection/README.md) specification.
 
 ### Adding a new KHR_materials_* extension
 

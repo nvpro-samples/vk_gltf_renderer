@@ -221,35 +221,38 @@ TEST(ComputeAnimation, CpuSkinningProducesTransformedPositions)
   ASSERT_TRUE(anim.hasSkinning());
   ASSERT_GT(anim.getNumAnimations(), 0);
 
-  // Advance animation to ~halfway (joint node rotates)
-  auto& info       = anim.getAnimationInfo(0);
-  info.currentTime = info.start + (info.end - info.start) * 0.5f;
-  anim.updateAnimation(0);
-  scene.updateNodeWorldMatrices();
-
-  // Run CPU skinning
-  anim.computeSkinning();
+  // Sample several times across the animation and require that at least one produces
+  // transformed vertices. We must not assume a specific time is a non-rest pose: SimpleSkin's
+  // rotation returns to identity in its middle segment (keyframes at 2.5s and 3.0s), so the
+  // exact midpoint would leave vertices at their base positions.
+  auto& info = anim.getAnimationInfo(0);
 
   const auto& skinTasks = anim.getSkinTasks();
   ASSERT_FALSE(skinTasks.empty());
-
-  const auto& result = anim.getSkinningResult(0);
-  EXPECT_FALSE(result.positions.empty()) << "computeSkinning should allocate and fill positions";
-
-  // At least one vertex should have moved from the base position
   const auto& basePos = skinTasks[0].basePositions;
-  ASSERT_EQ(result.positions.size(), basePos.size());
 
   bool anyMoved = false;
-  for(size_t i = 0; i < basePos.size(); i++)
+  for(int step = 1; step < 20 && !anyMoved; step++)
   {
-    if(glm::any(glm::epsilonNotEqual(result.positions[i], basePos[i], 1e-6f)))
+    info.currentTime = info.start + (info.end - info.start) * (step / 20.0f);
+    EXPECT_TRUE(anim.updateAnimation(0));
+    scene.updateNodeWorldMatrices();
+    anim.computeSkinning();
+
+    const auto& result = anim.getSkinningResult(0);
+    EXPECT_FALSE(result.positions.empty()) << "computeSkinning should allocate and fill positions";
+    ASSERT_EQ(result.positions.size(), basePos.size());
+
+    for(size_t i = 0; i < basePos.size(); i++)
     {
-      anyMoved = true;
-      break;
+      if(glm::any(glm::epsilonNotEqual(result.positions[i], basePos[i], 1e-6f)))
+      {
+        anyMoved = true;
+        break;
+      }
     }
   }
-  EXPECT_TRUE(anyMoved) << "At mid-animation, skinned vertices should differ from base positions";
+  EXPECT_TRUE(anyMoved) << "Skinned vertices should differ from base positions for at least one animation time";
 }
 
 TEST(ComputeAnimation, CpuSkinningOutputMatchesSizeOfBaseGeometry)
@@ -263,7 +266,7 @@ TEST(ComputeAnimation, CpuSkinningOutputMatchesSizeOfBaseGeometry)
 
   auto& info       = anim.getAnimationInfo(0);
   info.currentTime = info.start;
-  anim.updateAnimation(0);
+  EXPECT_TRUE(anim.updateAnimation(0));
   scene.updateNodeWorldMatrices();
   anim.computeSkinning();
 
@@ -293,7 +296,7 @@ TEST(ComputeAnimation, CpuSkinningStableOverMultipleFrames)
   for(int frame = 0; frame < 30; frame++)
   {
     info.incrementTime(1.0f / 30.0f, true);
-    anim.updateAnimation(0);
+    EXPECT_TRUE(anim.updateAnimation(0));
     scene.updateNodeWorldMatrices();
     anim.computeSkinning();
 
@@ -329,7 +332,7 @@ TEST(ComputeAnimation, CpuMorphProducesBlendedPositions)
   // Advance animation to halfway so weights are non-trivial
   auto& info       = anim.getAnimationInfo(0);
   info.currentTime = info.start + (info.end - info.start) * 0.5f;
-  anim.updateAnimation(0);
+  EXPECT_TRUE(anim.updateAnimation(0));
   scene.updateNodeWorldMatrices();
 
   anim.computeMorphTargets();
@@ -358,7 +361,7 @@ TEST(ComputeAnimation, CpuMorphBlendedPositionsDifferFromBase)
   // Set weights animation to mid-point
   auto& info       = anim.getAnimationInfo(0);
   info.currentTime = info.start + (info.end - info.start) * 0.25f;
-  anim.updateAnimation(0);
+  EXPECT_TRUE(anim.updateAnimation(0));
   scene.updateNodeWorldMatrices();
   anim.computeMorphTargets();
 
@@ -398,7 +401,7 @@ TEST(ComputeAnimation, CpuMorphWithNormalsAndTangents)
   // Advance to ~1/3 of animation
   auto& info       = anim.getAnimationInfo(0);
   info.currentTime = info.start + (info.end - info.start) * 0.33f;
-  anim.updateAnimation(0);
+  EXPECT_TRUE(anim.updateAnimation(0));
   scene.updateNodeWorldMatrices();
   anim.computeMorphTargets();
 
@@ -427,7 +430,7 @@ TEST(ComputeAnimation, CpuMorphNormalsAreNormalized)
 
   auto& info       = anim.getAnimationInfo(0);
   info.currentTime = info.start + (info.end - info.start) * 0.5f;
-  anim.updateAnimation(0);
+  EXPECT_TRUE(anim.updateAnimation(0));
   scene.updateNodeWorldMatrices();
   anim.computeMorphTargets();
 
@@ -452,7 +455,7 @@ TEST(ComputeAnimation, CpuMorphTangentWPreserved)
 
   auto& info       = anim.getAnimationInfo(0);
   info.currentTime = info.start + (info.end - info.start) * 0.5f;
-  anim.updateAnimation(0);
+  EXPECT_TRUE(anim.updateAnimation(0));
   scene.updateNodeWorldMatrices();
   anim.computeMorphTargets();
 
@@ -479,7 +482,7 @@ TEST(ComputeAnimation, CpuMorphStableOverMultipleFrames)
   for(int frame = 0; frame < 30; frame++)
   {
     info.incrementTime(1.0f / 30.0f, true);
-    anim.updateAnimation(0);
+    EXPECT_TRUE(anim.updateAnimation(0));
     scene.updateNodeWorldMatrices();
     anim.computeMorphTargets();
 
@@ -516,7 +519,7 @@ TEST(ComputeAnimation, BothCpuPathsRunIndependently)
     auto& anim       = skinScene.animation();
     auto& info       = anim.getAnimationInfo(0);
     info.currentTime = info.start + (info.end - info.start) * 0.3f;
-    anim.updateAnimation(0);
+    EXPECT_TRUE(anim.updateAnimation(0));
     skinScene.updateNodeWorldMatrices();
     anim.computeSkinning();
 
@@ -528,7 +531,7 @@ TEST(ComputeAnimation, BothCpuPathsRunIndependently)
     auto& anim       = morphScene.animation();
     auto& info       = anim.getAnimationInfo(0);
     info.currentTime = info.start + (info.end - info.start) * 0.3f;
-    anim.updateAnimation(0);
+    EXPECT_TRUE(anim.updateAnimation(0));
     morphScene.updateNodeWorldMatrices();
     anim.computeMorphTargets();
 

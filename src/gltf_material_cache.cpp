@@ -220,7 +220,7 @@ void populateShaderMaterial(shaderio::GltfShadeMaterial& dstMat, const tinygltf:
 #endif
 
 #if MAT_EXT_RETROREFLECTION
-  EXT_materials_retroreflection retro = tinygltf::utils::getRetroreflection(srcMat);
+  KHR_materials_retroreflection retro = tinygltf::utils::getRetroreflection(srcMat);
   dstMat.retroreflectionFactor        = retro.retroreflectionFactor;
   handleTexture(dstMat.retroreflectionTexture, retro.retroreflectionTexture);
 #endif

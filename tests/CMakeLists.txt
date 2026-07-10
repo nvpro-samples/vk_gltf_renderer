@@ -39,6 +39,8 @@ set(TEST_SOURCES
     test_animation_update.cpp
     # Compute animation: deferred CPU allocation, CPU skinning, CPU morph targets
     test_compute_animation.cpp
+    # Top-level extensionsUsed / extensionsRequired reconciliation on save
+    test_extensions_metadata.cpp
     # Need tinygltf implementation
     ${CMAKE_SOURCE_DIR}/src/tiny_stb_implementation.cpp
     # Local glTF scene implementation
@@ -69,8 +71,8 @@ target_compile_definitions(${TEST_NAME} PRIVATE
 
 # Add Draco support if enabled
 if(USE_DRACO)
-    target_include_directories(${TEST_NAME} PRIVATE 
-        ${draco_SOURCE_DIR}/src 
+    target_include_directories(${TEST_NAME} PRIVATE
+        ${draco_SOURCE_DIR}/src
         ${CMAKE_BINARY_DIR}
         ${CMAKE_CURRENT_BINARY_DIR})
     target_link_libraries(${TEST_NAME} PRIVATE draco::draco)
@@ -106,6 +108,7 @@ set(TEST_RAPIDJSON_INCLUDE_DIR ${CMAKE_BINARY_DIR}/_deps/RapidJSON-master/rapidj
 
 # Include directories
 target_include_directories(${TEST_NAME} PRIVATE
+    ${CMAKE_SOURCE_DIR}
     ${CMAKE_SOURCE_DIR}/src
     ${CMAKE_BINARY_DIR}/${PROJECT_NAME}
     ${CMAKE_SOURCE_DIR}/third_party/MikkTSpace
@@ -152,8 +155,8 @@ add_executable(${BENCHMARK_NAME}
 
 # Add Draco support if enabled
 if(USE_DRACO)
-    target_include_directories(${BENCHMARK_NAME} PRIVATE 
-        ${draco_SOURCE_DIR}/src 
+    target_include_directories(${BENCHMARK_NAME} PRIVATE
+        ${draco_SOURCE_DIR}/src
         ${CMAKE_BINARY_DIR}
         ${CMAKE_CURRENT_BINARY_DIR})
     target_link_libraries(${BENCHMARK_NAME} PRIVATE draco::draco)

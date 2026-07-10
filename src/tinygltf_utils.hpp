@@ -219,9 +219,9 @@ struct KHR_materials_diffuse_transmission
   tinygltf::TextureInfo diffuseTransmissionColorTexture = {};
 };
 
-// EXT_materials_retroreflection — Minimal Retroreflective Microfacet (Portsmouth et al. 2026)
-#define EXT_materials_retroreflection_EXTENSION_NAME "EXT_materials_retroreflection"
-struct EXT_materials_retroreflection
+// https://github.com/KhronosGroup/glTF/blob/main/extensions/2.0/Khronos/KHR_materials_retroreflection/README.md
+#define KHR_MATERIALS_RETROREFLECTION_EXTENSION_NAME "KHR_materials_retroreflection"
+struct KHR_materials_retroreflection
 {
   float                 retroreflectionFactor  = 0.0f;
   tinygltf::TextureInfo retroreflectionTexture = {};
@@ -1141,8 +1141,8 @@ KHR_materials_pbrSpecularGlossiness getPbrSpecularGlossiness(const tinygltf::Mat
 void setPbrSpecularGlossiness(tinygltf::Material& tmat, const KHR_materials_pbrSpecularGlossiness& dispersion);
 KHR_materials_diffuse_transmission getDiffuseTransmission(const tinygltf::Material& tmat);
 void setDiffuseTransmission(tinygltf::Material& tmat, const KHR_materials_diffuse_transmission& diffuseTransmission);
-EXT_materials_retroreflection getRetroreflection(const tinygltf::Material& tmat);
-void                          setRetroreflection(tinygltf::Material& tmat, const EXT_materials_retroreflection& retro);
+KHR_materials_retroreflection getRetroreflection(const tinygltf::Material& tmat);
+void                          setRetroreflection(tinygltf::Material& tmat, const KHR_materials_retroreflection& retro);
 
 
 template <typename T>
@@ -1214,6 +1214,24 @@ void simpleCreateTangents(tinygltf::Model& model, tinygltf::Primitive& primitive
 
 /*------------------------------------------------------------------------------------------------*/
 bool getMeshoptCompression(const tinygltf::BufferView& bview, KHR_meshopt_compression& mcomp);
+
+/*-------------------------------------------------------------------------------------------------
+## Function `syncExtensionsUsed`
+> Reconciles the top-level `extensionsUsed` / `extensionsRequired` arrays with the extensions
+> actually present in the model, per the glTF 2.0 "Specifying Extensions" rules.
+
+Call before serializing (e.g. in `Scene::save()`), since tinygltf writes these arrays verbatim.
+
+Behavior is intentionally asymmetric:
+- `extensionsUsed` is recomputed from every object's `extensions` map (materials, texture infos,
+  nodes, primitives, textures, animations, ...): missing names are added, stale names are dropped.
+- `extensionsRequired` is preserved as authored and never grown -- "required" is a semantic
+  judgment that cannot be derived from the data. Author-declared required names are also forced
+  into `extensionsUsed` so the spec invariant `extensionsRequired` ⊆ `extensionsUsed` always holds,
+  and footprint-less required extensions (e.g. `KHR_mesh_quantization`, which has no `extensions`
+  entry anywhere) are not lost.
+-------------------------------------------------------------------------------------------------*/
+void syncExtensionsUsed(tinygltf::Model& model);
 
 }  // namespace utils
 

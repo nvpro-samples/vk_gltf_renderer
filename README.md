@@ -104,7 +104,7 @@ For **headless timing** and optional scripted GPU benchmarks, see [Benchmarking]
 
 ## glTF Support
 
-**Reference scope:** The list below reflects what this renderer loads and displays. The **path tracer** is the authoritative PBR implementation — especially for ray-traced material evaluation, sampling, and new extensions (e.g. [EXT_materials_retroreflection](https://github.com/KhronosGroup/glTF/blob/main/extensions/2.0/Vendor/EXT_materials_retroreflection/README.md)). The **rasterizer** is a preview path for interaction, not the primary material reference.
+**Reference scope:** The list below reflects what this renderer loads and displays. The **path tracer** is the authoritative PBR implementation — especially for ray-traced material evaluation, sampling, and new extensions (e.g. [KHR_materials_retroreflection](https://github.com/KhronosGroup/glTF/blob/main/extensions/2.0/Khronos/KHR_materials_retroreflection/README.md)). The **rasterizer** is a preview path for interaction, not the primary material reference.
 
 ### Core
 
@@ -147,7 +147,7 @@ For **headless timing** and optional scripted GPU benchmarks, see [Benchmarking]
 - ✅ KHR_texture_basisu
 - ✅ KHR_texture_transform
 - ✅ KHR_xmp_json_ld
-- ✅ EXT_materials_retroreflection
+- ✅ KHR_materials_retroreflection
 - ✅ EXT_mesh_gpu_instancing
 - ✅ EXT_texture_webp
 - ✅ MSFT_texture_dds

@@ -1324,9 +1324,9 @@ bool UiInspector::materialTransmission(tinygltf::Material& material)
 bool UiInspector::materialRetroreflection(tinygltf::Material& material)
 {
   return renderMaterialExtensionSection(
-      material, "Retroreflection", EXT_materials_retroreflection_EXTENSION_NAME,
+      material, "Retroreflection", KHR_MATERIALS_RETROREFLECTION_EXTENSION_NAME,
       [this, &material]() {
-        EXT_materials_retroreflection retro = tinygltf::utils::getRetroreflection(material);
+        KHR_materials_retroreflection retro = tinygltf::utils::getRetroreflection(material);
         bool                          modif = false;
         if(PE::begin())
         {

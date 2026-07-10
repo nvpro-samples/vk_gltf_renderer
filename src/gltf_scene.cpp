@@ -181,7 +181,7 @@ nvvkgltf::Scene::Scene()
       "KHR_materials_dispersion",
       "KHR_node_visibility",
       "EXT_mesh_gpu_instancing",
-      "EXT_materials_retroreflection",
+      "KHR_materials_retroreflection",
       "NV_attributes_iray",
       "MSFT_texture_dds",
       "KHR_materials_pbrSpecularGlossiness",
@@ -528,6 +528,12 @@ bool nvvkgltf::Scene::save(const std::filesystem::path& filename)
       m_model.asset.generator += " + ";
     m_model.asset.generator += std::string(generatorPrefix) + " " APP_VERSION_STRING;
   }
+
+  // Reconcile top-level extensionsUsed / extensionsRequired with what the model actually
+  // contains, so the written asset complies with the glTF 2.0 "Specifying Extensions" rules
+  // (tinygltf writes these arrays verbatim). This prunes stale entries left by edits/merges
+  // and adds any extension that became used since load.
+  tinygltf::utils::syncExtensionsUsed(m_model);
 
   // Save the glTF file
   tinygltf::TinyGLTF tcontext;

@@ -201,7 +201,7 @@ SceneFeatureSet detectSceneFeatures(const std::vector<tinygltf::Material>& mater
       set.enable(SceneFeatureSet::eDispersion);
     if(hasExt(ext, KHR_MATERIALS_DIFFUSE_TRANSMISSION_EXTENSION_NAME))
       set.enable(SceneFeatureSet::eDiffuseTransmission);
-    if(hasExt(ext, EXT_materials_retroreflection_EXTENSION_NAME))
+    if(hasExt(ext, KHR_MATERIALS_RETROREFLECTION_EXTENSION_NAME))
       set.enable(SceneFeatureSet::eRetroreflection);
     if(hasExt(ext, KHR_MATERIALS_UNLIT_EXTENSION_NAME))
       set.enable(SceneFeatureSet::eUnlit);
