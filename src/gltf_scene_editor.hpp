@@ -19,6 +19,7 @@
 
 #pragma once
 
+#include <array>
 #include <optional>
 #include <string>
 #include <unordered_map>
@@ -41,6 +42,72 @@ struct SceneGraphSnapshot
   std::vector<tinygltf::Animation> animations;
   std::vector<tinygltf::Skin>      skins;
   std::vector<tinygltf::Light>     lights;
+};
+
+// Procedural primitive kinds that can be appended to a live scene.
+//
+// To add a new kind (e.g. cone, torus):
+//   1. add an enum value here,
+//   2. add a row to kPrimitiveKinds below (drives every UI menu and the display name),
+//   3. add a case to addPrimitiveMesh() that generates the geometry.
+// No UI code needs to change - all menus iterate kPrimitiveKinds.
+enum class PrimitiveKind
+{
+  ePlane,
+  eCube,
+  eSphere,
+};
+
+// Parameters for a procedural primitive. Interpretation depends on the kind:
+//   ePlane  : size = width & depth, subdivU = steps
+//   eCube   : size = edge length
+//   eSphere : size = diameter, subdivU = sectors, subdivV = stacks
+struct PrimitiveParams
+{
+  float size    = 1.0f;
+  int   subdivU = 20;
+  int   subdivV = 20;
+};
+
+// Single source of truth for the available primitives: pairs a kind with its display name (also used
+// to name the generated mesh/material/node). UI menus iterate this; primitiveKindName() looks it up.
+struct PrimitiveKindInfo
+{
+  PrimitiveKind kind;
+  const char*   name;
+};
+inline constexpr std::array<PrimitiveKindInfo, 3> kPrimitiveKinds{{
+    {PrimitiveKind::ePlane, "Plane"},
+    {PrimitiveKind::eCube, "Cube"},
+    {PrimitiveKind::eSphere, "Sphere"},
+}};
+
+// Human-readable name for a primitive kind (falls back to "Primitive" for an unknown value).
+const char* primitiveKindName(PrimitiveKind kind);
+
+// Single source of truth for the punctual light kinds (KHR_lights_punctual) that can be added to a
+// live scene: pairs the glTF light.type string with a display name (also used to name the node/light).
+// UI menus iterate this so the light list is defined in exactly one place, mirroring kPrimitiveKinds.
+struct LightKindInfo
+{
+  const char* type;  // glTF light.type: "point" | "directional" | "spot"
+  const char* name;  // display name and default node/light name
+};
+inline constexpr std::array<LightKindInfo, 3> kLightKinds{{
+    {"point", "Point Light"},
+    {"directional", "Directional Light"},
+    {"spot", "Spot Light"},
+}};
+
+// Pre-append sizes of the model vectors touched by addPrimitiveMesh(). Used by the undo command
+// to truncate the appended tail back to its original state (append is purely additive at the tail).
+struct ModelTailSizes
+{
+  size_t meshes      = 0;
+  size_t materials   = 0;
+  size_t accessors   = 0;
+  size_t bufferViews = 0;
+  size_t buffers     = 0;
 };
 
 /*-------------------------------------------------------------------------------------------------
@@ -85,9 +152,28 @@ public:
   [[nodiscard]] int duplicateNode(int originalIndex, bool reparse = true);
   void              deleteNode(int nodeIndex);
 
+  // ---------- Procedural primitives ----------
+  // Appends a plane/cube/sphere as new glTF geometry (buffer + bufferViews + accessors + material +
+  // mesh) plus a node (child of parentIndex, or a scene root when parentIndex < 0). Returns the new
+  // node index, or -1 on failure. Calls parseScene(); the new geometry is picked up on the next GPU sync.
+  [[nodiscard]] int addPrimitiveMesh(PrimitiveKind kind, const PrimitiveParams& params, int parentIndex = -1);
+
+  // Truncate the appended tail of the model vectors back to the given sizes (undo of addPrimitiveMesh).
+  // Safe because addPrimitiveMesh only appends at the tail. Does not call parseScene(); undo truncates
+  // first, then restoreFromSnapshot() reparses once against the final model.
+  void truncateGeometryTail(const ModelTailSizes& sizes);
+
   // ---------- Hierarchy ----------
   void               setNodeParent(int childIndex, int newParentIndex);
   [[nodiscard]] bool wouldCreateCycle(int childIndex, int newParentIndex) const;
+
+  // ---------- External assets (glTF 2.1) ----------
+  // "Break the lock": make a referenced external asset editable. Removes the read-only marker from
+  // every merged node and drops the `externalAsset` link on the instance node(s). Because instances
+  // of the same source share geometry/materials, this necessarily applies to ALL instances of that
+  // asset at once (nodeIndex may be an instance node or any read-only node within it). The unlocked
+  // content is then saved inline. Returns true if anything was unlocked.
+  bool makeExternalAssetEditable(int nodeIndex);
 
   // ---------- Transforms ----------
   void setNodeTRS(int nodeIndex, const glm::vec3& translation, const glm::quat& rotation, const glm::vec3& scale);
@@ -117,6 +203,12 @@ public:
 private:
   Scene& m_scene;
 
+  // Referenced external-asset subtrees (glTF 2.1) are read-only. Returns true (and logs) when an
+  // edit on nodeIndex must be blocked; call sites early-out on true.
+  [[nodiscard]] bool blockIfNodeReadOnly(int nodeIndex, const char* op) const;
+
+  // Produce a unique node name from a base, using a " (N)" suffix (stripping any existing one).
+  [[nodiscard]] std::string makeUniqueNodeName(const std::string& baseName) const;
   int  duplicateNodeRecursive(int originalIndex, int newParentIndex, std::unordered_map<int, int>& nodeMap);
   void collectDescendantIndices(int nodeIndex, std::vector<int>& indices) const;
   void deleteNodeRecursive(int nodeIndex);

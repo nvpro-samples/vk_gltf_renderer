@@ -26,7 +26,17 @@ cd build
 ctest -C Release --output-on-failure
 ```
 
+> CTest runs the **unit tests** only (`vk_gltf_renderer_tests`, registered via
+> `gtest_discover_tests`). The Google Benchmark microbenchmarks
+> (`vk_gltf_renderer_benchmarks`) are not registered with CTest — run that executable directly
+> (see [Running Benchmarks](#running-benchmarks)).
+
 ### Direct Execution
+
+> Paths below assume a multi-config generator (Visual Studio). On single-config generators
+> (Ninja/Makefiles, typical on Linux) the binaries are in `_bin/<Config>/` without the `.exe`
+> suffix, e.g. `_bin/Release/vk_gltf_renderer_tests`.
+
 ```bash
 # Run all tests
 _bin/Release/vk_gltf_renderer_tests.exe
@@ -47,8 +57,8 @@ _bin/Release/vk_gltf_renderer_tests.exe --gtest_color=yes --gtest_print_time=1
 # Run all benchmarks
 _bin/Release/vk_gltf_renderer_benchmarks.exe
 
-# Run specific benchmark
-_bin/Release/vk_gltf_renderer_benchmarks.exe --benchmark_filter=SceneLoad
+# Run specific benchmark (substring match on the registered name, e.g. BM_SceneLoad_Simple)
+_bin/Release/vk_gltf_renderer_benchmarks.exe --benchmark_filter=BM_SceneLoad
 
 # Run with repetitions for statistical accuracy
 _bin/Release/vk_gltf_renderer_benchmarks.exe --benchmark_repetitions=10
@@ -58,15 +68,32 @@ _bin/Release/vk_gltf_renderer_benchmarks.exe --benchmark_repetitions=10
 
 ```
 tests/
-├── CMakeLists.txt              # Test build configuration
+├── CMakeLists.txt              # Test build configuration (authoritative list of test sources)
 ├── README.md                   # This file
 ├── test_main.cpp               # Test entry point
-├── test_basic.cpp              # Basic scene loading tests
 ├── benchmark_main.cpp          # Benchmark entry point
+├── test_basic.cpp              # Basic scene loading
+├── test_roundtrip.cpp          # Load → save → reload fidelity
+├── test_features_preserved.cpp # Features/extensions survive round-trip
+├── test_model_primary.cpp      # Primary-model selection
+├── test_basic_editing.cpp      # Node add/delete/duplicate editing
+├── test_index_remapping_basic.cpp / _advanced.cpp # Index remapping after edits
+├── test_dirty_flags_and_render_nodes.cpp # Dirty-flag → render-node sync
+├── test_node_hierarchy_operations.cpp    # Reparent / hierarchy ops
+├── test_children_order_preservation.cpp  # Child ordering stability
+├── test_animation_and_validation.cpp     # Animation + scene validation
+├── test_animation_update.cpp / test_compute_animation.cpp # CPU / GPU animation
+├── test_error_paths.cpp        # Error handling
+├── test_material_cache.cpp     # Material cache
+├── test_extensions_metadata.cpp # Extension metadata
+├── test_primitives.cpp         # Procedural primitives
 └── common/
     ├── test_utils.hpp          # Test utilities header
     └── test_utils.cpp          # Test utilities implementation
 ```
+
+> The list above is a snapshot; `tests/CMakeLists.txt` is the source of truth for
+> which test files are built.
 
 ## Adding New Tests
 

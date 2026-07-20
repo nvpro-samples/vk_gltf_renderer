@@ -1,11 +1,11 @@
 # glTF Resources
 
-This document provides a curated collection of resources to support work with the glTF 3D file format. It includes links to models, tools, references, and tutorials, offering a comprehensive starting point for exploring and utilizing glTF assets in professional workflows.
+> **For users.** A curated collection of external links (models, HDRIs, specifications, and tools) to support work with the glTF 3D file format — a starting point for exploring and using glTF assets.
 
 
 ## glTF Models
 
-* **Models downloadable from CMake's "Configure" action** : Look into CMakeLists.txt in section "*Adding download resources*" around lne 287 : you can uncomment models we provided for our samples. They will be downloaded in the folder *_downloaded_resources*
+* **Models downloadable from CMake's "Configure" action** : Look into `CMakeLists.txt`, in the "*Adding download resources*" section : you can uncomment models we provided for our samples. They will be downloaded into the *_downloaded_resources* folder.
 * [glTF Sample Assets](https://github.com/KhronosGroup/glTF-Sample-Assets) : glTF V2.0 Sample Assets
 * [Sketchfab](https://sketchfab.com/3d-models?features=downloadable&sort_by=-likeCount) : A huge collection of downloadable models.
 * [Polycam](https://poly.cam/3d-models/gltf-models) : GLTF 3D Models

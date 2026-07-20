@@ -424,6 +424,76 @@ std::string AddLightCommand::description() const
 }
 
 //--------------------------------------------------------------------------------------------------
+// AddPrimitiveCommand
+//--------------------------------------------------------------------------------------------------
+
+AddPrimitiveCommand::AddPrimitiveCommand(nvvkgltf::Scene&                 scene,
+                                         nvvkgltf::PrimitiveKind          kind,
+                                         const nvvkgltf::PrimitiveParams& params,
+                                         int                              parentIndex,
+                                         SceneSelection*                  selection)
+    : m_scene(scene)
+    , m_kind(kind)
+    , m_params(params)
+    , m_parentIndex(parentIndex)
+    , m_selection(selection)
+{
+  // A freshly-constructed Scene has no scene container. addPrimitiveMesh() creates one in execute(),
+  // but the pre-add snapshot below runs first: snapshotForDelete() indexes scenes[currentScene] and
+  // would read past an empty vector. Initialize the container here (mirrors addPrimitiveMesh's own
+  // guard) so the snapshot/undo path is well-defined for the very first primitive of an empty scene.
+  tinygltf::Model& model = m_scene.getModel();
+  if(model.scenes.empty())
+    model.scenes.emplace_back();
+
+  // Capture the pre-add tail sizes and node graph so undo can fully remove the appended geometry.
+  m_tailSizes.meshes      = model.meshes.size();
+  m_tailSizes.materials   = model.materials.size();
+  m_tailSizes.accessors   = model.accessors.size();
+  m_tailSizes.bufferViews = model.bufferViews.size();
+  m_tailSizes.buffers     = model.buffers.size();
+  m_snapshot              = std::make_unique<nvvkgltf::SceneGraphSnapshot>(m_scene.editor().snapshotForDelete());
+}
+
+AddPrimitiveCommand::~AddPrimitiveCommand() = default;
+
+void AddPrimitiveCommand::execute()
+{
+  m_newNodeIndex = m_scene.editor().addPrimitiveMesh(m_kind, m_params, m_parentIndex);
+  if(m_newNodeIndex < 0 || !m_selection)
+    return;
+
+  // Select the primitive itself so its material is immediately editable in the Inspector. Selecting a
+  // primitive also carries the parent-node context (SceneSelection stores the node index), so the node
+  // is highlighted too. The primitive we just created is primitive 0 of the new node's single mesh.
+  const int primIdx       = 0;
+  const int meshIdx       = m_scene.getModel().nodes[m_newNodeIndex].mesh;
+  const int renderNodeIdx = m_scene.getRenderNodeForPrimitive(m_newNodeIndex, primIdx);
+  if(renderNodeIdx >= 0)
+    m_selection->selectPrimitive(renderNodeIdx, m_newNodeIndex, primIdx, meshIdx);
+  else
+    m_selection->selectNode(m_newNodeIndex);  // fallback: primitive not yet in the render list
+}
+
+void AddPrimitiveCommand::undo()
+{
+  if(m_selection)
+    m_selection->clearSelection();
+  // Truncate first so restore's single parseScene() sees the final mesh/accessor set.
+  // (buildPrimitiveKeyMap walks all meshes; restoring then truncating would leave an orphan
+  // mesh in the render-primitive list until a second reparse.)
+  m_scene.editor().truncateGeometryTail(m_tailSizes);
+  if(m_snapshot)
+    m_scene.editor().restoreFromSnapshot(*m_snapshot);
+  m_newNodeIndex = -1;
+}
+
+std::string AddPrimitiveCommand::description() const
+{
+  return fmt::format("Add {}", nvvkgltf::primitiveKindName(m_kind));
+}
+
+//--------------------------------------------------------------------------------------------------
 // EditLightCommand
 //--------------------------------------------------------------------------------------------------
 

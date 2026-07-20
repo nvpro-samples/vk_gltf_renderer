@@ -54,11 +54,13 @@ void appendPathTracerOptimalMacros(std::vector<std::pair<std::string, std::strin
 /*-------------------------------------------------------------------------------------------------
 # function appendPathTracerDlssShaderMacro
 
-> Set `USE_DLSS_SHADER` for every path-tracer file compile (hot-reload and variant rebuild).
-> Matches the CMake build when optimal mode is off; in optimal mode uses `SceneFeatureSet::eDlssGuide`.
+> Set the two path-tracer denoiser gates for every file compile (hot-reload and variant rebuild),
+> both driven by runtime state independent of optimal mode:
+>  - `USE_GUIDE_SHADER` from `SceneFeatureSet::eDlssGuide` (DLSS **or** OptiX active): guide-buffer
+>    capture code (albedo/normal shared by both denoisers).
+>  - `USE_DLSS_SHADER` from `dlssActive` (DLSS active only): DLSS-specific path, including the gate
+>    that compiles out the per-frame multisample loop to reduce register pressure.
 -------------------------------------------------------------------------------------------------*/
-void appendPathTracerDlssShaderMacro(std::vector<std::pair<std::string, std::string>>& macros,
-                                     bool                                              optimalShader,
-                                     const SceneFeatureSet&                            features);
+void appendPathTracerDlssShaderMacro(std::vector<std::pair<std::string, std::string>>& macros, const SceneFeatureSet& features, bool dlssActive);
 
 }  // namespace nvvkgltf

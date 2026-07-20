@@ -27,6 +27,8 @@
 
 #include "tinygltf_utils.hpp"
 
+#include <cstdlib>
+#include <cstring>
 #include <unordered_set>
 
 #include <glm/gtx/norm.hpp>
@@ -378,6 +380,38 @@ void tinygltf::utils::setNodeVisibility(tinygltf::Node& node, const KHR_node_vis
 {
   tinygltf::Value& ext = tinygltf::utils::ensureExtension(node.extensions, KHR_NODE_VISIBILITY_EXTENSION_NAME);
   tinygltf::utils::setValue(ext, "visible", visibility.visible);
+}
+
+KHR_node_hoverability tinygltf::utils::getNodeHoverability(const tinygltf::Node& node)
+{
+  KHR_node_hoverability gnode;
+  if(const auto* ext = tinygltf::utils::findExtension(node.extensions, KHR_NODE_HOVERABILITY_EXTENSION_NAME))
+  {
+    tinygltf::utils::getValue(*ext, "hoverable", gnode.hoverable);
+  }
+  return gnode;
+}
+
+void tinygltf::utils::setNodeHoverability(tinygltf::Node& node, const KHR_node_hoverability& hoverability)
+{
+  tinygltf::Value& ext = tinygltf::utils::ensureExtension(node.extensions, KHR_NODE_HOVERABILITY_EXTENSION_NAME);
+  tinygltf::utils::setValue(ext, "hoverable", hoverability.hoverable);
+}
+
+KHR_node_selectability tinygltf::utils::getNodeSelectability(const tinygltf::Node& node)
+{
+  KHR_node_selectability gnode;
+  if(const auto* ext = tinygltf::utils::findExtension(node.extensions, KHR_NODE_SELECTABILITY_EXTENSION_NAME))
+  {
+    tinygltf::utils::getValue(*ext, "selectable", gnode.selectable);
+  }
+  return gnode;
+}
+
+void tinygltf::utils::setNodeSelectability(tinygltf::Node& node, const KHR_node_selectability& selectability)
+{
+  tinygltf::Value& ext = tinygltf::utils::ensureExtension(node.extensions, KHR_NODE_SELECTABILITY_EXTENSION_NAME);
+  tinygltf::utils::setValue(ext, "selectable", selectability.selectable);
 }
 
 KHR_materials_pbrSpecularGlossiness tinygltf::utils::getPbrSpecularGlossiness(const tinygltf::Material& tmat)
@@ -754,6 +788,57 @@ std::string tinygltf::utils::getTextureUiLabel(const tinygltf::Model& model, int
   }
 
   return "Texture " + std::to_string(textureIndex);
+}
+
+int tinygltf::utils::appendAccessor(tinygltf::Model& model,
+                                    int              bufferIndex,
+                                    const void*      data,
+                                    size_t           dataBytes,
+                                    int              componentType,
+                                    int              type,
+                                    size_t           count,
+                                    int              target)
+{
+  if(bufferIndex < 0 || bufferIndex >= static_cast<int>(model.buffers.size()))
+  {
+    LOGE("appendAccessor: invalid bufferIndex %d (buffers=%zu)\n", bufferIndex, model.buffers.size());
+    std::abort();
+  }
+  if(data == nullptr && dataBytes != 0)
+  {
+    LOGE("appendAccessor: data is nullptr but dataBytes is non-zero\n");
+    std::abort();
+  }
+
+  tinygltf::Buffer& buf = model.buffers[bufferIndex];
+
+  const size_t currentOffset = buf.data.size();
+  const size_t padding       = (4 - (currentOffset % 4)) % 4;  // keep 4-byte alignment
+  buf.data.resize(currentOffset + padding);
+  const size_t dataOffset = buf.data.size();
+  buf.data.resize(dataOffset + dataBytes);
+  if(dataBytes != 0)
+    std::memcpy(buf.data.data() + dataOffset, data, dataBytes);
+
+  tinygltf::BufferView bv;
+  bv.buffer         = bufferIndex;
+  bv.byteOffset     = dataOffset;
+  bv.byteLength     = dataBytes;
+  bv.byteStride     = 0;
+  bv.target         = target;
+  const int bvIndex = static_cast<int>(model.bufferViews.size());
+  model.bufferViews.push_back(bv);
+
+  tinygltf::Accessor acc;
+  acc.bufferView     = bvIndex;
+  acc.byteOffset     = 0;
+  acc.componentType  = componentType;
+  acc.type           = type;
+  acc.count          = count;
+  const int accIndex = static_cast<int>(model.accessors.size());
+  model.accessors.push_back(acc);
+
+  return accIndex;
 }
 
 // Creating missing tangent attribute

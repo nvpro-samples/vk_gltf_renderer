@@ -26,13 +26,17 @@
 
 #include <algorithm>
 #include <functional>
+#include <limits>
 
 #include <fmt/format.h>
 
 #include <nvutils/logger.hpp>
+#include <nvutils/primitives.hpp>
 
 #include "gltf_scene_editor.hpp"
 #include "gltf_scene_animation.hpp"
+#include "gltf_compact_model.hpp"
+#include "tinygltf_utils.hpp"
 
 namespace nvvkgltf {
 
@@ -94,6 +98,16 @@ std::string SceneEditor::getNodeName(int nodeIndex) const
   return getNode(nodeIndex).name;
 }
 
+bool SceneEditor::blockIfNodeReadOnly(int nodeIndex, const char* op) const
+{
+  if(m_scene.isNodeReadOnly(nodeIndex))
+  {
+    LOGW("Cannot %s node %d: it belongs to a referenced external asset (read-only)\n", op, nodeIndex);
+    return true;
+  }
+  return false;
+}
+
 void SceneEditor::renameNode(int nodeIndex, const std::string& name)
 {
   if(!isValidNodeIndex(nodeIndex))
@@ -101,6 +115,8 @@ void SceneEditor::renameNode(int nodeIndex, const std::string& name)
     LOGW("Cannot rename invalid node\n");
     return;
   }
+  if(blockIfNodeReadOnly(nodeIndex, "rename"))
+    return;
   getNodeForEdit(nodeIndex).name = name;
 }
 
@@ -252,6 +268,8 @@ void SceneEditor::setNodeTRS(int nodeIndex, const glm::vec3& translation, const 
     LOGW("Cannot set transformation on invalid node index: %d\n", nodeIndex);
     return;
   }
+  if(blockIfNodeReadOnly(nodeIndex, "transform"))
+    return;
 
   tinygltf::Node& node = m_scene.m_model.nodes[nodeIndex];
   tinygltf::utils::setNodeTRS(node, translation, rotation, scale);
@@ -271,6 +289,8 @@ int SceneEditor::duplicateNode(int originalIndex, bool reparse)
     LOGW("Cannot duplicate invalid node index: %d\n", originalIndex);
     return -1;
   }
+  if(blockIfNodeReadOnly(originalIndex, "duplicate"))
+    return -1;
 
   int originalParent =
       (originalIndex < static_cast<int>(m_scene.m_nodeParents.size())) ? m_scene.m_nodeParents[originalIndex] : -1;
@@ -280,6 +300,9 @@ int SceneEditor::duplicateNode(int originalIndex, bool reparse)
 
   if(newIdx == -1)
     return -1;
+
+  // Give the duplicated root a fresh, unique, human-friendly name ("fox1 (1)", "fox1 (2)", ...).
+  m_scene.m_model.nodes[newIdx].name = makeUniqueNodeName(m_scene.m_model.nodes[newIdx].name);
 
   // Remap skins: create new skin objects with joint indices pointing to duplicated nodes
   for(auto& [origIdx, dupIdx] : nodeMap)
@@ -350,6 +373,40 @@ int SceneEditor::duplicateNode(int originalIndex, bool reparse)
   return newIdx;
 }
 
+// Build a name that is unique among all current node names, using a " (N)" suffix.
+// A trailing " (N)" on the base is stripped first, so duplicating "fox1 (2)" gives
+// "fox1 (3)" instead of "fox1 (2) (1)". Unnamed nodes get the "Node" stem.
+std::string SceneEditor::makeUniqueNodeName(const std::string& baseName) const
+{
+  // Derive the stem: strip a trailing " (N)" where N is one or more digits.
+  std::string stem = baseName.empty() ? "Node" : baseName;
+  if(stem.back() == ')')
+  {
+    size_t open = stem.rfind(" (");
+    if(open != std::string::npos)
+    {
+      bool allDigits = (open + 2 < stem.size() - 1);  // at least one char between "(" and ")"
+      for(size_t i = open + 2; allDigits && i + 1 < stem.size(); i++)
+        allDigits = (stem[i] >= '0' && stem[i] <= '9');
+      if(allDigits)
+        stem = stem.substr(0, open);
+    }
+  }
+
+  // Collect existing names once, then pick the smallest free suffix.
+  std::unordered_set<std::string> used;
+  used.reserve(m_scene.m_model.nodes.size());
+  for(const tinygltf::Node& n : m_scene.m_model.nodes)
+    used.insert(n.name);
+
+  for(int i = 1;; i++)
+  {
+    std::string candidate = stem + " (" + std::to_string(i) + ")";
+    if(used.find(candidate) == used.end())
+      return candidate;
+  }
+}
+
 int SceneEditor::duplicateNodeRecursive(int originalIndex, int newParentIndex, std::unordered_map<int, int>& nodeMap)
 {
   if(!isValidNodeIndex(originalIndex))
@@ -362,7 +419,6 @@ int SceneEditor::duplicateNodeRecursive(int originalIndex, int newParentIndex, s
   glm::mat4        originalLocalMatrix = m_scene.m_nodesLocalMatrices[originalIndex];
   glm::mat4        originalWorldMatrix = m_scene.m_nodesWorldMatrices[originalIndex];
 
-  newNode.name = newNode.name + "_copy";
   newNode.children.clear();
 
   int newIdx = static_cast<int>(m_scene.m_model.nodes.size());
@@ -454,8 +510,155 @@ int SceneEditor::addLightNode(const std::string& lightType, const std::string& n
   return nodeIndex;
 }
 
+//--------------------------------------------------------------------------------------------------
+// Procedural primitives
+//--------------------------------------------------------------------------------------------------
+
+const char* primitiveKindName(PrimitiveKind kind)
+{
+  for(const auto& info : kPrimitiveKinds)
+    if(info.kind == kind)
+      return info.name;
+  return "Primitive";
+}
+
+int SceneEditor::addPrimitiveMesh(PrimitiveKind kind, const PrimitiveParams& params, int parentIndex)
+{
+  if(parentIndex >= 0 && blockIfNodeReadOnly(parentIndex, "add primitive to"))
+    return -1;
+
+  // A freshly-constructed Scene has no scene container yet; addNode() below needs one to add a root.
+  if(m_scene.m_model.scenes.empty())
+    m_scene.m_model.scenes.emplace_back();
+
+  const std::string baseName = primitiveKindName(kind);
+
+  // 1. Generate the procedural geometry (positions/normals/uv only - no tangents or colors).
+  nvutils::PrimitiveMesh mesh;
+  switch(kind)
+  {
+    case PrimitiveKind::ePlane:
+      mesh = nvutils::createPlane(std::max(1, params.subdivU), params.size, params.size);
+      break;
+    case PrimitiveKind::eCube:
+      mesh = nvutils::createCube(params.size, params.size, params.size);
+      break;
+    case PrimitiveKind::eSphere:
+      mesh = nvutils::createSphereUv(params.size * 0.5f, std::max(3, params.subdivU), std::max(2, params.subdivV));
+      break;
+  }
+
+  if(mesh.vertices.empty() || mesh.triangles.empty())
+  {
+    LOGW("addPrimitiveMesh: generated an empty mesh\n");
+    return -1;
+  }
+
+  tinygltf::Model& model = m_scene.m_model;
+
+  // 2. De-interleave attributes, flatten indices, and compute the position AABB (required on POSITION).
+  const size_t           vtxCount = mesh.vertices.size();
+  std::vector<glm::vec3> positions(vtxCount);
+  std::vector<glm::vec3> normals(vtxCount);
+  std::vector<glm::vec2> texcoords(vtxCount);
+  glm::vec3              bmin(std::numeric_limits<float>::max());
+  glm::vec3              bmax(std::numeric_limits<float>::lowest());
+  for(size_t i = 0; i < vtxCount; i++)
+  {
+    positions[i] = mesh.vertices[i].pos;
+    normals[i]   = mesh.vertices[i].nrm;
+    texcoords[i] = mesh.vertices[i].tex;
+    bmin         = glm::min(bmin, mesh.vertices[i].pos);
+    bmax         = glm::max(bmax, mesh.vertices[i].pos);
+  }
+  std::vector<uint32_t> indices(mesh.triangles.size() * 3);
+  for(size_t t = 0; t < mesh.triangles.size(); t++)
+  {
+    indices[t * 3 + 0] = mesh.triangles[t].indices.x;
+    indices[t * 3 + 1] = mesh.triangles[t].indices.y;
+    indices[t * 3 + 2] = mesh.triangles[t].indices.z;
+  }
+
+  // 3. Dedicated buffer so an undo can pop the whole append cleanly (see truncateGeometryTail).
+  const int bufferIndex = static_cast<int>(model.buffers.size());
+  model.buffers.emplace_back();
+  model.buffers[bufferIndex].name = baseName + " Buffer";
+
+  const int posAcc                  = tinygltf::utils::appendAccessor(model, bufferIndex, positions.data(),
+                                                                      positions.size() * sizeof(glm::vec3), TINYGLTF_COMPONENT_TYPE_FLOAT,
+                                                                      TINYGLTF_TYPE_VEC3, positions.size(), TINYGLTF_TARGET_ARRAY_BUFFER);
+  model.accessors[posAcc].minValues = {bmin.x, bmin.y, bmin.z};
+  model.accessors[posAcc].maxValues = {bmax.x, bmax.y, bmax.z};
+
+  const int nrmAcc = tinygltf::utils::appendAccessor(model, bufferIndex, normals.data(),
+                                                     normals.size() * sizeof(glm::vec3), TINYGLTF_COMPONENT_TYPE_FLOAT,
+                                                     TINYGLTF_TYPE_VEC3, normals.size(), TINYGLTF_TARGET_ARRAY_BUFFER);
+  const int texAcc = tinygltf::utils::appendAccessor(model, bufferIndex, texcoords.data(),
+                                                     texcoords.size() * sizeof(glm::vec2), TINYGLTF_COMPONENT_TYPE_FLOAT,
+                                                     TINYGLTF_TYPE_VEC2, texcoords.size(), TINYGLTF_TARGET_ARRAY_BUFFER);
+  const int idxAcc = tinygltf::utils::appendAccessor(model, bufferIndex, indices.data(), indices.size() * sizeof(uint32_t),
+                                                     TINYGLTF_COMPONENT_TYPE_UNSIGNED_INT, TINYGLTF_TYPE_SCALAR,
+                                                     indices.size(), TINYGLTF_TARGET_ELEMENT_ARRAY_BUFFER);
+
+  // 4. One new material per primitive (mid-grey dielectric), so each can be recolored independently.
+  tinygltf::Material mat;
+  mat.name                                 = baseName + " Material";
+  mat.pbrMetallicRoughness.baseColorFactor = {0.8, 0.8, 0.8, 1.0};
+  mat.pbrMetallicRoughness.metallicFactor  = 0.0;
+  mat.pbrMetallicRoughness.roughnessFactor = 0.5;
+  mat.doubleSided                          = (kind == PrimitiveKind::ePlane);  // planes are visible from both sides
+  const int matIndex                       = static_cast<int>(model.materials.size());
+  model.materials.push_back(mat);
+
+  // 5. Primitive + mesh.
+  tinygltf::Primitive prim;
+  prim.mode                     = TINYGLTF_MODE_TRIANGLES;
+  prim.attributes["POSITION"]   = posAcc;
+  prim.attributes["NORMAL"]     = nrmAcc;
+  prim.attributes["TEXCOORD_0"] = texAcc;
+  prim.indices                  = idxAcc;
+  prim.material                 = matIndex;
+
+  tinygltf::Mesh newMesh;
+  newMesh.name = baseName;
+  newMesh.primitives.push_back(prim);
+  const int meshIndex = static_cast<int>(model.meshes.size());
+  model.meshes.push_back(newMesh);
+
+  // 6. Node referencing the new mesh (child of parent, or scene root).
+  const int nodeIndex = addNode(baseName, parentIndex);
+  if(nodeIndex < 0)
+    return -1;
+  model.nodes[nodeIndex].mesh = meshIndex;
+
+  // 7. Rebuild render data; the primitive-count change flags a geometry rebuild on the next GPU sync.
+  m_scene.parseScene();
+
+  LOGI("Added %s primitive as node %d (mesh %d, material %d)\n", baseName.c_str(), nodeIndex, meshIndex, matIndex);
+  return nodeIndex;
+}
+
+void SceneEditor::truncateGeometryTail(const ModelTailSizes& sizes)
+{
+  // Geometry-only resize: does not call parseScene(). Undo truncates first, then
+  // restoreFromSnapshot() reparses once against the final model (see AddPrimitiveCommand::undo).
+  auto& model = m_scene.m_model;
+  if(sizes.meshes <= model.meshes.size())
+    model.meshes.resize(sizes.meshes);
+  if(sizes.materials <= model.materials.size())
+    model.materials.resize(sizes.materials);
+  if(sizes.accessors <= model.accessors.size())
+    model.accessors.resize(sizes.accessors);
+  if(sizes.bufferViews <= model.bufferViews.size())
+    model.bufferViews.resize(sizes.bufferViews);
+  if(sizes.buffers <= model.buffers.size())
+    model.buffers.resize(sizes.buffers);
+}
+
 void SceneEditor::deleteNode(int nodeIndex)
 {
+  if(blockIfNodeReadOnly(nodeIndex, "delete"))
+    return;
   deleteNodeRecursive(nodeIndex);
   m_scene.parseScene();
 }
@@ -555,6 +758,71 @@ bool SceneEditor::wouldCreateCycle(int childIndex, int newParentIndex) const
   return false;
 }
 
+//--------------------------------------------------------------------------------------------------
+// External assets (glTF 2.1): "break the lock" -- make a referenced asset editable.
+//--------------------------------------------------------------------------------------------------
+bool SceneEditor::makeExternalAssetEditable(int nodeIndex)
+{
+  if(!isValidNodeIndex(nodeIndex))
+  {
+    LOGW("Cannot make editable: invalid node index %d\n", nodeIndex);
+    return false;
+  }
+
+  // Resolve the instance node (the editable node carrying `externalAsset`). When a read-only merged
+  // child was clicked, walk up to its instance-node ancestor.
+  int instance = nodeIndex;
+  while(instance >= 0 && m_scene.m_model.nodes[instance].externalAsset < 0)
+    instance = (instance < static_cast<int>(m_scene.m_nodeParents.size())) ? m_scene.m_nodeParents[instance] : -1;
+
+  if(instance < 0)
+  {
+    LOGW("Cannot make editable: node %d is not part of a referenced external asset\n", nodeIndex);
+    return false;
+  }
+
+  const int ea = m_scene.m_model.nodes[instance].externalAsset;
+  if(ea < 0 || ea >= static_cast<int>(m_scene.m_model.externalAssets.size()))
+    return false;
+  const int fileIndex = m_scene.m_model.externalAssets[ea].file;
+
+  // Unlock every instance that shares this source file: the merged subtrees become editable and the
+  // instance nodes drop their `externalAsset` link, so the now-owned content is saved inline instead
+  // of being re-externalized. Geometry/materials remain SHARED between the instances by design --
+  // editing a shared material therefore affects all instances of the asset, which is the intent.
+  int unlockedInstances = 0;
+  for(int n = 0; n < static_cast<int>(m_scene.m_model.nodes.size()); ++n)
+  {
+    const int nea = m_scene.m_model.nodes[n].externalAsset;
+    if(nea < 0 || nea >= static_cast<int>(m_scene.m_model.externalAssets.size()))
+      continue;
+    if(m_scene.m_model.externalAssets[nea].file != fileIndex)
+      continue;
+
+    m_scene.m_model.nodes[n].externalAsset = -1;
+
+    std::vector<int> subtree;
+    collectDescendantIndices(n, subtree);
+    for(int d : subtree)
+      Scene::clearExternalAssetMarker(m_scene.m_model.nodes[d]);
+    Scene::clearExternalAssetMarker(m_scene.m_model.nodes[n]);  // safety: instance node normally unmarked
+    ++unlockedInstances;
+  }
+
+  // Drop the now-orphaned externalAssets/files entries and remap the survivors, so the .gltf no
+  // longer carries a dead reference for the asset we just unlocked.
+  nvvkgltf::compactExternalAssetReferences(m_scene.m_model);
+
+  // Keep the provenance list's emptiness in sync with the model: once no external asset remains, the
+  // scene is a plain model (nothing else consumes the provenance detail). Emptiness must never lead
+  // model.externalAssets, or save() would flatten a scene that still has live references.
+  if(m_scene.m_model.externalAssets.empty())
+    m_scene.m_referencedAssets.clear();
+
+  LOGI("Made external asset editable (file %d): unlocked %d instance(s)\n", fileIndex, unlockedInstances);
+  return unlockedInstances > 0;
+}
+
 void SceneEditor::setNodeParent(int childIndex, int newParentIndex)
 {
   if(!isValidNodeIndex(childIndex))
@@ -562,12 +830,19 @@ void SceneEditor::setNodeParent(int childIndex, int newParentIndex)
     LOGW("Cannot move invalid node index: %d\n", childIndex);
     return;
   }
+  if(blockIfNodeReadOnly(childIndex, "reparent"))
+    return;
 
   if(newParentIndex != -1 && !isValidNodeIndex(newParentIndex))
   {
     LOGW("Cannot move to invalid parent index: %d\n", newParentIndex);
     return;
   }
+
+  // Reparenting appends to the destination parent's children list, so a read-only parent must be
+  // protected too (a read-only child is already blocked above). Scene-root moves (-1) have no parent.
+  if(newParentIndex != -1 && blockIfNodeReadOnly(newParentIndex, "reparent into"))
+    return;
 
   if(wouldCreateCycle(childIndex, newParentIndex))
   {
@@ -606,6 +881,9 @@ void SceneEditor::setNodeParent(int childIndex, int newParentIndex)
   m_scene.m_nodeParents[childIndex] = newParentIndex;
   m_scene.buildTopologicalLevels();
 
+  // Bump scene-graph revision to update GPU parent links after reparenting.
+  m_scene.bumpSceneGraphRevision();
+
   m_scene.markNodeDirty(childIndex);
   m_scene.updateNodeWorldMatrices();
 }
@@ -621,6 +899,8 @@ void SceneEditor::setNodeMesh(int nodeIndex, int meshIndex)
     LOGW("Cannot set mesh on invalid node index: %d\n", nodeIndex);
     return;
   }
+  if(blockIfNodeReadOnly(nodeIndex, "set mesh on"))
+    return;
 
   if(meshIndex < 0 || meshIndex >= static_cast<int>(m_scene.m_model.meshes.size()))
   {
@@ -640,6 +920,8 @@ void SceneEditor::clearNodeMesh(int nodeIndex)
   {
     return;
   }
+  if(blockIfNodeReadOnly(nodeIndex, "clear mesh on"))
+    return;
 
   tinygltf::Node& node = getNodeForEdit(nodeIndex);
   node.mesh            = -1;
@@ -653,6 +935,8 @@ void SceneEditor::setNodeCamera(int nodeIndex, int cameraIndex)
   {
     return;
   }
+  if(blockIfNodeReadOnly(nodeIndex, "set camera on"))
+    return;
 
   if(cameraIndex < 0 || cameraIndex >= static_cast<int>(m_scene.m_model.cameras.size()))
   {
@@ -670,6 +954,8 @@ void SceneEditor::clearNodeCamera(int nodeIndex)
   {
     return;
   }
+  if(blockIfNodeReadOnly(nodeIndex, "clear camera on"))
+    return;
 
   tinygltf::Node& node = getNodeForEdit(nodeIndex);
   node.camera          = -1;
@@ -681,6 +967,8 @@ void SceneEditor::setNodeSkin(int nodeIndex, int skinIndex)
   {
     return;
   }
+  if(blockIfNodeReadOnly(nodeIndex, "set skin on"))
+    return;
 
   if(skinIndex < 0 || skinIndex >= static_cast<int>(m_scene.m_model.skins.size()))
   {
@@ -698,6 +986,8 @@ void SceneEditor::clearNodeSkin(int nodeIndex)
   {
     return;
   }
+  if(blockIfNodeReadOnly(nodeIndex, "clear skin on"))
+    return;
 
   tinygltf::Node& node = getNodeForEdit(nodeIndex);
   node.skin            = -1;
@@ -885,6 +1175,11 @@ void SceneEditor::setPrimitiveMaterial(int meshIndex, int primIndex, int newMate
     LOGE("Invalid mesh index: %d\n", meshIndex);
     return;
   }
+  if(m_scene.isMeshReadOnly(meshIndex))
+  {
+    LOGW("Cannot set material on mesh %d: it belongs to a referenced external asset (read-only)\n", meshIndex);
+    return;
+  }
 
   tinygltf::Mesh& mesh = m_scene.m_model.meshes[meshIndex];
   if(primIndex < 0 || primIndex >= static_cast<int>(mesh.primitives.size()))
@@ -962,6 +1257,8 @@ int SceneEditor::duplicateMeshForNode(int meshIndex, int nodeIndex)
     LOGW("Cannot assign mesh to invalid node index: %d\n", nodeIndex);
     return -1;
   }
+  if(blockIfNodeReadOnly(nodeIndex, "duplicate mesh for"))
+    return -1;
 
   tinygltf::Mesh newMesh = m_scene.m_model.meshes[meshIndex];
   newMesh.name += "_copy";
@@ -986,6 +1283,8 @@ int SceneEditor::splitPrimitiveMaterial(int nodeIndex, int primIndex)
     LOGW("splitPrimitiveMaterial: invalid node index %d\n", nodeIndex);
     return -1;
   }
+  if(blockIfNodeReadOnly(nodeIndex, "split material on"))
+    return -1;
 
   int meshIdx = m_scene.m_model.nodes[nodeIndex].mesh;
   if(meshIdx < 0 || meshIdx >= static_cast<int>(m_scene.m_model.meshes.size()))
@@ -1078,6 +1377,8 @@ int SceneEditor::mergePrimitiveMaterial(int nodeIndex)
     LOGW("mergePrimitiveMaterial: invalid node index %d\n", nodeIndex);
     return -1;
   }
+  if(blockIfNodeReadOnly(nodeIndex, "merge material on"))
+    return -1;
 
   int meshIdx = m_scene.m_model.nodes[nodeIndex].mesh;
   if(meshIdx < 0 || meshIdx >= static_cast<int>(m_scene.m_model.meshes.size()))

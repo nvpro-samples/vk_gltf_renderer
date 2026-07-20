@@ -28,6 +28,7 @@
 #include "gltf_compact_model.hpp"
 #include "tinygltf_utils.hpp"
 #include <nvutils/logger.hpp>
+#include <algorithm>
 #include <set>
 #include <vector>
 
@@ -398,7 +399,13 @@ std::vector<int> buildRemapTable(const std::set<int>& usedSet, size_t originalSi
   std::vector<int> remap(originalSize, -1);
   int              newIdx = 0;
   for(int oldIdx : usedSet)
+  {
+    // Skip malformed/partially-edited references that fall outside the model array; without this a
+    // stray index (e.g. node.mesh past meshes.size()) would write out of bounds.
+    if(oldIdx < 0 || oldIdx >= static_cast<int>(originalSize))
+      continue;
     remap[oldIdx] = newIdx++;
+  }
   return remap;
 }
 
@@ -409,7 +416,13 @@ std::vector<T> extractUsedElements(const std::vector<T>& original, const std::se
   std::vector<T> result;
   result.reserve(usedSet.size());
   for(int oldIdx : usedSet)
+  {
+    // Skip out-of-range indices in lockstep with buildRemapTable so the new-index numbering the two
+    // produce stays consistent and no out-of-bounds element is read.
+    if(oldIdx < 0 || oldIdx >= static_cast<int>(original.size()))
+      continue;
     result.push_back(original[oldIdx]);
+  }
   return result;
 }
 
@@ -564,6 +577,278 @@ void logCompactionResults(size_t                 origMesh,
 }  // anonymous namespace
 
 //--------------------------------------------------------------------------------------------------
+// removeExternalAssetContent() - strip merged external-asset subtrees for re-externalization on save
+//--------------------------------------------------------------------------------------------------
+void removeExternalAssetContent(tinygltf::Model& model)
+{
+  const int nodeCount = static_cast<int>(model.nodes.size());
+
+  // Flag the merged (marked) nodes for removal.
+  std::vector<char> keep(nodeCount, 1);
+  bool              anyRemoved = false;
+  for(int i = 0; i < nodeCount; ++i)
+  {
+    if(nvvkgltf::Scene::hasExternalAssetMarker(model.nodes[i]))
+    {
+      keep[i]    = 0;
+      anyRemoved = true;
+    }
+  }
+  if(!anyRemoved)
+    return;  // no external-asset content merged in; nothing to strip
+
+  // old -> new node index for the survivors.
+  std::vector<int> newIdx(nodeCount, -1);
+  int              next = 0;
+  for(int i = 0; i < nodeCount; ++i)
+    if(keep[i])
+      newIdx[i] = next++;
+  auto remap = [&](int old) -> int { return (old >= 0 && old < nodeCount && keep[old]) ? newIdx[old] : -1; };
+
+  // Rebuild the node array (survivors only), remapping children.
+  std::vector<tinygltf::Node> newNodes;
+  newNodes.reserve(static_cast<size_t>(next));
+  for(int i = 0; i < nodeCount; ++i)
+  {
+    if(!keep[i])
+      continue;
+    tinygltf::Node   node = std::move(model.nodes[i]);
+    std::vector<int> children;
+    children.reserve(node.children.size());
+    for(int c : node.children)
+    {
+      const int m = remap(c);
+      if(m >= 0)
+        children.push_back(m);
+    }
+    node.children = std::move(children);
+    newNodes.push_back(std::move(node));
+  }
+  model.nodes = std::move(newNodes);
+
+  // Scene roots.
+  for(auto& scene : model.scenes)
+  {
+    std::vector<int> roots;
+    roots.reserve(scene.nodes.size());
+    for(int c : scene.nodes)
+    {
+      const int m = remap(c);
+      if(m >= 0)
+        roots.push_back(m);
+    }
+    scene.nodes = std::move(roots);
+  }
+
+  // Skin joints / skeleton (skins that become orphaned are dropped by the compaction pass below).
+  for(auto& skin : model.skins)
+  {
+    std::vector<int> joints;
+    joints.reserve(skin.joints.size());
+    for(int j : skin.joints)
+    {
+      const int m = remap(j);
+      if(m >= 0)
+        joints.push_back(m);
+    }
+    skin.joints   = std::move(joints);
+    skin.skeleton = remap(skin.skeleton);
+  }
+
+  // Animation channels: drop those targeting removed nodes; keep only animations that still have
+  // channels by rebuilding the list.
+  std::vector<tinygltf::Animation> keptAnimations;
+  keptAnimations.reserve(model.animations.size());
+  for(auto& anim : model.animations)
+  {
+    std::vector<tinygltf::AnimationChannel> channels;
+    channels.reserve(anim.channels.size());
+    for(auto& ch : anim.channels)
+    {
+      const int m = remap(ch.target_node);
+      if(m >= 0)
+      {
+        ch.target_node = m;
+        channels.push_back(ch);
+      }
+    }
+    anim.channels = std::move(channels);
+    if(!anim.channels.empty())
+      keptAnimations.push_back(std::move(anim));
+  }
+  model.animations = std::move(keptAnimations);
+
+  // Cascade-remove the now-orphaned meshes/materials/textures/images/samplers/skins/cameras/
+  // animations/lights (reachability from the surviving scene graph), then compact geometry buffers.
+  UsedResources used;
+  collectReferencedResources(model, used);
+
+  const size_t origMesh  = model.meshes.size();
+  const size_t origMat   = model.materials.size();
+  const size_t origTex   = model.textures.size();
+  const size_t origImg   = model.images.size();
+  const size_t origSamp  = model.samplers.size();
+  const size_t origSkin  = model.skins.size();
+  const size_t origCam   = model.cameras.size();
+  const size_t origAnim  = model.animations.size();
+  size_t       origLight = 0;
+  if(model.extensions.count("KHR_lights_punctual"))
+  {
+    const tinygltf::Value& ext = model.extensions.at("KHR_lights_punctual");
+    if(ext.Has("lights") && ext.Get("lights").IsArray())
+      origLight = ext.Get("lights").ArrayLen();
+  }
+
+  const std::vector<int> meshRemap     = buildRemapTable(used.meshes, origMesh);
+  const std::vector<int> materialRemap = buildRemapTable(used.materials, origMat);
+  const std::vector<int> textureRemap  = buildRemapTable(used.textures, origTex);
+  const std::vector<int> imageRemap    = buildRemapTable(used.images, origImg);
+  const std::vector<int> samplerRemap  = buildRemapTable(used.samplers, origSamp);
+  const std::vector<int> skinRemap     = buildRemapTable(used.skins, origSkin);
+  const std::vector<int> cameraRemap   = buildRemapTable(used.cameras, origCam);
+  const std::vector<int> lightRemap    = buildRemapTable(used.lights, origLight);
+
+  std::vector<tinygltf::Mesh>      newMeshes     = extractUsedElements(model.meshes, used.meshes);
+  std::vector<tinygltf::Material>  newMaterials  = extractUsedElements(model.materials, used.materials);
+  std::vector<tinygltf::Texture>   newTextures   = extractUsedElements(model.textures, used.textures);
+  std::vector<tinygltf::Image>     newImages     = extractUsedElements(model.images, used.images);
+  std::vector<tinygltf::Sampler>   newSamplers   = extractUsedElements(model.samplers, used.samplers);
+  std::vector<tinygltf::Skin>      newSkins      = extractUsedElements(model.skins, used.skins);
+  std::vector<tinygltf::Camera>    newCameras    = extractUsedElements(model.cameras, used.cameras);
+  std::vector<tinygltf::Animation> newAnimations = extractUsedElements(model.animations, used.animations);
+
+  updateAllReferences(model, newMeshes, newMaterials, newTextures, meshRemap, materialRemap, textureRemap, imageRemap,
+                      samplerRemap, skinRemap, cameraRemap, lightRemap, used.lights);
+
+  model.meshes     = std::move(newMeshes);
+  model.materials  = std::move(newMaterials);
+  model.textures   = std::move(newTextures);
+  model.images     = std::move(newImages);
+  model.samplers   = std::move(newSamplers);
+  model.skins      = std::move(newSkins);
+  model.cameras    = std::move(newCameras);
+  model.animations = std::move(newAnimations);
+
+  ::compactModel(model);
+
+  // ::compactModel always leaves a single merged buffer, even when no geometry remains. A complex
+  // scene that references only external assets has no buffer data, and an empty buffer (byteLength
+  // 0) is invalid glTF, so drop any buffer that no buffer view references and remap the rest.
+  {
+    std::vector<char> bufferUsed(model.buffers.size(), 0);
+    for(const auto& bv : model.bufferViews)
+    {
+      if(bv.buffer >= 0 && bv.buffer < static_cast<int>(model.buffers.size()))
+        bufferUsed[bv.buffer] = 1;
+    }
+    size_t usedCount = 0;
+    for(char u : bufferUsed)
+      usedCount += (u != 0) ? 1 : 0;
+
+    // Only rebuild when at least one buffer is unreferenced. The rebuild moves buffers OUT of
+    // model.buffers; doing it when nothing is dropped (survivors == total) would leave every survivor
+    // in a moved-from state (empty data), which wiped the geometry .bin on save.
+    if(usedCount != model.buffers.size())
+    {
+      std::vector<int>              bufferRemap(model.buffers.size(), -1);
+      std::vector<tinygltf::Buffer> newBuffers;
+      for(size_t i = 0; i < model.buffers.size(); ++i)
+      {
+        if(bufferUsed[i])
+        {
+          bufferRemap[i] = static_cast<int>(newBuffers.size());
+          newBuffers.push_back(std::move(model.buffers[i]));
+        }
+      }
+      for(auto& bv : model.bufferViews)
+        if(bv.buffer >= 0 && bv.buffer < static_cast<int>(bufferRemap.size()))
+          bv.buffer = bufferRemap[bv.buffer];
+      model.buffers = std::move(newBuffers);
+    }
+  }
+}
+
+//--------------------------------------------------------------------------------------------------
+// flattenExternalAssets() - keep merged content inline, strip every external-asset reference
+//--------------------------------------------------------------------------------------------------
+void flattenExternalAssets(tinygltf::Model& model)
+{
+  for(tinygltf::Node& node : model.nodes)
+  {
+    // Drop the external-asset link so the (former) instance node becomes an ordinary transform node,
+    // and remove the read-only provenance marker so the merged content is fully owned/editable.
+    node.externalAsset = -1;
+    nvvkgltf::Scene::clearExternalAssetMarker(node);
+  }
+
+  // The merged geometry now stands on its own; the external-asset tables are no longer referenced.
+  model.externalAssets.clear();
+  model.files.clear();
+}
+
+//--------------------------------------------------------------------------------------------------
+// compactExternalAssetReferences() - drop orphaned externalAssets/files entries and remap survivors
+//--------------------------------------------------------------------------------------------------
+void compactExternalAssetReferences(tinygltf::Model& model)
+{
+  const size_t origExternalAssets = model.externalAssets.size();
+  const size_t origFiles          = model.files.size();
+  if(origExternalAssets == 0 && origFiles == 0)
+    return;
+
+  // Phase 1: collect used externalAssets (still referenced by a node) and the files reachable from
+  // them -- directly via ExternalAsset::file, then transitively through each surviving file's
+  // aliases. std::set keeps indices sorted so the remap/extract below match the rest of this file.
+  std::set<int> usedExternalAssets;
+  for(const tinygltf::Node& n : model.nodes)
+    if(n.externalAsset >= 0 && n.externalAsset < static_cast<int>(origExternalAssets))
+      usedExternalAssets.insert(n.externalAsset);
+
+  std::set<int>    usedFiles;
+  std::vector<int> worklist;
+  auto             markFile = [&](int f) {
+    if(f >= 0 && f < static_cast<int>(origFiles) && usedFiles.insert(f).second)
+      worklist.push_back(f);
+  };
+  for(int e : usedExternalAssets)
+    markFile(model.externalAssets[e].file);
+  while(!worklist.empty())
+  {
+    const tinygltf::File& f = model.files[worklist.back()];
+    worklist.pop_back();
+    for(const tinygltf::FileAlias& a : f.aliases)
+      markFile(a.file);
+  }
+
+  if(usedExternalAssets.size() == origExternalAssets && usedFiles.size() == origFiles)
+    return;  // everything still referenced; nothing to compact
+
+  // Phase 2: build old->new remap tables and extract the survivors (same helpers as compactModel()).
+  const std::vector<int> externalAssetRemap = buildRemapTable(usedExternalAssets, origExternalAssets);
+  const std::vector<int> fileRemap          = buildRemapTable(usedFiles, origFiles);
+
+  std::vector<tinygltf::ExternalAsset> newExternalAssets = extractUsedElements(model.externalAssets, usedExternalAssets);
+  std::vector<tinygltf::File> newFiles = extractUsedElements(model.files, usedFiles);
+
+  // Phase 3: rewrite every index reference to the new indices.
+  for(tinygltf::Node& n : model.nodes)
+    if(n.externalAsset >= 0 && n.externalAsset < static_cast<int>(origExternalAssets))
+      n.externalAsset = externalAssetRemap[n.externalAsset];
+
+  for(tinygltf::ExternalAsset& a : newExternalAssets)
+    if(a.file >= 0 && a.file < static_cast<int>(origFiles))
+      a.file = fileRemap[a.file];
+
+  for(tinygltf::File& f : newFiles)
+    for(tinygltf::FileAlias& a : f.aliases)
+      if(a.file >= 0 && a.file < static_cast<int>(origFiles))
+        a.file = fileRemap[a.file];
+
+  model.externalAssets = std::move(newExternalAssets);
+  model.files          = std::move(newFiles);
+}
+
+//--------------------------------------------------------------------------------------------------
 // Scene::compactModel() - Remove all orphaned resources
 //--------------------------------------------------------------------------------------------------
 bool Scene::compactModel()
@@ -605,25 +890,25 @@ bool Scene::compactModel()
   }
 
   // Phase 2: Build old→new index remapping tables
-  auto meshRemap      = buildRemapTable(used.meshes, origMesh);
-  auto materialRemap  = buildRemapTable(used.materials, origMat);
-  auto textureRemap   = buildRemapTable(used.textures, origTex);
-  auto imageRemap     = buildRemapTable(used.images, origImg);
-  auto samplerRemap   = buildRemapTable(used.samplers, origSamp);
-  auto skinRemap      = buildRemapTable(used.skins, origSkin);
-  auto cameraRemap    = buildRemapTable(used.cameras, origCam);
-  auto animationRemap = buildRemapTable(used.animations, origAnim);
-  auto lightRemap     = buildRemapTable(used.lights, origLight);
+  const std::vector<int> meshRemap      = buildRemapTable(used.meshes, origMesh);
+  const std::vector<int> materialRemap  = buildRemapTable(used.materials, origMat);
+  const std::vector<int> textureRemap   = buildRemapTable(used.textures, origTex);
+  const std::vector<int> imageRemap     = buildRemapTable(used.images, origImg);
+  const std::vector<int> samplerRemap   = buildRemapTable(used.samplers, origSamp);
+  const std::vector<int> skinRemap      = buildRemapTable(used.skins, origSkin);
+  const std::vector<int> cameraRemap    = buildRemapTable(used.cameras, origCam);
+  const std::vector<int> animationRemap = buildRemapTable(used.animations, origAnim);
+  const std::vector<int> lightRemap     = buildRemapTable(used.lights, origLight);
 
   // Phase 3: Extract only the used elements into compacted arrays
-  auto newMeshes     = extractUsedElements(m_model.meshes, used.meshes);
-  auto newMaterials  = extractUsedElements(m_model.materials, used.materials);
-  auto newTextures   = extractUsedElements(m_model.textures, used.textures);
-  auto newImages     = extractUsedElements(m_model.images, used.images);
-  auto newSamplers   = extractUsedElements(m_model.samplers, used.samplers);
-  auto newSkins      = extractUsedElements(m_model.skins, used.skins);
-  auto newCameras    = extractUsedElements(m_model.cameras, used.cameras);
-  auto newAnimations = extractUsedElements(m_model.animations, used.animations);
+  std::vector<tinygltf::Mesh>      newMeshes     = extractUsedElements(m_model.meshes, used.meshes);
+  std::vector<tinygltf::Material>  newMaterials  = extractUsedElements(m_model.materials, used.materials);
+  std::vector<tinygltf::Texture>   newTextures   = extractUsedElements(m_model.textures, used.textures);
+  std::vector<tinygltf::Image>     newImages     = extractUsedElements(m_model.images, used.images);
+  std::vector<tinygltf::Sampler>   newSamplers   = extractUsedElements(m_model.samplers, used.samplers);
+  std::vector<tinygltf::Skin>      newSkins      = extractUsedElements(m_model.skins, used.skins);
+  std::vector<tinygltf::Camera>    newCameras    = extractUsedElements(m_model.cameras, used.cameras);
+  std::vector<tinygltf::Animation> newAnimations = extractUsedElements(m_model.animations, used.animations);
 
   // Phase 4: Rewrite all index references to use new indices
   updateAllReferences(m_model, newMeshes, newMaterials, newTextures, meshRemap, materialRemap, textureRemap, imageRemap,

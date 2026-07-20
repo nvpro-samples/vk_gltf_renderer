@@ -49,7 +49,6 @@
 */
 //////////////////////////////////////////////////////////////////////////
 
-#include <cstdlib>
 #include <mikktspace.h>
 #include <tinygltf/tiny_gltf.h>
 #include <vector>
@@ -347,42 +346,7 @@ static int appendToBuffer(tinygltf::Model& model, const void* data, size_t dataB
 {
   if(model.buffers.empty())
     model.buffers.emplace_back();
-
-  tinygltf::Buffer& buf = model.buffers[0];
-
-  if(data == nullptr && dataBytes != 0)
-  {
-    LOGE("appendToBuffer: data is nullptr but dataBytes is non-zero\n");
-    std::abort();
-  }
-
-  size_t currentOffset = buf.data.size();
-  size_t padding       = (4 - (currentOffset % 4)) % 4;
-  buf.data.resize(currentOffset + padding);
-  size_t dataOffset = buf.data.size();
-
-  tinygltf::BufferView bv;
-  bv.buffer     = 0;
-  bv.byteOffset = dataOffset;
-  bv.byteLength = dataBytes;
-  bv.byteStride = 0;
-  int bvIndex   = static_cast<int>(model.bufferViews.size());
-  model.bufferViews.push_back(bv);
-
-  buf.data.resize(dataOffset + dataBytes);
-  if(dataBytes != 0)
-    std::memcpy(buf.data.data() + dataOffset, data, dataBytes);
-
-  tinygltf::Accessor acc;
-  acc.bufferView    = bvIndex;
-  acc.byteOffset    = 0;
-  acc.componentType = componentType;
-  acc.type          = glType;
-  acc.count         = count;
-  int accIndex      = static_cast<int>(model.accessors.size());
-  model.accessors.push_back(acc);
-
-  return accIndex;
+  return tinygltf::utils::appendAccessor(model, 0, data, dataBytes, componentType, glType, count);
 }
 
 // Group face-vertices by tangent compatibility and compute fv -> new vertex index.

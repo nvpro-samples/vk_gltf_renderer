@@ -66,6 +66,19 @@ struct RenderPrimitive
   int                  meshID      = 0;
 };
 
+// glTF 2.1 external asset that was resolved and merged into the model. Records the provenance
+// (source file + externalAsset/file indices) and the range of merged-in nodes so they can be
+// treated as read-only and, later, re-externalized on save. The instance node itself (the node
+// carrying `externalAsset`) stays editable and is NOT part of subtreeNodes.
+struct ReferencedAsset
+{
+  int              instanceNodeIndex  = -1;  // node in m_model carrying externalAsset (editable)
+  int              externalAssetIndex = -1;  // index into m_model.externalAssets
+  int              fileIndex          = -1;  // index into m_model.files
+  std::string      sourceUri;                // resolved source path/URI (provenance)
+  std::vector<int> subtreeNodes;             // merged-in node indices (read-only)
+};
+
 struct RenderCamera
 {
   enum CameraType
@@ -246,9 +259,16 @@ public:
   //--------------------------------------------------------------------------------------------------
 
   [[nodiscard]] bool load(const std::filesystem::path& filename);  // Load .gltf or .glb
-  [[nodiscard]] bool save(const std::filesystem::path& filename);  // Save .gltf or .glb
+  // Save .gltf or .glb. For scenes that reference external assets (glTF 2.1), selfContained=false
+  // (default) re-externalizes them (small file, keeps references), while selfContained=true bakes
+  // the merged content inline and drops all external references (portable, shareable file).
+  [[nodiscard]] bool save(const std::filesystem::path& filename, bool selfContained = false);
   // Merge another glTF into this scene. Optional maxTextureCount validates combined texture limit (e.g. GPU descriptor limit).
   [[nodiscard]] int mergeScene(const std::filesystem::path& filename, std::optional<uint32_t> maxTextureCount = std::nullopt);  // Returns wrapper node index, or -1 on failure
+  // glTF 2.1: add another glTF as a referenced external asset (read-only, re-externalized on save)
+  // instead of embedding it. Repeated references to the same file share geometry. Returns the new
+  // instance node index, or -1 on failure.
+  [[nodiscard]] int referenceScene(const std::filesystem::path& filename);
   // After mergeScene(), returns the animation list index of the first clip from the merged file (for UI default); -1 if none.
   // Consumed once by the renderer so the animation dropdown selects merged motion instead of staying on a base-scene clip.
   [[nodiscard]] int                      takeMergePreferredAnimationIndex();
@@ -269,6 +289,64 @@ public:
   [[nodiscard]] bool     valid() const { return m_validSceneParsed; }
 
   //--------------------------------------------------------------------------------------------------
+  // External Assets (glTF 2.1)
+  //--------------------------------------------------------------------------------------------------
+
+  // External assets that were resolved and merged into the model (provenance + read-only ranges).
+  const std::vector<nvvkgltf::ReferencedAsset>& getReferencedAssets() const { return m_referencedAssets; }
+  // True if the scene references at least one external asset (glTF 2.1). When true, save() can
+  // write either the referenced (complex) form or a flattened self-contained form.
+  [[nodiscard]] bool hasExternalAssets() const { return !m_referencedAssets.empty(); }
+  // Provenance marker stamped into the `extras` of nodes merged in from a referenced external
+  // asset. Stored in extras (not a Node struct field) so it travels with the node through
+  // duplicate/delete renumbering for free, and is never persisted (re-externalization removes the
+  // marked nodes before save). The value is the index into m_referencedAssets.
+  static constexpr const char* kExternalAssetContentKey = "NV_external_asset_content";
+
+  // Single source of truth for the read-only marker (set/query/clear on a node's `extras`). Static
+  // so the merge/flatten/re-externalize passes (which operate on a bare tinygltf::Model) reuse them.
+  static void setExternalAssetMarker(tinygltf::Node& node, int referencedAssetIndex)
+  {
+    tinygltf::Value::Object obj = node.extras.IsObject() ? node.extras.Get<tinygltf::Value::Object>() : tinygltf::Value::Object{};
+    obj[kExternalAssetContentKey] = tinygltf::Value(referencedAssetIndex);
+    node.extras                   = tinygltf::Value(std::move(obj));
+  }
+  [[nodiscard]] static bool hasExternalAssetMarker(const tinygltf::Node& node)
+  {
+    return node.extras.Has(kExternalAssetContentKey);
+  }
+  static void clearExternalAssetMarker(tinygltf::Node& node)
+  {
+    if(!node.extras.IsObject() || !node.extras.Has(kExternalAssetContentKey))
+      return;
+    tinygltf::Value::Object obj = node.extras.Get<tinygltf::Value::Object>();
+    obj.erase(kExternalAssetContentKey);
+    // Reset to null when empty so tinygltf does not emit an empty "extras": {}.
+    node.extras = obj.empty() ? tinygltf::Value() : tinygltf::Value(std::move(obj));
+  }
+
+  // True if the node was merged in from a referenced external asset and should be treated read-only.
+  [[nodiscard]] bool isNodeReadOnly(int nodeIndex) const
+  {
+    return nodeIndex >= 0 && nodeIndex < static_cast<int>(m_model.nodes.size())
+           && hasExternalAssetMarker(m_model.nodes[nodeIndex]);
+  }
+  // True if the mesh is used by a referenced (read-only) node. Used to guard mesh-keyed edits.
+  [[nodiscard]] bool isMeshReadOnly(int meshIndex) const;
+
+  // KHR_node_selectability: a node is selectable iff neither it nor any ancestor sets
+  // `selectable:false` (the flag cascades to the whole subtree). Default is selectable.
+  [[nodiscard]] bool isNodeSelectable(int nodeIndex) const;
+  // Returns `nodeIndex` if it is selectable, otherwise the closest selectable ancestor, or -1 if none.
+  [[nodiscard]] int nearestSelectableAncestor(int nodeIndex) const;
+  // True if the node is an external-asset instance node (carries an `externalAsset` link). These
+  // nodes stay editable; "Make Editable" (SceneEditor::makeExternalAssetEditable) breaks the link.
+  [[nodiscard]] bool isExternalAssetInstance(int nodeIndex) const
+  {
+    return nodeIndex >= 0 && nodeIndex < static_cast<int>(m_model.nodes.size()) && m_model.nodes[nodeIndex].externalAsset >= 0;
+  }
+
+  //--------------------------------------------------------------------------------------------------
   // Scene Management
   //--------------------------------------------------------------------------------------------------
 
@@ -279,6 +357,13 @@ public:
   void                          updateNodeWorldMatrices();
   void                          updateLocalMatricesAndLights();
   glm::mat4                     computeNodeWorldMatrix(int nodeID) const;
+
+  // The GPU transform path propagates world matrices on-device only, leaving the CPU mirror
+  // (m_nodesWorldMatrices / RenderNode.worldMatrix) stale for the nodes it moved. That path records
+  // those nodes here; the CPU sync path merges them back into the dirty set so only those subtrees are
+  // recomputed (not the whole scene) before render-node / TLAS transforms are sourced from the mirror.
+  void addGpuStaleNodes(const std::unordered_set<int>& nodes) { m_gpuStaleNodes.insert(nodes.begin(), nodes.end()); }
+  bool mergeGpuStaleNodesIntoDirty();  // Moves recorded stale nodes into the dirty set; returns true if any were pending.
 
   // Topological BFS levels (see buildTopologicalLevels) — shared by CPU parallel propagation and GPU transform compute.
   [[nodiscard]] const std::vector<int>&                 getTopoNodeOrder() const { return m_topoLevels.nodeOrder; }
@@ -454,6 +539,17 @@ private:
 
   void parseScene();
   void clearParsedData();
+  // glTF 2.1: resolve every node.externalAsset by loading the referenced file and merging it in
+  // under that node. Tags merged-in subtrees read-only and records provenance. Returns true if at
+  // least one external asset was merged (so the caller can re-run post-merge passes).
+  bool resolveExternalAssets();
+  // glTF 2.1: recursively merge (in place) every external asset referenced by `model`, making it
+  // self-contained before it is merged into the scene. Applies file aliases and guards against
+  // reference cycles via `ancestry` (canonical paths currently being resolved up the chain).
+  void flattenReferencedModel(tinygltf::Model& model, const std::filesystem::path& modelDir, std::vector<std::string>& ancestry, int depth);
+  // Tag the appended node range [firstNode, lastNode) read-only and record provenance. Shared by
+  // load-time resolveExternalAssets() and runtime referenceScene(). Returns the m_referencedAssets index.
+  int recordReferencedAsset(int firstNode, int lastNode, int instanceNode, int externalAssetIndex, int fileIndex, const std::string& uri);
   void parseVariants();
   void setSceneElementsDefaultNames();
   void createSceneCamera();
@@ -528,6 +624,10 @@ private:
   std::unordered_set<std::string>    m_supportedExtensions;  // Extensions to load
   bool                               m_validSceneParsed = false;
 
+  // glTF 2.1 external assets resolved into m_model (provenance). Read-only membership is derived
+  // from the per-node extras marker (kExternalAssetContentKey), not tracked by index here.
+  std::vector<nvvkgltf::ReferencedAsset> m_referencedAssets;
+
   //--------------------------------------------------------------------------------------------------
   // Data Members: Render Data (Built from Model)
   //--------------------------------------------------------------------------------------------------
@@ -601,6 +701,10 @@ private:
   //--------------------------------------------------------------------------------------------------
 
   DirtyFlags m_dirtyFlags;
+
+  // Nodes the GPU transform path updated on-device only; their CPU world matrices need reconciliation on
+  // the next CPU sync. See addGpuStaleNodes() / mergeGpuStaleNodesIntoDirty().
+  std::unordered_set<int> m_gpuStaleNodes;
 
   // Set by mergeScene when imported file contributes new animations (first new clip index). Cleared by takeMergePreferredAnimationIndex.
   int m_pendingMergePreferredAnimationIndex = -1;

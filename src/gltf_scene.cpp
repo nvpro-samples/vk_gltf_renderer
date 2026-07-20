@@ -44,6 +44,7 @@
 #include "gltf_scene_animation.hpp"
 #include "gltf_scene_editor.hpp"
 #include "gltf_scene_validator.hpp"
+#include "gltf_compact_model.hpp"
 #include "gltf_animation_pointer.hpp"
 #include "gltf_scene_merger.hpp"
 #include "gltf_compact_model.hpp"
@@ -55,7 +56,22 @@ namespace {
 // Load .gltf or .glb into model using shared TinyGLTF config (no external file limit, image bytes stored raw).
 // Returns true on success. On failure, outError and outWarn are set for caller to log.
 //--------------------------------------------------------------------------------------------------
-bool loadGltfFile(const std::filesystem::path& filename, tinygltf::Model& model, std::string* outError, std::string* outWarn)
+// glTF 2.1 file aliases: while loading a referenced glTF, redirect any of its inner URIs that match
+// an alias to another entry in the owner's `files` table (used for shared-resource packing or for
+// overriding inner data). Aliases are declared on the owner's File entry that points to this glTF.
+struct AliasContext
+{
+  const std::vector<tinygltf::FileAlias>* aliases    = nullptr;  // aliases declared on the file being loaded
+  const std::vector<tinygltf::File>*      ownerFiles = nullptr;  // files[] that FileAlias::file indexes into
+  std::filesystem::path                   ownerBaseDir;          // resolves the aliased target's URI
+  std::filesystem::path                   childBaseDir;          // base dir of the file being loaded
+};
+
+bool loadGltfFile(const std::filesystem::path& filename,
+                  tinygltf::Model&             model,
+                  std::string*                 outError,
+                  std::string*                 outWarn,
+                  const AliasContext*          aliasCtx = nullptr)
 {
   const std::string  filenameUtf8 = nvutils::utf8FromPath(filename);
   tinygltf::TinyGLTF tcontext;
@@ -72,6 +88,43 @@ bool loadGltfFile(const std::filesystem::path& filename, tinygltf::Model& model,
         return true;
       },
       nullptr);
+
+  // glTF 2.1: apply this file's aliases by intercepting inner file reads (buffers/images). Any inner
+  // URI matching an alias is served from the aliased entry in the owner's files[] table instead.
+  if(aliasCtx != nullptr && aliasCtx->aliases != nullptr && !aliasCtx->aliases->empty() && aliasCtx->ownerFiles != nullptr)
+  {
+    const AliasContext    ctx = *aliasCtx;  // capture by value into the callback
+    tinygltf::FsCallbacks fs{};
+    fs.FileExists         = &tinygltf::FileExists;
+    fs.ExpandFilePath     = &tinygltf::ExpandFilePath;
+    fs.WriteWholeFile     = &tinygltf::WriteWholeFile;
+    fs.GetFileSizeInBytes = &tinygltf::GetFileSizeInBytes;
+    fs.user_data          = nullptr;
+    fs.ReadWholeFile = [ctx](std::vector<unsigned char>* out, std::string* err, const std::string& filepath, void*) -> bool {
+      std::error_code ec;
+      const std::filesystem::path rel = std::filesystem::relative(nvutils::pathFromUtf8(filepath), ctx.childBaseDir, ec);
+      const std::string innerUri = ec ? std::string{} : rel.generic_string();
+      if(!innerUri.empty())
+      {
+        for(const tinygltf::FileAlias& a : *ctx.aliases)
+        {
+          if(a.alias != innerUri)
+            continue;
+          if(a.file < 0 || a.file >= static_cast<int>(ctx.ownerFiles->size()))
+            break;
+          const tinygltf::File& target = (*ctx.ownerFiles)[a.file];
+          if(target.uri.empty())  // bufferView / data-URI aliased targets are not yet supported
+            break;
+          std::string targetDecoded;
+          tinygltf::URIDecode(target.uri, &targetDecoded, nullptr);
+          const std::filesystem::path targetPath = ctx.ownerBaseDir / nvutils::pathFromUtf8(targetDecoded);
+          return tinygltf::ReadWholeFile(out, err, nvutils::utf8FromPath(targetPath), nullptr);
+        }
+      }
+      return tinygltf::ReadWholeFile(out, err, filepath, nullptr);
+    };
+    tcontext.SetFsCallbacks(fs, nullptr);
+  }
 
   const std::string ext    = nvutils::utf8FromPath(filename.extension());
   bool              result = false;
@@ -161,33 +214,36 @@ nvvkgltf::Scene::Scene()
   // Base list of supported extensions; samples can add onto this for custom
   // image formats.
   m_supportedExtensions = {
+      "EXT_mesh_gpu_instancing",
+      "EXT_meshopt_compression",
       "KHR_animation_pointer",
+      "KHR_interactivity",
       "KHR_lights_punctual",
       "KHR_materials_anisotropy",
       "KHR_materials_clearcoat",
+      "KHR_materials_diffuse_transmission",
+      "KHR_materials_dispersion",
       "KHR_materials_displacement",
       "KHR_materials_emissive_strength",
       "KHR_materials_ior",
       "KHR_materials_iridescence",
+      "KHR_materials_pbrSpecularGlossiness",
+      "KHR_materials_retroreflection",
       "KHR_materials_sheen",
       "KHR_materials_specular",
       "KHR_materials_transmission",
       "KHR_materials_unlit",
       "KHR_materials_variants",
-      "KHR_materials_volume",
       "KHR_materials_volume_scatter",
+      "KHR_materials_volume",
       "KHR_mesh_quantization",
-      "KHR_texture_transform",
-      "KHR_materials_dispersion",
-      "KHR_node_visibility",
-      "EXT_mesh_gpu_instancing",
-      "KHR_materials_retroreflection",
-      "NV_attributes_iray",
-      "MSFT_texture_dds",
-      "KHR_materials_pbrSpecularGlossiness",
-      "KHR_materials_diffuse_transmission",
       "KHR_meshopt_compression",
-      "EXT_meshopt_compression",
+      "KHR_node_hoverability",
+      "KHR_node_selectability",
+      "KHR_node_visibility",
+      "KHR_texture_transform",
+      "MSFT_texture_dds",
+      "NV_attributes_iray",
 #ifdef USE_DRACO
       "KHR_draco_mesh_compression",
 #endif
@@ -251,6 +307,11 @@ bool nvvkgltf::Scene::load(const std::filesystem::path& filename)
     m_filename = filename;
   m_model = {};
 
+  // External-asset provenance persists across parseScene() (which clears only derived render
+  // data); reset it here, once per file load. The per-node read-only markers live in the model
+  // itself and are reset when m_model is cleared above.
+  m_referencedAssets.clear();
+
   std::string error, warn;
   if(!loadGltfFile(filename, m_model, &error, &warn))
   {
@@ -281,14 +342,25 @@ bool nvvkgltf::Scene::load(const std::filesystem::path& filename)
   m_currentVariant = 0;
   if(m_animation)
     m_animation->resetPointer();
-  parseScene();
 
-  m_validSceneParsed = !m_model.nodes.empty();
-
+  // Base image search path (asset directory). Set before resolving external assets, which append
+  // their own import directories so images referenced by merged assets resolve correctly.
   std::error_code pathEc;
   m_imageSearchPaths = {std::filesystem::absolute(m_filename.parent_path(), pathEc)};
   if(pathEc)
     m_imageSearchPaths = {m_filename.parent_path()};
+
+  // glTF 2.1: merge referenced external assets into the model before parsing the scene graph.
+  if(resolveExternalAssets())
+  {
+    // Merged assets may bring their own KHR/EXT_meshopt_compression buffer views.
+    if(!decompressMeshoptExtension())
+      return false;
+  }
+
+  parseScene();
+
+  m_validSceneParsed = !m_model.nodes.empty();
 
   resolveImageURIs();
 
@@ -443,7 +515,7 @@ bool nvvkgltf::Scene::decompressMeshoptExtension()
 //--------------------------------------------------------------------------------------------------
 // Save scene to glTF/GLB file with validation
 //
-bool nvvkgltf::Scene::save(const std::filesystem::path& filename)
+bool nvvkgltf::Scene::save(const std::filesystem::path& filename, bool selfContained)
 {
   namespace fs = std::filesystem;
 
@@ -459,6 +531,27 @@ bool nvvkgltf::Scene::save(const std::filesystem::path& filename)
     return false;  // STRICT: refuse to save invalid model
   }
 
+  // glTF 2.1: when the scene references external assets, transform a copy of the model before
+  // writing (the live scene is left untouched). Two forms:
+  //   - selfContained=false (default): re-externalize -- write the complex-scene form (the
+  //     files/externalAssets tables + instance nodes) instead of the flattened runtime model.
+  //   - selfContained=true: flatten -- keep the merged content inline and strip every external
+  //     reference, producing a portable file that can be shared without the referenced assets.
+  // Everything below (image copy, generator tag, extension reconciliation, serialization) then
+  // operates on `outModel`.
+  tinygltf::Model  transformedModel;
+  tinygltf::Model* outModelPtr = &m_model;
+  if(!m_referencedAssets.empty())
+  {
+    transformedModel = m_model;
+    if(selfContained)
+      nvvkgltf::flattenExternalAssets(transformedModel);
+    else
+      nvvkgltf::removeExternalAssetContent(transformedModel);
+    outModelPtr = &transformedModel;
+  }
+  tinygltf::Model& outModel = *outModelPtr;
+
   std::filesystem::path saveFilename = filename;
 
   // Make sure the extension is correct
@@ -471,15 +564,15 @@ bool nvvkgltf::Scene::save(const std::filesystem::path& filename)
   const bool saveBinary = nvutils::extensionMatches(filename, ".glb");
 
   // Copy the images to the destination folder using the same search paths as for loading.
-  if(!m_model.images.empty() && !saveBinary && !getImageSearchPaths().empty())
+  if(!outModel.images.empty() && !saveBinary && !getImageSearchPaths().empty())
   {
     const std::vector<fs::path>&    searchPaths = getImageSearchPaths();
     fs::path                        dstPath     = filename.parent_path();
     int                             numCopied   = 0;
     std::unordered_set<std::string> usedRelativeNames;
-    for(size_t i = 0; i < m_model.images.size(); i++)
+    for(size_t i = 0; i < outModel.images.size(); i++)
     {
-      auto& image = m_model.images[i];
+      auto& image = outModel.images[i];
       if(image.uri.empty())
         continue;
       if(image.uri.size() >= 5 && image.uri.compare(0, 5, "data:") == 0)
@@ -522,23 +615,23 @@ bool nvvkgltf::Scene::save(const std::filesystem::path& filename)
 
   // Append generator tag if not already present
   constexpr const char* generatorPrefix = "NVIDIA vk_gltf_renderer";
-  if(m_model.asset.generator.find(generatorPrefix) == std::string::npos)
+  if(outModel.asset.generator.find(generatorPrefix) == std::string::npos)
   {
-    if(!m_model.asset.generator.empty())
-      m_model.asset.generator += " + ";
-    m_model.asset.generator += std::string(generatorPrefix) + " " APP_VERSION_STRING;
+    if(!outModel.asset.generator.empty())
+      outModel.asset.generator += " + ";
+    outModel.asset.generator += std::string(generatorPrefix) + " " APP_VERSION_STRING;
   }
 
   // Reconcile top-level extensionsUsed / extensionsRequired with what the model actually
   // contains, so the written asset complies with the glTF 2.0 "Specifying Extensions" rules
   // (tinygltf writes these arrays verbatim). This prunes stale entries left by edits/merges
   // and adds any extension that became used since load.
-  tinygltf::utils::syncExtensionsUsed(m_model);
+  tinygltf::utils::syncExtensionsUsed(outModel);
 
   // Save the glTF file
   tinygltf::TinyGLTF tcontext;
   const std::string  saveFilenameUtf8 = nvutils::utf8FromPath(saveFilename);
-  bool result = tcontext.WriteGltfSceneToFile(&m_model, saveFilenameUtf8, saveBinary, saveBinary, true, saveBinary);
+  bool result = tcontext.WriteGltfSceneToFile(&outModel, saveFilenameUtf8, saveBinary, saveBinary, true, saveBinary);
   LOGI("%sSaved: %s\n", st.indent().c_str(), saveFilenameUtf8.c_str());
 
   // After a successful .gltf save, treat the save location as the new canonical home of the scene.
@@ -605,6 +698,7 @@ void nvvkgltf::Scene::takeModel(tinygltf::Model&& model)
 {
   m_model = std::move(model);
   m_imageSearchPaths.clear();
+  m_referencedAssets.clear();
   if(m_animation)
     m_animation->resetPointer();
   parseScene();
@@ -685,6 +779,523 @@ int nvvkgltf::Scene::takeMergePreferredAnimationIndex()
 }
 
 //--------------------------------------------------------------------------------------------------
+// True if the mesh is used by any read-only (referenced external-asset) node.
+//--------------------------------------------------------------------------------------------------
+bool nvvkgltf::Scene::isMeshReadOnly(int meshIndex) const
+{
+  if(meshIndex < 0)
+    return false;
+  for(const tinygltf::Node& node : m_model.nodes)
+  {
+    if(node.mesh == meshIndex && hasExternalAssetMarker(node))
+      return true;
+  }
+  return false;
+}
+
+bool nvvkgltf::Scene::isNodeSelectable(int nodeIndex) const
+{
+  // A node is selectable exactly when it is its own nearest selectable ancestor, i.e. no node on the
+  // path to the root opts out. Reuses the single upward pass below (invalid indices return -1 != node).
+  return nodeIndex >= 0 && nearestSelectableAncestor(nodeIndex) == nodeIndex;
+}
+
+int nvvkgltf::Scene::nearestSelectableAncestor(int nodeIndex) const
+{
+  const int nodeCount = static_cast<int>(m_model.nodes.size());
+  if(nodeIndex < 0 || nodeIndex >= nodeCount)
+    return -1;
+
+  // Fast path: if the asset never uses KHR_node_selectability, no node can opt out, so skip the walk.
+  if(std::find(m_model.extensionsUsed.begin(), m_model.extensionsUsed.end(), KHR_NODE_SELECTABILITY_EXTENSION_NAME)
+     == m_model.extensionsUsed.end())
+    return nodeIndex;
+
+  // Single upward pass (O(depth)): find the highest (closest to root) node that opts out of
+  // selection. Everything at or below it is non-selectable, so the nearest selectable node is the
+  // parent of that highest opt-out node (guaranteed selectable, since nothing above it blocks).
+  // If no node on the path opts out, the node itself is selectable.
+  int highestBlocker = -1;
+  int current        = nodeIndex;
+  while(current >= 0 && current < nodeCount)
+  {
+    if(!tinygltf::utils::getNodeSelectability(m_model.nodes[current]).selectable)
+      highestBlocker = current;
+    current = (current < static_cast<int>(m_nodeParents.size())) ? m_nodeParents[current] : -1;
+  }
+
+  if(highestBlocker < 0)
+    return nodeIndex;  // Nothing opts out -> the node itself is selectable.
+  return (highestBlocker < static_cast<int>(m_nodeParents.size())) ? m_nodeParents[highestBlocker] : -1;
+}
+
+//--------------------------------------------------------------------------------------------------
+// glTF 2.1: recursively merge (in place) every external asset referenced by `model`, so it becomes
+// self-contained before being merged into the scene. Applies file aliases (inner-URI redirection)
+// and guards against reference cycles using `ancestry` (canonical paths currently on the chain).
+// The referencing nodes have their externalAsset/mesh/camera links cleared once resolved.
+//--------------------------------------------------------------------------------------------------
+void nvvkgltf::Scene::flattenReferencedModel(tinygltf::Model&             model,
+                                             const std::filesystem::path& modelDir,
+                                             std::vector<std::string>&    ancestry,
+                                             int                          depth)
+{
+  constexpr int kMaxExternalAssetDepth = 16;  // backstop beyond the cycle guard
+  if(model.externalAssets.empty() || model.files.empty() || model.nodes.empty())
+    return;
+  if(depth > kMaxExternalAssetDepth)
+  {
+    LOGW("External asset: nesting deeper than %d levels; stopping recursion\n", kMaxExternalAssetDepth);
+    return;
+  }
+
+  // Group referencing nodes by file so each unique file is loaded once (deterministic order).
+  std::unordered_map<int, std::vector<int>> nodesByFile;
+  std::vector<int>                          fileOrder;
+  for(int i = 0; i < static_cast<int>(model.nodes.size()); ++i)
+  {
+    const int eaIdx = model.nodes[i].externalAsset;
+    if(eaIdx < 0 || eaIdx >= static_cast<int>(model.externalAssets.size()))
+      continue;
+    const int fileIdx = model.externalAssets[eaIdx].file;
+    if(fileIdx < 0 || fileIdx >= static_cast<int>(model.files.size()))
+      continue;
+    if(nodesByFile.find(fileIdx) == nodesByFile.end())
+      fileOrder.push_back(fileIdx);
+    nodesByFile[fileIdx].push_back(i);
+  }
+
+  for(int fileIdx : fileOrder)
+  {
+    const tinygltf::File& file = model.files[fileIdx];
+    if(file.mimeType != "model/gltf-binary" && file.mimeType != "model/gltf+json")
+      continue;
+    if(file.uri.empty())  // embedded (bufferView/data:) external assets are not yet supported
+      continue;
+
+    std::string uriDecoded;
+    tinygltf::URIDecode(file.uri, &uriDecoded, nullptr);
+    const std::filesystem::path childPath = modelDir / nvutils::pathFromUtf8(uriDecoded);
+
+    std::error_code ec;
+    const std::filesystem::path canonical = std::filesystem::weakly_canonical(std::filesystem::absolute(childPath, ec), ec);
+    const std::string canonKey = nvutils::utf8FromPath(canonical);
+    if(std::find(ancestry.begin(), ancestry.end(), canonKey) != ancestry.end())
+    {
+      LOGW("External asset: reference cycle detected at '%s'; skipping\n", nvutils::utf8FromPath(childPath).c_str());
+      continue;
+    }
+
+    AliasContext actx;
+    actx.aliases      = &file.aliases;
+    actx.ownerFiles   = &model.files;
+    actx.ownerBaseDir = modelDir;
+    actx.childBaseDir = childPath.parent_path();
+
+    tinygltf::Model childModel;
+    std::string     error, warn;
+    if(!loadGltfFile(childPath, childModel, &error, &warn, file.aliases.empty() ? nullptr : &actx))
+    {
+      LOGW("External asset: failed to load nested '%s' (%s)\n", nvutils::utf8FromPath(childPath).c_str(),
+           error.empty() ? "unknown error" : error.c_str());
+      continue;
+    }
+    if(!validator().validateModelExtensions(childModel, "nested external asset"))
+      continue;
+
+    // Recurse first so the child is fully self-contained before we merge it in.
+    ancestry.push_back(canonKey);
+    flattenReferencedModel(childModel, childPath.parent_path(), ancestry, depth + 1);
+    ancestry.pop_back();
+
+    // Images of the merged asset resolve from its own directory.
+    std::filesystem::path importDir = std::filesystem::absolute(childPath.parent_path(), ec);
+    if(ec)
+      importDir = childPath.parent_path();
+    m_imageSearchPaths.push_back(importDir);
+
+    const std::vector<int>& refNodes = nodesByFile[fileIdx];
+
+    // Spec precedence: externalAsset overrides mesh/camera. Clear externalAsset too, so `model`
+    // becomes self-contained (the content is now merged in as children of the referencing node).
+    for(int nodeIdx : refNodes)
+    {
+      model.nodes[nodeIdx].mesh          = -1;
+      model.nodes[nodeIdx].camera        = -1;
+      model.nodes[nodeIdx].externalAsset = -1;
+    }
+
+    const int             firstNode  = refNodes.front();
+    nvvkgltf::MergeResult firstMerge = SceneMerger::mergeIntoNode(model, childModel, firstNode);
+    if(!firstMerge.valid())
+    {
+      LOGW("External asset: failed to merge nested '%s'\n", nvutils::utf8FromPath(childPath).c_str());
+      continue;
+    }
+    for(size_t k = 1; k < refNodes.size(); ++k)
+    {
+      if(!SceneMerger::instanceSubtree(model, firstMerge, refNodes[k]).valid())
+        LOGW("External asset: failed to instance nested '%s'\n", nvutils::utf8FromPath(childPath).c_str());
+    }
+  }
+
+  // The model is now embedded/self-contained. Clear every node.externalAsset (the merger neither
+  // copies the files/externalAssets tables nor remaps this index) so no stale reference — including
+  // ones that failed to resolve above — leaks into the parent when this model is merged in.
+  for(tinygltf::Node& node : model.nodes)
+    node.externalAsset = -1;
+}
+
+//--------------------------------------------------------------------------------------------------
+// glTF 2.1: resolve node.externalAsset references by loading each referenced file and merging it
+// under the referencing node. Each unique file is loaded and merged ONCE; additional nodes that
+// reference the same file are instanced from the first merged subtree so they share geometry
+// (render primitives / BLAS) instead of duplicating it. Merged-in subtrees are tagged read-only
+// and provenance is recorded in m_referencedAssets. Returns true if anything was merged.
+//
+// Limitation: only external file `uri` references are handled (bufferView / data: URIs are skipped).
+//--------------------------------------------------------------------------------------------------
+bool nvvkgltf::Scene::resolveExternalAssets()
+{
+  if(m_model.externalAssets.empty() || m_model.files.empty() || m_model.nodes.empty())
+    return false;
+
+  const std::filesystem::path baseDir = m_filename.parent_path();
+
+  // Snapshot the referencing nodes up front (merging appends nodes to m_model.nodes), grouped by
+  // the file they reference so each unique file is merged once and instanced for the rest. The
+  // insertion-ordered list of files keeps behavior deterministic.
+  std::unordered_map<int, std::vector<int>> nodesByFile;  // fileIndex -> referencing node indices
+  std::vector<int>                          fileOrder;
+  for(int i = 0; i < static_cast<int>(m_model.nodes.size()); ++i)
+  {
+    const int eaIdx = m_model.nodes[i].externalAsset;
+    if(eaIdx < 0)
+      continue;
+    if(eaIdx >= static_cast<int>(m_model.externalAssets.size()))
+    {
+      LOGW("External asset: node %d references invalid externalAsset index %d\n", i, eaIdx);
+      continue;
+    }
+    const int fileIdx = m_model.externalAssets[eaIdx].file;
+    if(fileIdx < 0 || fileIdx >= static_cast<int>(m_model.files.size()))
+    {
+      LOGW("External asset %d references invalid file index %d\n", eaIdx, fileIdx);
+      continue;
+    }
+    if(nodesByFile.find(fileIdx) == nodesByFile.end())
+      fileOrder.push_back(fileIdx);
+    nodesByFile[fileIdx].push_back(i);
+  }
+  if(fileOrder.empty())
+    return false;
+
+  // Cycle guard shared across nested references, seeded with the top-level scene file so a child
+  // that references back to the root is detected.
+  std::vector<std::string> ancestry;
+  {
+    std::error_code seedEc;
+    ancestry.push_back(
+        nvutils::utf8FromPath(std::filesystem::weakly_canonical(std::filesystem::absolute(m_filename, seedEc), seedEc)));
+  }
+
+  bool mergedAny = false;
+  for(int fileIdx : fileOrder)
+  {
+    const tinygltf::File& file = m_model.files[fileIdx];
+
+    // Only external glTF assets can be referenced as external assets.
+    if(file.mimeType != "model/gltf-binary" && file.mimeType != "model/gltf+json")
+    {
+      LOGW("External asset file %d has unsupported mimeType '%s' (expected model/gltf+json or model/gltf-binary)\n",
+           fileIdx, file.mimeType.c_str());
+      continue;
+    }
+    // First pass: only external file URIs are supported.
+    if(file.uri.empty())
+    {
+      LOGW("External asset file %d has no 'uri'; embedded (bufferView/data:) external assets are not yet supported\n", fileIdx);
+      continue;
+    }
+
+    // #6: percent-decode the URI before resolving it to a path.
+    std::string uriDecoded;
+    tinygltf::URIDecode(file.uri, &uriDecoded, nullptr);
+    const std::filesystem::path childPath     = baseDir / nvutils::pathFromUtf8(uriDecoded);
+    const std::string           childPathUtf8 = nvutils::utf8FromPath(childPath);
+
+    // Cycle guard across the reference chain.
+    std::error_code             cycleEc;
+    const std::filesystem::path canonical =
+        std::filesystem::weakly_canonical(std::filesystem::absolute(childPath, cycleEc), cycleEc);
+    const std::string canonKey = nvutils::utf8FromPath(canonical);
+    if(std::find(ancestry.begin(), ancestry.end(), canonKey) != ancestry.end())
+    {
+      LOGW("External asset: reference cycle detected at '%s'; skipping\n", childPathUtf8.c_str());
+      continue;
+    }
+
+    // #3: apply this file's glTF 2.1 aliases (inner-URI redirection) while loading.
+    AliasContext actx;
+    actx.aliases      = &file.aliases;
+    actx.ownerFiles   = &m_model.files;
+    actx.ownerBaseDir = baseDir;
+    actx.childBaseDir = childPath.parent_path();
+
+    tinygltf::Model childModel;
+    std::string     error, warn;
+    if(!loadGltfFile(childPath, childModel, &error, &warn, file.aliases.empty() ? nullptr : &actx))
+    {
+      LOGW("External asset: failed to load '%s' (%s)\n", childPathUtf8.c_str(), error.empty() ? "unknown error" : error.c_str());
+      continue;
+    }
+    if(!validator().validateModelExtensions(childModel, "external asset"))
+    {
+      LOGW("External asset '%s' uses unsupported extensions; skipping\n", childPathUtf8.c_str());
+      continue;
+    }
+
+    // #4: recursively resolve the child's own external assets so it is self-contained before merging.
+    ancestry.push_back(canonKey);
+    flattenReferencedModel(childModel, childPath.parent_path(), ancestry, 1);
+    ancestry.pop_back();
+
+    const std::vector<int>& refNodes = nodesByFile[fileIdx];
+
+    // Spec: when a node has an externalAsset, its own mesh/camera are ignored (externalAsset takes
+    // precedence). Clear them so referencing nodes contribute only their transform + children.
+    for(int nodeIdx : refNodes)
+    {
+      m_model.nodes[nodeIdx].mesh   = -1;
+      m_model.nodes[nodeIdx].camera = -1;
+    }
+
+    // Merge the file once under the first referencing node.
+    const int             firstNode  = refNodes.front();
+    const int             firstEa    = m_model.nodes[firstNode].externalAsset;
+    nvvkgltf::MergeResult firstMerge = SceneMerger::mergeIntoNode(m_model, childModel, firstNode);
+    if(!firstMerge.valid())
+    {
+      LOGW("External asset: failed to merge '%s'\n", childPathUtf8.c_str());
+      continue;
+    }
+
+    // Make the merged asset's images resolvable from its own directory.
+    std::error_code       importEc;
+    std::filesystem::path importDir = std::filesystem::absolute(childPath.parent_path(), importEc);
+    if(importEc)
+      importDir = childPath.parent_path();
+    m_imageSearchPaths.push_back(importDir);
+
+    recordReferencedAsset(firstMerge.firstNode, firstMerge.lastNode, firstNode, firstEa, fileIdx, childPathUtf8);
+    mergedAny = true;
+
+    // Instance the merged subtree for every additional referencing node (shares geometry/BLAS).
+    for(size_t k = 1; k < refNodes.size(); ++k)
+    {
+      const int             nodeIdx  = refNodes[k];
+      const int             eaIdx    = m_model.nodes[nodeIdx].externalAsset;
+      nvvkgltf::MergeResult instance = SceneMerger::instanceSubtree(m_model, firstMerge, nodeIdx);
+      if(!instance.valid())
+      {
+        LOGW("External asset: failed to instance '%s' under node %d\n", childPathUtf8.c_str(), nodeIdx);
+        continue;
+      }
+      recordReferencedAsset(instance.firstNode, instance.lastNode, nodeIdx, eaIdx, fileIdx, childPathUtf8);
+    }
+
+    LOGI("External asset: merged '%s' (%zu instance(s), %d nodes each)\n", childPathUtf8.c_str(), refNodes.size(),
+         firstMerge.lastNode - firstMerge.firstNode);
+  }
+
+  return mergedAny;
+}
+
+//--------------------------------------------------------------------------------------------------
+// Tag [firstNode,lastNode) read-only and record provenance. Returns the m_referencedAssets index.
+//--------------------------------------------------------------------------------------------------
+int nvvkgltf::Scene::recordReferencedAsset(int firstNode, int lastNode, int instanceNode, int externalAssetIndex, int fileIndex, const std::string& uri)
+{
+  const int       refIdx = static_cast<int>(m_referencedAssets.size());
+  ReferencedAsset ref;
+  ref.instanceNodeIndex  = instanceNode;
+  ref.externalAssetIndex = externalAssetIndex;
+  ref.fileIndex          = fileIndex;
+  ref.sourceUri          = uri;
+  ref.subtreeNodes.reserve(lastNode > firstNode ? static_cast<size_t>(lastNode - firstNode) : 0);
+  for(int n = firstNode; n < lastNode; ++n)
+  {
+    ref.subtreeNodes.push_back(n);
+    // Stamp the provenance marker into the node's extras (preserves any existing extras). This is
+    // what isNodeReadOnly() reads, and it survives duplicate/delete renumbering intrinsically.
+    setExternalAssetMarker(m_model.nodes[n], refIdx);
+  }
+  m_referencedAssets.push_back(std::move(ref));
+  return refIdx;
+}
+
+//--------------------------------------------------------------------------------------------------
+// glTF 2.1: add another glTF as a referenced external asset (read-only), instead of embedding it.
+// Repeated references to the same file share geometry (placed by duplicating an existing instance).
+//--------------------------------------------------------------------------------------------------
+int nvvkgltf::Scene::referenceScene(const std::filesystem::path& filename)
+{
+  nvutils::ScopedTimer st(std::string(__FUNCTION__) + "\n");
+
+  if(m_model.scenes.empty())
+    m_model.scenes.emplace_back();
+
+  std::error_code ec;
+  const std::filesystem::path absTarget = std::filesystem::weakly_canonical(std::filesystem::absolute(filename, ec), ec);
+
+  // If this file is already referenced and still has a live instance, place a shared copy by
+  // duplicating that instance (shares meshes/materials/BLAS) rather than loading + merging again.
+  int existingFileIndex = -1;
+  for(int f = 0; f < static_cast<int>(m_model.files.size()); ++f)
+  {
+    const std::string& uri = m_model.files[f].uri;
+    if(uri.empty())
+      continue;
+    std::string uriDecoded;
+    tinygltf::URIDecode(uri, &uriDecoded, nullptr);
+    std::filesystem::path p = nvutils::pathFromUtf8(uriDecoded);
+    if(p.is_relative() && !m_filename.empty())
+      p = m_filename.parent_path() / p;
+    if(std::filesystem::weakly_canonical(std::filesystem::absolute(p, ec), ec) == absTarget)
+    {
+      existingFileIndex = f;
+      break;
+    }
+  }
+  if(existingFileIndex >= 0)
+  {
+    for(int n = 0; n < static_cast<int>(m_model.nodes.size()); ++n)
+    {
+      const int ea = m_model.nodes[n].externalAsset;
+      if(ea >= 0 && ea < static_cast<int>(m_model.externalAssets.size()) && m_model.externalAssets[ea].file == existingFileIndex)
+      {
+        const int dup = editor().duplicateNode(n);  // shares geometry; copies read-only markers + link
+        if(dup >= 0)
+          LOGI("%sReferenced '%s' as a shared instance (node %d)\n", st.indent().c_str(),
+               nvutils::utf8FromPath(filename.filename()).c_str(), dup);
+        return dup;
+      }
+    }
+    // File entry exists but no live instance remains: fall through and merge fresh (reusing the file).
+  }
+
+  // Load + validate the child file.
+  tinygltf::Model childModel;
+  std::string     error, warn;
+  if(!loadGltfFile(filename, childModel, &error, &warn))
+  {
+    LOGW("%sReference: failed to load '%s' (%s)\n", st.indent().c_str(), nvutils::utf8FromPath(filename).c_str(),
+         error.empty() ? "unknown error" : error.c_str());
+    return -1;
+  }
+  if(!validator().validateModelExtensions(childModel, "referenced asset"))
+    return -1;
+
+  // glTF 2.1: recursively resolve the referenced asset's own external assets so it is self-contained
+  // before merging it under the instance node (guards against cycles back to this scene / the file).
+  {
+    std::vector<std::string> ancestry;
+    ancestry.push_back(nvutils::utf8FromPath(std::filesystem::weakly_canonical(std::filesystem::absolute(m_filename, ec), ec)));
+    ancestry.push_back(nvutils::utf8FromPath(absTarget));
+    flattenReferencedModel(childModel, filename.parent_path(), ancestry, 1);
+  }
+
+  // File entry: store a path relative to the scene's location when possible (portable), else absolute.
+  std::string storedUri;
+  {
+    std::filesystem::path rel;
+    if(!m_filename.empty())
+      rel = std::filesystem::relative(absTarget, m_filename.parent_path(), ec);
+    storedUri = (!rel.empty() && !ec) ? rel.generic_string() : absTarget.generic_string();
+  }
+
+  // Capture pre-mutation sizes so we can roll back all additions on any failure.
+  const int origFilesSize            = static_cast<int>(m_model.files.size());
+  const int origExternalAssetsSize   = static_cast<int>(m_model.externalAssets.size());
+  const int origNodesSize            = static_cast<int>(m_model.nodes.size());
+  auto&     sceneNodes               = m_model.scenes[m_currentScene >= 0 ? m_currentScene : 0].nodes;
+  const int origSceneNodesSize       = static_cast<int>(sceneNodes.size());
+  const int origImageSearchPathsSize = static_cast<int>(m_imageSearchPaths.size());
+
+  auto rollback = [&]() {
+    m_model.files.resize(origFilesSize);
+    m_model.externalAssets.resize(origExternalAssetsSize);
+    m_model.nodes.resize(origNodesSize);
+    sceneNodes.resize(origSceneNodesSize);
+    m_imageSearchPaths.resize(origImageSearchPathsSize);
+  };
+
+  int fileIndex = existingFileIndex;
+  if(fileIndex < 0)
+  {
+    tinygltf::File file;
+    file.uri      = storedUri;
+    file.mimeType = nvutils::extensionMatches(filename, ".glb") ? "model/gltf-binary" : "model/gltf+json";
+    fileIndex     = static_cast<int>(m_model.files.size());
+    m_model.files.push_back(std::move(file));
+  }
+
+  const int externalAssetIndex = static_cast<int>(m_model.externalAssets.size());
+  {
+    tinygltf::ExternalAsset asset;
+    asset.file = fileIndex;
+    asset.name = filename.stem().string();
+    m_model.externalAssets.push_back(std::move(asset));
+  }
+
+  // Create the instance node (editable transform node carrying the externalAsset link) as a root of
+  // the current scene, then merge the child under it.
+  const int instanceNode = static_cast<int>(m_model.nodes.size());
+  {
+    tinygltf::Node node;
+    node.name          = filename.stem().string();
+    node.translation   = {0.0, 0.0, 0.0};
+    node.rotation      = {0.0, 0.0, 0.0, 1.0};
+    node.scale         = {1.0, 1.0, 1.0};
+    node.mesh          = -1;
+    node.camera        = -1;
+    node.skin          = -1;
+    node.externalAsset = externalAssetIndex;
+    m_model.nodes.push_back(std::move(node));
+  }
+  sceneNodes.push_back(instanceNode);
+
+  nvvkgltf::MergeResult mr = SceneMerger::mergeIntoNode(m_model, childModel, instanceNode);
+  if(!mr.valid())
+  {
+    LOGW("%sReference: failed to merge '%s'\n", st.indent().c_str(), nvutils::utf8FromPath(filename).c_str());
+    rollback();
+    return -1;
+  }
+
+  // Make the referenced asset's images resolvable from its own directory, then decompress meshopt.
+  std::filesystem::path importDir = std::filesystem::absolute(filename.parent_path(), ec);
+  if(ec)
+    importDir = filename.parent_path();
+  m_imageSearchPaths.push_back(importDir);
+  if(!decompressMeshoptExtension())
+  {
+    rollback();
+    return -1;
+  }
+
+  recordReferencedAsset(mr.firstNode, mr.lastNode, instanceNode, externalAssetIndex, fileIndex, nvutils::utf8FromPath(absTarget));
+
+  resolveImageURIs();
+  parseScene();
+  m_validSceneParsed = !m_model.nodes.empty();
+
+  LOGI("%sReferenced '%s' (%d nodes)\n", st.indent().c_str(), nvutils::utf8FromPath(filename.filename()).c_str(),
+       mr.lastNode - mr.firstNode);
+  return instanceNode;
+}
+
+//--------------------------------------------------------------------------------------------------
 // SCENE MANAGEMENT
 //--------------------------------------------------------------------------------------------------
 
@@ -756,12 +1367,16 @@ void nvvkgltf::Scene::parseScene()
         [this, &primMap](int nodeID, const glm::mat4& worldMat) { return handleRenderNode(nodeID, worldMat, primMap); });
   }
 
-  // Search for the first camera in the scene and exit traversal upon finding it
+  // Search for the first camera in the scene and exit traversal upon finding it. Cameras belonging
+  // to a referenced (read-only) external asset are part of the asset, not the editable scene's
+  // viewport camera, so they are skipped here (an editable default camera is created below instead).
   for(auto& sceneNode : m_model.scenes[m_currentScene].nodes)
   {
     tinygltf::utils::traverseSceneGraph(
         m_model, sceneNode, glm::mat4(1),
         [&](int nodeID, glm::mat4) {
+          if(isNodeReadOnly(nodeID))
+            return false;  // keep searching for an editable camera
           m_sceneCameraNode = nodeID;
           return true;  // Stop traversal
         },
@@ -918,9 +1533,9 @@ void nvvkgltf::Scene::createSceneCamera()
 
   // Set the camera to look at the scene
   nvutils::Bbox bbox   = getSceneBounds();
-  glm::vec3     center = bbox.center();
-  glm::vec3 eye = center + glm::vec3(0, 0, bbox.radius() * 2.414f);  //2.414 units away from the center of the sphere to fit it within a 45 - degree FOV
-  glm::vec3 up                    = glm::vec3(0, 1, 0);
+  glm::dvec3    center = bbox.center();
+  glm::dvec3 eye = center + glm::dvec3(0, 0, bbox.radius() * 2.414);  //2.414 units away from the center of the sphere to fit it within a 45 - degree FOV
+  glm::dvec3 up                   = glm::dvec3(0, 1, 0);
   tcamera.type                    = "perspective";
   tcamera.name                    = "Camera";
   tcamera.perspective.aspectRatio = 16.0f / 9.0f;
@@ -937,7 +1552,7 @@ void nvvkgltf::Scene::createSceneCamera()
 
   // Set the node transformation
   tnode.translation = {eye.x, eye.y, eye.z};
-  glm::quat q       = glm::quatLookAt(glm::normalize(center - eye), up);
+  glm::dquat q      = glm::quatLookAt(glm::normalize(center - eye), up);
   tnode.rotation    = {q.x, q.y, q.z, q.w};
 }
 
@@ -968,6 +1583,22 @@ void nvvkgltf::Scene::updateNodeWorldMatrices()
     updateWorldMatricesParallel();
   else
     updateWorldMatricesSerial();
+}
+
+//--------------------------------------------------------------------------------------------------
+// Fold the nodes the GPU transform path moved on-device into the dirty set so the next
+// updateNodeWorldMatrices() recomputes only those subtrees (restoring the CPU mirror the CPU sync path
+// reads for render-node buffers / TLAS instances). Cheap: cost scales with what actually moved, not the
+// whole scene. Returns true if any stale nodes were pending.
+//
+bool nvvkgltf::Scene::mergeGpuStaleNodesIntoDirty()
+{
+  if(m_gpuStaleNodes.empty())
+    return false;
+
+  m_dirtyFlags.nodes.insert(m_gpuStaleNodes.begin(), m_gpuStaleNodes.end());
+  m_gpuStaleNodes.clear();
+  return true;
 }
 
 //--------------------------------------------------------------------------------------------------
@@ -1286,7 +1917,7 @@ void nvvkgltf::Scene::updateRenderNodesFull()
   traverseSceneWithVisibility([&](int nodeID, const glm::mat4& worldMat, bool visible) {
     tinygltf::Node& tnode = m_model.nodes[nodeID];
 
-    if(tnode.light > -1)
+    if(tnode.light > -1 && static_cast<size_t>(tnode.light) < m_lights.size())
     {
       m_lights[tnode.light].worldMatrix = worldMat;
     }
@@ -1421,6 +2052,7 @@ void nvvkgltf::Scene::clearParsedData()
   m_sceneBounds     = {};
   m_sceneCameraNode = -1;
   m_dirtyFlags.clear();
+  m_gpuStaleNodes.clear();  // node IDs are scene-relative; must not survive into a newly parsed model
 
   // Invalidate the shaded-nodes cache: m_dirtyFlags.clear() wiped the signals the reconcile
   // path would have seen, so we must force the next getShadedNodes() call to do a full rebuild.
@@ -1441,6 +2073,7 @@ void nvvkgltf::Scene::destroy()
   m_filename.clear();
   m_validSceneParsed = false;
   m_model            = {};
+  m_referencedAssets.clear();
 }
 
 
@@ -1544,6 +2177,12 @@ const std::vector<nvvkgltf::RenderCamera>& nvvkgltf::Scene::getRenderCameras(boo
 
 bool nvvkgltf::Scene::handleCameraTraversal(int nodeID, const glm::mat4& worldMatrix)
 {
+  // Skip cameras that belong to a referenced (read-only) external asset. They are part of the asset,
+  // not the editable scene's viewport cameras, and must not participate in the camera round-trip
+  // (otherwise they surface as the wrong "camera 0" and get duplicated on save/reload).
+  if(isNodeReadOnly(nodeID))
+    return false;
+
   tinygltf::Node& node = m_model.nodes[nodeID];
   m_sceneCameraNode    = nodeID;
 
@@ -1974,7 +2613,11 @@ void applyRenderCameraToNode(tinygltf::Node& tnode, tinygltf::Camera& tcamera, c
     tcamera.perspective.yfov  = camera.yfov;
   }
 
-  tinygltf::Value::Object extras;
+  // Preserve any existing extras (e.g. the external-asset read-only marker) and only update the
+  // camera:: keys. Replacing the whole object would wipe provenance markers and un-tag merged
+  // camera nodes, causing them to leak into saves and duplicate on reload.
+  tinygltf::Value::Object extras =
+      tnode.extras.IsObject() ? tnode.extras.Get<tinygltf::Value::Object>() : tinygltf::Value::Object{};
   extras["camera::eye"]    = tinygltf::utils::convertToTinygltfValue(3, glm::value_ptr(camera.eye));
   extras["camera::center"] = tinygltf::utils::convertToTinygltfValue(3, glm::value_ptr(camera.center));
   extras["camera::up"]     = tinygltf::utils::convertToTinygltfValue(3, glm::value_ptr(camera.up));
@@ -1985,6 +2628,9 @@ void applyRenderCameraToNode(tinygltf::Node& tnode, tinygltf::Camera& tcamera, c
 void nvvkgltf::Scene::setSceneCamera(const nvvkgltf::RenderCamera& camera)
 {
   assert(m_sceneCameraNode != -1 && "No camera node found in the scene");
+  // Never write into a referenced (read-only) external-asset camera node.
+  if(m_sceneCameraNode < 0 || isNodeReadOnly(m_sceneCameraNode))
+    return;
 
   tinygltf::Node&   tnode   = m_model.nodes[m_sceneCameraNode];
   tinygltf::Camera& tcamera = m_model.cameras[tnode.camera];
@@ -1998,28 +2644,27 @@ void nvvkgltf::Scene::setSceneCameras(const std::vector<nvvkgltf::RenderCamera>&
 {
   assert(!cameras.empty() && "cameras must not be empty");
 
+  // Collect the scene's editable camera nodes in traversal order. Cameras embedded in a referenced
+  // (read-only) external asset are skipped: they belong to the asset, are re-merged on load and
+  // stripped on save, so we must never overwrite them here.
   std::vector<int> cameraNodeIds;
   for(auto& sceneNode : m_model.scenes[m_currentScene].nodes)
   {
     tinygltf::utils::traverseSceneGraph(m_model, sceneNode, glm::mat4(1), [&](int nodeID, const glm::mat4&) {
-      if(m_model.nodes[nodeID].camera >= 0)
+      if(m_model.nodes[nodeID].camera >= 0 && !isNodeReadOnly(nodeID))
         cameraNodeIds.push_back(nodeID);
       return false;
     });
   }
 
-  // Adjust the number of cameras
-  m_model.cameras.resize(cameras.size());
-
   for(size_t i = 0; i < cameras.size(); ++i)
   {
+    // Reuse an existing editable camera node, or add a new one when the user has more cameras.
     int nodeIndex = -1;
-    // If the node camera already exists, use it
     if(i < cameraNodeIds.size())
     {
       nodeIndex = cameraNodeIds[i];
     }
-    // If the node camera does not exist, add a new node to hold the camera
     else
     {
       tinygltf::Node& tnode = m_model.nodes.emplace_back();
@@ -2028,16 +2673,21 @@ void nvvkgltf::Scene::setSceneCameras(const std::vector<nvvkgltf::RenderCamera>&
       m_model.scenes[m_currentScene].nodes.push_back(nodeIndex);
     }
 
+    // Write into the node's own camera entry (append one for a brand-new node). Editable camera
+    // entries are disjoint from referenced ones, so this leaves the referenced cameras untouched.
     tinygltf::Node& tnode = m_model.nodes[nodeIndex];
-    tnode.camera          = static_cast<int>(i);
-    applyRenderCameraToNode(tnode, m_model.cameras[i], cameras[i]);
+    if(tnode.camera < 0)
+    {
+      m_model.cameras.emplace_back();
+      tnode.camera = static_cast<int>(m_model.cameras.size() - 1);
+    }
+    applyRenderCameraToNode(tnode, m_model.cameras[tnode.camera], cameras[i]);
   }
 
-  // Set all other cameras nodes to the first camera
+  // Fewer cameras than before (the user removed some): detach the surplus editable camera nodes so
+  // they no longer appear as viewport cameras. Their now-unused camera entries are pruned on save.
   for(size_t i = cameras.size(); i < cameraNodeIds.size(); ++i)
-  {
-    m_model.nodes[cameraNodeIds[i]].camera = 0;  // Re-using the first camera
-  }
+    m_model.nodes[cameraNodeIds[i]].camera = -1;
 }
 
 // Parse the variants of the materials

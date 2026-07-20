@@ -275,7 +275,10 @@ void TransformComputeVk::markGpuStale()
 
 //--------------------------------------------------------------------------------------------------
 // Recreate GPU buffers if the scene topology changed (node/render-node count or graph revision).
-void TransformComputeVk::ensureGpuBuffersMatchScene(nvvk::StagingUploader& staging, const Scene& scn)
+// Returns true if the buffers were rebuilt this call (createGpuBuffers ran and already appended a
+// full local-matrix upload), so the caller can skip its own redundant per-node upload for this frame.
+//--------------------------------------------------------------------------------------------------
+bool TransformComputeVk::ensureGpuBuffersMatchScene(nvvk::StagingUploader& staging, const Scene& scn)
 {
   const size_t   nRn   = scn.getRenderNodes().size();
   const size_t   nNd   = scn.getModel().nodes.size();
@@ -285,7 +288,9 @@ void TransformComputeVk::ensureGpuBuffersMatchScene(nvvk::StagingUploader& stagi
      || rev != m_cachedSceneGraphRevision)
   {
     createGpuBuffers(staging, scn);
+    return true;
   }
+  return false;
 }
 
 //--------------------------------------------------------------------------------------------------
@@ -466,7 +471,7 @@ void TransformComputeVk::dispatchTransformUpdate(VkCommandBuffer cmd, nvvk::Stag
   if(!m_alloc)
     return;
 
-  ensureGpuBuffersMatchScene(staging, scn);
+  const bool buffersRebuilt = ensureGpuBuffersMatchScene(staging, scn);
   if(!hasSceneGpuBuffers())
     return;
 
@@ -481,7 +486,14 @@ void TransformComputeVk::dispatchTransformUpdate(VkCommandBuffer cmd, nvvk::Stag
   if(locals.size() < numNodes)
     return;
 
-  if(m_gpuNeedsFullSync)
+  // If createGpuBuffers just ran this frame it already appended a full local-matrix upload into the same
+  // staging batch; appending again here would flush two overlapping vkCmdCopyBuffer2 to m_bLocalMatrices
+  // (offset 0 full + per-node) with no barrier between them -> WRITE_AFTER_WRITE. Skip the redundant upload.
+  if(buffersRebuilt)
+  {
+    // Nothing to do: the full local-matrix upload was already appended by createGpuBuffers.
+  }
+  else if(m_gpuNeedsFullSync)
   {
     NVVK_CHECK(staging.appendBuffer(m_bLocalMatrices, 0, std::span(locals.data(), numNodes)));
   }
@@ -564,6 +576,11 @@ void TransformComputeVk::dispatchTransformUpdate(VkCommandBuffer cmd, nvvk::Stag
 #ifndef NDEBUG
   const_cast<SceneVk&>(scnVk).debugUpdateShadowCopy(scn);  // material/prim IDs — matrices validated separately
 #endif
+
+  // Transforms were propagated on-device only, so the CPU world-matrix mirror is now stale for exactly
+  // the moved nodes. Record them so a later CPU sync recomputes just those subtrees (not the whole scene).
+  if(!df.nodes.empty())
+    scn.addGpuStaleNodes(df.nodes);
 
   m_gpuNeedsFullSync = false;
 

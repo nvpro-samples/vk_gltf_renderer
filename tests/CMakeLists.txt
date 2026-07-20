@@ -41,6 +41,8 @@ set(TEST_SOURCES
     test_compute_animation.cpp
     # Top-level extensionsUsed / extensionsRequired reconciliation on save
     test_extensions_metadata.cpp
+    # Procedural primitives (plane/cube/sphere) + new/empty-scene workflow
+    test_primitives.cpp
     # Need tinygltf implementation
     ${CMAKE_SOURCE_DIR}/src/tiny_stb_implementation.cpp
     # Local glTF scene implementation

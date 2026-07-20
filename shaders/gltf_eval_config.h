@@ -28,6 +28,18 @@ layout off). Each pair has a compile-time guard below.
 // Get the MAT_EXT_ values from the material config (Struct layout)
 #include "gltf_material_config.h"
 
+// Denoiser guide-buffer compile gates. Both default to 0 so preprocessor #if checks never
+// hit an undefined identifier (Slang warning E15205). The build-time compile defines
+// USE_GUIDE_SHADER=1 via CMake when DLSS/OptiX is available; USE_DLSS_SHADER stays 0 in the
+// embedded shader (DLSS is never active at startup). The runtime from-file recompile sets
+// both explicitly from the active denoiser state.
+#ifndef USE_GUIDE_SHADER
+#define USE_GUIDE_SHADER 0
+#endif
+#ifndef USE_DLSS_SHADER
+#define USE_DLSS_SHADER 0
+#endif
+
 // Make by default the GLTF_USE_X values the same as the MAT_EXT_X values
 // We split them, so that we can remove a functionality at compile time
 // without changing the struct layout (GltfShadeMaterial).

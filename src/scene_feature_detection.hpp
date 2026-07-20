@@ -66,10 +66,10 @@ struct SceneFeatureSet
     eSpecularGlossiness,
     eTextureTransform,
 
-    // Shader-side guide-buffer code (DlssScratch / dlssGetClearGlassGuideAlbedo / etc.).
+    // Shader-side guide-buffer code (GuideScratch / dlssGetClearGlassGuideAlbedo / etc.).
     // True when the active denoiser (DLSS or OptiX) wants the path tracer to populate
     // first-hit guide buffers. The build-time CMake gate also controls this via
-    // USE_DLSS_SHADER, but runtime variant rebuild can be more aggressive (e.g. turn
+    // USE_GUIDE_SHADER, but runtime variant rebuild can be more aggressive (e.g. turn
     // off when DLSS is compiled in but the user has disabled the denoiser).
     eDlssGuide,
 

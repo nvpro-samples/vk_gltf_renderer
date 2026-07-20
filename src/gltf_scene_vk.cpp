@@ -312,6 +312,8 @@ void nvvkgltf::SceneVk::createGeometry(VkCommandBuffer cmd, nvvk::StagingUploade
 {
   m_sceneDescDirty = true;  // Geometry buffers may be recreated below.
   createVertexBuffers(cmd, staging, scn);
+  // Ensure m_bRenderNode is resized with a full upload since geometry-only rebuilds can change the render-node count, avoiding GPU buffer overflows.
+  uploadRenderNodes(staging, scn, {});
   (void)flushSceneDescIfDirty(staging, scn);
 }
 
@@ -1247,6 +1249,16 @@ bool nvvkgltf::SceneVk::createImage(const VkCommandBuffer& cmd, nvvk::StagingUpl
   bool               canGenerateMipmaps = false;
   VkFormatProperties formatProperties;
   vkGetPhysicalDeviceFormatProperties(m_physicalDevice, format, &formatProperties);
+
+  // Skip formats the device cannot sample (e.g. ASTC from EXT_texture_astc on desktop GPUs).
+  // Returning false lets the caller substitute a default image instead of crashing in vkCreateImage.
+  if((formatProperties.optimalTilingFeatures & VK_FORMAT_FEATURE_SAMPLED_IMAGE_BIT) == 0)
+  {
+    LOGW("Image '%s' uses a format (%d) not supported by this device; skipping (using default image).\n",
+         image.imgName.c_str(), static_cast<int>(format));
+    return false;
+  }
+
   if((formatProperties.optimalTilingFeatures & VK_FORMAT_FEATURE_BLIT_DST_BIT) == VK_FORMAT_FEATURE_BLIT_DST_BIT)
   {
     canGenerateMipmaps = true;

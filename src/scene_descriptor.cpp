@@ -18,7 +18,7 @@
  */
 
 //
-// Parses .scene.json / .glXf descriptor files that define multiple glTF models
+// Parses .scene.json descriptor files that define multiple glTF models
 // and their instances (path, transform, name). Supports both RTXPT-style
 // "graph" nodes and a simple "models" + "instances" array format. No dependency
 // on Scene or Vulkan; output is used by the application to load and place scenes.
@@ -75,7 +75,7 @@ static glm::quat parseQuat(const json& j, const char* key, const glm::quat& defa
 //--------------------------------------------------------------------------------------------------
 // Load scene descriptor
 //--------------------------------------------------------------------------------------------------
-// Parses a .scene.json or .glXf file: reads "models" (glTF paths) and "graph" or "instances"
+// Parses a .scene.json file: reads "models" (glTF paths) and "graph" or "instances"
 // (model index, translation, rotation, scale, name). Model paths are resolved relative to the
 // descriptor's directory. On success, out is populated and true is returned; on failure, an
 // error is logged and false is returned. If no instances are present, one identity instance

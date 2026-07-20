@@ -43,39 +43,50 @@ static const float RR_PCONT_FLOOR                  = 0.001f;      // Minimum pro
 static const float RR_PCONT_CAP                    = 0.95f;       // Maximum probability for Russian Roulette
 
 //-----------------------------------------------------------------------
-// #DLSS - Information for the DLSS
+// Denoiser guide buffers (shared by DLSS and OptiX)
 //
-// The DLSS-only guide-buffer extras (DlssOutput / DlssScratch + the helpers further
-// down + the per-bounce captures in pathTraceOneBounce) only exist when USE_DLSS_SHADER
-// is defined (set by CMake when USE_DLSS or USE_OPTIX_DENOISER is ON, or by the
-// runtime scene-aware variant rebuild). When it's off we drop those scratch fields
-// from PathTracerState and SampleResult to shrink per-thread live state.
+// Guide-buffer scratch (GuideOutput / GuideScratch + the helpers further down + the
+// per-bounce captures in pathTraceOneBounce) only exists when USE_GUIDE_SHADER is
+// defined (set by CMake when USE_DLSS or USE_OPTIX_DENOISER is ON, or by the runtime
+// scene-aware variant rebuild). When it's off we drop those scratch fields from
+// PathTracerState and SampleResult to shrink per-thread live state.
 //
-// Exception: hitPosition is promoted OUT of the DLSS-gated block because it is
+// Two-tier split inside the guide block:
+//   USE_GUIDE_SHADER : albedo + normalRoughness (+ motion/depth). Consumed by DLSS and
+//                      OptiX, so present whenever any denoiser guide is required.
+//   USE_DLSS_SHADER  : specularAlbedo + specularHitDist (+ their per-bounce capture).
+//                      DLSS-only; OptiX needs neither, so they are compiled out of the
+//                      OptiX/no-denoiser variant to shrink live state further.
+//
+// Exception: hitPosition is promoted OUT of the guide-gated block because it is
 // also consumed by the always-on NDC depth output (used for selection/picking on
 // the first frame). Keeping it gated would break picking when DLSS/OptiX are off.
 //-----------------------------------------------------------------------
-#if USE_DLSS_SHADER
-struct DlssOutput
+#if USE_GUIDE_SHADER
+struct GuideOutput
 {
   float16_t4 albedo          = float16_t4(0);
-  float16_t3 specularAlbedo  = float16_t3(0);
   float16_t4 normalRoughness = float16_t4(0);
+#if USE_DLSS_SHADER
+  float16_t3 specularAlbedo  = float16_t3(0);
   float      specularHitDist = 0.0f;  // Distance to reflected surface (0=no reflection, 65504=sky reflection)
+#endif                                // USE_DLSS_SHADER
 };
 
 //-----------------------------------------------------------------------
 // DLSS guide temps accumulated during pathTrace (written to SampleResult at end).
 //-----------------------------------------------------------------------
-struct DlssScratch
+struct GuideScratch
 {
-  float16_t3 albedo             = float16_t3(0);
+  float16_t3 albedo          = float16_t3(0);
+  float16_t4 normalRoughness = float16_t4(0);
+#if USE_DLSS_SHADER
   float16_t3 specularAlbedo     = float16_t3(0);
-  float16_t4 normalRoughness    = float16_t4(0);
   float16_t  specularHitDist    = float16_t(0);
   bool       captureSpecularHit = false;
-};
 #endif  // USE_DLSS_SHADER
+};
+#endif  // USE_GUIDE_SHADER
 
 //-----------------------------------------------------------------------
 // This is the result of sampling a pixel
@@ -84,9 +95,9 @@ struct SampleResult
 {
   float4 radiance    = float4(0, 0, 0, 0);
   float3 hitPosition = 1e34f;  // World-space first-hit position; always present (drives NDC depth + DLSS motion).
-#if USE_DLSS_SHADER
-  float3     hitPositionPrev = 1e34f;  // Previous-frame world-space position of the first-hit point (instance motion).
-  DlssOutput dlssOutput      = {};
+#if USE_GUIDE_SHADER
+  float3      hitPositionPrev = 1e34f;  // Previous-frame world-space position of the first-hit point (instance motion).
+  GuideOutput guideOutput     = {};
 #endif
 };
 
@@ -825,7 +836,7 @@ enum PathStepResult
 
 // Path tracer state
 //
-// isInside / volumeMedium / scatterBounces / dlss are only carried in builds that
+// isInside / volumeMedium / scatterBounces / guide are only carried in builds that
 // actually use them. Each field dropped removes that many live registers from the
 // per-thread state that survives across every Trace() call in the bounce loop,
 // which is what determines warps-per-SM (occupancy) on the megakernel.
@@ -855,9 +866,9 @@ struct PathTracerState
 #if GLTF_USE_VOLUME_SCATTER
   int scatterBounces = 0;
 #endif
-#if USE_DLSS_SHADER
-  DlssScratch dlss            = {};
-  float3      firstHitPosPrev = float3(1e34f);  // Previous-frame world position of the first hit (instance motion).
+#if USE_GUIDE_SHADER
+  GuideScratch guide           = {};
+  float3       firstHitPosPrev = float3(1e34f);  // Previous-frame world position of the first hit (instance motion).
 #endif
 #if WIREFRAME
   float firstHitWireframeAlpha = 0.0;
@@ -937,7 +948,7 @@ bool tryPrimaryMissBackplate(RayDesc ray, SceneFrameInfo* frameInfo, inout PathT
   // processPixel projects this with w=0 (camera translation cancels). NDC depth for a miss is written
   // as far (1.0) on the !hasSolidHit branch, so this value is consumed only by motion vectors.
   pt.firstHitPos = ray.Direction;
-#if USE_DLSS_SHADER
+#if USE_GUIDE_SHADER
   // Sky is fixed in world space; the previous-frame view direction is identical (w=0 yields camera-only motion).
   pt.firstHitPosPrev = ray.Direction;
 #endif
@@ -964,13 +975,15 @@ SampleResult packSampleResult(PathTracerState pt)
   SampleResult sampleResult = {};
   sampleResult.radiance     = float4(pt.radiance, pt.solid ? 1 : 0);
   sampleResult.hitPosition  = pt.firstHitPos;
+#if USE_GUIDE_SHADER
+  sampleResult.hitPositionPrev             = pt.firstHitPosPrev;
+  sampleResult.guideOutput.albedo          = float16_t4(pt.guide.albedo, pt.solid ? 1.0h : 0.0h);
+  sampleResult.guideOutput.normalRoughness = pt.guide.normalRoughness;
 #if USE_DLSS_SHADER
-  sampleResult.hitPositionPrev            = pt.firstHitPosPrev;
-  sampleResult.dlssOutput.albedo          = float16_t4(pt.dlss.albedo, pt.solid ? 1.0h : 0.0h);
-  sampleResult.dlssOutput.specularAlbedo  = pt.dlss.specularAlbedo;
-  sampleResult.dlssOutput.normalRoughness = pt.dlss.normalRoughness;
-  sampleResult.dlssOutput.specularHitDist = pt.dlss.specularHitDist;
-#endif
+  sampleResult.guideOutput.specularAlbedo  = pt.guide.specularAlbedo;
+  sampleResult.guideOutput.specularHitDist = pt.guide.specularHitDist;
+#endif  // USE_DLSS_SHADER
+#endif  // USE_GUIDE_SHADER
   return sampleResult;
 }
 

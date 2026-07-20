@@ -72,13 +72,26 @@ void appendPathTracerOptimalMacros(std::vector<std::pair<std::string, std::strin
   }
 }
 
-void appendPathTracerDlssShaderMacro(std::vector<std::pair<std::string, std::string>>& macros, bool optimalShader, const SceneFeatureSet& features)
+void appendPathTracerDlssShaderMacro(std::vector<std::pair<std::string, std::string>>& macros, const SceneFeatureSet& features, bool dlssActive)
 {
+  // Two independent, runtime-driven compile gates (both refreshed every frame, independent of
+  // optimal mode):
+  //   USE_GUIDE_SHADER : guide-buffer capture (albedo/normal/etc.). Needed by DLSS *and* OptiX,
+  //                      so it follows eDlssGuide == dlssGuideRequired() (DLSS or OptiX active).
+  //   USE_DLSS_SHADER  : DLSS-specific path. True only when DLSS is actually active. Drives the
+  //                      per-frame multisample-loop gate (loop compiled out for DLSS to cut
+  //                      register pressure; compiled in for OptiX / no-denoiser so samples work).
 #if defined(USE_DLSS) || defined(USE_OPTIX_DENOISER)
-  const bool useDlssShader = optimalShader ? features.has(SceneFeatureSet::eDlssGuide) : true;
+  const bool useGuideShader = features.has(SceneFeatureSet::eDlssGuide);
+#else
+  const bool useGuideShader = false;
+#endif
+#if defined(USE_DLSS)
+  const bool useDlssShader = dlssActive;
 #else
   const bool useDlssShader = false;
 #endif
+  pushExplicit(macros, "USE_GUIDE_SHADER", useGuideShader);
   pushExplicit(macros, "USE_DLSS_SHADER", useDlssShader);
 }
 

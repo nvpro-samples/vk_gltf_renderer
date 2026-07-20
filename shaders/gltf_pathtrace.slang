@@ -135,12 +135,12 @@ PathStepResult pathTraceOneBounce(IRaytracer raytracer, inout RayDesc ray, inout
 #if USE_DLSS_SHADER
       // #DLSS - If capturing specular hit and we hit environment, use max distance (65504 = fp16 max)
       // This happens when a glossy reflection bounces into the sky.
-      if(pt.dlss.captureSpecularHit)
+      if(pt.guide.captureSpecularHit)
       {
-        pt.dlss.specularHitDist    = float16_t(65504.0f);
-        pt.dlss.captureSpecularHit = false;
+        pt.guide.specularHitDist    = float16_t(65504.0f);
+        pt.guide.captureSpecularHit = false;
       }
-#endif
+#endif  // USE_DLSS_SHADER
 
       // Add sky or HDR texture using refactored helper
       float3 envColor;
@@ -215,12 +215,12 @@ PathStepResult pathTraceOneBounce(IRaytracer raytracer, inout RayDesc ray, inout
 
 #if USE_DLSS_SHADER
     // #DLSS - Capture specular hit distance on depth 1 (first reflection bounce)
-    if(pt.dlss.captureSpecularHit)
+    if(pt.guide.captureSpecularHit)
     {
-      pt.dlss.specularHitDist    = float16_t(payload.hitT);
-      pt.dlss.captureSpecularHit = false;
+      pt.guide.specularHitDist    = float16_t(payload.hitT);
+      pt.guide.captureSpecularHit = false;
     }
-#endif
+#endif  // USE_DLSS_SHADER
 
     //-----------------------------------------------------------------------
     // First-hit captures (NDC-depth always; DLSS/OptiX guide buffers when on).
@@ -231,7 +231,7 @@ PathStepResult pathTraceOneBounce(IRaytracer raytracer, inout RayDesc ray, inout
       // selection/picking, independent of DLSS/OptiX.
       pt.firstHitPos = hit.pos;
 
-#if USE_DLSS_SHADER
+#if USE_GUIDE_SHADER
       // #DLSS instance motion - Previous-frame world position of this surface point.
       pt.firstHitPosPrev = hit.pos;
       if(!hitInfinitePlane && pushConst.prevRenderNodeObjectToWorld != nullptr)
@@ -240,22 +240,27 @@ PathStepResult pathTraceOneBounce(IRaytracer raytracer, inout RayDesc ray, inout
         pt.firstHitPosPrev = mul(float4(objPos, 1.0), pushConst.prevRenderNodeObjectToWorld[payload.rnodeID]).xyz;
       }
 
-      // #DLSS - Gather data from first hit (store temporarily, write at end to reduce live state)
+      // Base-color guide albedo (shared by DLSS and OptiX). Stored temporarily, written at end to
+      // reduce live state.
+      float3 guideAlbedo = pbrMat.baseColor.xyz;
+#if USE_DLSS_SHADER
+      // #DLSS specular guide - specular albedo + clear-glass albedo refinement. DLSS-only quality
+      // path; OptiX needs neither, so it is compiled out of the OptiX/no-denoiser variant.
       // Apply KHR_materials_specular energy conservation clamping for DLSS guide buffer
       // Spec formula: dielectric_f0 = min(f0_from_ior * specularColor, 1.0) * specular
       float  f0_from_ior          = pow((pbrMat.ior2 - pbrMat.ior1) / (pbrMat.ior2 + pbrMat.ior1), 2.0F);
       float3 specularColorClamped = min(f0_from_ior * pbrMat.specularColor, float3(1.0F));
       float3 specularAlbedo = EnvBRDFApprox2(specularColorClamped, pbrMat.roughness.x, dot(pbrMat.N, ray.Direction));
-      float3 guideAlbedo    = pbrMat.baseColor.xyz;
       if(USE_DLSS_TRANSP == 1 && !hasFlag(pushConst.flags, PathtracerFlags::ePtUseOptixDenoiser) && dlssIsClearGlass(pbrMat))
       {
         guideAlbedo = dlssGetClearGlassGuideAlbedo(raytracer, pbrMat, hit, ray.Direction, frameInfo, seed,
                                                    ptIsInside(pt), specularAlbedo);
       }
-      pt.dlss.specularAlbedo  = float16_t3(specularAlbedo);
-      pt.dlss.normalRoughness = float16_t4(float16_t3(pbrMat.N), float16_t(pbrMat.roughness.x));
-      pt.dlss.albedo          = float16_t3(guideAlbedo);
+      pt.guide.specularAlbedo = float16_t3(specularAlbedo);
 #endif  // USE_DLSS_SHADER
+      pt.guide.normalRoughness = float16_t4(float16_t3(pbrMat.N), float16_t(pbrMat.roughness.x));
+      pt.guide.albedo          = float16_t3(guideAlbedo);
+#endif  // USE_GUIDE_SHADER
     }
 
     // Keep track of the maximum roughness to prevent firefly artifacts by forcing subsequent bounces to be at least as rough
@@ -363,9 +368,9 @@ PathStepResult pathTraceOneBounce(IRaytracer raytracer, inout RayDesc ray, inout
       // Matches reference implementation: only capture for BSDF_EVENT_GLOSSY_REFLECTION
       if(firstRay && (sampleData.event_type == BSDF_EVENT_GLOSSY_REFLECTION || sampleData.event_type == BSDF_EVENT_IMPULSE_REFLECTION))
       {
-        pt.dlss.captureSpecularHit = true;
+        pt.guide.captureSpecularHit = true;
       }
-#endif
+#endif  // USE_DLSS_SHADER
 
       // The ray wasn't absorbed, so we can continue the path
       if(sampleData.event_type != BSDF_EVENT_ABSORB)
@@ -572,7 +577,10 @@ void processPixel(IRaytracer raytracer, float2 samplePos, float2 imageSize)
                                           pushConst.frameInfo->viewInv, pushConst.focalDistance, pushConst.aperture);
   float4 pixelColor = sampleResult.radiance;
 
-  // DLSS uses only one sample per pixel
+  // DLSS uses only one sample per pixel (it does its own temporal accumulation), so the
+  // multi-sample loop is compiled out in the DLSS variant to reduce register pressure.
+  // USE_DLSS_SHADER is true only when DLSS is actually active; for the OptiX and no-denoiser
+  // paths it is 0, so the loop is compiled in and honors the user's samples-per-pixel setting.
 #if !USE_DLSS_SHADER
   for(int s = 1; s < pushConst.numSamples; s++)
   {
@@ -582,7 +590,7 @@ void processPixel(IRaytracer raytracer, float2 samplePos, float2 imageSize)
     pixelColor += sampleResult.radiance;
   }
   pixelColor /= pushConst.numSamples;
-#endif // USE_DLSS_SHADER
+#endif  // !USE_DLSS_SHADER
 
 
   // NDC depth from first-hit world position (Vulkan [0,1] range, 1.0 = far/miss).
@@ -618,7 +626,8 @@ void processPixel(IRaytracer raytracer, float2 samplePos, float2 imageSize)
   }
 
 #if USE_DLSS_SHADER
-  // #DLSS - Storing the GBuffer for the DLSS denoiser
+  // #DLSS - Storing the GBuffer for the DLSS denoiser (DLSS-only variant; the specular guide targets
+  // do not exist in the OptiX/no-denoiser build).
   if(hasFlag(pushConst.flags, PathtracerFlags::ePtUseDlss))
   {
     // Combined camera + instance motion. w selects the projection model: surface hits use w=1 (the
@@ -630,23 +639,31 @@ void processPixel(IRaytracer raytracer, float2 samplePos, float2 imageSize)
                                              pushConst.frameInfo->prevMVP, pushConst.frameInfo->viewProjMatrix, imageSize);
     outImages[int(OutputImage::eDlssDepth)][int2(samplePos)]           = float4(ndcDepth);
     outImages[int(OutputImage::eDlssMotion)][int2(samplePos)]          = float4(motionVec, 0, 0);
-    outImages[int(OutputImage::eDlssNormalRoughness)][int2(samplePos)] = sampleResult.dlssOutput.normalRoughness;
-    outImages[int(OutputImage::eDlssAlbedo)][int2(samplePos)]          = sampleResult.dlssOutput.albedo;
-    outImages[int(OutputImage::eDlssSpecAlbedo)][int2(samplePos)] = float4(sampleResult.dlssOutput.specularAlbedo.xyz, 1.0f);
-    outImages[int(OutputImage::eDlssSpecularHitDist)][int2(samplePos)] = float4(sampleResult.dlssOutput.specularHitDist);
+    outImages[int(OutputImage::eDlssNormalRoughness)][int2(samplePos)] = sampleResult.guideOutput.normalRoughness;
+    outImages[int(OutputImage::eDlssAlbedo)][int2(samplePos)]          = sampleResult.guideOutput.albedo;
+    outImages[int(OutputImage::eDlssSpecAlbedo)][int2(samplePos)] = float4(sampleResult.guideOutput.specularAlbedo.xyz, 1.0f);
+    outImages[int(OutputImage::eDlssSpecularHitDist)][int2(samplePos)] = float4(sampleResult.guideOutput.specularHitDist);
   }
+#endif  // USE_DLSS_SHADER
 
+#if USE_GUIDE_SHADER
   if(hasFlag(pushConst.flags, PathtracerFlags::ePtUseOptixDenoiser))
   {
     // Transform normal from world space to camera space for OptiX denoiser
-    // OptiX requires normals in camera space (right-handed, -Z forward, Y up, X right)
-    float3 worldNormal   = sampleResult.dlssOutput.normalRoughness.xyz;
-    float3 cameraNormal  = normalize(mul(float3x3(pushConst.frameInfo->viewMatrix), worldNormal));
-    uint   normalEncoded = compressUnitVec(cameraNormal);
+    // OptiX requires normals in camera space (right-handed, -Z forward, Y up, X right).
+    // On primary misses the guide normal is zero, so fall back to a valid forward-facing
+    // normal to avoid normalizing/compressing a degenerate vector.
+    float3 cameraNormal = float3(0.0f, 0.0f, 1.0f);
+    if(hasSolidHit)
+    {
+      float3 worldNormal = sampleResult.guideOutput.normalRoughness.xyz;
+      cameraNormal       = normalize(mul(float3x3(pushConst.frameInfo->viewMatrix), worldNormal));
+    }
+    uint normalEncoded = compressUnitVec(cameraNormal);
     outImages[int(OutputImage::eOptixAlbedoNormal)][int2(samplePos)] =
-        float4(sampleResult.dlssOutput.albedo.xyz, asfloat(normalEncoded));
+        float4(sampleResult.guideOutput.albedo.xyz, asfloat(normalEncoded));
   }
-#endif  // USE_DLSS_SHADER
+#endif  // USE_GUIDE_SHADER
 }
 
 //-----------------------------------------------------------------------

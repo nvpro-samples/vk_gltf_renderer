@@ -28,7 +28,7 @@
 #include <glm/gtc/quaternion.hpp>
 
 //
-// Standalone parser for .scene.json / .glXf descriptor files.
+// Standalone parser for .scene.json descriptor files.
 //
 // Descriptor files define a set of glTF models and their instances (transform, name).
 // Supports RTXPT-style "graph" nodes and a simple "models" + "instances" array format.
@@ -68,6 +68,6 @@ struct SceneDescriptor
   }
 };
 
-// Parses a .scene.json or .glXf descriptor file. Model paths are resolved relative to the
+// Parses a .scene.json descriptor file. Model paths are resolved relative to the
 // descriptor's directory. Returns true on success; on failure, logs the error and returns false.
 bool loadSceneDescriptor(const std::filesystem::path& descriptorPath, SceneDescriptor& outDescriptor);

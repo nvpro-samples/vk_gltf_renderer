@@ -28,6 +28,7 @@
  * - Scene List: Flat grouped view (nodes, meshes, materials, cameras, lights, textures, images, animations)
  */
 
+#include <functional>
 #include <string>
 #include <vector>
 #include <unordered_set>
@@ -38,6 +39,7 @@
 #include <nvutils/bounding_box.hpp>
 
 #include "scene_selection.hpp"
+#include "gltf_scene_editor.hpp"  // nvvkgltf::PrimitiveKind, PrimitiveParams
 
 class UndoStack;
 
@@ -67,9 +69,26 @@ public:
   void setSelection(SceneSelection* selection) { m_selection = selection; }
   void setUndoStack(UndoStack* undoStack) { m_undoStack = undoStack; }
   void setBbox(nvutils::Bbox bbox) { m_bbox = bbox; }
+  // Called after a geometry-changing edit (e.g. adding a primitive) so the renderer can (re)create
+  // the GPU vertex/index buffers and acceleration structures for the new geometry.
+  void setGeometryChangedCallback(std::function<void()> cb) { m_onGeometryChanged = std::move(cb); }
+  // Called at the start of every create action so a scene can be stood up on demand (e.g. the
+  // menu-bar "Create" running with nothing loaded). No-op when a scene already exists.
+  void setBeforeCreateCallback(std::function<void()> cb) { m_onBeforeCreate = std::move(cb); }
   void markCachesDirty();
 
   void render(bool* show = nullptr, bool isBusy = false);
+
+  // Renders the "Add Primitive" size/subdivision modal (opened by requestAddPrimitive). Must be called
+  // from an always-rendered top-level UI path -- NOT from render(), which is skipped when the Scene
+  // Browser window is hidden/collapsed -- so the modal still surfaces when triggered from the menu bar.
+  void showAddPrimitivePopup();
+
+  // Object-creation catalog (Empty Node + Mesh submenu + Light submenu), shared by the menu-bar
+  // "Create" menu, the node context "Add Child" and the scene-root context "Add". parentIndex = -1
+  // adds at the scene root. Defined in one place so meshes and lights stay in the same taxonomy.
+  void renderCreateCatalog(int parentIndex);                         // bare items (inside the "Create" menu)
+  void renderAddObjectMenu(int parentIndex, const char* menuLabel);  // wrapped in a submenu (context menus)
 
   // Selection synchronization (called from external picker)
   void focusOnSelection();  // Auto-expand/scroll to selection
@@ -131,6 +150,13 @@ private:
   void showMeshContextMenu(int meshIdx);
   void showPrimitiveContextMenu(int primIdx, int meshIdx, int nodeIdx);
   void showMaterialContextMenu(int matIdx);
+
+  // Create-catalog building blocks (all take parentIndex; -1 = scene root):
+  void renderAddPrimitiveItems(int parentIndex);  // one item per nvvkgltf::kPrimitiveKinds (Mesh)
+  void renderAddLightItems(int parentIndex);      // one item per nvvkgltf::kLightKinds (Light)
+  void addEmptyNode(int parentIndex);             // undoable empty-node creation
+  void addLight(const char* lightType, const char* lightName, int parentIndex);  // undoable light creation
+  void requestAddPrimitive(nvvkgltf::PrimitiveKind kind, int parentIndex);       // opens the size/subdiv popup
 
   //==================================================================================================
   // DIALOG RENDERING
@@ -208,4 +234,12 @@ private:
   // Shared delete state (owned by renderer, written by context menu)
   int*  m_pendingDeleteNode        = nullptr;
   bool* m_openDeletePopupNextFrame = nullptr;
+
+  // Add-primitive popup state (deferred-open pattern like rename/delete)
+  std::function<void()>     m_onGeometryChanged;
+  std::function<void()>     m_onBeforeCreate;  // ensure a scene exists before any create action
+  nvvkgltf::PrimitiveKind   m_pendingPrimitiveKind = nvvkgltf::PrimitiveKind::eCube;
+  nvvkgltf::PrimitiveParams m_pendingPrimitiveParams;
+  int                       m_pendingPrimitiveParent         = -1;
+  bool                      m_openAddPrimitivePopupNextFrame = false;
 };

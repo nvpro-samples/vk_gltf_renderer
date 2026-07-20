@@ -1,6 +1,6 @@
 # Developer Guide -- Vulkan Ray Tracing glTF Renderer
 
-Architecture and source code reference for contributors to the Vulkan glTF Renderer. For runtime usage, see the [User Guide](user-guide.md).
+> **For contributors and agents.** High-level architecture, source map, and the material system — concepts plus pointers into `src/` and `shaders/`, not a restatement of the code. For runtime usage see the [User Guide](user-guide.md); for the scene data-flow deep dive see [Rendering Architecture](RENDERING_ARCHITECTURE.md).
 
 This project is developer-oriented: the **RTX path tracer** is the primary high-quality reference for ray tracing glTF PBR materials, while the **rasterizer** is a practical fallback for fast interaction and iteration. Both renderers share Vulkan resources and Slang shaders.
 
@@ -15,6 +15,8 @@ This project is developer-oriented: the **RTX path tracer** is the primary high-
 - [Contributing](#contributing)
 
 For the internal data-flow walkthrough (Model -> RenderNodes -> GPU/TLAS), including how ray tracing acceleration structures are built, see [Rendering Architecture](RENDERING_ARCHITECTURE.md).
+
+For how glTF 2.1 external assets (complex scenes) are merged, flagged read-only, and re-externalized/flattened on save, see [External Assets](external_assets.md).
 
 ---
 
@@ -32,13 +34,14 @@ For the internal data-flow walkthrough (Model -> RenderNodes -> GPU/TLAS), inclu
 | `onResize()` | Recreate G-Buffer and notify renderers |
 | `onUIRender()` | Render ImGui UI and handle input |
 | `onUIMenu()` | Create menu bar (File, View, Tools, Debug) |
-| `onFileDrop()` | Load dropped .gltf/.glb/.obj as scenes, .hdr as environment maps |
+| `onFileDrop()` | Load dropped .gltf/.glb/.obj (or a `.scene.json` descriptor) as scenes, .hdr as environment maps |
 
 In `main()` we attach:
 - `GltfRenderer` — the main element (scene loading, rendering, UI)
 - `ElementProfiler` — GPU execution timing
 - `ElementLogger` — log output in a UI window
 - `ElementGpuMonitor` — NVML-based GPU status monitoring
+- `ElementDbgPrintf` — shader `printf` debug output (only when built with `USE_DBG_PRINTF`)
 
 ---
 
@@ -104,11 +107,14 @@ flowchart TB
 
 ## Source Code Structure
 
+Primary files grouped by subsystem (not an exhaustive listing — treat `src/` and
+`shaders/` as the source of truth for the complete set):
+
 ```text
 src/
 ├── main.cpp                    # Entry point, Vulkan context, CLI parsing
 ├── renderer.cpp/hpp            # Main renderer orchestrator (GltfRenderer)
-├── renderer_base.hpp           # Abstract base for rendering backends
+├── renderer_base.hpp           # BaseRenderer: abstract base for PathTracer / Rasterizer
 ├── renderer_pathtracer.cpp/hpp # Monte Carlo path tracer (Vulkan ray tracing + ray query)
 ├── renderer_rasterizer.cpp/hpp # Forward PBR rasterizer
 ├── renderer_silhouette.cpp/hpp # Selection highlight (compute shader)
@@ -117,8 +123,11 @@ src/
 ├── gltf_scene.cpp/hpp          # Core scene loading and management
 ├── gltf_scene_vk.cpp/hpp       # GPU buffer/texture upload (SceneVk)
 ├── gltf_scene_rtx.cpp/hpp      # BLAS/TLAS acceleration structures (SceneRtx)
+├── gltf_scene_gpu.cpp/hpp      # SceneGpu — coordinates SceneVk / AnimationVk / SceneRtx / TransformComputeVk
 ├── gltf_scene_editor.cpp/hpp   # Scene editing (add/delete/duplicate nodes)
-├── gltf_scene_animation.cpp/hpp# Animation playback and interpolation
+├── gltf_scene_animation.cpp/hpp# AnimationSystem: playback/interpolation (CPU), via Scene::animation()
+├── gltf_scene_animation_vk.cpp/hpp # GPU compute skinning / morph target animation
+├── gltf_scene_transform_vk.cpp/hpp # GPU compute world-matrix propagation
 ├── gltf_scene_merger.cpp/hpp   # Merge two glTF scenes
 ├── gltf_scene_validator.cpp/hpp# Scene validation
 ├── gltf_compact_*.cpp/hpp      # Orphan resource removal / buffer compaction
@@ -145,11 +154,16 @@ src/
 ├── gizmo_visuals_vk.cpp/hpp    # Helper overlay manager
 │
 ├── undo_redo.cpp/hpp           # Full undo/redo system for scene editing
-├── tinygltf_utils.cpp/hpp      # TinyGLTF material extension extraction
+├── tinygltf_utils.cpp/hpp      # TinyGLTF material + node extension extraction (visibility/selectability/hoverability)
 ├── tinygltf_converter.cpp/hpp  # OBJ to glTF converter
 ├── tiny_stb_implementation.cpp # STB library implementation (single compilation unit)
 ├── pipeline_cache_util.cpp/hpp # Vulkan pipeline cache persistence
 ├── scene_selection.cpp/hpp     # Selection state and events
+├── scene_descriptor.cpp/hpp    # Scene descriptor set layout / bindings
+├── scene_feature_detection.cpp/hpp # Detect which extensions a scene uses
+├── scene_shader_macros.cpp/hpp # Emit -DGLTF_USE_* macros from detected features
+├── timeline_pipeline.cpp/hpp   # Timeline-semaphore submission helper
+├── benchmarking.cpp/hpp        # Headless timing / scripted GPU benchmarks
 ├── gltf_camera_utils.hpp       # Camera utility functions
 ├── gpu_memory_tracker.hpp      # GPU memory category tracking
 ├── scoped_banner.hpp           # Scoped UI banner helper
@@ -159,7 +173,15 @@ shaders/
 ├── gltf_pathtrace.slang        # Path tracer (compute + ray generation)
 ├── gltf_raster.slang           # PBR rasterizer (vertex + fragment)
 ├── silhouette.comp.slang       # Selection edge detection
+├── skinning.comp.slang         # GPU skinning
+├── morph.comp.slang            # GPU morph-target blending
+├── world_matrix_propagate.comp.slang   # Per-level world-matrix propagation
+├── snapshot_prev_transforms.comp.slang # Snapshot previous transforms (motion vectors)
+├── update_render_instances.comp.slang  # Refresh render-instance data on GPU
+├── animation_io.h.slang        # Skinning/morph shader I/O
+├── world_matrix_io.h.slang     # World-matrix compute shader I/O
 ├── shaderio.h                  # Host/device shared structures
+├── pathtrace_functions.h.slang # Path-tracer hit/shading helpers (getShadowTransmission, etc.)
 ├── common.h.slang              # Shared shader utilities
 ├── get_hit.h.slang             # Hit state interpolation
 ├── raytracer_interface.h.slang # RayQuery vs traditional RT abstraction
@@ -172,6 +194,7 @@ shaders/
 │
 │   # Local material fork (see "Material System" below)
 ├── gltf_material_config.h      # MAT_EXT_* compile-time feature flags
+├── gltf_eval_config.h          # GLTF_USE_* runtime behavior gates
 ├── gltf_scene_io.h.slang       # GltfShadeMaterial / GltfLight / GltfScene shaderio structs
 ├── gltf_vertex_access.h.slang  # Vertex buffer accessors
 └── gltf_material_eval.h.slang  # evaluateMaterial(): GltfShadeMaterial -> PbrMaterial
@@ -213,15 +236,16 @@ are **forked locally** into `shaders/gltf_*.h.slang` rather than using the upstr
   `nvpro_core2`. The local `evaluateMaterial()` initializes `PbrMaterial` with
   `defaultPbrMaterial()` first, then overrides per extension — gating an extension off
   safely leaves the corresponding BSDF fields at their neutral defaults.
-- Struct members carry their defaults inline (`float3 emissiveFactor = float3(0);`),
-  so `GltfShadeMaterial m = {};` works; no parallel `default*()` helpers to keep in sync.
-- Host-side layout is asserted in [`src/gltf_material_cache.cpp`](../src/gltf_material_cache.cpp)
-  via `static_assert(sizeof(...) % 4 == 0)` and anchor-offset checks, so flipping any
-  `MAT_EXT_*` flag that breaks the stride rule fails the build immediately.
-- `MAT_EXT_RETROREFLECTION` — `KHR_materials_retroreflection` (Minimal Retroreflective
-  Microfacet, Portsmouth et al. 2026). Adds one scalar and one texture slot, then applies
-  the MRM substitution symmetrically to eval/sample/PDF paths. Disabled if the flag is 0.
-  See the [KHR_materials_retroreflection](https://github.com/KhronosGroup/glTF/blob/main/extensions/2.0/Khronos/KHR_materials_retroreflection/README.md) specification.
+- Struct members carry their defaults inline, so `GltfShadeMaterial m = {};` works; no
+  parallel `default*()` helpers to keep in sync (see `shaders/gltf_scene_io.h.slang`).
+- Host-side layout is guarded by `static_assert`s in
+  [`src/gltf_material_cache.cpp`](../src/gltf_material_cache.cpp) (8-byte
+  alignment/stride plus anchor offsets), so flipping any `MAT_EXT_*` flag that breaks the
+  layout fails the build immediately.
+- Retroreflection is a worked example of the pattern: `MAT_EXT_RETROREFLECTION` gates
+  `KHR_materials_retroreflection` on both host and device, with the evaluation living in
+  [`gltf_material_eval.h.slang`](../shaders/gltf_material_eval.h.slang). See the
+  [KHR_materials_retroreflection](https://github.com/KhronosGroup/glTF/blob/main/extensions/2.0/Khronos/KHR_materials_retroreflection/README.md) specification.
 
 ### Adding a new KHR_materials_* extension
 

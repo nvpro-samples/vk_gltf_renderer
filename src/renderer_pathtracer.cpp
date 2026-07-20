@@ -41,6 +41,7 @@
 #include "renderer_pathtracer.hpp"
 
 #include "scene_shader_macros.hpp"
+#include "ui_linear_color.hpp"
 
 // Pre-compiled shaders
 #include "_autogen/gltf_pathtrace.slang.h"
@@ -373,7 +374,8 @@ bool PathTracer::onUIRender(Resources& resources)
       {
         changed |= PE::SliderFloat("Height", &resources.settings.infinitePlaneDistance, -extentY, extentY, "%5.9f",
                                    ImGuiSliderFlags_NoRoundToFormat, "Distance to infinite plane");
-        changed |= PE::ColorEdit3("Color", glm::value_ptr(resources.settings.infinitePlaneBaseColor));
+        changed |= uicolor::colorEdit3Linear("Color", glm::value_ptr(resources.settings.infinitePlaneBaseColor),
+                                             "Infinite-plane base color (shown/edited in linear; swatch/wheel perceptual).");
         changed |= PE::SliderFloat("Metallic", &resources.settings.infinitePlaneMetallic, 0.0f, 1.0f);
         changed |= PE::SliderFloat("Roughness", &resources.settings.infinitePlaneRoughness, 0.0f, 1.0f);
         if(resources.settings.isShadowCatcher)
@@ -423,7 +425,8 @@ PathTracer::CompileStateSnapshot PathTracer::getCompileStateSnapshot()
 {
   std::lock_guard<std::mutex> lock(m_compileMutex);
   return {
-      m_compiledWireframe, m_compiledOptimal, m_compiledFeatures, m_rqPipeline, m_rtxPipeline,
+      m_compiledWireframe, m_compiledOptimal, m_compiledDlss, m_compiledDlssGuide,
+      m_compiledFeatures,  m_rqPipeline,      m_rtxPipeline,
   };
 }
 
@@ -441,11 +444,15 @@ void PathTracer::ensureShadersAndPipelines(Resources& resources)
   const bool wantOptimal = resources.settings.optimalShader;
   auto       state       = getCompileStateSnapshot();
 
+  const bool wantDlss          = isDlssEnabled();
+  const bool wantDlssGuide     = resources.currentFeatureSet.has(nvvkgltf::SceneFeatureSet::eDlssGuide);
   const bool wireframeChanged  = (state.wireframe != resources.settings.wireframe);
   const bool optimalChanged    = (state.optimal != wantOptimal);
+  const bool dlssChanged       = (state.dlss != wantDlss);
+  const bool guideChanged      = (state.dlssGuide != wantDlssGuide);
   const bool featureSetChanged = wantOptimal && (state.features != resources.currentFeatureSet);
 
-  const bool needCompile = wireframeChanged || optimalChanged || featureSetChanged;
+  const bool needCompile = wireframeChanged || optimalChanged || dlssChanged || guideChanged || featureSetChanged;
   if(needCompile)
   {
     if(m_busyWindow)
@@ -498,10 +505,14 @@ void PathTracer::onRender(VkCommandBuffer cmd, Resources& resources)
   const bool wantOptimal = resources.settings.optimalShader;
   const auto state       = getCompileStateSnapshot();
 
+  const bool wantDlss          = isDlssEnabled();
+  const bool wantDlssGuide     = resources.currentFeatureSet.has(nvvkgltf::SceneFeatureSet::eDlssGuide);
   const bool wireframeChanged  = (state.wireframe != resources.settings.wireframe);
   const bool optimalChanged    = (state.optimal != wantOptimal);
+  const bool dlssChanged       = (state.dlss != wantDlss);
+  const bool guideChanged      = (state.dlssGuide != wantDlssGuide);
   const bool featureSetChanged = wantOptimal && (state.features != resources.currentFeatureSet);
-  const bool needRecompile     = wireframeChanged || optimalChanged || featureSetChanged;
+  const bool needRecompile     = wireframeChanged || optimalChanged || dlssChanged || guideChanged || featureSetChanged;
   const bool needPipeline = (m_renderTechnique == RenderTechnique::RayQuery) ? (state.rqPipeline == VK_NULL_HANDLE) :
                                                                                (state.rtxPipeline == VK_NULL_HANDLE);
 
@@ -1038,6 +1049,8 @@ void PathTracer::compileShader(Resources& resources, bool fromFile)
     const VariantKey targetKey{
         resources.settings.wireframe,
         resources.settings.optimalShader,
+        isDlssEnabled(),
+        resources.currentFeatureSet.has(nvvkgltf::SceneFeatureSet::eDlssGuide),
         resources.settings.optimalShader ? resources.currentFeatureSet : nvvkgltf::SceneFeatureSet{},
     };
     if(swapVariant(resources, targetKey))
@@ -1079,7 +1092,7 @@ void PathTracer::compileShader(Resources& resources, bool fromFile)
         {"AVAILABLE_SER", std::to_string(m_supportSER)},
         {"WIREFRAME", std::to_string((int)resources.settings.wireframe)},
     };
-    nvvkgltf::appendPathTracerDlssShaderMacro(macros, resources.settings.optimalShader, resources.currentFeatureSet);
+    nvvkgltf::appendPathTracerDlssShaderMacro(macros, resources.currentFeatureSet, isDlssEnabled());
 
     // Scene-aware optimal mode: set every GLTF_USE_* to 0 or 1 from SceneFeatureSet.
     // Never pass MAT_EXT_X=0 (that would change GltfShadeMaterial layout while the host
@@ -1135,6 +1148,18 @@ void PathTracer::compileShader(Resources& resources, bool fromFile)
     m_compiledOptimal   = compiledFromFile ? resources.settings.optimalShader : false;
     m_compiledFeatures  = (compiledFromFile && resources.settings.optimalShader) ? resources.currentFeatureSet :
                                                                                    nvvkgltf::SceneFeatureSet{};
+    // From-file compiles follow the live runtime state. For the embedded SPIR-V fallback we mirror
+    // the CMake build (see CMakeLists.txt): USE_GUIDE_SHADER=1 iff DLSS/OptiX is available at build
+    // time, and USE_DLSS_SHADER=0 (DLSS is never active at startup; it engages later and triggers a
+    // from-file recompile).
+#if defined(USE_DLSS) || defined(USE_OPTIX_DENOISER)
+    constexpr bool kEmbeddedDlssGuide = true;
+#else
+    constexpr bool kEmbeddedDlssGuide = false;
+#endif
+    constexpr bool kEmbeddedDlss = false;
+    m_compiledDlss               = compiledFromFile ? isDlssEnabled() : kEmbeddedDlss;
+    m_compiledDlssGuide = compiledFromFile ? resources.currentFeatureSet.has(nvvkgltf::SceneFeatureSet::eDlssGuide) : kEmbeddedDlssGuide;
 
     // Destroy pipeline since there is a new shader
     destroyPipelinesLocked();
@@ -1174,8 +1199,8 @@ bool PathTracer::swapVariant(Resources& resources, const VariantKey& newKey)
 
   // 1) Park the currently-active shader/pipelines/SBT so we don't leak them.
   // The current variant key reflects what compileShader() last recorded.
-  const VariantKey currentKey{m_compiledWireframe, m_compiledOptimal, m_compiledFeatures};
-  const bool       hasLive = m_shaderModule != VK_NULL_HANDLE || m_rtxPipeline != VK_NULL_HANDLE
+  const VariantKey currentKey{m_compiledWireframe, m_compiledOptimal, m_compiledDlss, m_compiledDlssGuide, m_compiledFeatures};
+  const bool hasLive = m_shaderModule != VK_NULL_HANDLE || m_rtxPipeline != VK_NULL_HANDLE
                        || m_rqPipeline != VK_NULL_HANDLE || m_sbtBuffer.buffer != VK_NULL_HANDLE;
   if(hasLive)
   {
@@ -1231,6 +1256,8 @@ bool PathTracer::swapVariant(Resources& resources, const VariantKey& newKey)
       m_sbtRegions        = it->sbtRegions;
       m_compiledWireframe = newKey.wireframe;
       m_compiledOptimal   = newKey.optimal;
+      m_compiledDlss      = newKey.dlss;
+      m_compiledDlssGuide = newKey.dlssGuide;
       m_compiledFeatures  = newKey.features;
       m_variantCache.erase(it);
       return true;
@@ -1475,6 +1502,13 @@ void PathTracer::setupPushConstant(VkCommandBuffer cmd, Resources& resources, Vk
   const Dlss::FrameContext fc = m_dlss->beginFrame();
   if(useDlss)
     frameCount = static_cast<int>(fc.frameIndex);
+
+  // That earlier full-struct write is a prior transfer write to the same buffer, so order this second
+  // update after it (and after the compute-visibility barrier that followed it) to avoid a WRITE_AFTER_WRITE.
+  nvvk::cmdMemoryBarrier(cmd, VK_PIPELINE_STAGE_2_ALL_TRANSFER_BIT | VK_PIPELINE_STAGE_2_COMPUTE_SHADER_BIT,
+                         VK_PIPELINE_STAGE_2_ALL_TRANSFER_BIT,
+                         VK_ACCESS_2_TRANSFER_WRITE_BIT | VK_ACCESS_2_SHADER_READ_BIT, VK_ACCESS_2_TRANSFER_WRITE_BIT);
+
   // Patch only the 8-byte jitter slot; the rest of SceneFrameInfo was already written by renderer.cpp::renderFrame this frame.
   vkCmdUpdateBuffer(cmd, resources.bFrameInfo.buffer, offsetof(shaderio::SceneFrameInfo, jitter), sizeof(glm::vec2), &fc.jitter);
 #endif

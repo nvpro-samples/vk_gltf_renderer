@@ -1,5 +1,7 @@
 # Rendering Architecture -- Vulkan Ray Tracing Data Flow
 
+> **For contributors and agents.** The scene data-flow model (glTF model → RenderNodes → GPU SSBO / BLAS / TLAS) explained conceptually, with pointers to the owning code. Exact struct fields, thresholds, and function signatures live in the cited source files, not here.
+
 **Purpose:** Document the complete data flow from glTF model through the Vulkan ray tracing and rasterization pipeline -- from scene graph to BLAS/TLAS acceleration structures and GPU render nodes.  
 **Critical for:** Understanding how scene editing (duplicate/delete) affects the ray tracing and rasterization paths.
 
@@ -86,7 +88,7 @@ parseScene():
   6. updateRenderNodesFull()             -- apply animations, skinning, morph, visibility
   7. Diff against snapshot → set dirty flags:
        renderNodesVk / renderNodesRtx    (indices that changed)
-       allRenderNodesDirty               (count changed or >50% dirty)
+       allRenderNodesDirty               (count changed or ≥ kFullUpdateRatio dirty)
        materials, primitivesChanged, lights
 ```
 
@@ -148,15 +150,10 @@ tinygltf::Model:                    RenderNodes[] (flat, contiguous):
 
 ### GPU Data Structure:
 
-```cpp
-// GPU format (shaders/gltf_raster.slang, gltf_pathtrace.slang)
-struct GltfRenderNode {
-  mat4 objectToWorld;  // 64 bytes - Transform to world space
-  mat4 worldToObject;  // 64 bytes - Inverse transform (for normals)
-  int  materialID;     // Material array index
-  int  renderPrimID;   // Primitive array index (vertex/index data)
-};
-```
+Each render node uploads to the GPU as a `GltfRenderNode` (object↔world transforms plus
+`materialID` and `renderPrimID`). The authoritative layout lives in
+`shaders/gltf_scene_io.h.slang` and is consumed by `gltf_raster.slang` /
+`gltf_pathtrace.slang` — read the header for the exact fields.
 
 ### Upload Logic:
 
@@ -176,12 +173,12 @@ uploadRenderNodes(staging, scene, dirtyIndices):
 
 ```
 Rasterization (vertex shader):
-  instance = renderNodes[gl_InstanceIndex]          -- direct indexing into SSBO
+  instance = renderNodes[pushConst.renderNodeID]    -- one draw per render node; index via push constant
   worldMatrix = instance.objectToWorld
   materialID  = instance.materialID
 
 Ray Tracing (closest hit / any hit):
-  instance = renderNodes[gl_InstanceID]             -- TLAS instance index
+  instance = renderNodes[InstanceIndex()]           -- Slang: TLAS instance index
   worldMatrix = instance.objectToWorld
   materialID  = instance.materialID
 ```
@@ -209,7 +206,7 @@ cmdCreateBuildTopLevelAccelerationStructure(cmd, staging, scene):
 
     create VkAccelerationStructureInstanceKHR:
       transform              = renderNode.worldMatrix   -- 3x4 row-major
-      instanceCustomIndex    = renderNode.renderPrimID  -- accessible in shader as gl_InstanceCustomIndexEXT
+      instanceCustomIndex    = renderNode.renderPrimID  -- read in shader via InstanceID()
       accelerationStructureReference = blasAddress       -- which BLAS to use
       mask                   = 0x01
       flags                  = getInstanceFlag(material) -- cull mode from material
@@ -239,12 +236,12 @@ Each BLAS (Bottom-Level AS):
 ### Ray Tracing Hit Correlation:
 
 ```
-When a ray hits TLAS instance[i]:
-  gl_InstanceID              = i                        -- index into renderNodes SSBO
-  gl_InstanceCustomIndexEXT  = renderPrimID             -- index into renderPrimitives / BLAS
+When a ray hits TLAS instance[i] (Slang RT / ray query builtins):
+  InstanceIndex()  = i             -- index into renderNodes SSBO
+  InstanceID()     = renderPrimID  -- index into renderPrimitives / BLAS (instanceCustomIndex)
   Shader reads:
-    renderNodes[gl_InstanceID]              → transform, materialID
-    renderPrimitives[gl_InstanceCustomIndexEXT] → vertex/index buffer info
+    renderNodes[InstanceIndex()]        → transform, materialID
+    renderPrimitives[InstanceID()]      → vertex/index buffer info
 ```
 
 ---
@@ -253,16 +250,10 @@ When a ray hits TLAS instance[i]:
 
 ### RenderNode (CPU)
 
-```cpp
-struct RenderNode {
-  mat4 worldMatrix;   // Computed during parseScene() traversal
-  int  materialID;    // → m_model.materials[materialID]
-  int  renderPrimID;  // → m_renderPrimitives[renderPrimID]
-  int  refNodeID;     // → m_model.nodes[refNodeID] (back-reference)
-  int  skinID;        // → m_model.skins[skinID] (or -1)
-  bool visible;       // Visibility flag
-};
-```
+`struct RenderNode` (defined in `src/gltf_scene.hpp`) is one flattened primitive instance:
+a world matrix computed during `parseScene()` traversal plus back-references
+(`materialID` → model materials, `renderPrimID` → `m_renderPrimitives`, `refNodeID` →
+model node, `skinID`) and a `visible` flag. See the header for the exact fields.
 
 **Relationships:**
 - **N:1 with Node** - Multiple RenderNodes per node (if mesh has multiple primitives)
@@ -271,14 +262,9 @@ struct RenderNode {
 
 ### RenderPrimitive (CPU)
 
-```cpp
-struct RenderPrimitive {
-  tinygltf::Primitive* pPrimitive;  // → mesh.primitives[i] (pointer!) (speed up for Skin)
-  int vertexCount;
-  int indexCount;
-  int meshID;                       // Which mesh this came from
-};
-```
+`struct RenderPrimitive` (in `src/gltf_scene.hpp`) is a unique, deduplicated piece of
+geometry: a pointer back to the `tinygltf::Primitive`, vertex/index counts, and the
+owning `meshID`.
 
 **Purpose:** Deduplicated geometry - if two nodes use same mesh, they share RenderPrimitives.
 
@@ -313,7 +299,7 @@ struct RenderPrimitive {
         → build m_renderPrimitives[] (deduplicated, deterministic order)
         → build m_renderNodes[] (flat instances from hierarchy traversal)
 
-2. sceneVk.create(cmd, staging, scene)
+2. sceneGpu.create(cmd, scene)   (drives SceneVk internally)
      → upload vertex/index buffers for all primitives
      → uploadRenderNodes() → create GPU SSBO, upload all GltfRenderNode[]
 
@@ -337,11 +323,11 @@ User edits a node transform (gizmo, inspector):
 
 On next frame, updateSceneChanges(cmd):
   1. updateSceneChanges_NodeTransforms():
-       scene.updateRenderNodeDirtyFromNodes(true)
-         → converts dirty node indices to dirty render-node indices
        scene.updateNodeWorldMatrices()
          → recomputes world matrices for dirty nodes and descendants
          → updates RenderNode.worldMatrix in the registry
+         (markNodeDirty() only queues node indices; updateNodeWorldMatrices()
+          marks the affected render-node indices as it walks the hierarchy)
   2. sceneVk.syncFromScene(staging, scene)
        → reads dirty flags → uploads ONLY changed RenderNodes (surgical)
   3. sceneRtx.syncTopLevelAS(cmd, staging, scene)
@@ -350,7 +336,7 @@ On next frame, updateSceneChanges(cmd):
 
 **Note:** Animation updates follow a similar but separate path inline in the animation
 processing block (not via `updateSceneChanges`). The same functions are called
-(`updateRenderNodeDirtyFromNodes`, `updateNodeWorldMatrices`, `syncFromScene`, `syncTopLevelAS`)
+(`updateNodeWorldMatrices`, `syncFromScene`, `syncTopLevelAS`)
 but within the animation frame section, which also handles morph/skin GPU uploads.
 
 **Optimization:** Only changed RenderNodes uploaded, not entire buffer.
@@ -426,6 +412,9 @@ On next frame, updateSceneChanges(cmd):
 
 ## Performance Characteristics
 
+The millisecond figures below are rough order-of-magnitude estimates for orientation, not
+measured benchmarks — profile with the built-in tools (see `docs/benchmarking.md`) for real numbers.
+
 ### Surgical Update (Transform Only):
 - **CPU:** O(N) where N = number of dirty nodes (typically 1-10)
 - **GPU Upload:** Only changed RenderNodes (typically < 1KB)
@@ -470,7 +459,8 @@ Both are directly uploadable to GPU via staging (single memcpy-style transfer).
 │ │ GltfRenderNode[N-1]                │ │ ← Instance N-1
 │ └────────────────────────────────────┘ │
 └────────────────────────────────────────┘
-         ↑ Shader indexing: nodes[gl_InstanceIndex]
+         ↑ Shader indexing: raster → nodes[pushConst.renderNodeID];
+                            ray tracing → nodes[InstanceIndex()]
 ```
 
 **Access Pattern:** Direct indexing (O(1)) in shaders.
@@ -489,13 +479,21 @@ Always modify the tinygltf Model, then call the appropriate rebuild:
 ### 2. RenderNodes Index = TLAS Instance Index
 
 `RenderNodes[i]` corresponds to `TLAS Instance[i]`.
-When a ray hits instance `i`, `gl_InstanceID = i`, and the shader reads `renderNodes[i]` for transform and material.
+When a ray hits instance `i`, `InstanceIndex() = i`, and the shader reads `renderNodes[i]` for transform and material.
 
 ### 3. RenderPrimitive Index = BLAS Array Index
 
 `m_renderPrimitives[p]` corresponds to `m_blasAccel[p]`.
-BLAS are built once during load (geometry does not change at runtime).
-Only the TLAS is rebuilt when instances move, appear, or disappear.
+The BLAS array is stable across hierarchy-only edits (reparent, duplicate, delete of
+existing meshes). It is rebuilt when the deduplicated primitive set changes
+(`primitivesChanged`), and individual BLAS may be *updated* in place for animated
+geometry (skinning / morph via `SceneRtx::updateBottomLevelAS()`). The TLAS is rebuilt
+or updated when instances move, appear, or disappear.
+
+Animated scenes build their BLAS with `ALLOW_UPDATE` and skip compaction; only static scenes
+compact (see `GltfRenderer::buildAccelerationStructures()`). Vulkan permits compacting an
+updatable BLAS and refitting it afterward, but this app's build+compact+per-frame-update path
+triggers a GPU device-lost, so compaction is skipped for animated scenes as a workaround.
 
 ---
 
@@ -506,13 +504,13 @@ Only the TLAS is rebuilt when instances move, appear, or disappear.
 | **Load scene** | ✅ New | ✅ Full rebuild | ✅ Create & upload | ✅ Create & build |
 | **Merge scene** | ✅ New | ✅ Full rebuild | ✅ Full GPU recreation | ✅ Full rebuild |
 | **Transform change** | ✅ Modified | ✅ Partial update | ✅ Surgical upload | ✅ Update instances |
-| **Add empty node** | ✅ Modified | ✅ Full rebuild | No GPU work | No GPU work |
+| **Add empty node** | ✅ Modified | No change (no `parseScene()`; empty node has no mesh) | No GPU work | No GPU work |
 | **Delete node** | ✅ Modified | ✅ Full rebuild | ✅ Resize & full upload | ✅ Rebuild |
 | **Duplicate node** | ✅ Modified | ✅ Full rebuild | ✅ Resize & upload new | ✅ Rebuild |
 | **Reparent** | ✅ Modified | ✅ Transforms only | ✅ Surgical upload (transforms) | ✅ Update instances |
 | **Split mesh** | ✅ Modified | ✅ Full rebuild | ✅ Surgical upload (changed indices) | ✅ Update instances |
 | **Merge mesh** | ✅ Modified | ✅ Full rebuild | ✅ Surgical upload (changed indices) | ✅ Update instances |
-| **Material change** | ✅ Modified | ✅ Partial update | ✅ Surgical upload | No change |
+| **Material change** | ✅ Modified | ✅ Partial update | ✅ Surgical upload | Usually none; RTX instance flags may update for alpha-mode / double-sided edits |
 
 **Key:** `parseScene()` always does a full CPU rebuild, but its internal diff sets precise dirty flags
 so the GPU sync is surgical -- only changed render node indices, new materials, etc. are uploaded.
@@ -523,7 +521,7 @@ so the GPU sync is surgical -- only changed render node indices, new materials, 
 clearing, then compares after rebuild. This sets precise dirty flags:
 
 - `renderNodesVk` / `renderNodesRtx`: indices where any field differs (surgical upload)
-- `allRenderNodesDirty`: set when count changes or >50% of indices differ (full upload, avoids hash-set overhead)
+- `allRenderNodesDirty`: set when count changes or the dirty fraction reaches `kFullUpdateRatio` (`gltf_scene.hpp`) — full upload, avoids hash-set overhead
 - `materials`: new material indices
 - `primitivesChanged`: primitive count changed (BLAS rebuild needed)
 - `lights`: all lights dirty if light count changed
@@ -550,7 +548,7 @@ Any mismatch is logged as a warning with a descriptive error message.
 - `createRenderNodesForNode()` - `gltf_scene.cpp`
 - `buildPrimitiveKeyMap()` - `gltf_scene.cpp`
 - `updateNodeWorldMatrices()` - `gltf_scene.cpp`
-- `updateRenderNodeDirtyFromNodes()` - `gltf_scene.cpp`
+- `updateRenderNodeDirtyFromNodes()` - `gltf_scene.cpp` (helper; not in the default transform/animation path — dirty flags are maintained incrementally)
 - `markNodeDirty()` - `gltf_scene.cpp`
 
 ### SceneEditor (Editing)
@@ -626,7 +624,8 @@ Model (authoritative) → parseScene() → RenderNodes (derived) → GPU
 
 **Option 1:** Split `parseScene()` into targeted rebuilds
 - `rebuildPrimitivesAndRenderNodes()` for split/merge mesh
-- `rebuildRenderNodesAndLights()` for node add/delete (already exists)
+- `rebuildRenderNodesAndLights()` already exists and is used for adding lights;
+  node delete/duplicate still go through a full `parseScene()`
 - Only rebuild what the operation requires
 - Medium complexity
 

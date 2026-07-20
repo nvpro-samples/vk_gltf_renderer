@@ -21,6 +21,7 @@
 
 #include <optional>
 #include <string>
+#include <utility>
 #include <tinygltf/tiny_gltf.h>
 
 namespace nvvkgltf {
@@ -43,6 +44,17 @@ struct IndexRemapping
   int lights      = 0;  // KHR_lights_punctual extension
 };
 
+// Result of merging/instancing a subtree into a base model: the half-open range of appended
+// node indices [firstNode, lastNode) and the appended roots (children attached to the target).
+struct MergeResult
+{
+  int              firstNode = -1;
+  int              lastNode  = -1;
+  std::vector<int> roots;  // appended root node indices (subset of the range)
+
+  [[nodiscard]] bool valid() const { return firstNode >= 0 && lastNode > firstNode; }
+};
+
 class SceneMerger
 {
 public:
@@ -55,6 +67,23 @@ public:
                    const tinygltf::Model&  importedModel,
                    const std::string&      importedSceneName,
                    std::optional<uint32_t> maxTextureCount = std::nullopt);
+
+  // Merge importedModel into baseModel for glTF 2.1 external assets. Appends all imported
+  // resources and attaches the imported default-scene root nodes as children of an EXISTING
+  // node (targetNodeIndex) -- no wrapper node is created and baseModel.scenes is left untouched.
+  // If maxTextureCount is set and the combined texture count would exceed it, returns an invalid
+  // MergeResult. On success returns the appended node range + roots (for read-only tagging).
+  static MergeResult mergeIntoNode(tinygltf::Model&        baseModel,
+                                   const tinygltf::Model&  importedModel,
+                                   int                     targetNodeIndex,
+                                   std::optional<uint32_t> maxTextureCount = std::nullopt);
+
+  // Instance an existing merged subtree (already in baseModel, described by `source`) as a new
+  // copy attached to targetNodeIndex. Node hierarchy is copied and skins/animation channels are
+  // duplicated so instances are independent, but meshes/materials/accessors are SHARED -- so the
+  // instances reuse the same render primitives / BLAS instead of duplicating geometry.
+  // Returns the appended node range + roots of the new instance, or an invalid MergeResult.
+  static MergeResult instanceSubtree(tinygltf::Model& baseModel, const MergeResult& source, int targetNodeIndex);
 
 private:
   // Implementation in .cpp (helpers in anonymous namespace).

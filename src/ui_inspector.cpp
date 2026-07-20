@@ -30,6 +30,7 @@
 #include "gltf_scene.hpp"
 #include "gltf_scene_editor.hpp"
 #include "tinygltf_utils.hpp"
+#include "ui_linear_color.hpp"
 
 #include <imgui.h>
 #include <imgui_internal.h>
@@ -37,6 +38,7 @@
 #include <nvgui/fonts.hpp>
 #include <nvutils/logger.hpp>
 #include <glm/glm.hpp>
+#include <glm/gtc/color_space.hpp>
 #include <glm/gtc/quaternion.hpp>
 #include <glm/gtx/euler_angles.hpp>
 #include <glm/gtc/type_ptr.hpp>
@@ -54,6 +56,10 @@ static float logarithmicStep(float value)
 {
   return std::max(0.1f * std::pow(10.0f, std::floor(std::log10(value))), 0.001f);
 }
+
+// Linear color-factor editors (linear numbers + perceptual sRGB swatch/wheel). See header for details.
+using uicolor::colorEdit3Linear;
+using uicolor::colorEdit4Linear;
 
 //==================================================================================================
 // HELPER FUNCTIONS
@@ -350,11 +356,18 @@ void UiInspector::renderNodeProperties(int nodeIdx)
 
   ImGui::Separator();
 
+  // glTF 2.1: nodes merged in from a referenced external asset are read-only.
+  const bool readOnly = m_scene->isNodeReadOnly(nodeIdx);
+  if(readOnly)
+    ImGui::TextColored(ImVec4(1.0f, 0.8f, 0.3f, 1.0f), "%s Referenced asset (read-only)", ICON_MS_LOCK);
+
+  ImGui::BeginDisabled(readOnly);
   renderTransformSection(nodeIdx);
   if(node.light > -1)
     renderLightProperties(node.light);
   if(node.camera > -1)
     renderCameraProperties(node.camera);
+  ImGui::EndDisabled();
 }
 
 //==================================================================================================
@@ -364,6 +377,12 @@ void UiInspector::renderNodeProperties(int nodeIdx)
 void UiInspector::renderPrimitiveProperties(int nodeIdx, int primIdx, int meshIdx)
 {
   const tinygltf::Model& model = m_scene->getModel();
+
+  // glTF 2.1: primitives belonging to a referenced external asset are read-only.
+  const bool readOnly = m_scene->isNodeReadOnly(nodeIdx);
+  if(readOnly)
+    ImGui::TextColored(ImVec4(1.0f, 0.8f, 0.3f, 1.0f), "%s Referenced asset (read-only)", ICON_MS_LOCK);
+  ImGui::BeginDisabled(readOnly);
 
   // Transform section (from parent node)
   if(ImGui::CollapsingHeader("TRANSFORM (Node)"))
@@ -424,6 +443,8 @@ void UiInspector::renderPrimitiveProperties(int nodeIdx, int primIdx, int meshId
       }
     }
   }
+
+  ImGui::EndDisabled();
 }
 
 //==================================================================================================
@@ -591,15 +612,13 @@ void UiInspector::renderLightProperties(int lightIdx)
       modif = true;
     }
 
-    // Convert color to sRGB for editing
+    // KHR_lights_punctual color is a linear multiplier on intensity. Shown/edited in linear; the
+    // swatch and wheel are perceptual (sRGB) so picking is intuitive.
     glm::vec3 color = glm::vec3(light.color[0], light.color[1], light.color[2]);
-    color           = glm::pow(color, glm::vec3(1.0f / 2.2f));  // Linear to sRGB
-
-    if(PE::ColorEdit3("Color", glm::value_ptr(color), 0,
-                      "RGB color in linear space.\n"
-                      "Acts as a wavelength-specific multiplier on intensity."))
+    if(colorEdit3Linear("Color", glm::value_ptr(color),
+                        "RGB light color (shown/edited in linear; swatch/wheel perceptual).\n"
+                        "Acts as a wavelength-specific multiplier on intensity."))
     {
-      color          = glm::pow(color, glm::vec3(2.2f));
       light.color[0] = color.x;
       light.color[1] = color.y;
       light.color[2] = color.z;
@@ -780,6 +799,52 @@ void UiInspector::renderTransformSection(int nodeIdx)
       }
     }
 
+    // Selectability extension (KHR_node_selectability). Does not affect rendering, only picking.
+    bool hasSelectability = tinygltf::utils::hasElementName(node.extensions, KHR_NODE_SELECTABILITY_EXTENSION_NAME);
+    if(hasSelectability)
+    {
+      KHR_node_selectability selectability = tinygltf::utils::getNodeSelectability(node);
+      if(PE::Checkbox("Selectable", &selectability.selectable,
+                      "KHR_node_selectability: when off, clicking this node or its children selects the nearest selectable ancestor instead."))
+      {
+        tinygltf::utils::setNodeSelectability(node, selectability);
+        if(m_scene)
+          m_scene->markNodeDirty(nodeIdx);
+      }
+    }
+    else
+    {
+      if(ImGui::SmallButton("Add Selectability"))
+      {
+        tinygltf::utils::setNodeSelectability(node, {});  // Default: selectable = true
+        if(m_scene)
+          m_scene->markNodeDirty(nodeIdx);
+      }
+    }
+
+    // Hoverability extension (KHR_node_hoverability). Parsed and preserved; used by KHR_interactivity.
+    bool hasHoverability = tinygltf::utils::hasElementName(node.extensions, KHR_NODE_HOVERABILITY_EXTENSION_NAME);
+    if(hasHoverability)
+    {
+      KHR_node_hoverability hoverability = tinygltf::utils::getNodeHoverability(node);
+      if(PE::Checkbox("Hoverable", &hoverability.hoverable,
+                      "KHR_node_hoverability: marks whether this node and its children can be hovered (consumed by KHR_interactivity)."))
+      {
+        tinygltf::utils::setNodeHoverability(node, hoverability);
+        if(m_scene)
+          m_scene->markNodeDirty(nodeIdx);
+      }
+    }
+    else
+    {
+      if(ImGui::SmallButton("Add Hoverability"))
+      {
+        tinygltf::utils::setNodeHoverability(node, {});  // Default: hoverable = true
+        if(m_scene)
+          m_scene->markNodeDirty(nodeIdx);
+      }
+    }
+
     PE::end();
   }
 }
@@ -814,9 +879,9 @@ void UiInspector::renderMaterialSection(int matIdx, bool allowEdit)
       KHR_materials_pbrSpecularGlossiness sg = tinygltf::utils::getPbrSpecularGlossiness(material);
 
       glm::vec4 diffuse = sg.diffuseFactor;
-      if(PE::ColorEdit4("Diffuse Color", glm::value_ptr(diffuse), 0,
-                        "RGBA diffuse color factor in linear space.\n"
-                        "(KHR_materials_pbrSpecularGlossiness)"))
+      if(colorEdit4Linear("Diffuse Color", glm::value_ptr(diffuse),
+                          "RGBA diffuse color factor (RGB shown/edited in linear; swatch/wheel perceptual; A is linear).\n"
+                          "(KHR_materials_pbrSpecularGlossiness)"))
       {
         sg.diffuseFactor = diffuse;
         modif            = true;
@@ -824,9 +889,9 @@ void UiInspector::renderMaterialSection(int matIdx, bool allowEdit)
       modif |= renderTextureEditRow("Diffuse", sg.diffuseTexture, m_scene->getModel(), m_textureNames);
 
       glm::vec3 specular = sg.specularFactor;
-      if(PE::ColorEdit3("Specular", glm::value_ptr(specular), 0,
-                        "RGB specular color factor in linear space.\n"
-                        "(KHR_materials_pbrSpecularGlossiness)"))
+      if(colorEdit3Linear("Specular", glm::value_ptr(specular),
+                          "RGB specular color factor (shown/edited in linear; swatch/wheel perceptual).\n"
+                          "(KHR_materials_pbrSpecularGlossiness)"))
       {
         sg.specularFactor = specular;
         modif             = true;
@@ -848,9 +913,9 @@ void UiInspector::renderMaterialSection(int matIdx, bool allowEdit)
       tinygltf::PbrMetallicRoughness& pbr = material.pbrMetallicRoughness;
 
       glm::vec4 baseColor = glm::make_vec4(pbr.baseColorFactor.data());
-      if(PE::ColorEdit4("Base Color", glm::value_ptr(baseColor), 0,
-                        "RGBA base color factor in linear space.\n"
-                        "RGB modulates diffuse/specular; A controls alpha coverage."))
+      if(colorEdit4Linear("Base Color", glm::value_ptr(baseColor),
+                          "RGBA base color factor (RGB shown/edited in linear; swatch/wheel perceptual; A is linear).\n"
+                          "RGB modulates diffuse/specular; A controls alpha coverage."))
       {
         pbr.baseColorFactor[0] = baseColor.x;
         pbr.baseColorFactor[1] = baseColor.y;
@@ -881,10 +946,12 @@ void UiInspector::renderMaterialSection(int matIdx, bool allowEdit)
     }
 
     // Emissive
+    // emissiveFactor is a linear [0,1] multiplier on the emissive texel radiance (glTF 5.19.8).
+    // Shown/edited in linear; the swatch and wheel are perceptual (sRGB) so picking is intuitive.
     glm::vec3 emissive = glm::make_vec3(material.emissiveFactor.data());
-    if(PE::ColorEdit3("Emissive", glm::value_ptr(emissive), 0,
-                      "RGB emissive color in linear space.\n"
-                      "Multiplied by emissiveStrength (if present) for HDR emission."))
+    if(colorEdit3Linear("Emissive", glm::value_ptr(emissive),
+                        "RGB emissive factor [0,1] (shown/edited in linear; swatch/wheel perceptual).\n"
+                        "Linear multiplier on the emissive texture; scaled by emissiveStrength for HDR emission."))
     {
       material.emissiveFactor[0] = emissive.x;
       material.emissiveFactor[1] = emissive.y;
@@ -1357,9 +1424,9 @@ bool UiInspector::materialDiffuseTransmission(tinygltf::Material& material)
           modif |= PE::DragFloat("Factor", &dt.diffuseTransmissionFactor, 0.01f, 0.0f, 1.0f, "%.3f", 0,
                                  "Percentage of penetrating light that is diffusely transmitted [0,1].\n"
                                  "For thin translucent materials (leaves, paper, candle wax).");
-          modif |= PE::ColorEdit3("Color", glm::value_ptr(dt.diffuseTransmissionColor), 0,
-                                  "Color that modulates the diffusely transmitted light.\n"
-                                  "Acts as a transmission-side tint, independent of base color.");
+          modif |= colorEdit3Linear("Color", glm::value_ptr(dt.diffuseTransmissionColor),
+                                    "Color that modulates the diffusely transmitted light (shown/edited in linear; swatch/wheel perceptual).\n"
+                                    "Acts as a transmission-side tint, independent of base color.");
           modif |= renderTextureEditRow("Diffuse Transmission", dt.diffuseTransmissionTexture, m_scene->getModel(), m_textureNames);
           modif |= renderTextureEditRow("Diffuse Transmission Color", dt.diffuseTransmissionColorTexture,
                                         m_scene->getModel(), m_textureNames);
@@ -1481,9 +1548,9 @@ bool UiInspector::materialSheen(tinygltf::Material& material)
         bool                modif = false;
         if(PE::begin())
         {
-          modif |= PE::ColorEdit3("Sheen Color", glm::value_ptr(sheen.sheenColorFactor), 0,
-                                  "Sheen color in linear space. Black = disabled.\n"
-                                  "Models back-scattering from fabric micro-fibers (velvet, cloth).");
+          modif |= colorEdit3Linear("Sheen Color", glm::value_ptr(sheen.sheenColorFactor),
+                                    "Sheen color (shown/edited in linear; swatch/wheel perceptual). Black = disabled.\n"
+                                    "Models back-scattering from fabric micro-fibers (velvet, cloth).");
           modif |= PE::DragFloat("Sheen Roughness", &sheen.sheenRoughnessFactor, 0.01f, 0.0f, 1.0f, "%.3f", 0,
                                  "Sheen roughness [0,1]. Controls micro-fiber divergence.\n"
                                  "Low = sharp grazing-angle highlights. High = soft, broad sheen.");
@@ -1507,9 +1574,9 @@ bool UiInspector::materialSpecular(tinygltf::Material& material)
         bool                   modif    = false;
         if(PE::begin())
         {
-          modif |= PE::ColorEdit3("Specular Color", glm::value_ptr(specular.specularColorFactor), 0,
-                                  "F0 color tint for dielectric specular reflection (linear RGB).\n"
-                                  "At normal incidence, multiplies the IOR-derived F0. At grazing, remains white.");
+          modif |= colorEdit3Linear("Specular Color", glm::value_ptr(specular.specularColorFactor),
+                                    "F0 color tint for dielectric specular reflection (shown/edited in linear; swatch/wheel perceptual).\n"
+                                    "At normal incidence, multiplies the IOR-derived F0. At grazing, remains white.");
           modif |= PE::DragFloat("Specular Factor", &specular.specularFactor, 0.01f, 0.0f, 1.0f, "%.3f", 0,
                                  "Strength of dielectric specular reflection [0,1]. 0 = pure diffuse.\n"
                                  "Does not affect metals. Scales both F0 and F90.");
@@ -1549,9 +1616,9 @@ bool UiInspector::materialVolume(tinygltf::Material& material, int matIdx)
                                  "Volume thickness beneath the surface (mesh coordinate space).\n"
                                  "0 = thin-walled. > 0 = volumetric (requires closed mesh).\n"
                                  "Ray tracers use actual distance; rasterizers use this as approximation.");
-          modif |= PE::ColorEdit3("Attenuation Color", glm::value_ptr(volume.attenuationColor), 0,
-                                  "Color that white light becomes after traveling the attenuation distance.\n"
-                                  "Models wavelength-dependent absorption via Beer's law.");
+          modif |= colorEdit3Linear("Attenuation Color", glm::value_ptr(volume.attenuationColor),
+                                    "Color that white light becomes after traveling the attenuation distance\n"
+                                    "(shown/edited in linear; swatch/wheel perceptual). Models wavelength-dependent absorption via Beer's law.");
 
           bool isInfinite = (volume.attenuationDistance >= FLT_MAX);
           if(PE::Checkbox("Infinite Attenuation", &isInfinite, "No light absorption (infinite distance)"))
@@ -1592,10 +1659,10 @@ bool UiInspector::materialVolumeScatter(tinygltf::Material& material)
         bool                         modif         = false;
         if(PE::begin())
         {
-          modif |= PE::ColorEdit3("Multiscatter Color", glm::value_ptr(volumeScatter.multiscatterColorFactor), 0,
-                                  "Multi-scatter albedo (linear RGB). Black = no scattering.\n"
-                                  "Approximates the perceived color after many scattering bounces.\n"
-                                  "Requires KHR_materials_volume.");
+          modif |= colorEdit3Linear("Multiscatter Color", glm::value_ptr(volumeScatter.multiscatterColorFactor),
+                                    "Multi-scatter albedo (shown/edited in linear; swatch/wheel perceptual). Black = no scattering.\n"
+                                    "Approximates the perceived color after many scattering bounces.\n"
+                                    "Requires KHR_materials_volume.");
           modif |= PE::SliderFloat("Scatter Anisotropy", &volumeScatter.scatterAnisotropy, -1.0f, 1.0f, "%.3f", 0,
                                    "Henyey-Greenstein phase function parameter (-1, 1).\n"
                                    "0 = isotropic. Positive = forward scattering. Negative = backward scattering.");

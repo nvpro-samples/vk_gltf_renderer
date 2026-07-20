@@ -198,6 +198,23 @@ struct KHR_node_visibility
   bool visible = true;
 };
 
+// https://github.com/KhronosGroup/glTF/tree/main/extensions/2.0/Khronos/KHR_node_hoverability
+#define KHR_NODE_HOVERABILITY_EXTENSION_NAME "KHR_node_hoverability"
+struct KHR_node_hoverability
+{
+  bool hoverable = true;
+};
+
+// https://github.com/KhronosGroup/glTF/tree/main/extensions/2.0/Khronos/KHR_node_selectability
+#define KHR_NODE_SELECTABILITY_EXTENSION_NAME "KHR_node_selectability"
+struct KHR_node_selectability
+{
+  bool selectable = true;
+};
+
+// https://github.com/KhronosGroup/glTF/tree/main/extensions/2.0/Khronos/KHR_interactivity
+#define KHR_INTERACTIVITY_EXTENSION_NAME "KHR_interactivity"
+
 #define KHR_MATERIALS_PBR_SPECULAR_GLOSSINESS_EXTENSION_NAME "KHR_materials_pbrSpecularGlossiness"
 struct KHR_materials_pbrSpecularGlossiness
 {
@@ -1107,6 +1124,16 @@ uint32_t appendData(tinygltf::Buffer& buffer, const T& inData)
   return len;
 }
 
+/*-------------------------------------------------------------------------------------------------
+## Function `appendAccessor`
+> Appends tightly-packed bytes into `model.buffers[bufferIndex]`, pads to 4-byte alignment,
+> creates a matching BufferView + Accessor, and returns the new accessor index.
+
+`target` is the glTF bufferView target (`TINYGLTF_TARGET_ARRAY_BUFFER`,
+`TINYGLTF_TARGET_ELEMENT_ARRAY_BUFFER`, or 0). The caller must ensure `bufferIndex` is valid.
+-------------------------------------------------------------------------------------------------*/
+int appendAccessor(tinygltf::Model& model, int bufferIndex, const void* data, size_t dataBytes, int componentType, int type, size_t count, int target = 0);
+
 
 //--------------------------------------------------------------------------------------------------
 // Materials
@@ -1199,6 +1226,26 @@ node B would not be visible due to node A.
 -------------------------------------------------------------------------------------------------*/
 KHR_node_visibility getNodeVisibility(const tinygltf::Node& node);
 void                setNodeVisibility(tinygltf::Node& node, const KHR_node_visibility& visibility);
+
+/*-------------------------------------------------------------------------------------------------
+> Retrieves the hoverability of a node using `KHR_node_hoverability`.
+
+Like `getNodeVisibility`, this only reads the flag on the node itself and does
+not walk the hierarchy; the spec's cascade rule (an ancestor with
+`hoverable:false` disables the whole subtree) must be applied by the caller.
+-------------------------------------------------------------------------------------------------*/
+KHR_node_hoverability getNodeHoverability(const tinygltf::Node& node);
+void                  setNodeHoverability(tinygltf::Node& node, const KHR_node_hoverability& hoverability);
+
+/*-------------------------------------------------------------------------------------------------
+> Retrieves the selectability of a node using `KHR_node_selectability`.
+
+Like `getNodeVisibility`, this only reads the flag on the node itself and does
+not walk the hierarchy; the spec's cascade rule (an ancestor with
+`selectable:false` disables the whole subtree) must be applied by the caller.
+-------------------------------------------------------------------------------------------------*/
+KHR_node_selectability getNodeSelectability(const tinygltf::Node& node);
+void                   setNodeSelectability(tinygltf::Node& node, const KHR_node_selectability& selectability);
 
 /*-------------------------------------------------------------------------------------------------
 ## Function `createTangentAttribute`

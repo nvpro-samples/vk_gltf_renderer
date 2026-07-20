@@ -69,9 +69,14 @@ public:
   void benchmarkAdvance(const nvutils::ParameterSequencer::State& state);
 
   void createScene(const std::filesystem::path& sceneFilename);
+  // Ensure an editable Scene exists (wired to the UI, no GPU build) so add/import can run from nothing.
+  void ensureEmptyScene();
   void createSceneFromDescriptor(const std::filesystem::path& descriptorPath);
   void createHDR(const std::filesystem::path& hdrFilename);
   void onMergeScene(const std::filesystem::path& filename);
+  void onReferenceScene(const std::filesystem::path& filename);
+  // Shared worker for merge (embed) and reference (glTF 2.1 external asset) imports.
+  void addSceneFromFile(const std::filesystem::path& filename, bool asReference);
   /// Full GPU rebuild (textures + geometry + AS). Only uploads GPU data; CPU side must already be
   /// parsed (`mergeScene`, `parseScene`, etc., depending on how the model was changed).
   void                                        rebuildVulkanSceneFull();
@@ -91,19 +96,23 @@ private:
   void onUIMenu() override;
   void onUIRender() override;
 
-  bool save(const std::filesystem::path& filename);
+  bool save(const std::filesystem::path& filename, bool selfContained = false);
   bool updateFrameCounter();
 
   void clearGbuffer(VkCommandBuffer cmd);
-  void cleanupScene();           // Helper to cleanup current scene
-  void rebuildSceneFromModel();  // Rebuild Vulkan scene after modifying the glTF model in-place (preserves textures)
+  void cleanupScene();  // Helper to cleanup current scene
+  void rebuildSceneFromModel();  // Rebuild Vulkan scene after modifying the glTF model in-place (preserves textures); clears undo
+  void rebuildSceneGeometry();  // Geometry-only rebuild (preserves textures); does NOT clear undo (used by undoable geometry edits)
+  void reconcileGeometryIfNeeded();  // Rebuild geometry when GPU buffers are behind the render-primitive count (e.g. added primitive)
   void refreshCpuSceneGraphFromModel();
   void rebuildVulkanSceneInternal(bool rebuildTextures);  // GPU upload + AS; CPU scene must already be parsed
   void compileShaders();
   void createDescriptorSets();
   void createResourceBuffers();
   void createVulkanScene();
-  void buildAccelerationStructures();  // Helper for BLAS/TLAS building
+  void finalizeSceneSetup(const std::filesystem::path& filename);  // Shared GPU build + UI wiring after a load
+  void wireSceneToUi();                                            // Wire current scene into browser/inspector panels
+  void buildAccelerationStructures();                              // Helper for BLAS/TLAS building
   void destroyResources();
   void resetFrame();
   void silhouette(VkCommandBuffer cmd);
@@ -150,14 +159,17 @@ private:
                                bool&                  loadHdrFile,
                                bool&                  saveFile,
                                bool&                  saveAsFile,
+                               bool&                  saveSelfContainedAsFile,
                                bool&                  saveScreenFile,
                                bool&                  saveImageFile,
+                               bool&                  referenceFile,
                                bool&                  closeApp,
                                std::filesystem::path& sceneToLoadFilename,
                                std::filesystem::path& sceneToMergeFilename);
   void          renderViewMenu(bool validScene, bool& fitScene, bool& fitObject, bool& toggleVsync);
   void          renderWindowsMenu();
   void          renderEditMenu(bool validScene);
+  void          renderCreateMenu();  // "Create" menu: add procedural primitives (enabled whenever a scene exists)
   void          renderToolsMenu(bool validScene, bool& reloadShader, bool& compactScene);
   void          renderDebugMenu();
   void          onUndoRedo();
@@ -169,6 +181,7 @@ private:
   void          addToRecentFiles(const std::filesystem::path& filePath, int historySize = 20);
   void          removeFromRecentFiles(const std::filesystem::path& filePath);
   void          mouseClickedInViewport();
+  void          updateSelectionFromPick(int renderNodeIdx);
   nvutils::Bbox getRenderNodeBbox(int renderNodeIndex);
   nvutils::Bbox getRenderNodesBbox(const std::unordered_set<int>& renderNodeIndices);
   void          windowTitle();

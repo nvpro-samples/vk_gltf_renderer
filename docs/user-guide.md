@@ -1,6 +1,6 @@
 # User Guide — Vulkan glTF Renderer (Ray Tracing & PBR)
 
-Practical usage guide for the **Vulkan glTF Renderer** — covering the RTX path tracer, PBR rasterizer, AI denoisers, scene editor, and all rendering settings. For project overview and build instructions, start from the [README](../README.md).
+> **For users.** How to run and use the app — RTX path tracer, PBR rasterizer, AI denoisers, scene editor, camera, environment, tone mapping, and the common CLI flags. For project overview and build instructions see the [README](../README.md); for internals and the authoritative flag/enum lists, see the [Developer Guide](developer.md) and the code.
 
 ## Quick Navigation
 
@@ -40,7 +40,7 @@ A Monte Carlo path tracer with global illumination, progressive accumulation, an
 
 | Setting | Description |
 |---|---|
-| **Rendering Technique** | Choice between **Ray Tracing** (hardware RT pipeline with SBT) and **Ray Query** (compute shader). Both produce identical results; Ray Query avoids pipeline overhead on some workloads. |
+| **Rendering Pipeline** | Choice between **Compute / Ray Query** (compute shader) and **Ray Tracing Pipeline** (hardware RT pipeline with SBT). Both produce identical results; Ray Query avoids pipeline overhead on some workloads. |
 | **Use SER** | Enable [Shader Execution Reorder](https://developer.nvidia.com/blog/improving-ray-tracing-performance-with-shader-execution-reorder/) for the Ray Tracing pipeline. Can improve coherence on RTX 40-series GPUs. |
 | **FireFly Clamp** | Clamps high-intensity samples to reduce firefly artifacts in early frames. |
 | **Max Iterations** | Maximum number of frames accumulated before the renderer stops. |
@@ -107,7 +107,7 @@ A built-in physically based Sun & Sky shader module simulates atmospheric scatte
 
 ### HDR Environment
 
-Lighting can come from HDR environment maps (`.hdr` files). Drag and drop an HDR file onto the viewport, or load via **File > Load HDR**.
+Lighting can come from HDR environment maps (`.hdr` files). Drag and drop an HDR file onto the viewport, or load via **File > Load HDR Environment** (`Ctrl+Shift+O`).
 
 ![](hdr_1.jpg) ![](hdr_2.jpg) ![](hdr_3.jpg) ![](hdr_4.jpg) <br> ![](hdr_5.jpg) ![](hdr_6.jpg) ![](hdr_7.jpg) ![](hdr_8.jpg)
 
@@ -181,7 +181,7 @@ Camera navigation follows the [Softimage](https://en.wikipedia.org/wiki/Softimag
 
 ## Depth-of-Field
 
-Depth of field is available in the path tracer under `Settings > Depth-of-Field`. Adjust aperture and focal distance for cinematic bokeh.
+Depth of field is available in the path tracer under **Settings → Path Tracer** (Aperture, Auto Focus, Focal Distance). Adjust aperture and focal distance for cinematic bokeh.
 
 ![](dof_1.jpg) ![](dof_2.jpg)
 
@@ -197,10 +197,10 @@ The application includes a full **glTF scene asset editor** that allows non-dest
 
 ### Scene Browser
 
-The **Scene Browser** panel provides two complementary views:
+The **Scene Browser** panel provides two complementary tabs:
 
-- **Hierarchy view** — an interactive tree showing the full node graph with children, meshes, primitives, cameras, lights, and skins. Supports selection, expansion, drag-and-drop, and right-click context menus.
-- **Flat list view** — tabbed lists of all Nodes, Meshes, Materials, Cameras, Lights, Textures, Images, and Animations with counts and quick selection.
+- **Scene Graph** — an interactive tree showing the full node graph with children, meshes, primitives, cameras, lights, and skins. Supports selection, expansion, drag-and-drop, and right-click context menus.
+- **Scene List** — collapsible sections listing all Nodes, Meshes, Materials, Cameras, Lights, Textures, Images, and Animations with counts and quick selection.
 
 Asset-level metadata (glTF asset info, generator, copyright, `KHR_xmp_json_ld`) is shown at the top.
 
@@ -229,7 +229,7 @@ The **Edit** menu also provides Undo and Redo items with a description of the ac
 
 **Supported operations:** Transform (gizmo + inspector), Material editing (PBR properties + all extensions), Light editing (type, color, intensity, range, spot angles), Rename node, Duplicate, Delete, Add Child, Add Light, Re-parent (drag & drop).
 
-The undo history uses a linear model: performing a new action after an undo discards the redo stack. History is automatically cleared when loading, merging, or compacting a scene to prevent stale references.
+The undo history uses a linear model: performing a new action after an undo discards the redo stack. History is automatically cleared when loading, merging, or referencing a scene to prevent stale references.
 
 **Current limitations:**
 - Visibility toggles and scene-level transforms are not yet undoable.
@@ -238,7 +238,7 @@ The undo history uses a linear model: performing a new action after an undo disc
 ### Transform Editing
 
 - **Inspector panel**: Edit Translation, Rotation, and Scale (TRS) numerically with precision.
-- **Transform Gizmo**: Enable via toolbar or `Settings > Show Gizmo` for interactive translate/rotate/scale directly in the viewport.
+- **Transform Gizmo**: Enable via toolbar or **View → Gizmo** (`T`) for interactive translate/rotate/scale directly in the viewport.
 - **Scene Transform**: A popup on the scene root applies a global transform to all root nodes — useful for reorienting imported assets (e.g., Z-up to Y-up).
 
 ### Material Editing
@@ -257,9 +257,9 @@ The editor supports creating and editing **KHR_lights_punctual** lights — poin
 
 **Creating lights:**
 
-- Right-click any node in the hierarchy and select **Add Child > Point Light / Directional Light / Spot Light**
-- Right-click the Scene root and select **Add Point Light / Add Directional Light / Add Spot Light**
-- Click the **+** button on the Lights group header in the flat list view
+- Right-click any node in the hierarchy and select **Add Child → Light → Point / Directional / Spot Light**
+- Right-click the Scene root and select **Add → Light → Point / Directional / Spot Light**
+- Click the **+** button on the Lights group header in the Scene List
 
 Each light is created as a new node in the scene graph. Position and orient the light by editing the node's transform (inspector or gizmo).
 
@@ -284,10 +284,17 @@ All light property edits are undoable.
 
 Multiple glTF files can be combined into a single scene:
 
-- **File > Merge Scene** opens a file dialog to select a `.gltf` or `.glb` file
+- **File > Import/Merge Scene...** opens a file dialog to select a `.gltf` or `.glb` file (embeds it into the current scene, or opens it as a new scene if none is loaded)
 - **Shift + Drag & Drop** a file onto the viewport to merge instead of replace
 - Merged content is wrapped under a new root node, preserving both scenes' hierarchies
 - Texture count is validated against the GPU descriptor limit before merging
+
+To keep external files as **references** (glTF 2.1 external assets) instead of embedding them,
+use **File > Reference Scene...** or **Ctrl+Shift + Drag & Drop**. Referenced assets stay
+read-only, repeated references share geometry, and the links are preserved on save. Use the
+context-menu **Make Editable** to break the lock on a referenced subtree, and
+**File > Save Self-Contained As...** to bake references inline into a portable file. See
+[External Assets](external_assets.md) for details.
 
 ### Save and Compact
 
@@ -297,6 +304,19 @@ Multiple glTF files can be combined into a single scene:
 ### Visibility
 
 Nodes with the `KHR_node_visibility` extension can be toggled visible/hidden directly from the hierarchy. Visibility propagates to children and is reflected in both renderers immediately.
+
+### Selectability & Hoverability
+
+The Inspector's node **Transform** panel exposes two interaction flags, next to **Visible**:
+
+- **Selectable** (`KHR_node_selectability`) — when unchecked, clicking the node (or any of its children) in the viewport no longer selects it. Selection instead falls through to the nearest selectable ancestor, or is cleared if none exists. This lets an author mark decorative or grouping geometry as non-pickable while still selecting the meaningful parent object.
+- **Hoverable** (`KHR_node_hoverability`) — a companion flag intended for hover interactions (primarily consumed by `KHR_interactivity`). It is parsed, editable, and preserved on save.
+
+Both flags cascade to the whole subtree (a `false` on an ancestor disables its descendants) and default to enabled. Use **Add Selectability** / **Add Hoverability** to attach the extension to a node that does not yet carry it.
+
+### Interactivity
+
+Assets that carry a `KHR_interactivity` behavior graph show a read-only **Interactivity** section in the Scene Browser (graph and node counts). The graph is parsed and preserved on save, but this viewer does not execute behavior graphs yet.
 
 ---
 
@@ -309,7 +329,7 @@ If the loaded scene contains animations, an **Animation** control panel appears:
 - **Play / Pause** the active animation
 - **Step** forward one frame at a time
 - **Reset** to the beginning
-- Adjust **playback speed** (0.1x to 10x)
+- Adjust **playback speed** (0 to 100x, default 1x)
 - **Timeline scrubbing** — drag the slider to any time position
 
 Supported animation types: keyframe translation/rotation/scale, skeletal skinning, morph targets, and `KHR_animation_pointer` (animated material and light properties).
@@ -336,7 +356,7 @@ Inspect individual material channels to diagnose shading issues:
 |---|---|---|---|---|---|---|---|
 |![](dbg_metallic.jpg)|![](dbg_roughness.jpg)|![](dbg_normal.jpg)|![](dbg_base_color.jpg)|![](dbg_emissive.jpg)|![](dbg_opacity.jpg)|![](dbg_tangent.jpg)|![](dbg_tex_coord.jpg)|
 
-Select the debug channel from the **Debug** menu or settings panel.
+Select the visualization mode from the **Visualization** combo in the **Settings** panel. The full set of modes is defined by `shaderio::Visualization` in `shaders/shaderio.h`.
 
 ---
 
@@ -394,7 +414,7 @@ Repair or regenerate the model's tangent space when normal maps look incorrect o
 
 ### Shader Hot-Reload
 
-Press **F5** or use `Tools > Recompile Shaders` to hot-reload all Slang shaders without restarting the application. Shader source files in the `shaders/` directory are recompiled on-the-fly, making it ideal for rapid shader development and debugging.
+Press **Ctrl+Shift+R** or use `Tools > Reload Shaders` to hot-reload all Slang shaders without restarting the application. Shader source files in the `shaders/` directory are recompiled on-the-fly, making it ideal for rapid shader development and debugging.
 
 > **Note:** Hot-reload requires the Slang compiler and shader source files to be accessible at runtime (handled automatically by the build system's `copy_to_runtime_and_install`).
 
@@ -403,13 +423,13 @@ Press **F5** or use `Tools > Recompile Shaders` to hot-reload all Slang shaders 
 | Action | Shortcut | Description |
 |---|---|---|
 | **Save Image** | `Ctrl+Alt+I` | Save the current tonemapped render to a PNG file (alpha channel preserved for compositing). |
-| **Save Screen** | `Ctrl+Alt+Shift+I` | Save a screenshot of the full application window including UI. |
+| **Save Screen Image** | `Ctrl+Alt+Shift+I` | Save a screenshot of the full application window including UI. |
 
-Both are also available from **File > Save Image** and **File > Save Screen**.
+Both are also available from **File > Save Image** and **File > Save Screen Image**.
 
 ### Memory Statistics
 
-Open via **Tools > Memory Usage**. Displays GPU memory allocation broken down by category (textures, buffers, acceleration structures, etc.). Useful for tracking memory consumption on large scenes.
+Open via **Windows > Memory Usage**. Displays GPU memory allocation broken down by category (textures, buffers, acceleration structures, etc.). Useful for tracking memory consumption on large scenes.
 
 ---
 
@@ -432,6 +452,12 @@ If you encounter UI issues or want to reset all settings to defaults, delete thi
 
 All settings can be overridden from the command line using `--paramName value` syntax.
 
+> The tables below cover the commonly used flags. The **authoritative, complete** set is
+> registered in code via `nvutils::ParameterRegistry` — see the `registerParameters()` /
+> `parameterRegistry.add(...)` calls in `src/main.cpp`, `src/renderer.cpp`,
+> `src/renderer_pathtracer.cpp`, `src/renderer_rasterizer.cpp`, and `src/benchmarking.cpp`.
+> Names and value ranges there take precedence over this list.
+
 **General**
 
 | Parameter | Description |
@@ -444,8 +470,8 @@ All settings can be overridden from the command line using `--paramName value` s
 | `--output <path>` | Output image file path for headless mode (default: `<exe_name>.jpg` next to executable) |
 | `--vsync` | Enable vertical sync |
 | `--vvl` | Activate Vulkan Validation Layers |
-| `--logLevel <0-2>` | Log level: Info (0), Warning (1), Error (2) |
-| `--logShow <0-3>` | Extra log info (bitset): None (0), Time (1), Level (2) |
+| `--logLevel <N>` | Log level (nvutils values): Stats (1), Info (3), Warning (4), Error (5) |
+| `--logShow <N>` | Extra log info (bitset): None (0), Time (1), Level (2) |
 | `--device <index>` | Force a specific Vulkan GPU by device index |
 | `--vsyncOffMode <0-3>` | VSync-off present mode: Immediate (0), Mailbox (1), FIFO (2), FIFO Relaxed (3) |
 | `--floatingWindows` | Allow dock windows to be separate OS windows |
@@ -465,7 +491,7 @@ All settings can be overridden from the command line using `--paramName value` s
 | `--renderSystem <0-1>` | Path tracer (0) or Rasterizer (1) |
 | `--envSystem <0-1>` | Sky (0) or HDR (1) |
 | `--maxFrames <N>` | Maximum path tracer iterations |
-| `--visualization <N>` | Visualization mode (0=Rendered, 1=BaseColor, ..., 11=Clay, 12=TriangleID) |
+| `--visualization <N>` | Visualization mode (0 = Rendered). Values map to `shaderio::Visualization` in `shaders/shaderio.h` — see that enum for the current list. |
 | `--useSolidBackground` | Use solid background color |
 | `--solidBackgroundColor <R> <G> <B>` | Solid background color (0.0-1.0) |
 
@@ -487,7 +513,7 @@ All settings can be overridden from the command line using `--paramName value` s
 
 | Parameter | Description |
 |---|---|
-| `--rasterWireframe` | Enable wireframe mode |
+| `--wireframe` | Enable the wireframe overlay (global setting; both renderers honor it) |
 | `--rasterUseRecordedCmd` | Use recorded (secondary) command buffers |
 
 **Denoisers**
@@ -596,7 +622,7 @@ usage: gltf-material-modifier.py [-h] [--metallic METALLIC] [--roughness ROUGHNE
 - On Windows, `cudart64_*.dll` is delay-loaded — the application starts without it, but the denoiser tab will show as unavailable.
 - OptiX headers are auto-downloaded; no separate OptiX SDK install is needed.
 
-**Shader hot-reload fails (F5)**
+**Shader hot-reload fails (Ctrl+Shift+R)**
 - Hot-reload requires the Slang compiler and shader source files to be accessible at runtime.
 - Verify the `shaders/` directory is present next to the executable (handled by `copy_to_runtime_and_install`).
 

@@ -1,5 +1,7 @@
 # Benchmarking vk_gltf_renderer
 
+> **For contributors and agents.** How to measure performance — headless timing and the scripted sequencer. The exact flags, log fields, and comparison rules are owned by the code (`src/benchmarking.cpp`, `utils/benchmark/`); this doc explains the workflow.
+
 Two workflows:
 
 1. **Headless timing (recommended)** — post-warmup render throughput for N frames at 1 or 5 samples per pixel; compare logs between builds.
@@ -86,7 +88,7 @@ Results land in `utils/benchmark/output/` (logs per scene + CSV). See also [util
 
 ## How it works
 
-1. **`--benchmark 1`** turns off vsync, hides side panels (keeps a fullscreen viewport with the tonemapped image), and drains the scene load pipeline synchronously each frame.
+1. **`--benchmark 1`** turns off vsync, hides side panels (keeps a fullscreen viewport with the tonemapped image), and drains the scene load pipeline synchronously each frame. Scripted sequencer runs are **interactive-window** runs (minimal viewport) — they do *not* pass `--headless`; use the headless workflow above for windowless timing.
 2. **`ElementSequencer`** steps through a `.cfg` script (`SEQUENCE "name"` blocks).
 3. After each sequence, **`ProfilerManager`** logs `ParameterSequence` blocks at log level `eSTATS` (GPU/CPU timer averages).
 4. **`benchmarkAdvance()`** records Scene and PathTracer/Rasterizer VRAM stats.
@@ -94,13 +96,14 @@ Results land in `utils/benchmark/output/` (logs per scene + CSV). See also [util
 
 ## Benchmark script format
 
-Example (`utils/benchmark/quick.cfg`):
+Example — one sequence from `utils/benchmark/quick.cfg` (the file defines several: `Warmup`,
+`PT 1spp`, `Rasterizer`; see `quick.cfg` and `matrix.cfg` for the full scripts):
 
 ```
-SEQUENCE "Path tracer - 1 spp"
---sequenceframes 512
---sequenceaverages 128
---sequenceresetframes 16
+SEQUENCE "PT 1spp"
+--sequenceframes 256
+--sequenceaverages 64
+--sequenceresetframes 8
 --renderSystem 0
 --ptSamples 1
 --maxFrames 1
@@ -131,7 +134,7 @@ python utils/benchmark/benchmark.py run matrix.cfg --scene my_scene.gltf --csv-n
 python utils/benchmark/benchmark.py compare baseline.csv candidate.csv --output diff.csv --regression-threshold-pct 5
 ```
 
-`compare` marks **Regression** when candidate GPU time is more than N% slower than baseline. Negative delta % means faster.
+`compare` marks **Regression** when candidate GPU time is more than N% slower than baseline **or** when the candidate's Scene VRAM peak exceeds the baseline by more than the VRAM threshold (default 64 MB). Negative delta % means faster. See `compare_csv` in `utils/benchmark/benchmark_results.py` for the exact rules.
 
 ## Log parsing
 
@@ -146,7 +149,7 @@ Auto-generated log: `log_<executable>.txt` next to the binary (Logger behavior).
 
 ## Tips
 
-- Use fixed resolution (`--size 1920 1080` in `utils/benchmark/benchmark.py`) for comparable numbers.
+- Use fixed resolution (`--size 1920 1080`, set in `utils/benchmark/benchmark_runner.py`) for comparable numbers.
 - Disable validation layers for performance runs (`--vvl` off by default in Release).
 - Add scenes to `utils/benchmark/scenes.example.txt` (name + relative path per line).
 - Multi-camera scenes: add sequences with `--gltfCamera 0`, `--gltfCamera 1`, etc.

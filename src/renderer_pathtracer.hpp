@@ -100,23 +100,30 @@ public:
   VkPhysicalDeviceRayTracingInvocationReorderPropertiesNV m_reorderProperties{
       VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_RAY_TRACING_INVOCATION_REORDER_PROPERTIES_NV};
 
-  bool                      m_supportSER{false};  // True when the device supports SER (Shader Execution Reordering).
-  bool                      m_useSER{false};      // True when the device is using SER.
-  bool                      m_compiledWireframe{false};  // True when the shader is the wireframe build.
-  bool                      m_compiledOptimal{false};    // True when the shader is the scene-aware optimized build.
-  nvvkgltf::SceneFeatureSet m_compiledFeatures{};        // The feature set the current shader was compiled against.
+  bool m_supportSER{false};         // True when the device supports SER (Shader Execution Reordering).
+  bool m_useSER{false};             // True when the device is using SER.
+  bool m_compiledWireframe{false};  // True when the shader is the wireframe build.
+  bool m_compiledOptimal{false};    // True when the shader is the scene-aware optimized build.
+  bool m_compiledDlss{false};       // True when the current shader was compiled with DLSS active (USE_DLSS_SHADER).
+  bool m_compiledDlssGuide{false};  // True when the current shader has the guide-buffer variant compiled in (USE_GUIDE_SHADER).
+  nvvkgltf::SceneFeatureSet m_compiledFeatures{};  // The feature set the current shader was compiled against.
 
   // Variant pipeline cache: avoids slow pipeline (re)compilation by reusing previously built
   // VkShaderModule and pipelines for a given VariantKey. LRU-limited (see kVariantCacheMaxEntries).
   struct VariantKey
   {
-    bool                      wireframe = false;  // True when the shader is the wireframe build.
-    bool                      optimal   = false;  // True when the shader is the scene-aware optimized build.
-    nvvkgltf::SceneFeatureSet features{};         // only meaningful when `optimal == true`
+    bool wireframe = false;  // True when the shader is the wireframe build.
+    bool optimal   = false;  // True when the shader is the scene-aware optimized build.
+    bool dlss      = false;  // True when DLSS is active (drives USE_DLSS_SHADER: sample-loop gate).
+    bool dlssGuide = false;  // True when guide-buffer capture is compiled in (USE_GUIDE_SHADER: DLSS or OptiX).
+    nvvkgltf::SceneFeatureSet features{};  // only meaningful when `optimal == true`
 
     bool operator==(const VariantKey& o) const
     {
-      return wireframe == o.wireframe && optimal == o.optimal && (optimal ? (features == o.features) : true);
+      // dlss and dlssGuide are compared in every mode (they drive USE_DLSS_SHADER / USE_GUIDE_SHADER
+      // independently of optimal); the full extension feature set only matters for the optimal build.
+      return wireframe == o.wireframe && optimal == o.optimal && dlss == o.dlss && dlssGuide == o.dlssGuide
+             && (optimal ? (features == o.features) : true);
     }
   };
 
@@ -218,6 +225,8 @@ private:
   {
     bool                      wireframe = false;
     bool                      optimal   = false;
+    bool                      dlss      = false;
+    bool                      dlssGuide = false;
     nvvkgltf::SceneFeatureSet features{};
     VkPipeline                rqPipeline  = VK_NULL_HANDLE;
     VkPipeline                rtxPipeline = VK_NULL_HANDLE;

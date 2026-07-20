@@ -35,7 +35,7 @@
 #include <tinygltf/tiny_gltf.h>
 
 #include <nvutils/logger.hpp>
-#include "nvutils/parallel_work.hpp"
+#include <nvutils/parallel_work.hpp>
 
 #include "tinygltf_utils.hpp"
 
@@ -761,6 +761,17 @@ void AnimationSystem::computeSkinning()
     for(size_t i = 0; i < numJoints; ++i)
       m_normalMatrices[i] = glm::transpose(glm::inverse(glm::mat3(m_jointMatrices[i])));
 
+    // If this primitive is also morphed, computeMorphTargets() (called before this) has already
+    // blended the morph deltas. Skin the morphed geometry (morph -> skin composition) rather than
+    // the static base; otherwise fall back to the static per-primitive base attributes.
+    const MorphResult*            morph = findMorphResult(task.renderPrimID);
+    const std::vector<glm::vec3>& srcPositions =
+        (morph && morph->blendedPositions.size() == vertexCount) ? morph->blendedPositions : task.basePositions;
+    const std::vector<glm::vec3>& srcNormals =
+        (morph && morph->blendedNormals.size() == vertexCount) ? morph->blendedNormals : task.baseNormals;
+    const std::vector<glm::vec4>& srcTangents =
+        (morph && morph->blendedTangents.size() == vertexCount) ? morph->blendedTangents : task.baseTangents;
+
     // Apply skinning directly into pre-allocated result vectors
     SkinningResult& result        = task.result;
     const auto&     jointMatrices = m_jointMatrices;
@@ -784,11 +795,11 @@ void AnimationSystem::computeSkinning()
           const glm::mat4& jMat       = validJoint ? jointMatrices[jointIndex] : glm::identity<glm::mat4>();
           const glm::mat3& nMat       = validJoint ? normalMats[jointIndex] : glm::identity<glm::mat3>();
 
-          skinnedPos += jointWeight * glm::vec3(jMat * glm::vec4(task.basePositions[v], 1.0f));
+          skinnedPos += jointWeight * glm::vec3(jMat * glm::vec4(srcPositions[v], 1.0f));
           if(hasNormals)
-            skinnedNrm += jointWeight * (nMat * task.baseNormals[v]);
+            skinnedNrm += jointWeight * (nMat * srcNormals[v]);
           if(hasTangents)
-            skinnedTan += jointWeight * (glm::mat3(jMat) * glm::vec3(task.baseTangents[v]));
+            skinnedTan += jointWeight * (glm::mat3(jMat) * glm::vec3(srcTangents[v]));
         }
       }
 
@@ -796,7 +807,7 @@ void AnimationSystem::computeSkinning()
       if(hasNormals)
         result.normals[v] = glm::normalize(skinnedNrm);
       if(hasTangents)
-        result.tangents[v] = glm::vec4(glm::normalize(skinnedTan), task.baseTangents[v].w);
+        result.tangents[v] = glm::vec4(glm::normalize(skinnedTan), srcTangents[v].w);
     });
   }
 }
@@ -913,6 +924,16 @@ void AnimationSystem::computeMorphTargets()
 const MorphResult& AnimationSystem::getMorphResult(size_t morphTaskIndex) const
 {
   return m_morphResults[morphTaskIndex];
+}
+
+//--------------------------------------------------------------------------------------------------
+// Find the morph result associated with a render primitive, or nullptr if it has no morph targets.
+const MorphResult* AnimationSystem::findMorphResult(int renderPrimID) const
+{
+  for(const MorphResult& mr : m_morphResults)
+    if(mr.renderPrimID == renderPrimID)
+      return &mr;
+  return nullptr;
 }
 
 }  // namespace nvvkgltf

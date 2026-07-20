@@ -124,7 +124,7 @@ public:
 private:
   void createPipelines();
   void destroyPipelines();
-  void ensureGpuBuffersMatchScene(nvvk::StagingUploader& staging, const Scene& scn);
+  bool ensureGpuBuffersMatchScene(nvvk::StagingUploader& staging, const Scene& scn);
   void destroyGpuBuffersImmediate();
 
   nvvk::ResourceAllocator*  m_alloc = nullptr;

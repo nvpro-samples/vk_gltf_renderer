@@ -45,9 +45,11 @@
 
 #include "renderer.hpp"
 #include "gltf_create_tangent.hpp"
+#include "gltf_scene_editor.hpp"
 #include "scoped_banner.hpp"
 #include "tinygltf_utils.hpp"
 #include "ui_animation.hpp"
+#include "ui_linear_color.hpp"
 #include "ui_mouse_state.hpp"
 #include "version.hpp"
 
@@ -114,40 +116,7 @@ void GltfRenderer::mouseClickedInViewport()
     // pickResult.instanceID is the TLAS instance index = render node index
     if(s_mouseClickState.isMouseSingleClicked(ImGuiMouseButton_Left))
     {
-      if(pickResult.instanceID > -1)
-      {
-        const int        renderNodeIdx = pickResult.instanceID;
-        nvvkgltf::Scene* scene         = m_resources.getScene();
-        const auto&      renderNodes   = scene->getRenderNodes();
-        const bool       valid         = renderNodeIdx >= 0 && renderNodeIdx < static_cast<int>(renderNodes.size());
-
-        if(!valid)
-        {
-          m_resources.selectedRenderNodes.clear();
-          m_sceneSelection.clearSelection();
-        }
-        else if(m_resources.selectedRenderNodes.size() == 1 && m_resources.selectedRenderNodes.count(renderNodeIdx))
-        {
-          m_resources.selectedRenderNodes.clear();
-          m_sceneSelection.clearSelection();
-        }
-        else
-        {
-          const auto& renderNode = renderNodes[renderNodeIdx];
-          int         nodeID     = renderNode.refNodeID;
-          int         primIndex  = scene->getPrimitiveIndexForRenderNode(renderNodeIdx);
-          int         meshID     = scene->getModel().nodes[nodeID].mesh;
-
-          m_resources.selectedRenderNodes = {renderNodeIdx};
-          m_sceneSelection.selectPrimitive(renderNodeIdx, nodeID, primIndex, meshID);
-          m_sceneBrowser.focusOnSelection();
-        }
-      }
-      else
-      {
-        m_resources.selectedRenderNodes.clear();
-        m_sceneSelection.clearSelection();
-      }
+      updateSelectionFromPick(pickResult.instanceID);
     }
 
     // Environment was picked (no hit)
@@ -179,6 +148,80 @@ void GltfRenderer::mouseClickedInViewport()
       }
     }
   }
+}
+
+// Update the current selection from a ray-pick result. `renderNodeIdx` is the TLAS instance index
+// (== render node index), or < 0 when the environment/nothing was hit.
+void GltfRenderer::updateSelectionFromPick(int renderNodeIdx)
+{
+  const auto clearSelection = [&]() {
+    m_resources.selectedRenderNodes.clear();
+    m_sceneSelection.clearSelection();
+  };
+
+  nvvkgltf::Scene* scene       = m_resources.getScene();
+  const auto&      renderNodes = scene->getRenderNodes();
+
+  // Nothing hit, or invalid instance: clear the selection.
+  if(renderNodeIdx < 0 || renderNodeIdx >= static_cast<int>(renderNodes.size()))
+  {
+    clearSelection();
+    return;
+  }
+
+  // Clicking the currently selected primitive again de-selects it.
+  if(m_resources.selectedRenderNodes.size() == 1 && m_resources.selectedRenderNodes.count(renderNodeIdx))
+  {
+    clearSelection();
+    return;
+  }
+
+  // KHR_node_selectability: honor author intent. If the picked node opts out of selection (itself or
+  // via an ancestor with `selectable:false`), redirect to the nearest selectable ancestor, or clear.
+  if(!scene->isNodeSelectable(renderNodes[renderNodeIdx].refNodeID))
+  {
+    int selectableNodeID = scene->nearestSelectableAncestor(renderNodes[renderNodeIdx].refNodeID);
+    if(selectableNodeID >= 0)
+    {
+      m_sceneSelection.selectNode(selectableNodeID);
+      m_sceneBrowser.focusOnSelection();
+    }
+    else
+    {
+      clearSelection();
+    }
+    return;
+  }
+
+  // The picked node is read-only (e.g. part of a referenced external asset). Select the first
+  // editable ancestor instead, so the user can still change its transformation.
+  if(scene->isNodeReadOnly(renderNodes[renderNodeIdx].refNodeID))
+  {
+    int editableNodeID = renderNodes[renderNodeIdx].refNodeID;
+    while(editableNodeID >= 0 && scene->isNodeReadOnly(editableNodeID))
+      editableNodeID = scene->editor().getNodeParent(editableNodeID);
+
+    if(editableNodeID >= 0)
+    {
+      m_sceneSelection.selectNode(editableNodeID);
+      m_sceneBrowser.focusOnSelection();
+    }
+    else
+    {
+      clearSelection();
+    }
+    return;
+  }
+
+  // Regular case: select the picked primitive.
+  const auto& renderNode = renderNodes[renderNodeIdx];
+  int         nodeID     = renderNode.refNodeID;
+  int         primIndex  = scene->getPrimitiveIndexForRenderNode(renderNodeIdx);
+  int         meshID     = scene->getModel().nodes[nodeID].mesh;
+
+  m_resources.selectedRenderNodes = {renderNodeIdx};
+  m_sceneSelection.selectPrimitive(renderNodeIdx, nodeID, primIndex, meshID);
+  m_sceneBrowser.focusOnSelection();
 }
 
 nvutils::Bbox GltfRenderer::getRenderNodeBbox(int renderNodeIndex)
@@ -358,6 +401,11 @@ void GltfRenderer::renderUI()
 
       m_sceneBrowser.render(&m_resources.settings.showSceneBrowserWindow, m_busy.isBusy());
       m_inspector.render(&m_resources.settings.showInspectorWindow, m_busy.isBusy());
+
+      // Top-level so the "Add Primitive" modal surfaces even when the Scene Browser window is
+      // hidden/collapsed (e.g. triggered from the menu-bar "Create"). requestAddPrimitive() remains
+      // the trigger; this just renders the pending modal.
+      m_sceneBrowser.showAddPrimitivePopup();
     }
 
     if(m_resources.settings.showSettingsWindow)
@@ -629,8 +677,10 @@ void GltfRenderer::renderFileMenu(bool                   validScene,
                                   bool&                  loadHdrFile,
                                   bool&                  saveFile,
                                   bool&                  saveAsFile,
+                                  bool&                  saveSelfContainedAsFile,
                                   bool&                  saveScreenFile,
                                   bool&                  saveImageFile,
+                                  bool&                  referenceFile,
                                   bool&                  closeApp,
                                   std::filesystem::path& sceneToLoadFilename,
                                   std::filesystem::path& sceneToMergeFilename)
@@ -639,9 +689,12 @@ void GltfRenderer::renderFileMenu(bool                   validScene,
     return;
   newScene = ImGui::MenuItem(ICON_MS_FILTER_NONE " New Scene", "Ctrl+N");
   openFile |= ImGui::MenuItem(ICON_MS_FILE_OPEN " Open", "Ctrl+O");
-  ImGui::BeginDisabled(!validScene);
+  // Import/Merge and Reference always available: with no scene they create one from the imported file
+  // (addSceneFromFile builds a fresh Scene), otherwise they add into the current scene.
   mergeFile |= ImGui::MenuItem(ICON_MS_ADD " Import/Merge Scene...");
-  ImGui::EndDisabled();
+  nvgui::tooltip("Embed another glTF into this scene, or open it as a new scene if none is loaded");
+  referenceFile |= ImGui::MenuItem(ICON_MS_LINK " Reference Scene...");
+  nvgui::tooltip("Link another glTF as a read-only external asset (glTF 2.1). Repeats share geometry; kept as a reference on save");
   loadHdrFile |= ImGui::MenuItem(ICON_MS_IMAGE " Load HDR Environment", "Ctrl+Shift+O");
   if(ImGui::BeginMenu(ICON_MS_HISTORY " Open Recent"))
   {
@@ -655,6 +708,13 @@ void GltfRenderer::renderFileMenu(bool                   validScene,
   ImGui::BeginDisabled(!validScene);
   saveFile |= ImGui::MenuItem(ICON_MS_SAVE " Save", "Ctrl+S");
   saveAsFile |= ImGui::MenuItem(ICON_MS_FILE_SAVE " Save As...", "Ctrl+Shift+S");
+  // glTF 2.1: only meaningful when the scene references external assets. Bakes them inline and
+  // drops all references, producing a portable file that can be shared without the referenced files.
+  if(validScene && m_resources.getScene()->hasExternalAssets())
+  {
+    saveSelfContainedAsFile |= ImGui::MenuItem(ICON_MS_FILE_SAVE " Save Self-Contained As...");
+    nvgui::tooltip("Bake referenced external assets into the file and remove all external references (shareable copy)");
+  }
   ImGui::EndDisabled();
   ImGui::Separator();
   saveImageFile |= ImGui::MenuItem(ICON_MS_IMAGE " Save Image", "Ctrl+Alt+I");
@@ -713,6 +773,19 @@ void GltfRenderer::renderEditMenu(bool validScene)
     m_openDeletePopupNextFrame = true;
   }
   ImGui::EndDisabled();
+
+  ImGui::EndMenu();
+}
+
+void GltfRenderer::renderCreateMenu()
+{
+  if(!ImGui::BeginMenu("Create"))
+    return;
+
+  // Global creation: always adds at the scene root (never under the current selection). Each catalog
+  // action runs the browser's before-create hook (ensureEmptyScene), so "Create" works with nothing
+  // loaded; the first object then triggers the initial GPU build via reconcileGeometryIfNeeded().
+  m_sceneBrowser.renderCreateCatalog(-1);
 
   ImGui::EndMenu();
 }
@@ -935,31 +1008,34 @@ void GltfRenderer::renderMenu()
   std::filesystem::path sceneToLoadFilename{};
   std::filesystem::path sceneToMergeFilename{};
   GltfRenderer::windowTitle();
-  bool newScene       = ImGui::IsKeyChordPressed(ImGuiMod_Ctrl | ImGuiKey_N);
-  bool openFile       = ImGui::IsKeyChordPressed(ImGuiMod_Ctrl | ImGuiKey_O);
-  bool mergeFile      = false;
-  bool loadHdrFile    = ImGui::IsKeyChordPressed(ImGuiMod_Ctrl | ImGuiMod_Shift | ImGuiKey_O);
-  bool saveFile       = ImGui::IsKeyChordPressed(ImGuiMod_Ctrl | ImGuiKey_S);
-  bool saveAsFile     = ImGui::IsKeyChordPressed(ImGuiMod_Ctrl | ImGuiMod_Shift | ImGuiKey_S);
-  bool saveScreenFile = ImGui::IsKeyChordPressed(ImGuiMod_Ctrl | ImGuiMod_Shift | ImGuiMod_Alt | ImGuiKey_I);
-  bool saveImageFile  = ImGui::IsKeyChordPressed(ImGuiMod_Ctrl | ImGuiMod_Alt | ImGuiKey_I);
-  bool closeApp       = ImGui::IsKeyChordPressed(ImGuiMod_Ctrl | ImGuiKey_Q);
-  bool fitScene       = ImGui::IsKeyChordPressed(ImGuiMod_Ctrl | ImGuiMod_Shift | ImGuiKey_F);
-  bool fitObject      = ImGui::IsKeyChordPressed(ImGuiMod_Ctrl | ImGuiKey_F);
-  bool toggleVsyc     = ImGui::IsKeyChordPressed(ImGuiMod_Ctrl | ImGuiMod_Shift | ImGuiKey_V);
-  bool reloadShader   = ImGui::IsKeyChordPressed(ImGuiMod_Ctrl | ImGuiMod_Shift | ImGuiKey_R);
-  bool compactScene   = ImGui::IsKeyChordPressed(ImGuiMod_Ctrl | ImGuiKey_K);
-  bool undoCmd        = ImGui::IsKeyChordPressed(ImGuiMod_Ctrl | ImGuiKey_Z);
-  bool redoCmd        = ImGui::IsKeyChordPressed(ImGuiMod_Ctrl | ImGuiKey_Y);
-  bool duplicateCmd   = ImGui::IsKeyChordPressed(ImGuiMod_Ctrl | ImGuiKey_D);
-  bool deleteCmd      = !ImGui::GetIO().WantTextInput && ImGui::IsKeyPressed(ImGuiKey_Delete, false);
+  bool newScene                = ImGui::IsKeyChordPressed(ImGuiMod_Ctrl | ImGuiKey_N);
+  bool openFile                = ImGui::IsKeyChordPressed(ImGuiMod_Ctrl | ImGuiKey_O);
+  bool mergeFile               = false;
+  bool referenceFile           = false;
+  bool loadHdrFile             = ImGui::IsKeyChordPressed(ImGuiMod_Ctrl | ImGuiMod_Shift | ImGuiKey_O);
+  bool saveFile                = ImGui::IsKeyChordPressed(ImGuiMod_Ctrl | ImGuiKey_S);
+  bool saveAsFile              = ImGui::IsKeyChordPressed(ImGuiMod_Ctrl | ImGuiMod_Shift | ImGuiKey_S);
+  bool saveSelfContainedAsFile = false;
+  bool saveScreenFile          = ImGui::IsKeyChordPressed(ImGuiMod_Ctrl | ImGuiMod_Shift | ImGuiMod_Alt | ImGuiKey_I);
+  bool saveImageFile           = ImGui::IsKeyChordPressed(ImGuiMod_Ctrl | ImGuiMod_Alt | ImGuiKey_I);
+  bool closeApp                = ImGui::IsKeyChordPressed(ImGuiMod_Ctrl | ImGuiKey_Q);
+  bool fitScene                = ImGui::IsKeyChordPressed(ImGuiMod_Ctrl | ImGuiMod_Shift | ImGuiKey_F);
+  bool fitObject               = ImGui::IsKeyChordPressed(ImGuiMod_Ctrl | ImGuiKey_F);
+  bool toggleVsyc              = ImGui::IsKeyChordPressed(ImGuiMod_Ctrl | ImGuiMod_Shift | ImGuiKey_V);
+  bool reloadShader            = ImGui::IsKeyChordPressed(ImGuiMod_Ctrl | ImGuiMod_Shift | ImGuiKey_R);
+  bool compactScene            = ImGui::IsKeyChordPressed(ImGuiMod_Ctrl | ImGuiKey_K);
+  bool undoCmd                 = ImGui::IsKeyChordPressed(ImGuiMod_Ctrl | ImGuiKey_Z);
+  bool redoCmd                 = ImGui::IsKeyChordPressed(ImGuiMod_Ctrl | ImGuiKey_Y);
+  bool duplicateCmd            = ImGui::IsKeyChordPressed(ImGuiMod_Ctrl | ImGuiKey_D);
+  bool deleteCmd               = !ImGui::GetIO().WantTextInput && ImGui::IsKeyPressed(ImGuiKey_Delete, false);
   if(toggleVsyc)
     v_sync = !v_sync;
   bool validScene = m_resources.getScene() && m_resources.getScene()->valid();
 
-  renderFileMenu(validScene, newScene, openFile, mergeFile, loadHdrFile, saveFile, saveAsFile, saveScreenFile,
-                 saveImageFile, closeApp, sceneToLoadFilename, sceneToMergeFilename);
+  renderFileMenu(validScene, newScene, openFile, mergeFile, loadHdrFile, saveFile, saveAsFile, saveSelfContainedAsFile,
+                 saveScreenFile, saveImageFile, referenceFile, closeApp, sceneToLoadFilename, sceneToMergeFilename);
   renderEditMenu(validScene);
+  renderCreateMenu();
 
   if(ImGui::IsKeyPressed(ImGuiKey_Escape))
   {
@@ -1032,7 +1108,7 @@ void GltfRenderer::renderMenu()
   if(openFile)
   {
     sceneToLoadFilename = nvgui::windowOpenFileDialog(m_app->getWindowHandle(), "Load 3D Scene",
-                                                      "3D Scene Files|*.gltf;*.glb;*.obj;*.scene.json;*.glxf|glTF|*.gltf;*.glb|OBJ|*.obj|Scene Descriptor|*.scene.json;*.glxf",
+                                                      "3D Scene Files|*.gltf;*.glb;*.obj;*.scene.json|glTF|*.gltf;*.glb|OBJ|*.obj|Scene Descriptor|*.scene.json",
                                                       m_lastSceneDirectory);
   }
   if(!sceneToLoadFilename.empty())
@@ -1050,6 +1126,15 @@ void GltfRenderer::renderMenu()
   {
     onMergeScene(sceneToMergeFilename);
     sceneToMergeFilename.clear();
+  }
+
+  if(referenceFile)
+  {
+    std::filesystem::path filename =
+        nvgui::windowOpenFileDialog(m_app->getWindowHandle(), "Reference Scene (External Asset)",
+                                    "glTF Files|*.gltf;*.glb|glTF Text|*.gltf|glTF Binary|*.glb", m_lastSceneDirectory);
+    if(!filename.empty())
+      onReferenceScene(filename);
   }
 
   if(loadHdrFile)
@@ -1076,6 +1161,16 @@ void GltfRenderer::renderMenu()
                                                                  m_resources.getScene()->getFilename());
     if(!filename.empty())
       save(filename);
+  }
+
+  if(saveSelfContainedAsFile && validScene)
+  {
+    // glTF 2.1: write a portable copy with external assets baked inline (no external references).
+    std::filesystem::path filename = nvgui::windowSaveFileDialog(m_app->getWindowHandle(), "Save Self-Contained glTF",
+                                                                 "glTF Files|*.gltf;*.glb|glTF Text|*.gltf|glTF Binary|*.glb",
+                                                                 m_resources.getScene()->getFilename());
+    if(!filename.empty())
+      save(filename, /*selfContained=*/true);
   }
 
   if(saveScreenFile)
@@ -1646,7 +1741,8 @@ void GltfRenderer::renderEnvironmentWindow()
     changed |= PE::Checkbox("Solid Color", &m_resources.settings.useSolidBackground);
     if(m_resources.settings.useSolidBackground)
     {
-      changed |= PE::ColorEdit3("Background Color", glm::value_ptr(m_resources.settings.solidBackgroundColor));
+      changed |= uicolor::colorEdit3Linear("Background Color", glm::value_ptr(m_resources.settings.solidBackgroundColor),
+                                           "Solid background color (shown/edited in linear; swatch/wheel perceptual).");
     }
     PE::end();
   }

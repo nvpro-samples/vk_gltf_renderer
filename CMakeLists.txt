@@ -230,19 +230,22 @@ endif()
 # When DLSS is available, define HAS_DLSS_MOTION so gltf_raster.slang emits the third
 # color attachment (SV_TARGET2 motion vector) for DLAA. Otherwise, drop it entirely.
 #
-# USE_DLSS_SHADER=1 gates the path tracer's per-bounce guide-buffer captures
-# (DlssScratch + DlssOutput, dlssGetClearGlassGuideAlbedo, etc.) in
+# USE_GUIDE_SHADER=1 gates the path tracer's per-bounce guide-buffer captures
+# (GuideScratch + GuideOutput, dlssGetClearGlassGuideAlbedo, etc.) in
 # gltf_pathtrace.slang. The OptiX denoiser reuses these guide fields (albedo +
-# normalRoughness), so this define is on whenever DLSS or OptiX is
-# actually available. The path tracer reads USE_DLSS_SHADER (not HAS_DLSS_MOTION)
-# so the two shader-side gates stay independently controllable (e.g. for the
-# scene-aware variant rebuild that can disable USE_DLSS_SHADER per scene).
+# normalRoughness), so this define is on whenever DLSS or OptiX is actually available.
+#
+# USE_DLSS_SHADER gates only the DLSS-specific path (currently: compiling out the
+# per-frame multisample loop to reduce register pressure). It is DLSS-only and left at
+# its default (0) in the embedded shader, since DLSS is never active at startup; the
+# runtime variant rebuild flips it to 1 when DLSS actually engages. The two gates stay
+# independently controllable (and independent of HAS_DLSS_MOTION, which drives the raster path).
 set(SHADER_EXTRA_FLAGS "-I${NVSHADERS_DIR}")
 if(DLSS_AVAILABLE)
   list(APPEND SHADER_EXTRA_FLAGS "-DHAS_DLSS_MOTION=1")
 endif()
 if(DLSS_AVAILABLE OR OPTIX_DENOISER_AVAILABLE)
-  list(APPEND SHADER_EXTRA_FLAGS "-DUSE_DLSS_SHADER=1")
+  list(APPEND SHADER_EXTRA_FLAGS "-DUSE_GUIDE_SHADER=1")
 endif()
 
 # Compile all shaders to embedded headers (.h) and SPIR-V binaries (.spv) [optionally generate SPIR-V binaries (.spv) for debugging]

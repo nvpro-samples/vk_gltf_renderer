@@ -399,6 +399,10 @@ void GltfRenderer::onAttach(nvapp::Application* app)
   m_pathTracer.createPipeline(m_resources);
   m_rasterizer.createPipeline(m_resources);
 
+  // Wire the create-catalog hook up front so the menu-bar "Create" works with nothing loaded:
+  // it stands up an empty, UI-wired scene on demand (wireSceneToUi re-sets this same hook later).
+  m_sceneBrowser.setBeforeCreateCallback([this] { ensureEmptyScene(); });
+
   // ===== Visual Helpers (Grid + Transform Gizmo) =====
   {
     VkFormat depthFormat = m_resources.gBuffers.getDepthFormat();
@@ -763,10 +767,16 @@ void GltfRenderer::onLastHeadlessFrame()
 }
 
 //--------------------------------------------------------------------------------------------------
-// Merge a glTF scene into the current one. Called from File menu or Shift+drag-drop.
+// Add another glTF into the current scene, either embedded (merge) or linked (glTF 2.1 external
+// asset reference). Shared worker for onMergeScene()/onReferenceScene(): the two modes differ only
+// in the Scene call and the status text, so the threading + post-import rebuild live here.
 //
-void GltfRenderer::onMergeScene(const std::filesystem::path& filename)
+void GltfRenderer::addSceneFromFile(const std::filesystem::path& filename, bool asReference)
 {
+  // Bootstrap a scene when nothing is loaded (or the current one is invalid). This covers BOTH the
+  // merge and reference paths below -- they call getScene()->mergeScene()/referenceScene(), so this
+  // guarantees a non-null scene for either. (Both mergeScene() and referenceScene() also ensure a
+  // scene container on an empty model, so the imported content has a root.)
   if(!m_resources.getScene() || !m_resources.getScene()->valid())
   {
     auto scn = std::make_unique<nvvkgltf::Scene>();
@@ -777,29 +787,53 @@ void GltfRenderer::onMergeScene(const std::filesystem::path& filename)
   if(m_busy.isBusy())
     return;
 
+  // Ensure no in-flight frame still references GPU resources (incl. per-frame staging buffers) that
+  // the upcoming rebuild will destroy/replace. The drag-drop path idles in onFileDrop, but the File
+  // menu entry points reach here directly, so idle here to cover both. (main thread; see VUID-00922)
+  vkQueueWaitIdle(m_app->getQueue(0).queue);
+
   // Set busy BEFORE starting the worker thread to prevent UI access during scene modification
-  m_busy.start("Merging Scene");
+  m_busy.start(asReference ? "Referencing Scene" : "Merging Scene");
 
   std::thread([=, this]() {
-    int wrapperNodeIdx = m_resources.getScene()->mergeScene(filename, static_cast<uint32_t>(m_maxTextures));
-    if(wrapperNodeIdx >= 0)
+    const int         nodeIdx = asReference ? m_resources.getScene()->referenceScene(filename) :
+                                              m_resources.getScene()->mergeScene(filename, static_cast<uint32_t>(m_maxTextures));
+    const std::string name    = nvutils::utf8FromPath(filename.filename());
+    if(nodeIdx >= 0)
     {
       m_undoStack.clear();
       rebuildVulkanSceneFull();
-      // Merged-in glTF may bring extensions the previous scene didn't use; recompute
-      // so optimal-mode rebuilds the shader if the feature set widened.
+      // Imported glTF may bring extensions the previous scene didn't use; recompute so optimal-mode
+      // rebuilds the shader if the feature set widened.
       m_resources.recomputeSceneFeatures(dlssGuideRequired());
       resetFrame();
-      m_sceneSelection.selectNode(wrapperNodeIdx);
+      m_sceneSelection.selectNode(nodeIdx);
       m_sceneBrowser.focusOnSelection();
-      LOGI("Scene merged successfully: %s\n", nvutils::utf8FromPath(filename.filename()).c_str());
+      LOGI("Scene %s successfully: %s\n", asReference ? "referenced" : "merged", name.c_str());
     }
     else
     {
-      LOGE("Failed to merge scene: %s\n", nvutils::utf8FromPath(filename.filename()).c_str());
+      LOGE("Failed to %s scene: %s\n", asReference ? "reference" : "merge", name.c_str());
     }
     m_busy.stop();
   }).detach();
+}
+
+//--------------------------------------------------------------------------------------------------
+// Merge (embed) a glTF scene into the current one. Called from File menu or Shift+drag-drop.
+//
+void GltfRenderer::onMergeScene(const std::filesystem::path& filename)
+{
+  addSceneFromFile(filename, /*asReference=*/false);
+}
+
+//--------------------------------------------------------------------------------------------------
+// glTF 2.1: add a scene as a referenced external asset (read-only, re-externalized on save) instead
+// of embedding it. Called from File>Reference Scene... or Ctrl+Shift+drag-drop.
+//
+void GltfRenderer::onReferenceScene(const std::filesystem::path& filename)
+{
+  addSceneFromFile(filename, /*asReference=*/true);
 }
 
 //--------------------------------------------------------------------------------------------------
@@ -811,7 +845,7 @@ void GltfRenderer::onFileDrop(const std::filesystem::path& filename)
   // SYNC NOTE: User-initiated file load/merge — wait ensures GPU is idle before scene teardown/rebuild.
   vkQueueWaitIdle(m_app->getQueue(0).queue);
 
-  bool isDescriptor = filename.string().ends_with(".scene.json") || nvutils::extensionMatches(filename, ".glxf");
+  bool isDescriptor = filename.string().ends_with(".scene.json");
   if(isDescriptor)
   {
     if(m_busy.isBusy())
@@ -837,13 +871,21 @@ void GltfRenderer::onFileDrop(const std::filesystem::path& filename)
     // ImGui/GLFW don't see the key. On Windows use GetKeyState (state when the drop message
     // was generated) so it works for Explorer, Everything, and other DnD sources.
     bool shiftHeld = false;
+    bool ctrlHeld  = false;
 #if defined(_WIN32)
     shiftHeld = (GetKeyState(VK_SHIFT) & 0x8000) != 0;
+    ctrlHeld  = (GetKeyState(VK_CONTROL) & 0x8000) != 0;
 #else
     shiftHeld = ImGui::IsKeyDown(ImGuiKey_LeftShift) || ImGui::IsKeyDown(ImGuiKey_RightShift);
+    ctrlHeld  = ImGui::IsKeyDown(ImGuiKey_LeftCtrl) || ImGui::IsKeyDown(ImGuiKey_RightCtrl);
 #endif
 
-    if(shiftHeld)
+    if(shiftHeld && ctrlHeld)
+    {
+      // glTF 2.1: Ctrl+Shift+drop references the file as an external asset (read-only) instead of embedding.
+      onReferenceScene(filename);
+    }
+    else if(shiftHeld)
     {
       onMergeScene(filename);
     }
@@ -875,7 +917,7 @@ void GltfRenderer::onFileDrop(const std::filesystem::path& filename)
 
 //--------------------------------------------------------------------------------------------------
 // Save the scene
-bool GltfRenderer::save(const std::filesystem::path& filename)
+bool GltfRenderer::save(const std::filesystem::path& filename, bool selfContained)
 {
   if(m_resources.getScene() && m_resources.getScene()->valid() && !filename.empty())
   {
@@ -906,7 +948,7 @@ bool GltfRenderer::save(const std::filesystem::path& filename)
     }
 
     // Saving the scene
-    return m_resources.getScene()->save(filename);
+    return m_resources.getScene()->save(filename, selfContained);
   }
   return false;
 }
@@ -1246,7 +1288,17 @@ void GltfRenderer::createScene(const std::filesystem::path& sceneFilename)
     m_resources.scene = std::move(scn);
   }
 
-  // Scene is loaded, we can create the Vulkan scene
+  // Scene object is ready; wire up GPU resources and UI (shared with createEmptyScene()).
+  finalizeSceneSetup(filename);
+}
+
+//--------------------------------------------------------------------------------------------------
+// Shared tail for creating/loading a scene: builds the Vulkan scene, feature set, UI panels, camera
+// and textures. `filename` is empty for a new/empty scene (no camera list, no recent-files entry).
+//
+void GltfRenderer::finalizeSceneSetup(const std::filesystem::path& filename)
+{
+  // Scene object is set, we can create the Vulkan scene
   createVulkanScene();
   if(ui::animation::hasPlayableAnimation(m_resources.getScene()))
     m_resources.animationControl.showStrip = true;
@@ -1256,19 +1308,9 @@ void GltfRenderer::createScene(const std::filesystem::path& sceneFilename)
   // when optimalShader is off, the path tracer ignores currentFeatureSet.
   m_resources.recomputeSceneFeatures(dlssGuideRequired());
 
+  wireSceneToUi();  // Scene Browser + Inspector pointers, callbacks, bounds
+
   nvvkgltf::Scene* scene = m_resources.getScene();
-  // Scene Browser system
-  m_sceneBrowser.setScene(scene);
-  m_sceneBrowser.setSelection(&m_sceneSelection);
-  m_sceneBrowser.setUndoStack(&m_undoStack);
-  m_sceneBrowser.setBbox(scene->getSceneBounds());
-  m_sceneBrowser.setPendingDelete(&m_pendingDeleteNode, &m_openDeletePopupNextFrame);
-
-  m_inspector.setScene(scene);
-  m_inspector.setSelection(&m_sceneSelection);
-  m_inspector.setUndoStack(&m_undoStack);
-  m_inspector.setBbox(scene->getSceneBounds());
-
   m_resources.settings.infinitePlaneDistance = scene->getSceneBounds().min().y;  // Set the infinite plane distance to the bottom of the scene
 
   // Set camera from scene
@@ -1286,15 +1328,62 @@ void GltfRenderer::createScene(const std::filesystem::path& sceneFilename)
     vkDeviceWaitIdle(m_device);
     cleanupScene();
 
-    removeFromRecentFiles(filename);
+    if(!filename.empty())
+      removeFromRecentFiles(filename);
     return;
   }
 
-  addToRecentFiles(filename);
+  if(!filename.empty())
+    addToRecentFiles(filename);
 }
 
 //--------------------------------------------------------------------------------------------------
-// Load a .scene.json / .glXf descriptor: merge each model into a single Scene, duplicate for instances.
+// Wire the current Scene into the UI panels (browser + inspector): pointers, callbacks and bounds.
+// Shared by finalizeSceneSetup() (after a load) and ensureEmptyScene() (a wired empty scene).
+//
+void GltfRenderer::wireSceneToUi()
+{
+  nvvkgltf::Scene* scene = m_resources.getScene();
+
+  m_sceneBrowser.setScene(scene);
+  m_sceneBrowser.setSelection(&m_sceneSelection);
+  m_sceneBrowser.setUndoStack(&m_undoStack);
+  m_sceneBrowser.setBbox(scene->getSceneBounds());
+  m_sceneBrowser.setPendingDelete(&m_pendingDeleteNode, &m_openDeletePopupNextFrame);
+  m_sceneBrowser.setGeometryChangedCallback([this] { reconcileGeometryIfNeeded(); });
+  m_sceneBrowser.setBeforeCreateCallback([this] { ensureEmptyScene(); });
+
+  m_inspector.setScene(scene);
+  m_inspector.setSelection(&m_sceneSelection);
+  m_inspector.setUndoStack(&m_undoStack);
+  m_inspector.setBbox(scene->getSceneBounds());
+}
+
+//--------------------------------------------------------------------------------------------------
+// Ensure an editable Scene exists so the normal add path (popup + AddPrimitiveCommand) can run even
+// with nothing loaded. Creates a fresh, empty Scene and wires it to the UI, but does NOT build GPU
+// resources: an empty scene is not valid() so onRender() just clears the G-Buffer (see the guard in
+// onRender). The first primitive's AddPrimitiveCommand then triggers the (full) GPU build via
+// reconcileGeometryIfNeeded(). No-op if a scene already exists.
+//
+void GltfRenderer::ensureEmptyScene()
+{
+  if(m_resources.getScene())
+    return;
+
+  auto scn = std::make_unique<nvvkgltf::Scene>();
+  scn->supportedExtensions().insert(EXT_TEXTURE_WEBP_EXTENSION_NAME);
+  // One empty scene container so the browser shows a scene root (matches a loaded scene minus nodes).
+  // Still not valid() until a node is added, so onRender() clears the G-Buffer rather than drawing.
+  scn->getModel().scenes.emplace_back().name = "Scene";
+  m_resources.scene                          = std::move(scn);
+  wireSceneToUi();
+}
+
+//--------------------------------------------------------------------------------------------------
+// Load a legacy .scene.json descriptor and bridge it to glTF 2.1 external assets: each model
+// instance is added as a *reference* (not embedded), so the composed scene round-trips as external
+// assets on save. This turns the old descriptor format into a one-way importer onto the modern path.
 //
 void GltfRenderer::createSceneFromDescriptor(const std::filesystem::path& descriptorPath)
 {
@@ -1315,30 +1404,22 @@ void GltfRenderer::createSceneFromDescriptor(const std::filesystem::path& descri
 
   for(const auto& [modelIdx, instances] : instancesByModel)
   {
-    const auto& modelEntry     = desc.models[modelIdx];
-    int         wrapperNodeIdx = scene->mergeScene(modelEntry.resolvedPath, static_cast<uint32_t>(m_maxTextures));
-    if(wrapperNodeIdx < 0)
+    const auto& modelEntry = desc.models[modelIdx];
+    // referenceScene() loads the file on first use and, for repeats of the same model, duplicates the
+    // instance so geometry (meshes/BLAS) is shared. Each call returns the editable instance node that
+    // carries the externalAsset link; we only set its transform/name.
+    for(const auto& instPtr : instances)
     {
-      LOGE("Failed to merge model: %s\n", nvutils::utf8FromPath(modelEntry.resolvedPath).c_str());
-      continue;
-    }
-    const auto& firstInst = *instances[0];
-    scene->editor().setNodeTRS(wrapperNodeIdx, firstInst.translation, firstInst.rotation, firstInst.scale);
-    if(!firstInst.name.empty())
-      scene->getModel().nodes[wrapperNodeIdx].name = firstInst.name;
-
-    for(size_t i = 1; i < instances.size(); ++i)
-    {
-      const auto& inst        = *instances[i];
-      int         copyNodeIdx = scene->editor().duplicateNode(wrapperNodeIdx, false);
-      if(copyNodeIdx < 0)
+      const auto& inst            = *instPtr;
+      int         instanceNodeIdx = scene->referenceScene(modelEntry.resolvedPath);
+      if(instanceNodeIdx < 0)
       {
-        LOGE("Failed to duplicate node for instance: %s\n", nvutils::utf8FromPath(modelEntry.resolvedPath).c_str());
-        continue;
+        LOGE("Failed to reference model: %s\n", nvutils::utf8FromPath(modelEntry.resolvedPath).c_str());
+        break;  // the file won't load for the remaining instances either
       }
-      scene->editor().setNodeTRS(copyNodeIdx, inst.translation, inst.rotation, inst.scale);
+      scene->editor().setNodeTRS(instanceNodeIdx, inst.translation, inst.rotation, inst.scale);
       if(!inst.name.empty())
-        scene->getModel().nodes[copyNodeIdx].name = inst.name;
+        scene->getModel().nodes[instanceNodeIdx].name = inst.name;
     }
   }
 
@@ -1360,16 +1441,7 @@ void GltfRenderer::createSceneFromDescriptor(const std::filesystem::path& descri
   // can specialize its shader when settings.optimalShader is on.
   m_resources.recomputeSceneFeatures(dlssGuideRequired());
 
-  m_sceneBrowser.setScene(scene);
-  m_sceneBrowser.setSelection(&m_sceneSelection);
-  m_sceneBrowser.setUndoStack(&m_undoStack);
-  m_sceneBrowser.setBbox(scene->getSceneBounds());
-  m_sceneBrowser.setPendingDelete(&m_pendingDeleteNode, &m_openDeletePopupNextFrame);
-
-  m_inspector.setScene(scene);
-  m_inspector.setSelection(&m_sceneSelection);
-  m_inspector.setUndoStack(&m_undoStack);
-  m_inspector.setBbox(scene->getSceneBounds());
+  wireSceneToUi();
 
   m_resources.settings.infinitePlaneDistance = scene->getSceneBounds().min().y;
 
@@ -1509,9 +1581,55 @@ void GltfRenderer::rebuildVulkanSceneInternal(bool rebuildTextures)
 //
 void GltfRenderer::rebuildSceneFromModel()
 {
-  m_undoStack.clear();
+  m_undoStack.clear();  // structural model edit outside the command system invalidates history
+  rebuildSceneGeometry();
+}
+
+//--------------------------------------------------------------------------------------------------
+// Geometry-only rebuild that preserves the undo stack. Use from undoable geometry edits (e.g. adding
+// a procedural primitive) where the mutation IS tracked by a command and undo history must survive.
+//
+void GltfRenderer::rebuildSceneGeometry()
+{
   refreshCpuSceneGraphFromModel();
   rebuildVulkanSceneInternal(false);  // Geometry only, preserve textures
+  resetFrame();                       // geometry changed -> restart path-tracer accumulation (the rebuild clears the
+                                      // dirty flags before updateSceneChanges runs, so nothing else would reset it)
+}
+
+//--------------------------------------------------------------------------------------------------
+// Reconcile GPU resources with the model after a create/undo/redo edit. Two cases:
+//
+// 1. First build: the scene just became valid() (e.g. the first object - primitive, light or empty
+//    node - added to an empty scene from the "Create" menu). No textures/materials/render-node
+//    buffers exist yet, so onRender()/updateSceneChanges() would touch unbuilt GPU resources. Detect
+//    this via the material buffer (null until the first full build) and do a full build.
+// 2. Primitive topology changed (primitivesChanged): syncFromScene() never (re)allocates the
+//    per-primitive vertex/index buffers, so they must be recreated to match the current render
+//    primitives before the per-frame acceleration-structure build references them. A count check is
+//    not sufficient: add -> undo -> add-a-different-primitive can leave counts equal while the GPU
+//    buffers still hold the old geometry, so key off primitivesChanged. Light / empty-node / transform
+//    edits on an already-built scene need nothing here - updateSceneChanges() handles them per frame.
+//
+// Runs in UI context (after a command / undo-redo), matching the safe rebuild pattern used by tangent
+// regen and merge.
+//
+void GltfRenderer::reconcileGeometryIfNeeded()
+{
+  nvvkgltf::Scene* scene = m_resources.getScene();
+  if(!scene || !scene->valid())
+    return;
+
+  const bool firstBuild = (m_resources.sceneVk.material().buffer == VK_NULL_HANDLE);
+  if(firstBuild)
+  {
+    rebuildVulkanSceneFull();  // textures + materials + geometry + AS
+    resetFrame();              // restart path-tracer accumulation (full rebuild doesn't itself reset)
+  }
+  else if(scene->getDirtyFlags().primitivesChanged)
+  {
+    rebuildSceneGeometry();  // geometry-only (recreates vertex/index buffers + BLAS/TLAS, resets frame)
+  }
 }
 
 //--------------------------------------------------------------------------------------------------
@@ -1552,17 +1670,17 @@ void GltfRenderer::createVulkanScene()
 //
 void GltfRenderer::buildAccelerationStructures()
 {
-  VkBuildAccelerationStructureFlagsKHR flags = VK_BUILD_ACCELERATION_STRUCTURE_PREFER_FAST_TRACE_BIT_KHR
-                                               | VK_BUILD_ACCELERATION_STRUCTURE_ALLOW_COMPACTION_BIT_KHR;
-  if(m_resources.getScene() && m_resources.getScene()->animation().hasAnimation())
-    flags |= VK_BUILD_ACCELERATION_STRUCTURE_ALLOW_UPDATE_BIT_KHR;
+  // Skip BLAS compaction for animated scenes to avoid freezing mesh positions; only static scenes are compacted.
+  const bool isAnimated = m_resources.getScene() && m_resources.getScene()->animation().hasAnimation();
+  VkBuildAccelerationStructureFlagsKHR flags = VK_BUILD_ACCELERATION_STRUCTURE_PREFER_FAST_TRACE_BIT_KHR;
+  flags |= isAnimated ? VK_BUILD_ACCELERATION_STRUCTURE_ALLOW_UPDATE_BIT_KHR : VK_BUILD_ACCELERATION_STRUCTURE_ALLOW_COMPACTION_BIT_KHR;
 
   // Create the bottom-level acceleration structure descriptors (no building yet)
   m_resources.sceneRtx.createBottomLevelAccelerationStructure(*m_resources.getScene(), m_resources.sceneVk, flags);
 
   // Build the bottom-level acceleration structure
   // Memory-conscious approach: build within a fixed memory budget using multiple command buffers if needed
-  // Each build command is queued separately and followed by compaction to optimize memory usage
+  // Each build command is queued separately and (for non-animated scenes) followed by compaction to optimize memory usage
   {
     bool finished = false;
 
@@ -1574,13 +1692,20 @@ void GltfRenderer::buildAccelerationStructures()
       constexpr VkDeviceSize kBlasBuildMemoryBudget = 512ULL * 1024 * 1024;  // 512 MB per build pass
       finished = m_resources.sceneRtx.cmdBuildBottomLevelAccelerationStructure(cmd, kBlasBuildMemoryBudget);
       NVVK_CHECK(vkEndCommandBuffer(cmd));
-      m_loadPipeline.enqueue(cmd, [this] {
-        VkCommandBuffer compactCmd{};
-        nvvk::beginSingleTimeCommands(compactCmd, m_device, m_transientCmdPool);
-        m_resources.sceneRtx.cmdCompactBlas(compactCmd);
-        NVVK_CHECK(vkEndCommandBuffer(compactCmd));
-        m_loadPipeline.enqueue(compactCmd);
-      });
+      if(isAnimated)
+      {
+        m_loadPipeline.enqueue(cmd);
+      }
+      else
+      {
+        m_loadPipeline.enqueue(cmd, [this] {
+          VkCommandBuffer compactCmd{};
+          nvvk::beginSingleTimeCommands(compactCmd, m_device, m_transientCmdPool);
+          m_resources.sceneRtx.cmdCompactBlas(compactCmd);
+          NVVK_CHECK(vkEndCommandBuffer(compactCmd));
+          m_loadPipeline.enqueue(compactCmd);
+        });
+      }
 
     } while(!finished);
 
@@ -1807,6 +1932,9 @@ void GltfRenderer::resetFrame()
 
 void GltfRenderer::onUndoRedo()
 {
+  // Undo/redo may re-introduce geometry (e.g. redo of an added primitive) that has no GPU buffers yet;
+  // rebuild before the next frame's acceleration-structure build tries to reference them.
+  reconcileGeometryIfNeeded();
   resetFrame();
   m_sceneBrowser.markCachesDirty();
 }
@@ -1983,6 +2111,10 @@ bool GltfRenderer::updateAnimation(VkCommandBuffer cmd)
       }
       else
       {
+        // A prior GPU transform frame may have moved nodes on-device only; reconcile just those before
+        // the CPU sync sources render-node / TLAS transforms from the CPU mirror.
+        if(scn.mergeGpuStaleNodesIntoDirty())
+          scn.updateNodeWorldMatrices();
         m_resources.transformCompute.markGpuStale();
         (void)scnVk.syncFromScene(m_resources.staging, scn);
       }
@@ -2060,6 +2192,17 @@ uint32_t GltfRenderer::updateSceneChanges_SyncGpuBuffers(VkCommandBuffer cmd, nv
   if(synced != nvvkgltf::SceneVk::eSyncNone)
   {
     auto timerSection = m_profilerGpuTimer.cmdFrameSection(cmd, "SyncGpuBuffers");
+    // A prior staging flush earlier this frame (updateAnimation's "Staging flush") may have written
+    // some of these same buffers (e.g. m_bSceneDesc when a structural change re-dirties it). Those
+    // writes were exposed to compute / AS-build / vertex-input consumers, so this second transfer
+    // write must be ordered after both the prior transfer write (WAW) and those readers (WAR).
+    nvvk::cmdMemoryBarrier(cmd,
+                           VK_PIPELINE_STAGE_2_COPY_BIT | VK_PIPELINE_STAGE_2_COMPUTE_SHADER_BIT | VK_PIPELINE_STAGE_2_ACCELERATION_STRUCTURE_BUILD_BIT_KHR
+                               | VK_PIPELINE_STAGE_2_VERTEX_ATTRIBUTE_INPUT_BIT,
+                           VK_PIPELINE_STAGE_2_COPY_BIT,
+                           VK_ACCESS_2_TRANSFER_WRITE_BIT | VK_ACCESS_2_SHADER_READ_BIT | VK_ACCESS_2_ACCELERATION_STRUCTURE_READ_BIT_KHR
+                               | VK_ACCESS_2_ACCELERATION_STRUCTURE_WRITE_BIT_KHR | VK_ACCESS_2_VERTEX_ATTRIBUTE_READ_BIT,
+                           VK_ACCESS_2_TRANSFER_WRITE_BIT);
     m_resources.staging.cmdUploadAppended(cmd);
   }
   return synced;
@@ -2128,7 +2271,7 @@ bool GltfRenderer::updateSceneChanges(VkCommandBuffer cmd)
   bool        changed        = !df.isEmpty();
   bool        stagingFlushed = false;
 
-  const bool renderNodeOrNodeDirty = df.allRenderNodesDirty || !df.renderNodesVk.empty() || !df.nodes.empty();
+  bool renderNodeOrNodeDirty = df.allRenderNodesDirty || !df.renderNodesVk.empty() || !df.nodes.empty();
 
   // Material edit may have added or removed a KHR_materials_* extension; refresh the
   // scene feature set so optimal-mode shader rebuild picks it up. Cheap check (walk
@@ -2177,6 +2320,15 @@ bool GltfRenderer::updateSceneChanges(VkCommandBuffer cmd)
   }
   else
   {
+    // If the GPU transform path moved nodes on-device, the CPU world-matrix mirror is stale for just
+    // those nodes. Only reconcile when this CPU frame actually syncs (df not empty): the upcoming
+    // syncFromScene / syncTopLevelAS source transforms from the mirror, so the moved nodes must be
+    // current (otherwise a moved object snaps to its stale CPU transform on a full TLAS rebuild). On
+    // idle frames the GPU-side transforms stay authoritative, so we leave the stale set pending and skip
+    // the work — this is what keeps large scenes from hitching after a gizmo release.
+    if(!df.isEmpty() && scene->mergeGpuStaleNodesIntoDirty())
+      renderNodeOrNodeDirty = true;  // moved-node transforms changed -> invalidate rasterizer accumulation
+
     updateSceneChanges_NodeTransforms(cmd, scene, df);
 
     if(!df.isEmpty())

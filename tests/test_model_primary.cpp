@@ -23,6 +23,7 @@
 #include "gltf_scene_validator.hpp"
 #include "common/test_utils.hpp"
 #include <filesystem>
+#include <regex>
 
 using namespace gltf_test;
 
@@ -117,9 +118,12 @@ TEST_F(ModelPrimaryTest, DuplicatePreservesExtras)
   EXPECT_EQ(dupNode.extras.Get("custom_data").Get<std::string>(), "test_value");
   EXPECT_EQ(dupNode.extras.Get("user_id").Get<int>(), 12345);
 
-  // Verify it's a copy (different handle)
+  // Verify it's a copy (different handle) with a fresh, unique " (N)" name
+  // (matches makeUniqueNodeName: a trailing " (<digits>)" suffix).
   EXPECT_NE(dupHandle, handle);
-  EXPECT_TRUE(dupNode.name.find("_copy") != std::string::npos);
+  EXPECT_TRUE(std::regex_search(dupNode.name, std::regex(R"( \([0-9]+\)$)")))
+      << "Duplicated node name should end with a \" (N)\" suffix, got: " << dupNode.name;
+  EXPECT_NE(dupNode.name, scene.editor().getNode(handle).name);
 }
 
 TEST_F(ModelPrimaryTest, DuplicatePreservesExtensions)

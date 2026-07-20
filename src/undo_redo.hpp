@@ -40,6 +40,8 @@
 #include <glm/glm.hpp>
 #include <glm/gtc/quaternion.hpp>
 
+#include "gltf_scene_editor.hpp"  // PrimitiveKind, PrimitiveParams, ModelTailSizes, SceneGraphSnapshot
+
 // Forward declarations
 namespace nvvkgltf {
 class Scene;
@@ -301,6 +303,39 @@ private:
   int                                           m_parentIndex;
   int                                           m_newNodeIndex = -1;
   SceneSelection*                               m_selection;
+  std::unique_ptr<nvvkgltf::SceneGraphSnapshot> m_snapshot;
+};
+
+//--------------------------------------------------------------------------------------------------
+// AddPrimitiveCommand - Undo/redo for adding a procedural primitive (plane/cube/sphere)
+//
+// Adding a primitive appends geometry (buffer/bufferViews/accessors), a material, a mesh and a node.
+// Undo truncates the appended geometry tail first, then restores the node graph from a snapshot
+// (one parseScene). Truncate-before-restore matters because buildPrimitiveKeyMap walks all meshes.
+//--------------------------------------------------------------------------------------------------
+
+class AddPrimitiveCommand : public ICommand
+{
+public:
+  AddPrimitiveCommand(nvvkgltf::Scene&                 scene,
+                      nvvkgltf::PrimitiveKind          kind,
+                      const nvvkgltf::PrimitiveParams& params,
+                      int                              parentIndex,
+                      SceneSelection*                  selection);
+  ~AddPrimitiveCommand() override;
+
+  void                      execute() override;
+  void                      undo() override;
+  [[nodiscard]] std::string description() const override;
+
+private:
+  nvvkgltf::Scene&                              m_scene;
+  nvvkgltf::PrimitiveKind                       m_kind;
+  nvvkgltf::PrimitiveParams                     m_params;
+  int                                           m_parentIndex;
+  int                                           m_newNodeIndex = -1;
+  SceneSelection*                               m_selection;
+  nvvkgltf::ModelTailSizes                      m_tailSizes;
   std::unique_ptr<nvvkgltf::SceneGraphSnapshot> m_snapshot;
 };
 

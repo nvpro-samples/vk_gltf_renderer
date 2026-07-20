@@ -111,6 +111,10 @@ public:
 private:
   Scene& m_scene;
 
+  // Look up the morph result for a given render primitive (nullptr if the primitive is not
+  // morphed). Used by computeSkinning() to compose morph -> skin for primitives that are both.
+  const MorphResult* findMorphResult(int renderPrimID) const;
+
   struct AnimationChannel
   {
     enum PathType

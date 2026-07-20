@@ -168,6 +168,39 @@ void UiSceneBrowser::render(bool* show, bool isBusy)
       }
     }
 
+    // KHR_interactivity: the behavior graph is parsed and preserved on save, but not executed by
+    // this viewer. Surface it read-only so authors can see it survived the round-trip.
+    if(const tinygltf::Value* interactivity =
+           tinygltf::utils::findExtension(m_scene->getModel().extensions, KHR_INTERACTIVITY_EXTENSION_NAME))
+    {
+      if(ImGui::CollapsingHeader("Interactivity"))
+      {
+        int graphCount = 0;
+        int nodeCount  = 0;
+        if(interactivity->Has("graphs") && interactivity->Get("graphs").IsArray())
+        {
+          const tinygltf::Value& graphs = interactivity->Get("graphs");
+          graphCount                    = static_cast<int>(graphs.ArrayLen());
+          for(size_t i = 0; i < graphs.ArrayLen(); ++i)
+          {
+            const tinygltf::Value& g = graphs.Get(static_cast<int>(i));
+            if(g.Has("nodes") && g.Get("nodes").IsArray())
+              nodeCount += static_cast<int>(g.Get("nodes").ArrayLen());
+          }
+        }
+        else if(interactivity->Has("nodes") && interactivity->Get("nodes").IsArray())
+        {
+          graphCount = 1;  // Single-graph layout.
+          nodeCount  = static_cast<int>(interactivity->Get("nodes").ArrayLen());
+        }
+
+        ImGui::TextWrapped("KHR_interactivity behavior graph detected.");
+        ImGui::BulletText("Graphs: %d", graphCount);
+        ImGui::BulletText("Nodes: %d", nodeCount);
+        ImGui::TextDisabled("Parsed and preserved on save; execution is not yet supported.");
+      }
+    }
+
     // Tab bar
     if(ImGui::BeginTabBar("SceneBrowserTabs"))
     {
@@ -198,7 +231,9 @@ void UiSceneBrowser::render(bool* show, bool isBusy)
       ImGui::EndTabBar();
     }
 
-    // Dialogs (rendered outside tabs)
+    // Dialogs (rendered outside tabs). Note: the "Add Primitive" modal is intentionally NOT rendered
+    // here -- it is driven from an always-rendered top-level UI path (see GltfRenderer::renderUI)
+    // so it still surfaces when this window is hidden/collapsed (e.g. triggered from the menu bar).
     renderRenameDialog();
   }
   ImGui::End();
@@ -405,43 +440,12 @@ void UiSceneBrowser::renderSceneGraphTab()
 
       if(ImGui::TreeNodeEx("Scene", sceneTreeFlags, "%s", scene.name.c_str()))
       {
-        // Context menu on Scene (add root-level nodes and lights)
+        // Context menu on Scene (add objects at the scene root)
         if(ImGui::BeginPopupContextItem())
         {
           if(m_scene)
           {
-            if(ImGui::MenuItem(ICON_MS_ADD " Add Node"))
-            {
-              int newIndex = m_scene->editor().addNode("", -1);  // -1 = root level
-              if(newIndex != -1)
-              {
-                LOGI("Added root node to scene\n");
-                markSceneTransformsDirty();  // Scene root nodes have changed
-                if(m_selection)
-                  m_selection->selectNode(newIndex);
-              }
-            }
-
-            ImGui::Separator();
-
-            if(ImGui::MenuItem(ICON_MS_LIGHTBULB " Add Point Light"))
-            {
-              auto cmd = std::make_unique<AddLightCommand>(*m_scene, "point", "Point Light", -1, m_selection);
-              m_undoStack->executeCommand(std::move(cmd));
-              markCachesDirty();
-            }
-            if(ImGui::MenuItem(ICON_MS_LIGHTBULB " Add Directional Light"))
-            {
-              auto cmd = std::make_unique<AddLightCommand>(*m_scene, "directional", "Directional Light", -1, m_selection);
-              m_undoStack->executeCommand(std::move(cmd));
-              markCachesDirty();
-            }
-            if(ImGui::MenuItem(ICON_MS_LIGHTBULB " Add Spot Light"))
-            {
-              auto cmd = std::make_unique<AddLightCommand>(*m_scene, "spot", "Spot Light", -1, m_selection);
-              m_undoStack->executeCommand(std::move(cmd));
-              markCachesDirty();
-            }
+            renderAddObjectMenu(-1, ICON_MS_ADD " Add");  // -1 = scene root
           }
           ImGui::EndPopup();
         }
@@ -631,7 +635,10 @@ void UiSceneBrowser::applySceneTransform(size_t sceneID)
   // Loop over all root nodes in the scene and apply the scene transform
   for(size_t i = 0; i < state.nodeIds.size(); ++i)
   {
-    const int       nodeId   = state.nodeIds[i];
+    const int nodeId = state.nodeIds[i];
+    // glTF 2.1: referenced external-asset nodes are read-only; the gizmo must not move them.
+    if(m_scene->isNodeReadOnly(nodeId))
+      continue;
     tinygltf::Node& node     = m_scene->editor().getNodeForEdit(nodeId);
     const glm::mat4 newLocal = sceneMat * state.baselineLocal[i];
 
@@ -1176,24 +1183,7 @@ void UiSceneBrowser::renderLightsGroup()
     }
     if(ImGui::BeginPopup("AddLightPopup"))
     {
-      if(ImGui::MenuItem(ICON_MS_LIGHTBULB " Point Light"))
-      {
-        auto cmd = std::make_unique<AddLightCommand>(*m_scene, "point", "Point Light", -1, m_selection);
-        m_undoStack->executeCommand(std::move(cmd));
-        markCachesDirty();
-      }
-      if(ImGui::MenuItem(ICON_MS_LIGHTBULB " Directional Light"))
-      {
-        auto cmd = std::make_unique<AddLightCommand>(*m_scene, "directional", "Directional Light", -1, m_selection);
-        m_undoStack->executeCommand(std::move(cmd));
-        markCachesDirty();
-      }
-      if(ImGui::MenuItem(ICON_MS_LIGHTBULB " Spot Light"))
-      {
-        auto cmd = std::make_unique<AddLightCommand>(*m_scene, "spot", "Spot Light", -1, m_selection);
-        m_undoStack->executeCommand(std::move(cmd));
-        markCachesDirty();
-      }
+      renderAddLightItems(-1);  // -1 = scene root
       ImGui::EndPopup();
     }
     ImGui::PopID();
@@ -1399,6 +1389,28 @@ void UiSceneBrowser::showNodeContextMenu(int nodeIdx)
   {
     if(m_scene)
     {
+      const bool readOnly = m_scene->isNodeReadOnly(nodeIdx);
+
+      // glTF 2.1: "break the lock" -- make a referenced external asset editable. Offered on read-only
+      // merged nodes and on the instance node itself, and kept enabled while the rest of the menu is
+      // disabled below for read-only nodes.
+      if(readOnly || m_scene->isExternalAssetInstance(nodeIdx))
+      {
+        if(ImGui::MenuItem(ICON_MS_LOCK_OPEN " Make Editable"))
+        {
+          if(m_scene->editor().makeExternalAssetEditable(nodeIdx))
+          {
+            m_undoStack->clear();  // model mutated outside the command system
+            markCachesDirty();
+          }
+        }
+        ImGui::SetItemTooltip("Break the external-asset link and unlock all instances of this asset for editing (saved inline on next save)");
+        ImGui::Separator();
+      }
+
+      // glTF 2.1: referenced external-asset subtrees are read-only -- disable structural edits.
+      ImGui::BeginDisabled(readOnly);
+
       if(ImGui::MenuItem(ICON_MS_CONTENT_COPY " Duplicate", "Ctrl+D"))
       {
         auto cmd = std::make_unique<DuplicateNodeCommand>(*m_scene, nodeIdx, m_selection);
@@ -1418,40 +1430,7 @@ void UiSceneBrowser::showNodeContextMenu(int nodeIdx)
 
       ImGui::Separator();
 
-      // Add Child submenu
-      if(ImGui::BeginMenu(ICON_MS_ADD " Add Child"))
-      {
-        if(ImGui::MenuItem("Empty Node"))
-        {
-          auto cmd = std::make_unique<AddNodeCommand>(*m_scene, "", nodeIdx, m_selection);
-          m_undoStack->executeCommand(std::move(cmd));
-          LOGI("Added child node to node %d\n", nodeIdx);
-          markCachesDirty();
-        }
-
-        ImGui::Separator();
-
-        if(ImGui::MenuItem(ICON_MS_LIGHTBULB " Point Light"))
-        {
-          auto cmd = std::make_unique<AddLightCommand>(*m_scene, "point", "Point Light", nodeIdx, m_selection);
-          m_undoStack->executeCommand(std::move(cmd));
-          markCachesDirty();
-        }
-        if(ImGui::MenuItem(ICON_MS_LIGHTBULB " Directional Light"))
-        {
-          auto cmd = std::make_unique<AddLightCommand>(*m_scene, "directional", "Directional Light", nodeIdx, m_selection);
-          m_undoStack->executeCommand(std::move(cmd));
-          markCachesDirty();
-        }
-        if(ImGui::MenuItem(ICON_MS_LIGHTBULB " Spot Light"))
-        {
-          auto cmd = std::make_unique<AddLightCommand>(*m_scene, "spot", "Spot Light", nodeIdx, m_selection);
-          m_undoStack->executeCommand(std::move(cmd));
-          markCachesDirty();
-        }
-
-        ImGui::EndMenu();
-      }
+      renderAddObjectMenu(nodeIdx, ICON_MS_ADD " Add Child");  // Empty / Mesh / Light under this node
 
       ImGui::Separator();
 
@@ -1461,6 +1440,8 @@ void UiSceneBrowser::showNodeContextMenu(int nodeIdx)
         m_renameState.nodeIndex    = nodeIdx;
         m_openRenamePopupNextFrame = true;
       }
+
+      ImGui::EndDisabled();
     }
 
     ImGui::EndPopup();
@@ -1519,6 +1500,117 @@ void UiSceneBrowser::showMaterialContextMenu(int matIdx)
 
     ImGui::EndPopup();
   }
+}
+
+//--------------------------------------------------------------------------------------------------
+// Create catalog: Empty Node + Mesh submenu + Light submenu. Shared by the menu-bar "Create" menu,
+// the node context "Add Child" and the scene-root context "Add", so meshes and lights live in the
+// same taxonomy and the object list is defined in exactly one place. parentIndex = -1 = scene root.
+//--------------------------------------------------------------------------------------------------
+void UiSceneBrowser::renderCreateCatalog(int parentIndex)
+{
+  if(ImGui::MenuItem("Empty Node"))
+    addEmptyNode(parentIndex);
+
+  if(ImGui::BeginMenu(ICON_MS_DEPLOYED_CODE " Mesh"))
+  {
+    renderAddPrimitiveItems(parentIndex);
+    ImGui::EndMenu();
+  }
+
+  if(ImGui::BeginMenu(ICON_MS_LIGHTBULB " Light"))
+  {
+    renderAddLightItems(parentIndex);
+    ImGui::EndMenu();
+  }
+}
+
+// Wrap the catalog in a labeled submenu (used by the context menus).
+void UiSceneBrowser::renderAddObjectMenu(int parentIndex, const char* menuLabel)
+{
+  if(ImGui::BeginMenu(menuLabel))
+  {
+    renderCreateCatalog(parentIndex);
+    ImGui::EndMenu();
+  }
+}
+
+// One item per nvvkgltf::kPrimitiveKinds; clicking opens the size/subdivision popup.
+void UiSceneBrowser::renderAddPrimitiveItems(int parentIndex)
+{
+  for(const auto& info : nvvkgltf::kPrimitiveKinds)
+  {
+    if(ImGui::MenuItem(info.name))
+      requestAddPrimitive(info.kind, parentIndex);
+  }
+}
+
+// One item per nvvkgltf::kLightKinds; clicking adds the light immediately (no parameter popup).
+void UiSceneBrowser::renderAddLightItems(int parentIndex)
+{
+  for(const auto& info : nvvkgltf::kLightKinds)
+  {
+    if(ImGui::MenuItem(info.name))
+      addLight(info.type, info.name, parentIndex);
+  }
+}
+
+//--------------------------------------------------------------------------------------------------
+// Undoable empty-node creation. Ensures a scene exists first (menu-bar "Create" with nothing loaded)
+// and asks the renderer to build GPU resources if this is the first object in a fresh scene.
+//--------------------------------------------------------------------------------------------------
+void UiSceneBrowser::addEmptyNode(int parentIndex)
+{
+  if(m_onBeforeCreate)
+    m_onBeforeCreate();
+  if(!m_scene || !m_undoStack)
+    return;
+
+  auto cmd = std::make_unique<AddNodeCommand>(*m_scene, "", parentIndex, m_selection);
+  m_undoStack->executeCommand(std::move(cmd));
+  if(m_onGeometryChanged)
+    m_onGeometryChanged();  // first object in an empty scene needs the initial GPU build
+  markSceneTransformsDirty();
+  markCachesDirty();
+}
+
+//--------------------------------------------------------------------------------------------------
+// Undoable light creation. Same ensure-scene / first-build handling as addEmptyNode.
+//--------------------------------------------------------------------------------------------------
+void UiSceneBrowser::addLight(const char* lightType, const char* lightName, int parentIndex)
+{
+  if(m_onBeforeCreate)
+    m_onBeforeCreate();
+  if(!m_scene || !m_undoStack)
+    return;
+
+  auto cmd = std::make_unique<AddLightCommand>(*m_scene, lightType, lightName, parentIndex, m_selection);
+  m_undoStack->executeCommand(std::move(cmd));
+  if(m_onGeometryChanged)
+    m_onGeometryChanged();  // first object in an empty scene needs the initial GPU build
+  markSceneTransformsDirty();
+  markCachesDirty();
+}
+
+//--------------------------------------------------------------------------------------------------
+// Stash the requested primitive and open the parameter popup on the next frame (deferred-open pattern).
+// Ensures a scene exists first so the menu-bar "Create > Mesh" works with nothing loaded.
+//--------------------------------------------------------------------------------------------------
+void UiSceneBrowser::requestAddPrimitive(nvvkgltf::PrimitiveKind kind, int parentIndex)
+{
+  if(m_onBeforeCreate)
+    m_onBeforeCreate();
+
+  m_pendingPrimitiveKind   = kind;
+  m_pendingPrimitiveParent = parentIndex;
+
+  // Default the size to a fraction of the scene so the primitive lands at a sensible scale.
+  const float radius            = m_bbox.radius();
+  const float defaultSize       = (radius > 0.0f) ? radius * 0.2f : 1.0f;
+  m_pendingPrimitiveParams      = nvvkgltf::PrimitiveParams{};
+  m_pendingPrimitiveParams.size = defaultSize;
+
+  m_openAddPrimitivePopupNextFrame = true;
 }
 
 //==================================================================================================
@@ -1580,6 +1672,62 @@ void UiSceneBrowser::renderRenameDialog()
       m_renameState = {};
       ImGui::CloseCurrentPopup();
     }
+
+    ImGui::EndPopup();
+  }
+}
+
+//--------------------------------------------------------------------------------------------------
+// Parameter popup for adding a procedural primitive. On "Add", runs an undoable AddPrimitiveCommand
+// and asks the renderer (via callback) to (re)create the GPU geometry for the new primitive.
+//--------------------------------------------------------------------------------------------------
+void UiSceneBrowser::showAddPrimitivePopup()
+{
+  if(m_openAddPrimitivePopupNextFrame)
+  {
+    ImGui::OpenPopup("Add Primitive");
+    m_openAddPrimitivePopupNextFrame = false;
+  }
+
+  if(ImGui::BeginPopupModal("Add Primitive", nullptr, ImGuiWindowFlags_AlwaysAutoResize))
+  {
+    ImGui::Text("Add %s", nvvkgltf::primitiveKindName(m_pendingPrimitiveKind));
+    if(m_pendingPrimitiveParent >= 0)
+      ImGui::TextDisabled("Parent: node %d", m_pendingPrimitiveParent);
+    else
+      ImGui::TextDisabled("Parent: scene root");
+    ImGui::Separator();
+
+    ImGui::DragFloat("Size", &m_pendingPrimitiveParams.size, 0.05f, 0.001f, 1.0e6f, "%.3f");
+    if(m_pendingPrimitiveKind == nvvkgltf::PrimitiveKind::eSphere)
+    {
+      ImGui::DragInt("Sectors", &m_pendingPrimitiveParams.subdivU, 1.0f, 3, 256);
+      ImGui::DragInt("Stacks", &m_pendingPrimitiveParams.subdivV, 1.0f, 2, 256);
+    }
+    else if(m_pendingPrimitiveKind == nvvkgltf::PrimitiveKind::ePlane)
+    {
+      ImGui::DragInt("Subdivisions", &m_pendingPrimitiveParams.subdivU, 1.0f, 1, 256);
+    }
+
+    ImGui::Separator();
+
+    const bool canAdd = m_scene && m_undoStack;
+    ImGui::BeginDisabled(!canAdd);
+    if(ImGui::Button(ICON_MS_CHECK " Add", ImVec2(120, 0)))
+    {
+      auto cmd = std::make_unique<AddPrimitiveCommand>(*m_scene, m_pendingPrimitiveKind, m_pendingPrimitiveParams,
+                                                       m_pendingPrimitiveParent, m_selection);
+      m_undoStack->executeCommand(std::move(cmd));
+      if(m_onGeometryChanged)
+        m_onGeometryChanged();  // renderer (re)creates GPU vertex/index buffers + acceleration structures
+      markSceneTransformsDirty();
+      markCachesDirty();
+      ImGui::CloseCurrentPopup();
+    }
+    ImGui::EndDisabled();
+    ImGui::SameLine();
+    if(ImGui::Button(ICON_MS_CANCEL " Cancel", ImVec2(120, 0)))
+      ImGui::CloseCurrentPopup();
 
     ImGui::EndPopup();
   }
