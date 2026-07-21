@@ -83,6 +83,7 @@ public:
   std::shared_ptr<nvutils::CameraManipulator> getCameraManipulator() { return m_cameraManip; }
   void                                        registerRecentFilesHandler();
   void                                        setDlssHardwareAvailability(bool rrAvailable, bool srAvailable);
+  void                                        setOpacityMicromapAvailable(bool available);
   /// Ensures path-tracer accumulation covers the full headless run (--maxFrames >= --frames).
   void alignMaxFramesForHeadless(uint32_t headlessFrames);
 

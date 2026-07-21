@@ -1226,6 +1226,14 @@ void GltfRenderer::setDlssHardwareAvailability(bool rrAvailable, bool srAvailabl
 }
 
 //--------------------------------------------------------------------------------------------------
+// Set Opacity Micromap (VK_EXT_opacity_micromap) availability. When unavailable, the
+// EXT_mesh_opacity_micromap glTF extension is ignored. Call early, before scene creation.
+void GltfRenderer::setOpacityMicromapAvailable(bool available)
+{
+  m_resources.settings.opacityMicromapSupported = available;
+}
+
+//--------------------------------------------------------------------------------------------------
 // Load the scene
 void GltfRenderer::createScene(const std::filesystem::path& sceneFilename)
 {
@@ -1651,6 +1659,9 @@ void GltfRenderer::createVulkanScene()
   {
     // Add WebP loading support to SceneVk
     m_resources.sceneVk.setImageLoadCallback(webPLoadCallback);
+
+    // Enable opacity micromap (EXT_mesh_opacity_micromap) build when the device supports it
+    m_resources.sceneVk.setOpacityMicromapEnabled(m_resources.settings.opacityMicromapSupported);
 
     // Create and queue command buffer for scene data upload (vertices, indices, materials, etc.)
     // This work happens asynchronously via the command buffer queue

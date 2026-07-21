@@ -130,6 +130,7 @@ enum Visualization
   eAnisotropyStrength,
   eDiffuseTransmissionFactor,
   eDiffuseTransmissionColor,
+  eOpacityMicromap,
 };
 
 

@@ -436,9 +436,11 @@ void GltfRenderer::renderUI()
                                "Occlusion\0Clearcoat Factor\0Clearcoat Roughness\0Clearcoat Normal\0"
                                "Sheen Color\0Sheen Roughness\0Specular Factor\0Specular Color\0"
                                "Transmission Factor\0Iridescence Factor\0Iridescence Thickness\0"
-                               "Anisotropy Strength\0Diffuse Transmission Factor\0Diffuse Transmission Color\0\0");
+                               "Anisotropy Strength\0Diffuse Transmission Factor\0Diffuse Transmission Color\0"
+                               // Opacity-micromap debug view (must match the Visualization enum order).
+                               "Opacity Micromap\0\0");
           changed |= nvgui::hoverScrolling(*reinterpret_cast<int32_t*>(&m_resources.settings.visualization), 0,
-                                           int32_t(shaderio::Visualization::eDiffuseTransmissionColor));
+                                           int32_t(shaderio::Visualization::eOpacityMicromap));
           changed |= PE::Checkbox("Wireframe", &m_resources.settings.wireframe, "Overlay wireframe on rendered meshes");
           PE::end();
           if(m_resources.settings.renderSystem == RenderingMode::ePathtracer)

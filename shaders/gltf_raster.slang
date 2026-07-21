@@ -334,7 +334,7 @@ PixelOutput fragmentMain(VertexOutput input, uint primitiveID: SV_PrimitiveID, f
   {
     float3              vizColor;
     VisualizationResult vizResult =
-        applyVisualization(pbrMat, hit, pushConst.frameInfo.visualization, pushConst.renderPrimID, primitiveID, vizColor);
+        applyVisualization(pbrMat, hit, pushConst.frameInfo.visualization, pushConst.renderPrimID, primitiveID, -1, vizColor);
     if(vizResult == VisualizationResult::eColorOverride)
     {
       output.color.xyz = vizColor;

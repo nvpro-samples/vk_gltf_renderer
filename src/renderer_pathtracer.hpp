@@ -103,6 +103,7 @@ public:
   bool m_supportSER{false};         // True when the device supports SER (Shader Execution Reordering).
   bool m_useSER{false};             // True when the device is using SER.
   bool m_compiledWireframe{false};  // True when the shader is the wireframe build.
+  bool m_compiledVisualize{false};  // True when the shader has the debug-visualization code compiled in (USE_VISUALIZE).
   bool m_compiledOptimal{false};    // True when the shader is the scene-aware optimized build.
   bool m_compiledDlss{false};       // True when the current shader was compiled with DLSS active (USE_DLSS_SHADER).
   bool m_compiledDlssGuide{false};  // True when the current shader has the guide-buffer variant compiled in (USE_GUIDE_SHADER).
@@ -113,6 +114,7 @@ public:
   struct VariantKey
   {
     bool wireframe = false;  // True when the shader is the wireframe build.
+    bool visualize = false;  // True when the debug-visualization code is compiled in (USE_VISUALIZE).
     bool optimal   = false;  // True when the shader is the scene-aware optimized build.
     bool dlss      = false;  // True when DLSS is active (drives USE_DLSS_SHADER: sample-loop gate).
     bool dlssGuide = false;  // True when guide-buffer capture is compiled in (USE_GUIDE_SHADER: DLSS or OptiX).
@@ -122,8 +124,8 @@ public:
     {
       // dlss and dlssGuide are compared in every mode (they drive USE_DLSS_SHADER / USE_GUIDE_SHADER
       // independently of optimal); the full extension feature set only matters for the optimal build.
-      return wireframe == o.wireframe && optimal == o.optimal && dlss == o.dlss && dlssGuide == o.dlssGuide
-             && (optimal ? (features == o.features) : true);
+      return wireframe == o.wireframe && visualize == o.visualize && optimal == o.optimal && dlss == o.dlss
+             && dlssGuide == o.dlssGuide && (optimal ? (features == o.features) : true);
     }
   };
 
@@ -224,6 +226,7 @@ private:
   struct CompileStateSnapshot
   {
     bool                      wireframe = false;
+    bool                      visualize = false;
     bool                      optimal   = false;
     bool                      dlss      = false;
     bool                      dlssGuide = false;

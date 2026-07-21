@@ -100,6 +100,19 @@ The instance node's own `mesh`/`camera` are cleared (spec: `externalAsset` takes
 > separate coexisting models would require per-model index offsets threaded through the CPU build,
 > the `shaderio` structs, the shaders, and the editor — a much larger change for no runtime win.
 
+> **Index remapping is exhaustive — extend it when you add an extension.** Because everything is
+> appended into one model, *every* index the imported model stores must be rebased by the matching
+> `IndexRemapping` field (see `computeOffsets` / the `remapAndAppend*` helpers in
+> `gltf_scene_merger.cpp`). This includes indices buried inside **extensions**, both in the core
+> arrays they point at (accessors, bufferViews, textures, …) and in any per-model array the
+> extension defines itself. When an extension owns a root-level array (e.g. `KHR_lights_punctual`
+> `lights[]`, `EXT_mesh_opacity_micromap` `micromaps[]`), that array must be concatenated onto the
+> base's, a new `IndexRemapping` offset added for it, and the per-node / per-primitive references to
+> it (and the bufferView/accessor indices it stores) remapped. A missed remap is silent: it either
+> drops the extension (merged into an empty base, offset 0, so the un-copied root array simply never
+> appears) or cross-links it to the wrong resource (non-empty base). **If you add a glTF extension
+> that stores any index, add its remapping here in the same change.**
+
 ### Nested references & cycle detection
 
 A referenced file may itself reference other files. Before a child is merged, it is made

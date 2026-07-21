@@ -215,6 +215,7 @@ nvvkgltf::Scene::Scene()
   // image formats.
   m_supportedExtensions = {
       "EXT_mesh_gpu_instancing",
+      "EXT_mesh_opacity_micromap",
       "EXT_meshopt_compression",
       "KHR_animation_pointer",
       "KHR_interactivity",

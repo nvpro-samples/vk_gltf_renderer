@@ -29,6 +29,7 @@
 #include <nvvk/resource_allocator.hpp>
 
 #include "gltf_scene.hpp"
+#include "gltf_scene_omm.hpp"
 #include "gltf_material_cache.hpp"
 #include "nvvk/sampler_pool.hpp"
 #include "nvvk/staging.hpp"
@@ -120,10 +121,15 @@ public:
   const nvvk::Buffer&               sceneDesc() const { return m_bSceneDesc; }
   const std::vector<VertexBuffers>& vertexBuffers() const { return m_vertexBuffers; }
   const std::vector<nvvk::Buffer>&  indices() const { return m_bIndices; }
-  const std::vector<nvvk::Image>&   textures() const { return m_textures; }
-  [[nodiscard]] uint32_t            textureCount() const { return static_cast<uint32_t>(m_textures.size()); }
-  const GpuMemoryTracker&           getMemoryTracker() const { return m_memoryTracker; }
-  GpuMemoryTracker&                 getMemoryTracker() { return m_memoryTracker; }
+  const SceneOmm&                   opacityMicromap() const { return m_sceneOmm; }
+
+  // Enable building opacity micromaps (EXT_mesh_opacity_micromap). Driven from
+  // VK_EXT_opacity_micromap availability. Set before create().
+  void                            setOpacityMicromapEnabled(bool enabled) { m_sceneOmm.setEnabled(enabled); }
+  const std::vector<nvvk::Image>& textures() const { return m_textures; }
+  [[nodiscard]] uint32_t          textureCount() const { return static_cast<uint32_t>(m_textures.size()); }
+  const GpuMemoryTracker&         getMemoryTracker() const { return m_memoryTracker; }
+  GpuMemoryTracker&               getMemoryTracker() { return m_memoryTracker; }
 
   // An image to be loaded and created.
   struct SceneImage
@@ -206,6 +212,9 @@ protected:
 
   // Cached material data for updates.
   MaterialCache m_materialCache;
+
+  // Opacity micromaps (EXT_mesh_opacity_micromap), built alongside geometry and consumed by SceneRtx.
+  SceneOmm m_sceneOmm;
 
   bool m_sceneDescDirty    = false;  // Set when any scene buffer address changes; cleared by flushSceneDescIfDirty.
   bool m_generateMipmaps   = {};

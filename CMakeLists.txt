@@ -12,7 +12,7 @@ project(GLTF_renderer VERSION 2.0 LANGUAGES C CXX)
 set(CMAKE_EXPORT_COMPILE_COMMANDS ON)
 
 option(NVPRO2_ENABLE_nvgl off)
-option(USE_DEFAULT_SCENE "Using a default scene at startup" ON)
+option(USE_DEFAULT_SCENE "Using a default scene at startup" OFF)
 option(REQUIRE_NVML_MONITOR "Fail configuration if NVML support is unavailable" OFF)
 
 # Path to glTF-Sample-Assets repository (for testing)

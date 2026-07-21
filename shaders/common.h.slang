@@ -39,7 +39,14 @@ hashToColor(uint id)
   return float3(float((h >> 0) & 0xFF), float((h >> 8) & 0xFF), float((h >> 16) & 0xFF)) / 255.0;
 }
 
-VisualizationResult applyVisualization(inout PbrMaterial pbrMat, HitState hit, Visualization vizMethod, int rprimID, int primitiveID, out float3 overrideColor)
+// Debug visualization override: displays a flat color for the given visualization mode.
+VisualizationResult applyVisualization(inout PbrMaterial pbrMat,
+                                       HitState          hit,
+                                       Visualization     vizMethod,
+                                       int               rprimID,
+                                       int               primitiveID,
+                                       int               ommState,
+                                       out float3        overrideColor)
 {
   overrideColor = float3(0);
 
@@ -144,6 +151,14 @@ VisualizationResult applyVisualization(inout PbrMaterial pbrMat, HitState hit, V
     case Visualization::eDiffuseTransmissionColor:
       overrideColor = pbrMat.diffuseTransmissionColor;
       return VisualizationResult::eColorOverride;
+    case Visualization::eOpacityMicromap:
+      if(ommState < 0)
+        return VisualizationResult::eRenderedOutput;
+      overrideColor = (ommState > 0) ? float3(0.90, 0.80, 0.10)  // unknown: alpha evaluated at runtime by the any-hit
+                                       :
+                                       float3(0.15, 0.75, 0.15);  // opaque: resolved by the opacity micromap (any-hit skipped)
+      return VisualizationResult::eColorOverride;
+
     default:
       return VisualizationResult::eRenderedOutput;
   }

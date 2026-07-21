@@ -117,7 +117,8 @@ struct Settings
   float                   shadowCatcherDarkness  = 0.0f;                      // Non-physical shadow darkening
   bool dlssRrHardwareAvailable = false;  // DLSS Ray Reconstruction hardware/extensions available (set at startup)
   bool dlssSrHardwareAvailable = false;  // DLSS Super Resolution / DLAA hardware/extensions available (set at startup)
-  DisplayBuffer displayBuffer  = DisplayBuffer::eRendered;  // Which buffer to display in viewport
+  bool opacityMicromapSupported = false;  // VK_EXT_opacity_micromap available (set at startup); gates EXT_mesh_opacity_micromap
+  DisplayBuffer displayBuffer = DisplayBuffer::eRendered;  // Which buffer to display in viewport
 
   // Enable scene-based shader optimization. When true, only features used by the scene are
   // enabled, reducing shader size and register usage at the cost of a one-time recompile per scene change.

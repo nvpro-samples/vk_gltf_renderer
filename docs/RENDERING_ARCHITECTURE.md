@@ -62,6 +62,38 @@ If the **order** of primitives (and thus `renderPrimID`) ever changed **without*
 2. **BLAS** are built from that ordered list; `renderPrimID` is stable across hierarchy edits (reparent, duplicate, delete) as long as the mesh set is unchanged.
 3. Do **not** clear and repopulate `m_renderPrimitives` / `m_uniquePrimitiveIndex` in a way that depends on traversal order, or BLAS and TLAS will go out of sync.
 
+### Opacity micromaps (optional)
+
+When a scene uses `EXT_mesh_opacity_micromap` and the device exposes `VK_EXT_opacity_micromap`,
+`SceneOmm` (owned by `SceneVk`, see `gltf_scene_omm.*`) builds one `VkMicromapEXT` per root
+`micromaps[]` entry and uploads the per-primitive micromap index buffers alongside the geometry.
+Results are keyed by `renderPrimID` so they follow the same BLAS ordering contract above.
+`SceneRtx::createBottomLevelAccelerationStructure()` then attaches a
+`VkAccelerationStructureTrianglesOpacityMicromapEXT` to each primitive's triangle geometry
+(`triangles.pNext`), and the path-tracer RT pipeline is created with the OMM flag
+(`VK_PIPELINE_CREATE_RAY_TRACING_OPACITY_MICROMAP_BIT_EXT`). This only accelerates alpha-tested
+traversal — microtriangles flagged "unknown" still run the existing any-hit alpha logic — so the
+image is identical to the non-OMM path. When the extension is unsupported (or
+`--useOpacityMicromap 0`), the whole subsystem is skipped and rendering falls back to the regular
+alpha path.
+
+The `eOpacityMicromap` entry of `enum Visualization` (see `shaders/shaderio.h`) adds a debug view
+that colors the primary surface by how OMM traversal resolved it, using the fact that alpha
+evaluation only happens for "unknown" micro-triangles: OMM-opaque micro-triangles are committed by
+the hardware without any alpha work (green); "unknown" ones invoke the any-hit shader, which sets
+`payload.ommUnknown` (yellow); transparent ones are culled so those rays miss the mesh and show the
+environment behind. No baked micromap buffers are read by the shaders. The RT-pipeline technique
+consults the micromap (via the pipeline flag above); the inline RayQuery technique does not opt in,
+so there every alpha-tested triangle reads as "unknown".
+
+This debug view (and its `payload.ommUnknown` field) is compiled out of the normal render path
+behind the `USE_VISUALIZE` macro — the host sets it (see `PathTracer::compileShader`) only when the
+selected `Visualization` mode is not `eRendered`, so shipping renders carry no extra payload field
+or visualization branches. Because it is a compile gate, switching between normal rendering and any
+visualization mode triggers a shader recompile (cached per `VariantKey`, so repeat switches are
+fast); switching *among* visualization modes does not, since they share `USE_VISUALIZE == 1` and
+select the mode at runtime via `frameInfo->visualization`.
+
 ---
 
 ## Stage 1: parseScene() - Build Render Structures

@@ -188,6 +188,11 @@ void nvvkgltf::SceneRtx::createBottomLevelAccelerationStructure(const nvvkgltf::
   const auto& vertexBuffers = sceneVk.vertexBuffers();
   const auto& indices       = sceneVk.indices();
 
+  // Per-primitive opacity micromap linkage (kept alive for the whole build; see header).
+  const SceneOmm& sceneOmm = sceneVk.opacityMicromap();
+  m_ommGeometry.assign(renderPrimitives.size(), VkAccelerationStructureTrianglesOpacityMicromapEXT{
+                                                    VK_STRUCTURE_TYPE_ACCELERATION_STRUCTURE_TRIANGLES_OPACITY_MICROMAP_EXT});
+
   for(uint32_t p_idx = 0; p_idx < renderPrimitives.size(); p_idx++)
   {
     auto& blasData  = m_blasBuildData[p_idx];
@@ -198,6 +203,20 @@ void nvvkgltf::SceneRtx::createBottomLevelAccelerationStructure(const nvvkgltf::
     VkDeviceAddress indexAddress  = indices[p_idx].address;
     // Fill the BLAS information
     auto geo = renderPrimitiveToAsGeometry(renderPrimitives[p_idx], vertexAddress, indexAddress);
+
+    // Attach the opacity micromap to this primitive's triangle geometry, if it has one.
+    if(sceneOmm.has(p_idx))
+    {
+      const SceneOmm::PrimitiveOmm&                       omm    = sceneOmm.get(p_idx);
+      VkAccelerationStructureTrianglesOpacityMicromapEXT& ommGeo = m_ommGeometry[p_idx];
+      ommGeo.indexType                                           = omm.indexType;
+      ommGeo.indexBuffer.deviceAddress                           = omm.indexAddress;
+      ommGeo.indexStride                                         = omm.indexStride;
+      ommGeo.baseTriangle                                        = omm.baseTriangle;
+      ommGeo.micromap                                            = omm.micromap;
+      geo.geometry.geometry.triangles.pNext                      = &ommGeo;
+    }
+
     blasData.addGeometry(geo);
     VkAccelerationStructureBuildSizesInfoKHR sizeInfo = blasData.finalizeGeometry(m_device, flags);  // Will query the size of the resulting BLAS
   }
@@ -590,6 +609,7 @@ void nvvkgltf::SceneRtx::destroy()
 
   m_blasAccel          = {};
   m_blasBuildData      = {};
+  m_ommGeometry        = {};
   m_instanceFlagsCache = {};
   if(m_blasBuilder)
   {

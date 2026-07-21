@@ -26,6 +26,7 @@
 
 #include "gltf_scene_merger.hpp"
 #include "tinygltf_utils.hpp"
+#include <nvutils/logger.hpp>
 #include <algorithm>
 #include <filesystem>
 #include <unordered_map>
@@ -34,6 +35,15 @@
 namespace {
 
 using namespace nvvkgltf;
+
+// True if value[key] is present and a usable glTF index (a non-negative integer). Used to validate
+// extension-provided indices before rebasing them during a merge: Get<int>() on a missing/non-int
+// field yields 0, which after offsetting becomes a wrong-but-in-range index that silently
+// cross-links to unrelated resources, so callers must reject such fields instead of remapping them.
+static bool hasNonNegativeInt(const tinygltf::Value& value, const char* key)
+{
+  return value.Has(key) && value.Get(key).IsInt() && value.Get(key).Get<int>() >= 0;
+}
 
 IndexRemapping computeOffsets(const tinygltf::Model& baseModel)
 {
@@ -57,6 +67,15 @@ IndexRemapping computeOffsets(const tinygltf::Model& baseModel)
     if(ext.Has("lights") && ext.Get("lights").IsArray())
     {
       o.lights = static_cast<int>(ext.Get("lights").ArrayLen());
+    }
+  }
+  o.micromaps = 0;
+  if(baseModel.extensions.count(EXT_MESH_OPACITY_MICROMAP_EXTENSION_NAME))
+  {
+    const tinygltf::Value& ext = baseModel.extensions.at(EXT_MESH_OPACITY_MICROMAP_EXTENSION_NAME);
+    if(ext.Has("micromaps") && ext.Get("micromaps").IsArray())
+    {
+      o.micromaps = static_cast<int>(ext.Get("micromaps").ArrayLen());
     }
   }
   return o;
@@ -284,6 +303,29 @@ static void remapAndAppendMeshes(tinygltf::Model& base, const tinygltf::Model& i
           primitive.extensions["KHR_materials_variants"] = tinygltf::Value(std::move(extObj));
         }
       }
+      // EXT_mesh_opacity_micromap: the primitive links to the root micromaps[] array by index and,
+      // optionally, to a micromapIndices accessor; both are in imported space and must be remapped.
+      // `micromap` is required, so a missing/non-integer/negative value makes the link unusable --
+      // drop the whole extension rather than rebase a bad index into a valid-looking wrong one.
+      if(primitive.extensions.count(EXT_MESH_OPACITY_MICROMAP_EXTENSION_NAME))
+      {
+        const tinygltf::Value& ext = primitive.extensions[EXT_MESH_OPACITY_MICROMAP_EXTENSION_NAME];
+        if(ext.IsObject() && hasNonNegativeInt(ext, "micromap"))
+        {
+          tinygltf::Value::Object obj = ext.Get<tinygltf::Value::Object>();  // copy, then override indices
+          obj["micromap"]             = tinygltf::Value(ext.Get("micromap").Get<int>() + offsets.micromaps);
+          // micromapIndices (accessor) is optional; keep it only when it is a valid index.
+          if(hasNonNegativeInt(ext, "micromapIndices"))
+            obj["micromapIndices"] = tinygltf::Value(ext.Get("micromapIndices").Get<int>() + offsets.accessors);
+          else
+            obj.erase("micromapIndices");
+          primitive.extensions[EXT_MESH_OPACITY_MICROMAP_EXTENSION_NAME] = tinygltf::Value(std::move(obj));
+        }
+        else
+        {
+          primitive.extensions.erase(EXT_MESH_OPACITY_MICROMAP_EXTENSION_NAME);
+        }
+      }
     }
     base.meshes.push_back(std::move(m));
   }
@@ -424,6 +466,61 @@ static void remapAndAppendLights(tinygltf::Model& base, const tinygltf::Model& i
     base.lights.push_back(light);
 }
 
+// Merge the root-level EXT_mesh_opacity_micromap extension. Its micromaps[] entries reference
+// bufferViews (data + triangles) that must be offset into the combined model. Entries are appended
+// to any existing base micromaps[] so successive merges accumulate (the per-primitive `micromap`
+// index is shifted by offsets.micromaps in remapAndAppendMeshes to match).
+static void remapAndAppendMicromaps(tinygltf::Model& base, const tinygltf::Model& imported, const IndexRemapping& offsets)
+{
+  const char* extName = EXT_MESH_OPACITY_MICROMAP_EXTENSION_NAME;
+  if(!imported.extensions.count(extName))
+    return;
+  const tinygltf::Value& importedExt = imported.extensions.at(extName);
+  if(!importedExt.Has("micromaps") || !importedExt.Get("micromaps").IsArray())
+    return;
+
+  // Start from base's existing micromaps (if any) so merges accumulate.
+  tinygltf::Value::Array combined;
+  if(base.extensions.count(extName) && base.extensions.at(extName).Has("micromaps")
+     && base.extensions.at(extName).Get("micromaps").IsArray())
+  {
+    const tinygltf::Value& baseMicromaps = base.extensions.at(extName).Get("micromaps");
+    for(size_t i = 0; i < baseMicromaps.ArrayLen(); ++i)
+      combined.push_back(baseMicromaps.Get(static_cast<int>(i)));
+  }
+
+  // Append imported entries, offsetting their build-input bufferView references.
+  const tinygltf::Value& importedMicromaps = importedExt.Get("micromaps");
+  for(size_t i = 0; i < importedMicromaps.ArrayLen(); ++i)
+  {
+    const tinygltf::Value& src = importedMicromaps.Get(static_cast<int>(i));
+    if(!src.IsObject())
+    {
+      combined.push_back(src);
+      continue;
+    }
+    // data and triangles are required bufferView references. A missing/non-integer/negative value
+    // would become a wrong-but-in-range index after offsetting (silently cross-linking to the base
+    // model's buffer views), so reject the whole imported extension rather than merge a corrupt
+    // reference. Skipping just the entry is not an option: it would shift every later micromap index
+    // that the per-primitive `micromap` field points at.
+    if(!hasNonNegativeInt(src, "data") || !hasNonNegativeInt(src, "triangles"))
+    {
+      LOGW("EXT_mesh_opacity_micromap: imported micromaps[%zu] has an invalid data/triangles bufferView reference - skipping OMM merge\n",
+           i);
+      return;
+    }
+    tinygltf::Value::Object obj = src.Get<tinygltf::Value::Object>();  // copy, then override bufferViews
+    obj["data"]                 = tinygltf::Value(src.Get("data").Get<int>() + offsets.bufferViews);
+    obj["triangles"]            = tinygltf::Value(src.Get("triangles").Get<int>() + offsets.bufferViews);
+    combined.push_back(tinygltf::Value(std::move(obj)));
+  }
+
+  tinygltf::Value::Object extObj;
+  extObj["micromaps"]      = tinygltf::Value(std::move(combined));
+  base.extensions[extName] = tinygltf::Value(std::move(extObj));
+}
+
 // Append every imported resource array (buffers..lights) into base, remapping indices by
 // `offsets`, then union the imported extension-used/required lists into base. Shared by both
 // merge() (wrapper-node variant) and mergeIntoNode() (external-asset variant). Does NOT touch
@@ -443,6 +540,7 @@ static void appendResourcesAndExtensions(tinygltf::Model& base, const tinygltf::
   remapAndAppendNodes(base, imported, offsets);
   remapAndAppendAnimations(base, imported, offsets);
   remapAndAppendLights(base, imported);
+  remapAndAppendMicromaps(base, imported, offsets);
 
   // Merge extension lists so decompression and other logic see imported extensions
   for(const std::string& ext : imported.extensionsUsed)

@@ -55,6 +55,32 @@ static ImGuiTreeNodeFlags s_treeNodeFlags = ImGuiTreeNodeFlags_SpanAllColumns | 
 // HELPER FUNCTIONS
 //==================================================================================================
 
+// Above this many root nodes the scene-graph root list is virtualized with ImGuiListClipper (see
+// renderSceneGraphTab). Below it we render the whole graph every frame, which is what makes
+// scrolling and arbitrarily deep expansion "just work" -- the clipper cannot, because it models the
+// scroll extent as (root count x row height) and so ignores the height of expanded subtrees. That
+// undercount is harmless only when there are enough roots that a scroll region exists regardless
+// (millions of shallow trees, the case this threshold targets); for ordinary scenes we must render
+// fully or the scroll bar collapses. The full walk is trivial at this size and only runs while the
+// Scene Graph tab is open.
+static constexpr size_t kSceneGraphVirtualizeThreshold = 200;
+
+// Uniform height, in pixels, of a single scene-graph table row.
+//
+// Only used on the virtualized path: inside a table ImGuiListClipper requires every clipped item to
+// be exactly one row of a constant, known height. It otherwise measures item 0 to infer the height
+// and asserts (ImGuiListClipper_StepInternal, table branch) if that item did not advance the cursor
+// by exactly one row -- which an expanded root does, since it emits several rows. We sidestep the
+// measurement by pinning each root row to this height and handing the same value to clipper.Begin().
+// Under the default style this equals the natural text row height (ItemSpacing.y == 2*CellPadding.y),
+// so it does not change how the graph looks; the max() guards themes with larger cell padding,
+// keeping the forced height >= the natural content.
+static float sceneGraphRowHeight()
+{
+  const ImGuiStyle& style = ImGui::GetStyle();
+  return std::max(ImGui::GetTextLineHeightWithSpacing(), ImGui::GetTextLineHeight() + style.CellPadding.y * 2.0f);
+}
+
 static std::string getImageSourceLabel(const tinygltf::Model& model, int imageIndex)
 {
   if(imageIndex < 0 || imageIndex >= static_cast<int>(model.images.size()))
@@ -475,11 +501,40 @@ void UiSceneBrowser::renderSceneGraphTab()
         }
         renderSceneTransformUI(sceneID);
 
-        // Render nodes in scene
+        // Render the scene's root nodes. We iterate a snapshot, not scene.nodes directly, because
+        // rendering a row can immediately edit that same vector: the per-node context menu
+        // (Duplicate / Add) and drag-drop reparenting run their editor commands inline, and those
+        // push/erase in model.scenes[...].nodes (see gltf_scene_editor.cpp). Iterating the live
+        // vector would reallocate it mid-loop and desync the clipper's item count. Copying is O(root
+        // count) but a trivial memcpy, and the edit simply takes effect next frame -- the same
+        // apply-after-traversal contract Delete/Rename already use via their "next frame" flags.
         std::vector<int> nodesToRender = scene.nodes;
-        for(int nodeId : nodesToRender)
+
+        // Virtualize only huge root lists. m_doScroll forces a full walk so SetScrollHereY() on the
+        // (possibly clipped-away) selected row can fire; small graphs also render fully so scrolling
+        // and deep expansion stay correct -- the clipper models scroll extent as (root count x row
+        // height) and would collapse the scroll bar for an expanded ordinary scene.
+        const bool virtualizeRoots = !m_doScroll && nodesToRender.size() > kSceneGraphVirtualizeThreshold;
+        if(!virtualizeRoots)
         {
-          renderNodeHierarchy(nodeId);
+          for(int nodeId : nodesToRender)
+            renderNodeHierarchy(nodeId);
+        }
+        else
+        {
+          // Only build the rows currently visible in the scroll region, keeping per-frame cost at
+          // O(visible rows) instead of O(roots). The fixed row height lets the clipper skip measuring
+          // item 0 (required because an expanded root emits multiple rows, which would trip the
+          // clipper's one-row-per-item assert inside a table). An expanded root still renders its
+          // subtree; the clipper models it as one row, so the scroll extent is short by the few extra
+          // rows of currently-expanded roots -- negligible against a virtualized million-root list.
+          ImGuiListClipper clipper;
+          clipper.Begin(static_cast<int>(nodesToRender.size()), sceneGraphRowHeight());
+          while(clipper.Step())
+          {
+            for(int i = clipper.DisplayStart; i < clipper.DisplayEnd; ++i)
+              renderNodeHierarchy(nodesToRender[i], sceneGraphRowHeight());
+          }
         }
 
         ImGui::TreePop();
@@ -676,7 +731,9 @@ void UiSceneBrowser::applySceneTransform(size_t sceneID)
 // NODE HIERARCHY RENDERING
 //==================================================================================================
 
-void UiSceneBrowser::renderNodeHierarchy(int nodeIdx)
+// rowHeight > 0 pins this node's table row to a fixed height (used only when the root list is
+// virtualized with ImGuiListClipper, which needs a constant row height); 0 = natural height.
+void UiSceneBrowser::renderNodeHierarchy(int nodeIdx, float rowHeight)
 {
   if(!m_scene || nodeIdx < 0)
     return;
@@ -687,7 +744,10 @@ void UiSceneBrowser::renderNodeHierarchy(int nodeIdx)
   if(nodeIdx >= static_cast<int>(model.nodes.size()))
     return;
 
-  ImGui::TableNextRow();
+  // rowHeight > 0 (virtualized path) pins the row to the constant height the clipper was told (see
+  // sceneGraphRowHeight); 0 leaves the row at its natural height. Children recurse with 0 -- only
+  // the clipped root rows need a fixed height.
+  ImGui::TableNextRow(ImGuiTableRowFlags_None, rowHeight);
   ImGui::TableNextColumn();
 
   ImGuiTreeNodeFlags  flags      = s_treeNodeFlags;

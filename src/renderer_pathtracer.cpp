@@ -425,8 +425,8 @@ PathTracer::CompileStateSnapshot PathTracer::getCompileStateSnapshot()
 {
   std::lock_guard<std::mutex> lock(m_compileMutex);
   return {
-      m_compiledWireframe, m_compiledOptimal, m_compiledDlss, m_compiledDlssGuide,
-      m_compiledFeatures,  m_rqPipeline,      m_rtxPipeline,
+      m_compiledWireframe, m_compiledVisualize, m_compiledOptimal, m_compiledDlss,
+      m_compiledDlssGuide, m_compiledFeatures,  m_rqPipeline,      m_rtxPipeline,
   };
 }
 
@@ -446,13 +446,15 @@ void PathTracer::ensureShadersAndPipelines(Resources& resources)
 
   const bool wantDlss          = isDlssEnabled();
   const bool wantDlssGuide     = resources.currentFeatureSet.has(nvvkgltf::SceneFeatureSet::eDlssGuide);
+  const bool wantVisualize     = (resources.settings.visualization != shaderio::Visualization::eRendered);
   const bool wireframeChanged  = (state.wireframe != resources.settings.wireframe);
+  const bool visualizeChanged  = (state.visualize != wantVisualize);
   const bool optimalChanged    = (state.optimal != wantOptimal);
   const bool dlssChanged       = (state.dlss != wantDlss);
   const bool guideChanged      = (state.dlssGuide != wantDlssGuide);
   const bool featureSetChanged = wantOptimal && (state.features != resources.currentFeatureSet);
 
-  const bool needCompile = wireframeChanged || optimalChanged || dlssChanged || guideChanged || featureSetChanged;
+  const bool needCompile = wireframeChanged || visualizeChanged || optimalChanged || dlssChanged || guideChanged || featureSetChanged;
   if(needCompile)
   {
     if(m_busyWindow)
@@ -507,12 +509,14 @@ void PathTracer::onRender(VkCommandBuffer cmd, Resources& resources)
 
   const bool wantDlss          = isDlssEnabled();
   const bool wantDlssGuide     = resources.currentFeatureSet.has(nvvkgltf::SceneFeatureSet::eDlssGuide);
+  const bool wantVisualize     = (resources.settings.visualization != shaderio::Visualization::eRendered);
   const bool wireframeChanged  = (state.wireframe != resources.settings.wireframe);
+  const bool visualizeChanged  = (state.visualize != wantVisualize);
   const bool optimalChanged    = (state.optimal != wantOptimal);
   const bool dlssChanged       = (state.dlss != wantDlss);
   const bool guideChanged      = (state.dlssGuide != wantDlssGuide);
   const bool featureSetChanged = wantOptimal && (state.features != resources.currentFeatureSet);
-  const bool needRecompile     = wireframeChanged || optimalChanged || dlssChanged || guideChanged || featureSetChanged;
+  const bool needRecompile = wireframeChanged || visualizeChanged || optimalChanged || dlssChanged || guideChanged || featureSetChanged;
   const bool needPipeline = (m_renderTechnique == RenderTechnique::RayQuery) ? (state.rqPipeline == VK_NULL_HANDLE) :
                                                                                (state.rtxPipeline == VK_NULL_HANDLE);
 
@@ -885,10 +889,17 @@ void PathTracer::createRtxPipeline(Resources& resources)
       .pPipelineCreationFeedback = &feedback,
   };
 
+  // Allow the pipeline to use opacity micromaps (EXT_mesh_opacity_micromap); harmless when
+  // geometry is not carrying a micromap. Only set when the device supports VK_EXT_opacity_micromap.
+  VkPipelineCreateFlags flags = resources.settings.opacityMicromapSupported ?
+                                    VkPipelineCreateFlags(VK_PIPELINE_CREATE_RAY_TRACING_OPACITY_MICROMAP_BIT_EXT) :
+                                    VkPipelineCreateFlags(0);
+
   // Assemble the shader stages and recursion depth info into the ray tracing pipeline
   VkRayTracingPipelineCreateInfoKHR rtPipelineCreateInfo{
       .sType                        = VK_STRUCTURE_TYPE_RAY_TRACING_PIPELINE_CREATE_INFO_KHR,
       .pNext                        = &feedbackInfo,
+      .flags                        = flags,
       .stageCount                   = static_cast<uint32_t>(stages.size()),  // Stages are shaders
       .pStages                      = stages.data(),
       .groupCount                   = static_cast<uint32_t>(shader_groups.size()),
@@ -1048,6 +1059,7 @@ void PathTracer::compileShader(Resources& resources, bool fromFile)
   {
     const VariantKey targetKey{
         resources.settings.wireframe,
+        resources.settings.visualization != shaderio::Visualization::eRendered,
         resources.settings.optimalShader,
         isDlssEnabled(),
         resources.currentFeatureSet.has(nvvkgltf::SceneFeatureSet::eDlssGuide),
@@ -1091,6 +1103,9 @@ void PathTracer::compileShader(Resources& resources, bool fromFile)
     std::vector<std::pair<std::string, std::string>> macros = {
         {"AVAILABLE_SER", std::to_string(m_supportSER)},
         {"WIREFRAME", std::to_string((int)resources.settings.wireframe)},
+        // Debug-only visualization (incl. the OMM debug payload field). Compiled out of the normal
+        // render path so it adds no payload/register cost; a mode switch triggers a recompile.
+        {"USE_VISUALIZE", std::to_string(resources.settings.visualization != shaderio::Visualization::eRendered ? 1 : 0)},
     };
     nvvkgltf::appendPathTracerDlssShaderMacro(macros, resources.currentFeatureSet, isDlssEnabled());
 
@@ -1145,9 +1160,10 @@ void PathTracer::compileShader(Resources& resources, bool fromFile)
   {
     std::lock_guard<std::mutex> lock(m_compileMutex);
     m_compiledWireframe = compiledFromFile ? resources.settings.wireframe : false;
-    m_compiledOptimal   = compiledFromFile ? resources.settings.optimalShader : false;
-    m_compiledFeatures  = (compiledFromFile && resources.settings.optimalShader) ? resources.currentFeatureSet :
-                                                                                   nvvkgltf::SceneFeatureSet{};
+    m_compiledVisualize = compiledFromFile ? (resources.settings.visualization != shaderio::Visualization::eRendered) : false;
+    m_compiledOptimal  = compiledFromFile ? resources.settings.optimalShader : false;
+    m_compiledFeatures = (compiledFromFile && resources.settings.optimalShader) ? resources.currentFeatureSet :
+                                                                                  nvvkgltf::SceneFeatureSet{};
     // From-file compiles follow the live runtime state. For the embedded SPIR-V fallback we mirror
     // the CMake build (see CMakeLists.txt): USE_GUIDE_SHADER=1 iff DLSS/OptiX is available at build
     // time, and USE_DLSS_SHADER=0 (DLSS is never active at startup; it engages later and triggers a
@@ -1199,8 +1215,9 @@ bool PathTracer::swapVariant(Resources& resources, const VariantKey& newKey)
 
   // 1) Park the currently-active shader/pipelines/SBT so we don't leak them.
   // The current variant key reflects what compileShader() last recorded.
-  const VariantKey currentKey{m_compiledWireframe, m_compiledOptimal, m_compiledDlss, m_compiledDlssGuide, m_compiledFeatures};
-  const bool hasLive = m_shaderModule != VK_NULL_HANDLE || m_rtxPipeline != VK_NULL_HANDLE
+  const VariantKey currentKey{m_compiledWireframe, m_compiledVisualize, m_compiledOptimal,
+                              m_compiledDlss,      m_compiledDlssGuide, m_compiledFeatures};
+  const bool       hasLive = m_shaderModule != VK_NULL_HANDLE || m_rtxPipeline != VK_NULL_HANDLE
                        || m_rqPipeline != VK_NULL_HANDLE || m_sbtBuffer.buffer != VK_NULL_HANDLE;
   if(hasLive)
   {
@@ -1255,6 +1272,7 @@ bool PathTracer::swapVariant(Resources& resources, const VariantKey& newKey)
       m_sbtBuffer         = it->sbtBuffer;
       m_sbtRegions        = it->sbtRegions;
       m_compiledWireframe = newKey.wireframe;
+      m_compiledVisualize = newKey.visualize;
       m_compiledOptimal   = newKey.optimal;
       m_compiledDlss      = newKey.dlss;
       m_compiledDlssGuide = newKey.dlssGuide;

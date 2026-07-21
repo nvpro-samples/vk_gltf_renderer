@@ -114,6 +114,10 @@ protected:
   std::vector<nvvk::AccelerationStructureBuildData>   m_blasBuildData;
   std::vector<nvvk::AccelerationStructure>            m_blasAccel;
 
+  // Per-renderPrimID opacity micromap linkage attached to the BLAS geometry (triangles.pNext).
+  // Must stay alive from the BLAS size query through the GPU build, so it lives here.
+  std::vector<VkAccelerationStructureTrianglesOpacityMicromapEXT> m_ommGeometry;
+
   nvvk::AccelerationStructureBuildData            m_tlasBuildData;
   nvvk::AccelerationStructure                     m_tlasAccel;
   std::vector<VkAccelerationStructureInstanceKHR> m_tlasInstances;

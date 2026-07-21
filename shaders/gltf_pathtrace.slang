@@ -271,17 +271,21 @@ PathStepResult pathTraceOneBounce(IRaytracer raytracer, inout RayDesc ray, inout
     // Visualization override (Debug mode)
     // Note: clay visualization mode continues shading; flat-color modes break
     //-----------------------------------------------------------------------
+    // Debug-only; compiled out of the normal render path (USE_VISUALIZE, set by the host when the
+    // visualization mode is not eRendered).
+#if USE_VISUALIZE
     if(frameInfo->visualization != Visualization::eRendered)
     {
       float3              vizColor;
-      VisualizationResult vizResult =
-          applyVisualization(pbrMat, hit, frameInfo->visualization, payload.rprimID, payload.primitiveID, vizColor);
+      VisualizationResult vizResult = applyVisualization(pbrMat, hit, frameInfo->visualization, payload.rprimID,
+                                                         payload.primitiveID, payload.ommUnknown ? 1 : 0, vizColor);
       if(vizResult == VisualizationResult::eColorOverride && firstRay)
       {
         pt.radiance.xyz = vizColor;
         return PathStepResult.eBreak;
       }
     }
+#endif
 
     //-----------------------------------------------------------------------
     // Adding emissive
@@ -740,6 +744,17 @@ void rmissShadow(inout ShadowPayload payload)
 [shader("anyhit")]
 void rahitMain(inout HitPayload payload, in BuiltInTriangleIntersectionAttributes attr)
 {
+#if USE_VISUALIZE
+  // Opacity-micromap debug view: any-hit only runs for "unknown" micro-triangles (OMM-opaque
+  // ones are committed by the hardware without any-hit, transparent ones are culled). Flag it and
+  // accept the hit so it is colored as unknown; the path breaks at the first hit anyway.
+  if(pushConst.frameInfo->visualization == Visualization::eOpacityMicromap)
+  {
+    payload.ommUnknown = true;
+    AcceptHitAndEndSearch();
+  }
+#endif
+
   float3 barycentrics = float3(1 - attr.barycentrics.x - attr.barycentrics.y, attr.barycentrics.x, attr.barycentrics.y);
 
   uint instanceID   = InstanceIndex();

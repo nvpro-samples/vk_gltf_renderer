@@ -111,6 +111,8 @@ auto main(int argc, char** argv) -> int
   parameterRegistry.add({"vsyncOffMode", "Preferred VSync Off mode: [0:Immediate, 1:Mailbox, 2:FIFO, 3:FIFO Relax]"},
                         reinterpret_cast<int*>(&appInfo.preferredVsyncOffMode));
   parameterRegistry.add({"floatingWindows", "Allow dock windows to be separate windows"}, &appInfo.hasUndockableViewport, true);
+  bool useOpacityMicromap = true;
+  parameterRegistry.add({"useOpacityMicromap", "Use EXT_mesh_opacity_micromap opacity micromaps when supported"}, &useOpacityMicromap);
 
   // Don't show the profiler by default
   auto profilerSettings  = std::make_shared<nvapp::ElementProfiler::ViewSettings>();
@@ -180,6 +182,7 @@ auto main(int argc, char** argv) -> int
   VkPhysicalDeviceRayTracingPipelineFeaturesKHR rtPipelineFeature{VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_RAY_TRACING_PIPELINE_FEATURES_KHR};
   VkPhysicalDeviceShaderObjectFeaturesEXT shaderObjectFeatures{.sType = VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_SHADER_OBJECT_FEATURES_EXT};
   VkPhysicalDeviceRayTracingInvocationReorderFeaturesNV reorderFeature{VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_RAY_TRACING_INVOCATION_REORDER_FEATURES_NV};
+  VkPhysicalDeviceOpacityMicromapFeaturesEXT ommFeature{VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_OPACITY_MICROMAP_FEATURES_EXT};
   // clang-format on
 
   // Requesting the extensions and features needed
@@ -195,6 +198,7 @@ auto main(int argc, char** argv) -> int
       {VK_KHR_FRAGMENT_SHADER_BARYCENTRIC_EXTENSION_NAME, &baryFeatures},
       {VK_EXT_NESTED_COMMAND_BUFFER_EXTENSION_NAME, &nestedCmdFeature},
       {VK_NV_RAY_TRACING_INVOCATION_REORDER_EXTENSION_NAME, &reorderFeature, false},
+      {VK_EXT_OPACITY_MICROMAP_EXTENSION_NAME, &ommFeature, false},  // Optional: Opacity Micromap (OMM)
   };
 
   // Only request the graphics queue
@@ -337,6 +341,15 @@ auto main(int argc, char** argv) -> int
 
   elemGltfRenderer->setDlssHardwareAvailability(dlssRrHardwareAvailable, dlssSrHardwareAvailable);
 #endif
+
+  // Opacity Micromap (OMM) is optional: it may be filtered out if unsupported, and the feature
+  // flag confirms the driver actually enabled it. When unavailable, the glTF extension is ignored.
+  const bool ommHardware =
+      vkContext.hasExtensionEnabled(VK_EXT_OPACITY_MICROMAP_EXTENSION_NAME) && (ommFeature.micromap == VK_TRUE);
+  const bool ommAvailable = ommHardware && useOpacityMicromap;
+  if(!ommHardware)
+    LOGW("Opacity Micromap (VK_EXT_opacity_micromap) not available - EXT_mesh_opacity_micromap will be ignored\n");
+  elemGltfRenderer->setOpacityMicromapAvailable(ommAvailable);
 
 
   // Application information

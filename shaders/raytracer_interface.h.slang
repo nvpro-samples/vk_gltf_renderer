@@ -24,6 +24,14 @@
 #include "nvshaders/constants.h.slang"
 #include "nvshaders/random.h.slang"
 
+// Debug-visualization gate. Set to 1 by the host (see PathTracer::compileShader) when a
+// visualization mode other than eRendered is selected; 0 in the shipping render path. Gates the
+// OMM debug payload field and the visualization branches so they cost nothing in normal rendering.
+// Default here so the embedded build (which does not pass the macro) compiles it out cleanly.
+#ifndef USE_VISUALIZE
+#define USE_VISUALIZE 0
+#endif
+
 // Payload for the path tracer
 struct HitPayload
 {
@@ -33,6 +41,9 @@ struct HitPayload
   int    rprimID     = -1;
   int    primitiveID = -1;
   float2 bary        = float2(0);  // BuiltInTriangleIntersectionAttributes.barycentrics; third = 1 - x - y
+#if USE_VISUALIZE
+  bool ommUnknown = false;  // Opacity-micromap debug view: set when any-hit ran (micro-triangle is "unknown")
+#endif
 };
 
 // Shadow payload for the path tracer
@@ -58,7 +69,13 @@ struct RayQueryRaytracer : IRaytracer
   void Trace(RayDesc ray, inout HitPayload payload, inout uint seed)
   {
     payload.hitT = INFINITE;  // Default when not hitting anything
+#if USE_VISUALIZE
+    payload.ommUnknown = false;  // Clear stale debug state; the OMM viz re-sets it below per ray
+#endif
 
+    // Back-face culling implements glTF single-sidedness: the ray culls back faces by default,
+    // and SceneRtx sets VK_GEOMETRY_INSTANCE_TRIANGLE_FACING_CULL_DISABLE_BIT_KHR on double-sided
+    // (and transmissive/volume) instances to re-enable them (see gltf_scene_rtx.cpp).
     RayQuery rayQuery;
     rayQuery.TraceRayInline(topLevelAS, RAY_FLAG_CULL_BACK_FACING_TRIANGLES, 0xFF, ray);
 
@@ -71,6 +88,18 @@ struct RayQueryRaytracer : IRaytracer
 
       // Barycentric coordinate on the triangle
       const float3 barycentrics = float3(1.0 - bary.x - bary.y, bary.x, bary.y);
+
+#if USE_VISUALIZE
+      // Opacity-micromap debug view: reaching a candidate here means the micro-triangle is
+      // "unknown" (OMM-opaque micro-triangles are committed without yielding a candidate,
+      // transparent ones are culled). Commit it and stop, so it is colored as unknown.
+      if(pushConst.frameInfo->visualization == Visualization::eOpacityMicromap)
+      {
+        payload.ommUnknown = true;
+        rayQuery.CommitNonOpaqueTriangleHit();
+        break;
+      }
+#endif
 
       GltfRenderNode      renderNode = pushConst.gltfScene->renderNodes[instanceID];
       GltfRenderPrimitive renderPrim = pushConst.gltfScene->renderPrimitives[renderPrimID];
@@ -164,6 +193,9 @@ struct TraditionalRaytracer : IRaytracer
   void Trace(RayDesc ray, inout HitPayload payload, inout uint seed)
   {
     payload.seed = seed;
+#if USE_VISUALIZE
+    payload.ommUnknown = false;  // Clear stale debug state; any-hit re-sets it for the OMM viz
+#endif
     if(USE_SER == 1 && AVAILABLE_SER == 1)
     {
       HitObject hitObj = HitObject::TraceRay(topLevelAS, RAY_FLAG_CULL_BACK_FACING_TRIANGLES, 0xFF, 0, 0, 0, ray, payload);

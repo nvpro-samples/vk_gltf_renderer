@@ -38,6 +38,7 @@
 
 #define KHR_MATERIALS_VARIANTS_EXTENSION_NAME "KHR_materials_variants"
 #define EXT_MESH_GPU_INSTANCING_EXTENSION_NAME "EXT_mesh_gpu_instancing"
+#define EXT_MESH_OPACITY_MICROMAP_EXTENSION_NAME "EXT_mesh_opacity_micromap"
 #define EXT_TEXTURE_WEBP_EXTENSION_NAME "EXT_texture_webp"
 #define EXTENSION_ATTRIB_IRAY "NV_attributes_iray"
 #define MSFT_TEXTURE_DDS_NAME "MSFT_texture_dds"

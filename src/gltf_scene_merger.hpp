@@ -42,6 +42,7 @@ struct IndexRemapping
   int cameras     = 0;
   int animations  = 0;
   int lights      = 0;  // KHR_lights_punctual extension
+  int micromaps   = 0;  // EXT_mesh_opacity_micromap root micromaps[] array
 };
 
 // Result of merging/instancing a subtree into a base model: the half-open range of appended

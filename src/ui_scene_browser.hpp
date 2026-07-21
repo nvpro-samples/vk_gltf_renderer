@@ -125,7 +125,7 @@ private:
   void rebuildSceneTransformNodes(size_t sceneID);  // Rebuild node list from current scene (handles dynamic changes)
   void markSceneTransformsDirty();           // Mark all scene transforms for rebuild (call after hierarchy changes)
   void applySceneTransform(size_t sceneID);  // Apply transform to root nodes
-  void renderNodeHierarchy(int nodeIdx);
+  void renderNodeHierarchy(int nodeIdx, float rowHeight = 0.0f);
   void renderMeshInHierarchy(int meshIdx, int nodeIdx);
   void renderPrimitiveInHierarchy(int primIdx, int meshIdx, int nodeIdx);
   void renderLightInHierarchy(int lightIdx);
@@ -172,7 +172,7 @@ private:
   //==================================================================================================
   // CACHE MANAGEMENT
   //==================================================================================================
-  void buildCache(std::unordered_map<int, int>& cache, bool& dirtyFlag, int(tinygltf::Node::* member)) const;
+  void buildCache(std::unordered_map<int, int>& cache, bool& dirtyFlag, int(tinygltf::Node::*member)) const;
 
   //==================================================================================================
   // HIERARCHY EXPANSION HELPERS

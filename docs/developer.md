@@ -122,6 +122,7 @@ src/
 │
 ├── gltf_scene.cpp/hpp          # Core scene loading and management
 ├── gltf_scene_vk.cpp/hpp       # GPU buffer/texture upload (SceneVk)
+├── gltf_scene_omm.cpp/hpp      # Opacity micromaps (SceneOmm), EXT_mesh_opacity_micromap → VK_EXT_opacity_micromap
 ├── gltf_scene_rtx.cpp/hpp      # BLAS/TLAS acceleration structures (SceneRtx)
 ├── gltf_scene_gpu.cpp/hpp      # SceneGpu — coordinates SceneVk / AnimationVk / SceneRtx / TransformComputeVk
 ├── gltf_scene_editor.cpp/hpp   # Scene editing (add/delete/duplicate nodes)
@@ -291,7 +292,11 @@ are **forked locally** into `shaders/gltf_*.h.slang` rather than using the upstr
 2. If the extension affects the material model (any `KHR_materials_*`), follow the
    checklist in [Material System → Adding a new KHR_materials_* extension](#adding-a-new-khr_materials_-extension).
 3. Otherwise, integrate runtime behavior in scene/shader code as needed.
-4. Update extension documentation in [README.md](../README.md) and usage notes in
+4. **If the extension stores any index** (into accessors/bufferViews/textures or a root-level array
+   it defines itself), add its remapping to `gltf_scene_merger.cpp` in the same change — otherwise it
+   is silently dropped or cross-linked when scenes are merged. See
+   [External Assets → index remapping is exhaustive](external_assets.md#scenemerger-gltf_scene_mergerhppcpp).
+5. Update extension documentation in [README.md](../README.md) and usage notes in
    [user-guide.md](user-guide.md).
 
 ### Modify sync/data-flow behavior

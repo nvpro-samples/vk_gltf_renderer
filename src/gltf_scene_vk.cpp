@@ -161,6 +161,7 @@ void nvvkgltf::SceneVk::init(nvvk::ResourceAllocator* alloc, nvvk::SamplerPool* 
   m_alloc          = alloc;
   m_samplerPool    = samplerPool;
   m_memoryTracker.init(alloc);
+  m_sceneOmm.init(alloc);
 }
 
 //--------------------------------------------------------------------------------------------------
@@ -199,6 +200,7 @@ void nvvkgltf::SceneVk::deinit()
   }
 
   destroy();
+  m_sceneOmm.deinit();
 
   m_alloc          = nullptr;
   m_samplerPool    = nullptr;
@@ -241,6 +243,11 @@ void nvvkgltf::SceneVk::create(VkCommandBuffer        cmd,
   uploadLights(staging, scn);
 
   (void)flushSceneDescIfDirty(staging, scn);
+
+  // Build opacity micromaps last: this flushes pending uploads and records the micromap builds so
+  // they complete before the BLAS build reads them (no-op when disabled or unused by the scene).
+  if(m_rayTracingEnabled)
+    m_sceneOmm.create(cmd, staging, scn);
 }
 
 //========== Sync / Upload ==========
@@ -1457,6 +1464,7 @@ void nvvkgltf::SceneVk::destroyGeometry()
 void nvvkgltf::SceneVk::destroy()
 {
   destroyGeometry();
+  m_sceneOmm.destroy();
 
   // Destroy remaining scene data buffers
   if(m_bMaterial.buffer != VK_NULL_HANDLE)

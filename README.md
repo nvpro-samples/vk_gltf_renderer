@@ -21,7 +21,7 @@ Built in C++ on [nvpro_core2](https://github.com/nvpro-samples/nvpro_core2) with
 - **AI denoising** — DLSS Ray Reconstruction and OptiX AI Denoiser produce clean images at interactive rates.
 - **Rasterizer preview** — Fast PBR rasterizer shares scene resources for instant iteration.
 - **Scene editor** — Hierarchy manipulation, transform gizmo, material editing, undo/redo, save back to glTF.
-- **31 glTF extensions** — Anisotropy, clearcoat, transmission, volume, sheen, iridescence, dispersion, retroreflection, Draco, interactivity, and more.
+- **32 glTF extensions** — Anisotropy, clearcoat, transmission, volume, sheen, iridescence, dispersion, retroreflection, Draco, interactivity, opacity micromaps, and more.
 - **glTF 2.1 complex scenes (preview)** — Compose multi-file scenes with External Assets: reference glTF/GLB files as instances that share geometry, with nested references, cycle detection, and file aliases — re-externalized on save.
 - **Developer tools** — GPU profiler, memory tracker, shader hot-reload (Ctrl+Shift+R), headless batch mode.
 
@@ -85,7 +85,7 @@ cmake --build build
 - Rasterizer fallback for fast scene interaction and editing.
 - A scene asset editor with hierarchy operations, a transform gizmo, material editing, merging, and saving back to glTF (non-destructive).
 - glTF 2.1 complex-scene composition (preview): reference external glTF/GLB assets, instance them (shared geometry), resolve nested references with cycle detection, and re-externalize on save.
-- Support for 31 glTF extensions, including anisotropy, clearcoat, transmission, volume, sheen, iridescence, dispersion, diffuse transmission, retroreflection, material variant and scattering.
+- Support for 32 glTF extensions, including anisotropy, clearcoat, transmission, volume, sheen, iridescence, dispersion, diffuse transmission, retroreflection, opacity micromaps, material variant and scattering.
 - HDR environments, a physical sun and sky model, depth of field, and multiple tone mappers.
 - Animation support includes skeletal, morph targets, and KHR_animation_pointer.
 - GPU compute accelerates both skinning/morphing and per-level world-matrix propagation.
@@ -154,6 +154,7 @@ For **headless timing** and optional scripted GPU benchmarks, see [Benchmarking]
 - ✅ KHR_texture_transform
 - ✅ KHR_xmp_json_ld
 - ✅ EXT_mesh_gpu_instancing
+- ✅ EXT_mesh_opacity_micromap
 - ✅ EXT_texture_webp
 - ✅ MSFT_texture_dds
 
