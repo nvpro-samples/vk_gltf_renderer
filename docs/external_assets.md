@@ -227,6 +227,16 @@ become ordinary transform nodes.
 Both functions live in `gltf_compact_scene.cpp` (declared in `gltf_compact_model.hpp`) and run on a
 copy, so the live runtime scene is never disturbed.
 
+### Image relocation (`.gltf` only)
+
+When writing a text `.gltf` (not `.glb`), `Scene::save` relocates referenced `image.uri` files next
+to the saved file. It resolves each URI through the load-time image search paths, then: **keeps in
+place** any image that already resolves to the destination (a save-in-place, or a save-as into a
+folder that already holds the referenced files, does not duplicate into `images/`); **deduplicates**
+by canonical source path so a file shared by several entries is copied at most once; and otherwise
+**copies** into `images/` with a uniquified name and rewrites the URI. See the `uriBySource` loop in
+`Scene::save` (`gltf_scene.cpp`) for the exact rules.
+
 ---
 
 ## 8. File / symbol map

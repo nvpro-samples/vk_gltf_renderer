@@ -172,7 +172,7 @@ private:
   //==================================================================================================
   // CACHE MANAGEMENT
   //==================================================================================================
-  void buildCache(std::unordered_map<int, int>& cache, bool& dirtyFlag, int(tinygltf::Node::*member)) const;
+  void buildCache(std::unordered_map<int, int>& cache, bool& dirtyFlag, int(tinygltf::Node::* member)) const;
 
   //==================================================================================================
   // HIERARCHY EXPANSION HELPERS

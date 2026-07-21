@@ -565,12 +565,21 @@ bool nvvkgltf::Scene::save(const std::filesystem::path& filename, bool selfConta
   const bool saveBinary = nvutils::extensionMatches(filename, ".glb");
 
   // Copy the images to the destination folder using the same search paths as for loading.
+  // Images that already resolve next to the saved file (at their current relative URI) are left
+  // in place -- this keeps a "save in place" (or a save-as into a folder that already contains the
+  // referenced images) from needlessly duplicating them into an "images/" subfolder. Only images
+  // that would not be found relative to the destination are copied there and have their URI
+  // rewritten.
   if(!outModel.images.empty() && !saveBinary && !getImageSearchPaths().empty())
   {
     const std::vector<fs::path>&    searchPaths = getImageSearchPaths();
     fs::path                        dstPath     = filename.parent_path();
     int                             numCopied   = 0;
     std::unordered_set<std::string> usedRelativeNames;
+    // Deduplicate by resolved source file: multiple image entries that point at the same file on
+    // disk (e.g. one texture shared by several materials, or reused across a merged scene) share a
+    // single destination URI instead of being copied once per entry.
+    std::unordered_map<std::string, std::string> uriBySource;
     for(size_t i = 0; i < outModel.images.size(); i++)
     {
       auto& image = outModel.images[i];
@@ -584,6 +593,32 @@ bool nvvkgltf::Scene::save(const std::filesystem::path& filename, bool selfConta
       fs::path srcFile     = nvutils::findFile(pathDecoded, searchPaths, false);
       if(srcFile.empty())
         continue;
+
+      // Reuse the URI already decided for this source file so a file referenced more than once is
+      // never duplicated on disk. Key on the canonical path, falling back to the located path if
+      // canonicalization fails -- the key is then always non-empty and stable for that file.
+      std::error_code   ec;
+      const fs::path    canonical = fs::weakly_canonical(srcFile, ec);
+      const std::string srcKey    = (ec ? srcFile : canonical).generic_string();
+
+      if(auto it = uriBySource.find(srcKey); it != uriBySource.end())
+      {
+        image.uri = it->second;
+        continue;
+      }
+
+      // If the source already resolves to where the current URI points relative to the destination,
+      // leave it in place (no copy, URI unchanged) and reserve its relative name so a later copy
+      // cannot target the same path and overwrite it. An absolute URI is never kept: it would write
+      // a non-portable path, so it falls through to be copied and rewritten relative.
+      fs::path naturalDst = dstPath / pathDecoded;
+      if(!pathDecoded.is_absolute() && fs::exists(naturalDst, ec) && fs::equivalent(srcFile, naturalDst, ec))
+      {
+        usedRelativeNames.insert(pathDecoded.generic_string());
+        uriBySource.emplace(srcKey, image.uri);
+        continue;
+      }
+
       std::string name      = pathDecoded.filename().string();
       std::string base      = pathDecoded.stem().string();
       std::string ext       = pathDecoded.extension().string();
@@ -609,6 +644,7 @@ bool nvvkgltf::Scene::save(const std::filesystem::path& filename, bool selfConta
         }
       }
       image.uri = dstRelative.generic_string();  // forward slashes for glTF
+      uriBySource.emplace(srcKey, image.uri);
     }
     if(numCopied > 0)
       LOGI("%sImages copied: %d\n", st.indent().c_str(), numCopied);

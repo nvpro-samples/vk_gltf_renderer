@@ -275,3 +275,74 @@ TEST_F(FeaturePreservationTest, NodeHierarchyPreserved)
 
   EXPECT_TRUE(scene2.validator().validateModel().valid);
 }
+
+// When several image entries reference the same source file, saving into a fresh folder must copy
+// that file only once and point every entry at the single shared URI (regression for the
+// uriBySource dedup in Scene::save).
+TEST_F(FeaturePreservationTest, SharedImageDeduplicatedOnSave)
+{
+  auto assetsPath = TestResources::getSampleAssetsPath();
+  if(assetsPath.empty())
+  {
+    GTEST_SKIP() << "glTF-Sample-Assets not found at: " << GLTF_SAMPLE_ASSETS_PATH;
+  }
+
+  auto            resourcePath = assetsPath / "Models/BoxTextured/glTF/BoxTextured.gltf";
+  nvvkgltf::Scene scene;
+  if(!scene.load(resourcePath))
+  {
+    GTEST_SKIP() << "Failed to load test resource";
+  }
+
+  // Find an external image (a file URI, not an inlined data: URI) that can be shared.
+  tinygltf::Model& model      = scene.getModel();
+  int              firstImage = -1;
+  for(size_t i = 0; i < model.images.size(); i++)
+  {
+    const std::string& uri = model.images[i].uri;
+    if(!uri.empty() && uri.compare(0, 5, "data:") != 0)
+    {
+      firstImage = static_cast<int>(i);
+      break;
+    }
+  }
+  if(firstImage < 0)
+  {
+    GTEST_SKIP() << "Test asset has no external image to share";
+  }
+
+  // Add a second entry pointing at the exact same source file, as a scene merge would.
+  model.images.push_back(model.images[firstImage]);
+  const size_t secondImage = model.images.size() - 1;
+
+  // Save into a fresh, empty folder so the images cannot be "kept in place" and must be copied.
+  auto saveDir = tempDir / "dedup";
+  std::filesystem::create_directories(saveDir);
+  auto tempFile = saveDir / "BoxTextured.gltf";
+  ASSERT_TRUE(scene.save(tempFile));
+
+  // Only a single file was written under images/ -- the shared source was copied once, not twice.
+  auto   imagesDir = saveDir / "images";
+  size_t fileCount = 0;
+  if(std::filesystem::exists(imagesDir))
+  {
+    for(const auto& entry : std::filesystem::directory_iterator(imagesDir))
+    {
+      if(entry.is_regular_file())
+        fileCount++;
+    }
+  }
+  EXPECT_EQ(fileCount, 1u);
+
+  // Reload and confirm the dedup survived serialization: both entries resolve to the same rewritten
+  // "images/..." URI -- collapsed onto the single copied file, not a second "_1" duplicate. Checking
+  // the reloaded model tests the persisted output rather than an in-memory side effect of save().
+  nvvkgltf::Scene scene2;
+  ASSERT_TRUE(scene2.load(tempFile));
+  const tinygltf::Model& reloaded = scene2.getModel();
+  ASSERT_GT(reloaded.images.size(), secondImage);
+  const std::string& firstUri  = reloaded.images[firstImage].uri;
+  const std::string& secondUri = reloaded.images[secondImage].uri;
+  EXPECT_EQ(firstUri, secondUri);
+  EXPECT_EQ(0, firstUri.compare(0, 7, "images/")) << "image URI was not rewritten into images/: " << firstUri;
+}
