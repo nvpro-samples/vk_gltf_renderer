@@ -103,13 +103,18 @@ jobs:
           echo "VK_LAYER_PATH=$SDK_ROOT/share/vulkan/explicit_layer.d" >> "$GITHUB_ENV"
           echo "Installed Vulkan SDK at: $SDK_ROOT"
 
+      # libvulkan-dev provides the system libvulkan.so -> libvulkan.so.1 symlink
+      # that CMake's find_library(Vulkan) needs. The Vulkan SDK 1.4.350+ moved
+      # its loader from <sdk>/x86_64/lib to <sdk>/x86_64/lib/VulkanLoader/lib,
+      # which CMake does not search, so on a clean CI runner (no system loader)
+      # the Vulkan check fails without this. Harmless on older SDKs.
       - name: Install Linux build dependencies
         if: runner.os == 'Linux'
         run: |
           sudo apt-get install -y \
             libx11-dev libxcb1-dev libxcb-keysyms1-dev libxcursor-dev \
             libxi-dev libxinerama-dev libxrandr-dev libxxf86vm-dev libtbb-dev \
-            libgl-dev
+            libgl-dev libvulkan-dev
 
       # CUDA Toolkit is required at link time for OptiX denoiser interop.
       # NVML headers/import libraries are required so the GPU monitor is present

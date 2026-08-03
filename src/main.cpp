@@ -43,6 +43,9 @@
 #include <nvvk/validation_settings.hpp>
 
 #include "renderer.hpp"
+#ifdef USE_AGENTIC
+#include "agentic_bridge.hpp"
+#endif
 #include "docs/app_icon_png.h"
 #include "version.hpp"
 
@@ -91,6 +94,10 @@ auto main(int argc, char** argv) -> int
   // Global variables
   std::filesystem::path sceneFilename{};             // "shader_ball.gltf"};  // Default scene
   std::filesystem::path hdrFilename{"std_env.hdr"};  // Default HDR
+#ifdef USE_AGENTIC
+  std::string agenticBridgeRoot{};
+  bool        agenticBridgeInit{false};
+#endif
 
   // Application defaults overrides
   appInfo.preferredVsyncOffMode = VK_PRESENT_MODE_MAILBOX_KHR;
@@ -98,6 +105,11 @@ auto main(int argc, char** argv) -> int
   // Command line parameters registration
   parameterRegistry.add({"scenefile", "Input scene filename"}, {".gltf"}, &sceneFilename);
   parameterRegistry.add({"hdrfile", "Input HDR filename"}, {".hdr"}, &hdrFilename);
+#ifdef USE_AGENTIC
+  parameterRegistry.add({"agenticBridgeRoot", "Root directory for the optional external generation bridge"}, &agenticBridgeRoot);
+  parameterRegistry.add({"agenticBridgeInit", "Create the external generation bridge manifest/directories and exit"},
+                        &agenticBridgeInit, true);
+#endif
   parameterRegistry.addVector({"size", "Size of the window to be created", "s"}, &appInfo.windowSize);
   parameterRegistry.add({"headless"}, &appInfo.headless, true);
   parameterRegistry.add({"frames", "Number of frames to run in headless mode"}, &appInfo.headlessFrameCount);
@@ -129,6 +141,31 @@ auto main(int argc, char** argv) -> int
   cli.add(parameterRegistry);
   cli.parse(argc, argv);
   cli.setVerbose(benchmarkOptions.enabled);
+
+#ifdef USE_AGENTIC
+  if(agenticBridgeInit)
+  {
+    const std::filesystem::path bridgeRoot = agenticBridgeRoot.empty() ?
+                                                 nvutils::getExecutablePath().parent_path() / "agentic_bridge" :
+                                                 std::filesystem::path(agenticBridgeRoot);
+
+    std::string                 error;
+    const std::filesystem::path manifestPath = agentic::writeBridgeManifest(bridgeRoot, &error);
+    if(manifestPath.empty())
+    {
+      LOGE("Agentic bridge initialization failed: %s\n", error.c_str());
+      return -1;
+    }
+
+    LOGI("Agentic bridge initialized at %s\n", bridgeRoot.string().c_str());
+    LOGI("Agentic bridge manifest written to %s\n", manifestPath.string().c_str());
+    return 0;
+  }
+
+  // Route the optional bridge-root override to the runtime controller so the flag
+  // takes effect for a normal (non --agenticBridgeInit) run, not just the init path.
+  elemGltfRenderer->setAgenticBridgeRoot(agenticBridgeRoot);
+#endif  // USE_AGENTIC
 
   if(appInfo.headless)
   {

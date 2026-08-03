@@ -25,6 +25,7 @@
 //
 
 #include <algorithm>
+#include <cfloat>
 #include <filesystem>
 #include <fmt/format.h>
 #include <GLFW/glfw3.h>
@@ -52,6 +53,15 @@
 #include "ui_linear_color.hpp"
 #include "ui_mouse_state.hpp"
 #include "version.hpp"
+
+// The Agentic window toggle (menu / toolbar / F7) is only wired when USE_AGENTIC
+// is built; this keeps it out of the window-toggle tables in a non-Agentic build
+// so there is no dead control.
+#ifdef USE_AGENTIC
+static constexpr size_t kAgenticToggleCount = 1;
+#else
+static constexpr size_t kAgenticToggleCount = 0;
+#endif
 
 void GltfRenderer::mouseClickedInViewport()
 {
@@ -350,6 +360,11 @@ void GltfRenderer::renderUI()
   {  // Setting menu
     bool changed{false};
 
+    // Auto-poll + heartbeat refresh in one call (throttled internally).
+#ifdef USE_AGENTIC
+    m_agentic.tick();
+#endif
+
     if(m_resources.settings.showCameraWindow)
     {
       if(ImGui::Begin("Camera", &m_resources.settings.showCameraWindow))
@@ -407,6 +422,10 @@ void GltfRenderer::renderUI()
       // the trigger; this just renders the pending modal.
       m_sceneBrowser.showAddPrimitivePopup();
     }
+
+#ifdef USE_AGENTIC
+    agentic::renderAgenticWindow(m_agentic, m_resources);
+#endif
 
     if(m_resources.settings.showSettingsWindow)
     {
@@ -824,13 +843,16 @@ void GltfRenderer::renderWindowsMenu()
     const char* shortcut;
     bool*       visible;
   };
-  static const std::array<WindowToggleInfo, 6> toggles = {{
+  static const std::array<WindowToggleInfo, 6 + kAgenticToggleCount> toggles = {{
       {ICON_MS_PHOTO_CAMERA, "Camera", "F1", &m_resources.settings.showCameraWindow},
       {ICON_MS_ACCOUNT_TREE, "Scene Browser", "F2", &m_resources.settings.showSceneBrowserWindow},
       {ICON_MS_SETTINGS, "Settings", "F3", &m_resources.settings.showSettingsWindow},
       {ICON_MS_LIST_ALT, "Inspector", "F4", &m_resources.settings.showInspectorWindow},
       {ICON_MS_PUBLIC, "Environment", "F5", &m_resources.settings.showEnvironmentWindow},
       {ICON_MS_TONALITY, "Tonemapper", "F6", &m_resources.settings.showTonemapperWindow},
+#ifdef USE_AGENTIC
+      {ICON_MS_AUTO_AWESOME, "Agentic", "F7", &m_resources.settings.showAgenticWindow},
+#endif
   }};
   if(!ImGui::BeginMenu("Windows"))
     return;
@@ -845,6 +867,9 @@ void GltfRenderer::renderWindowsMenu()
   ImGui::MenuItem(ICON_MS_MONITORING " Memory Usage", nullptr, &m_resources.settings.showMemStats);
   ImGui::EndMenu();
 }
+
+// (The Agentic feature has no top-level menu; its window is toggled from the
+//  Windows menu / F7 and rendered by agentic::renderAgenticWindow in ui_agentic.cpp.)
 
 void GltfRenderer::renderToolsMenu(bool validScene, bool& reloadShader, bool& compactScene)
 {
@@ -906,17 +931,20 @@ void GltfRenderer::renderMenuToolbarAndGizmos()
     bool*       visible;
     const char* tooltip;
   };
-  static const std::array<WindowToggleInfo, 6> windowToggles  = {{
+  static const std::array<WindowToggleInfo, 6 + kAgenticToggleCount> windowToggles = {{
       {ICON_MS_PHOTO_CAMERA, "F1", &m_resources.settings.showCameraWindow, "Camera"},
       {ICON_MS_ACCOUNT_TREE, "F2", &m_resources.settings.showSceneBrowserWindow, "Scene Browser"},
       {ICON_MS_SETTINGS, "F3", &m_resources.settings.showSettingsWindow, "Settings"},
       {ICON_MS_LIST_ALT, "F4", &m_resources.settings.showInspectorWindow, "Inspector"},
       {ICON_MS_PUBLIC, "F5", &m_resources.settings.showEnvironmentWindow, "Environment"},
       {ICON_MS_TONALITY, "F6", &m_resources.settings.showTonemapperWindow, "Tonemapper"},
+#ifdef USE_AGENTIC
+      {ICON_MS_AUTO_AWESOME, "F7", &m_resources.settings.showAgenticWindow, "Agentic"},
+#endif
   }};
-  float                                        buttonSize     = ImGui::GetFrameHeight();
-  const ImGuiStyle&                            style          = ImGui::GetStyle();
-  float                                        separatorWidth = 2.0f;
+  float             buttonSize     = ImGui::GetFrameHeight();
+  const ImGuiStyle& style          = ImGui::GetStyle();
+  float             separatorWidth = 2.0f;
   float totalWidth  = separatorWidth + static_cast<float>(windowToggles.size()) * (buttonSize + style.ItemSpacing.x);
   float windowWidth = ImGui::GetWindowWidth();
   float offsetX     = windowWidth * 0.5f - totalWidth * 0.5f;
@@ -989,13 +1017,16 @@ void GltfRenderer::renderMenu()
     bool*       visible;
     const char* tooltip;
   };
-  static const std::array<WindowToggleInfo, 6> windowToggles = {{
+  static const std::array<WindowToggleInfo, 6 + kAgenticToggleCount> windowToggles = {{
       {ICON_MS_PHOTO_CAMERA, "Camera", "F1", ImGuiKey_F1, false, &m_resources.settings.showCameraWindow, "Camera"},
       {ICON_MS_ACCOUNT_TREE, "Scene Browser", "F2", ImGuiKey_F2, false, &m_resources.settings.showSceneBrowserWindow, "Scene Browser"},
       {ICON_MS_SETTINGS, "Settings", "F3", ImGuiKey_F3, false, &m_resources.settings.showSettingsWindow, "Settings"},
       {ICON_MS_LIST_ALT, "Inspector", "F4", ImGuiKey_F4, false, &m_resources.settings.showInspectorWindow, "Inspector"},
       {ICON_MS_PUBLIC, "Environment", "F5", ImGuiKey_F5, false, &m_resources.settings.showEnvironmentWindow, "Environment"},
       {ICON_MS_TONALITY, "Tonemapper", "F6", ImGuiKey_F6, false, &m_resources.settings.showTonemapperWindow, "Tonemapper"},
+#ifdef USE_AGENTIC
+      {ICON_MS_AUTO_AWESOME, "Agentic", "F7", ImGuiKey_F7, false, &m_resources.settings.showAgenticWindow, "Agentic"},
+#endif
   }};
   for(const auto& toggle : windowToggles)
   {
@@ -1229,6 +1260,8 @@ void GltfRenderer::renderMenu()
   m_pathTracer.onUIMenu();
   m_rasterizer.onUIMenu();
 }
+
+// (renderAgenticWindow moved to agentic::renderAgenticWindow in src/ui_agentic.cpp.)
 
 
 void GltfRenderer::addToRecentFiles(const std::filesystem::path& filePath, int historySize)

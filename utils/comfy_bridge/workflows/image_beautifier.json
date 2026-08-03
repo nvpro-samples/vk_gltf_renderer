@@ -1,0 +1,307 @@
+{
+  "266": {
+    "inputs": {
+      "image": "input.jpg"
+    },
+    "class_type": "LoadImage",
+    "_meta": {
+      "title": "Load Image"
+    }
+  },
+  "267": {
+    "inputs": {
+      "filename_prefix": "ComfyUI",
+      "images": [
+        "270",
+        0
+      ]
+    },
+    "class_type": "SaveImage",
+    "_meta": {
+      "title": "Save Image"
+    }
+  },
+  "269": {
+    "inputs": {
+      "image": [
+        "266",
+        0
+      ]
+    },
+    "class_type": "GetImageSize",
+    "_meta": {
+      "title": "Get Image Size"
+    }
+  },
+  "270": {
+    "inputs": {
+      "resize_type": "scale dimensions",
+      "resize_type.width": [
+        "269",
+        0
+      ],
+      "resize_type.height": [
+        "269",
+        1
+      ],
+      "resize_type.crop": "center",
+      "scale_method": "lanczos",
+      "input": [
+        "264:65",
+        0
+      ]
+    },
+    "class_type": "ResizeImageMaskNode",
+    "_meta": {
+      "title": "Resize Image/Mask"
+    }
+  },
+  "264:70": {
+    "inputs": {
+      "unet_name": "flux-2-klein-base-4b-fp8.safetensors",
+      "weight_dtype": "default"
+    },
+    "class_type": "UNETLoader",
+    "_meta": {
+      "title": "Load Diffusion Model"
+    }
+  },
+  "264:71": {
+    "inputs": {
+      "clip_name": "qwen_3_4b.safetensors",
+      "type": "flux2",
+      "device": "default"
+    },
+    "class_type": "CLIPLoader",
+    "_meta": {
+      "title": "Load CLIP"
+    }
+  },
+  "264:67": {
+    "inputs": {
+      "text": "",
+      "clip": [
+        "264:71",
+        0
+      ]
+    },
+    "class_type": "CLIPTextEncode",
+    "_meta": {
+      "title": "CLIP Text Encode (Negative Prompt)"
+    }
+  },
+  "264:72": {
+    "inputs": {
+      "vae_name": "flux2-vae.safetensors"
+    },
+    "class_type": "VAELoader",
+    "_meta": {
+      "title": "Load VAE"
+    }
+  },
+  "264:66": {
+    "inputs": {
+      "width": [
+        "264:81",
+        0
+      ],
+      "height": [
+        "264:81",
+        1
+      ],
+      "batch_size": 1
+    },
+    "class_type": "EmptyFlux2LatentImage",
+    "_meta": {
+      "title": "Empty Flux 2 Latent"
+    }
+  },
+  "264:80": {
+    "inputs": {
+      "upscale_method": "lanczos",
+      "megapixels": 1,
+      "resolution_steps": 1,
+      "image": [
+        "266",
+        0
+      ]
+    },
+    "class_type": "ImageScaleToTotalPixels",
+    "_meta": {
+      "title": "ImageScaleToTotalPixels"
+    }
+  },
+  "264:79:76": {
+    "inputs": {
+      "conditioning": [
+        "264:67",
+        0
+      ],
+      "latent": [
+        "264:79:78",
+        0
+      ]
+    },
+    "class_type": "ReferenceLatent",
+    "_meta": {
+      "title": "ReferenceLatent"
+    }
+  },
+  "264:79:78": {
+    "inputs": {
+      "pixels": [
+        "264:80",
+        0
+      ],
+      "vae": [
+        "264:72",
+        0
+      ]
+    },
+    "class_type": "VAEEncode",
+    "_meta": {
+      "title": "VAE Encode"
+    }
+  },
+  "264:79:77": {
+    "inputs": {
+      "conditioning": [
+        "264:74",
+        0
+      ],
+      "latent": [
+        "264:79:78",
+        0
+      ]
+    },
+    "class_type": "ReferenceLatent",
+    "_meta": {
+      "title": "ReferenceLatent"
+    }
+  },
+  "264:64": {
+    "inputs": {
+      "noise": [
+        "264:73",
+        0
+      ],
+      "guider": [
+        "264:63",
+        0
+      ],
+      "sampler": [
+        "264:61",
+        0
+      ],
+      "sigmas": [
+        "264:62",
+        0
+      ],
+      "latent_image": [
+        "264:66",
+        0
+      ]
+    },
+    "class_type": "SamplerCustomAdvanced",
+    "_meta": {
+      "title": "SamplerCustomAdvanced"
+    }
+  },
+  "264:74": {
+    "inputs": {
+      "text": "Photorealistic camera capture of the provided scene. Preserve the original render faithfully: same composition, camera angle, object identity, shapes, layout, lighting direction, colors, and materials. Enhance only realism and image quality: physically plausible lighting, natural exposure, realistic material micro-detail, subtle real-world imperfections, accurate reflections, soft contact shadows, natural contrast, balanced color grading, slight lens softness, subtle sensor grain, high-resolution real photograph, full-frame camera, reality.",
+      "clip": [
+        "264:71",
+        0
+      ]
+    },
+    "class_type": "CLIPTextEncode",
+    "_meta": {
+      "title": "CLIP Text Encode (Positive Prompt)"
+    }
+  },
+  "264:61": {
+    "inputs": {
+      "sampler_name": "euler"
+    },
+    "class_type": "KSamplerSelect",
+    "_meta": {
+      "title": "KSamplerSelect"
+    }
+  },
+  "264:62": {
+    "inputs": {
+      "steps": 1,
+      "width": [
+        "264:81",
+        0
+      ],
+      "height": [
+        "264:81",
+        1
+      ]
+    },
+    "class_type": "Flux2Scheduler",
+    "_meta": {
+      "title": "Flux2Scheduler"
+    }
+  },
+  "264:63": {
+    "inputs": {
+      "cfg": 1,
+      "model": [
+        "264:70",
+        0
+      ],
+      "positive": [
+        "264:79:77",
+        0
+      ],
+      "negative": [
+        "264:79:76",
+        0
+      ]
+    },
+    "class_type": "CFGGuider",
+    "_meta": {
+      "title": "CFGGuider"
+    }
+  },
+  "264:73": {
+    "inputs": {
+      "noise_seed": 1019824409806590
+    },
+    "class_type": "RandomNoise",
+    "_meta": {
+      "title": "RandomNoise"
+    }
+  },
+  "264:65": {
+    "inputs": {
+      "samples": [
+        "264:64",
+        0
+      ],
+      "vae": [
+        "264:72",
+        0
+      ]
+    },
+    "class_type": "VAEDecode",
+    "_meta": {
+      "title": "VAE Decode"
+    }
+  },
+  "264:81": {
+    "inputs": {
+      "image": [
+        "264:80",
+        0
+      ]
+    },
+    "class_type": "GetImageSize",
+    "_meta": {
+      "title": "Get Image Size"
+    }
+  }
+}

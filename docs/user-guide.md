@@ -466,6 +466,8 @@ All settings can be overridden from the command line using `--paramName value` s
 |---|---|
 | `--scenefile <path>` | Input scene file (.gltf, .glb) |
 | `--hdrfile <path>` | Input HDR environment file (.hdr) |
+| `--agenticBridgeInit` | Create the optional external generation bridge manifest/directories and exit |
+| `--agenticBridgeRoot <path>` | Bridge folder for the optional generation bridge, used by `--agenticBridgeInit` and at runtime (default: `agentic_bridge` next to the executable) |
 | `--size <W> <H>` | Window size |
 | `--headless` | Run without UI (batch mode) |
 | `--frames <N>` | Number of frames to render in headless mode |
@@ -477,6 +479,8 @@ All settings can be overridden from the command line using `--paramName value` s
 | `--device <index>` | Force a specific Vulkan GPU by device index |
 | `--vsyncOffMode <0-3>` | VSync-off present mode: Immediate (0), Mailbox (1), FIFO (2), FIFO Relaxed (3) |
 | `--floatingWindows` | Allow dock windows to be separate OS windows |
+
+The bridge is also driven from the **Agentic** window (press F7, or open it from the Windows menu). From there, queue an HDRI prompt job or export the current render for image-to-image enhancement through an external adapter such as ComfyUI. See [ComfyUI Agentic Setup](comfyui-agentic-setup.md).
 
 **Display**
 

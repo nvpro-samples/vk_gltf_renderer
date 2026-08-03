@@ -68,8 +68,9 @@ enum class RenderingMode
 // of the rendered output: the regular renderer output, or the OptiX denoised image.
 enum class DisplayBuffer
 {
-  eRendered,       // Final rendered image (default)
-  eOptixDenoised,  // OptiX Denoised output (handled via OptiXDenoiser::getDescriptorImageInfo)
+  eRendered,           // Final rendered image (default)
+  eOptixDenoised,      // OptiX Denoised output (handled via OptiXDenoiser::getDescriptorImageInfo)
+  eAgenticBeautified,  // External image-to-image result from the agentic bridge
 };
 
 enum DirtyFlags
@@ -100,6 +101,7 @@ struct Settings
   bool                    showStatisticsWindow   = false;  // Show Statistics window
   bool                    showSceneBrowserWindow = true;   // Show Scene Browser window
   bool                    showInspectorWindow    = true;   // Show Inspector window
+  bool                    showAgenticWindow      = false;  // Show Agentic bridge window
   bool                    showGridSettingsWindow = false;  // Show Grid & Snap settings window
   float                   hdrEnvIntensity        = 1.0f;   // Intensity of the environment (HDR)
   float                   hdrEnvRotation         = 0.0f;   // Rotation of the environment (HDR)

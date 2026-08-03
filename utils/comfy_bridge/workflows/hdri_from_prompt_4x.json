@@ -1,0 +1,320 @@
+{
+  "214": {
+    "inputs": {
+      "filename_prefix": "ComfyUI",
+      "images": [
+        "217:216",
+        0
+      ]
+    },
+    "class_type": "SaveImage",
+    "_meta": {
+      "title": "Save Image"
+    }
+  },
+  "218": {
+    "inputs": {
+      "value": "Professional HDRI environment map, 360 degree equirectangular spherical panorama, 2:1 aspect ratio, seamless horizontal wrap, full sky and ground, horizon centered, eye-level camera position, realistic natural lighting, physically plausible shadows and reflections, high dynamic range lighting reference, clean uncluttered environment, no main subject, suitable for lighting 3D renders, realistic exposure-bracketed photography, natural color balance, detailed environment textures, photorealistic, sharp but not oversharpened. \n\nOpen modern courtyard at sunset, concrete ground, glass buildings, warm low sun, soft long shadows, realistic sky, subtle clouds."
+    },
+    "class_type": "PrimitiveStringMultiline",
+    "_meta": {
+      "title": "Text String (Multiline)"
+    }
+  },
+  "198:39": {
+    "inputs": {
+      "vae_name": "ae.safetensors"
+    },
+    "class_type": "VAELoader",
+    "_meta": {
+      "title": "Load VAE"
+    }
+  },
+  "198:38": {
+    "inputs": {
+      "unet_name": "flux1-dev.safetensors",
+      "weight_dtype": "default"
+    },
+    "class_type": "UNETLoader",
+    "_meta": {
+      "title": "Load Diffusion Model"
+    }
+  },
+  "198:40": {
+    "inputs": {
+      "clip_name1": "clip_l.safetensors",
+      "clip_name2": "t5xxl_fp16.safetensors",
+      "type": "flux",
+      "device": "default"
+    },
+    "class_type": "DualCLIPLoader",
+    "_meta": {
+      "title": "DualCLIPLoader"
+    }
+  },
+  "198:27": {
+    "inputs": {
+      "width": 1024,
+      "height": 512,
+      "batch_size": 1
+    },
+    "class_type": "EmptySD3LatentImage",
+    "_meta": {
+      "title": "EmptySD3LatentImage"
+    }
+  },
+  "198:45": {
+    "inputs": {
+      "text": [
+        "218",
+        0
+      ],
+      "clip": [
+        "198:40",
+        0
+      ]
+    },
+    "class_type": "CLIPTextEncode",
+    "_meta": {
+      "title": "CLIP Text Encode (Prompt)"
+    }
+  },
+  "198:31": {
+    "inputs": {
+      "seed": 600634039406445,
+      "steps": 24,
+      "cfg": 1,
+      "sampler_name": "euler",
+      "scheduler": "simple",
+      "denoise": 1,
+      "model": [
+        "198:38",
+        0
+      ],
+      "positive": [
+        "198:45",
+        0
+      ],
+      "negative": [
+        "198:42",
+        0
+      ],
+      "latent_image": [
+        "198:27",
+        0
+      ]
+    },
+    "class_type": "KSampler",
+    "_meta": {
+      "title": "KSampler"
+    }
+  },
+  "198:8": {
+    "inputs": {
+      "samples": [
+        "198:31",
+        0
+      ],
+      "vae": [
+        "198:39",
+        0
+      ]
+    },
+    "class_type": "VAEDecode",
+    "_meta": {
+      "title": "VAE Decode"
+    }
+  },
+  "198:42": {
+    "inputs": {
+      "conditioning": [
+        "198:45",
+        0
+      ]
+    },
+    "class_type": "ConditioningZeroOut",
+    "_meta": {
+      "title": "ConditioningZeroOut"
+    }
+  },
+  "217:204": {
+    "inputs": {
+      "unet_name": "pid_flux1_1024_to_4096_4step_bf16.safetensors",
+      "weight_dtype": "default"
+    },
+    "class_type": "UNETLoader",
+    "_meta": {
+      "title": "Load Diffusion Model"
+    }
+  },
+  "217:205": {
+    "inputs": {
+      "clip_name": "gemma_2_2b_it_elm_bf16.safetensors",
+      "type": "pixeldit",
+      "device": "default"
+    },
+    "class_type": "CLIPLoader",
+    "_meta": {
+      "title": "Load CLIP"
+    }
+  },
+  "217:206": {
+    "inputs": {
+      "text": [
+        "218",
+        0
+      ],
+      "clip": [
+        "217:205",
+        0
+      ]
+    },
+    "class_type": "CLIPTextEncode",
+    "_meta": {
+      "title": "CLIP Text Encode (Prompt)"
+    }
+  },
+  "217:207": {
+    "inputs": {
+      "scheduler": "simple",
+      "steps": 4,
+      "denoise": 1,
+      "model": [
+        "217:204",
+        0
+      ]
+    },
+    "class_type": "BasicScheduler",
+    "_meta": {
+      "title": "BasicScheduler"
+    }
+  },
+  "217:208": {
+    "inputs": {
+      "sampler_name": "lcm"
+    },
+    "class_type": "KSamplerSelect",
+    "_meta": {
+      "title": "KSamplerSelect"
+    }
+  },
+  "217:209": {
+    "inputs": {
+      "width": 4096,
+      "height": 2048,
+      "batch_size": 1
+    },
+    "class_type": "EmptyChromaRadianceLatentImage",
+    "_meta": {
+      "title": "EmptyChromaRadianceLatentImage"
+    }
+  },
+  "217:210": {
+    "inputs": {
+      "latent_format": "flux",
+      "degrade_sigma": 0,
+      "positive": [
+        "217:206",
+        0
+      ],
+      "latent": [
+        "198:31",
+        0
+      ]
+    },
+    "class_type": "PiDConditioning",
+    "_meta": {
+      "title": "PiD Conditioning"
+    }
+  },
+  "217:211": {
+    "inputs": {
+      "conditioning": [
+        "217:206",
+        0
+      ]
+    },
+    "class_type": "ConditioningZeroOut",
+    "_meta": {
+      "title": "ConditioningZeroOut"
+    }
+  },
+  "217:212": {
+    "inputs": {
+      "latent_format": "flux",
+      "degrade_sigma": 0,
+      "positive": [
+        "217:211",
+        0
+      ],
+      "latent": [
+        "198:31",
+        0
+      ]
+    },
+    "class_type": "PiDConditioning",
+    "_meta": {
+      "title": "PiD Conditioning"
+    }
+  },
+  "217:213": {
+    "inputs": {
+      "add_noise": true,
+      "noise_seed": 298896442675772,
+      "cfg": 1,
+      "model": [
+        "217:204",
+        0
+      ],
+      "positive": [
+        "217:210",
+        0
+      ],
+      "negative": [
+        "217:212",
+        0
+      ],
+      "sampler": [
+        "217:208",
+        0
+      ],
+      "sigmas": [
+        "217:207",
+        0
+      ],
+      "latent_image": [
+        "217:209",
+        0
+      ]
+    },
+    "class_type": "SamplerCustom",
+    "_meta": {
+      "title": "SamplerCustom"
+    }
+  },
+  "217:215": {
+    "inputs": {
+      "vae_name": "pixel_space"
+    },
+    "class_type": "VAELoader",
+    "_meta": {
+      "title": "Load VAE"
+    }
+  },
+  "217:216": {
+    "inputs": {
+      "samples": [
+        "217:213",
+        0
+      ],
+      "vae": [
+        "217:215",
+        0
+      ]
+    },
+    "class_type": "VAEDecode",
+    "_meta": {
+      "title": "VAE Decode"
+    }
+  }
+}

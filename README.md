@@ -1,28 +1,28 @@
-# Vulkan glTF Renderer — RTX Ray Tracing & PBR Path Tracer
+# Vulkan RTX Path Tracer — glTF Scene Editor & PBR Material Reference
 
 [![License](https://img.shields.io/badge/License-Apache%202.0-blue.svg)](LICENSE)
 [![Platform](https://img.shields.io/badge/Platform-Windows%20%7C%20Linux-green.svg)](#requirements)
 [![C++](https://img.shields.io/badge/C%2B%2B-20-orange.svg)](#build-and-run)
 [![Vulkan](https://img.shields.io/badge/Vulkan-1.4%2B-red.svg)](#requirements)
 
-> Open-source **Vulkan ray tracing** renderer for **glTF 2.0** scenes — Reference for glTF PBR materials, RTX path tracing, physically based rendering, AI denoising, and a built-in scene editor.
+> Open-source **Vulkan RTX path tracer** and **PBR material reference** for **glTF 2.0** — with a built-in **glTF scene editor** for non-destructive hierarchy manipulation, material authoring, and save-back to glTF; AI denoising, and support for 33+ glTF extensions.
 
-| glTF Renderer |
+| Vulkan RTX Path Tracer & glTF Scene Editor |
 |---|
 | ![](docs/gltf_renderer.jpg) |
 
-A production-quality **Vulkan ray tracing** renderer for **glTF 2.0** scenes. Includes a high-fidelity **RTX path tracer** with full **PBR material** support, **DLSS Ray Reconstruction** and **OptiX AI Denoiser**, a rasterizer preview path, and a complete scene editor — built for graphics developers who want a reference they can study, profile, and extend.
+A production-quality **Vulkan ray tracing** renderer and **glTF PBR material reference** for **glTF 2.0** scenes. Comes with a built-in **glTF scene editor** — edit scene hierarchies, author PBR materials, apply transforms with a gizmo, and save back to glTF — backed by a high-fidelity **RTX path tracer** with **DLSS Ray Reconstruction** and **OptiX AI Denoiser**. Built for graphics developers who want a reference they can study, profile, and extend.
 
 Built in C++ on [nvpro_core2](https://github.com/nvpro-samples/nvpro_core2) with [Slang](https://github.com/shader-slang/slang) shaders. Successor to [vk_raytrace](https://github.com/nvpro-samples/vk_raytrace).
 
 ## Highlights
 
-- **Ray tracing reference** — Monte Carlo path tracer with NEE, MIS, and adaptive sampling for physically accurate glTF PBR results.
-- **AI denoising** — DLSS Ray Reconstruction and OptiX AI Denoiser produce clean images at interactive rates.
-- **Rasterizer preview** — Fast PBR rasterizer shares scene resources for instant iteration.
-- **Scene editor** — Hierarchy manipulation, transform gizmo, material editing, undo/redo, save back to glTF.
-- **32 glTF extensions** — Anisotropy, clearcoat, transmission, volume, sheen, iridescence, dispersion, retroreflection, Draco, interactivity, opacity micromaps, and more.
+- **glTF scene editor** — Non-destructive scene authoring: hierarchy manipulation, transform gizmo, node/material/light editing, undo/redo, and save back to glTF without touching the original assets.
+- **glTF PBR material reference** — Monte Carlo path tracer with NEE, MIS, and adaptive sampling for physically accurate glTF PBR material evaluation.
+- **33 glTF extensions** — Anisotropy, clearcoat, transmission, volume, sheen, iridescence, dispersion, retroreflection, Draco, interactivity, opacity micromaps, and more.
 - **glTF 2.1 complex scenes (preview)** — Compose multi-file scenes with External Assets: reference glTF/GLB files as instances that share geometry, with nested references, cycle detection, and file aliases — re-externalized on save.
+- **AI denoising** — DLSS Ray Reconstruction and OptiX AI Denoiser produce clean images at interactive rates.
+- **Rasterizer preview** — Fast PBR rasterizer shares scene resources for instant iteration during editing.
 - **Developer tools** — GPU profiler, memory tracker, shader hot-reload (Ctrl+Shift+R), headless batch mode.
 
 ## Quick Tour
@@ -85,7 +85,7 @@ cmake --build build
 - Rasterizer fallback for fast scene interaction and editing.
 - A scene asset editor with hierarchy operations, a transform gizmo, material editing, merging, and saving back to glTF (non-destructive).
 - glTF 2.1 complex-scene composition (preview): reference external glTF/GLB assets, instance them (shared geometry), resolve nested references with cycle detection, and re-externalize on save.
-- Support for 32 glTF extensions, including anisotropy, clearcoat, transmission, volume, sheen, iridescence, dispersion, diffuse transmission, retroreflection, opacity micromaps, material variant and scattering.
+- Support for 33 glTF extensions, including anisotropy, clearcoat, transmission, volume, sheen, iridescence, dispersion, diffuse transmission, retroreflection, opacity micromaps, material variant and scattering.
 - HDR environments, a physical sun and sky model, depth of field, and multiple tone mappers.
 - Animation support includes skeletal, morph targets, and KHR_animation_pointer.
 - GPU compute accelerates both skinning/morphing and per-level world-matrix propagation.
@@ -106,7 +106,7 @@ For **headless timing** and optional scripted GPU benchmarks, see [Benchmarking]
 
 ## glTF Support
 
-**Reference scope:** The list below reflects what this renderer loads and displays. The **path tracer** is the authoritative PBR implementation — especially for ray-traced material evaluation, sampling, and new extensions (e.g. [KHR_materials_retroreflection](https://github.com/KhronosGroup/glTF/blob/main/extensions/2.0/Khronos/KHR_materials_retroreflection/README.md)). The **rasterizer** is a preview path for interaction, not the primary material reference.
+**Reference scope:** The list below reflects what this renderer loads and displays. The **path tracer** is the authoritative PBR implementation — especially for ray-traced material evaluation, sampling, and new extensions (e.g. [KHR_materials_retroreflection](https://github.com/mklefrancois/glTF/tree/khr-materials-retroreflection/extensions/2.0/Khronos/KHR_materials_retroreflection/README.md)). The **rasterizer** is a preview path for interaction, not the primary material reference.
 
 ### Core
 
@@ -155,6 +155,7 @@ For **headless timing** and optional scripted GPU benchmarks, see [Benchmarking]
 - ✅ KHR_xmp_json_ld
 - ✅ EXT_mesh_gpu_instancing
 - ✅ EXT_mesh_opacity_micromap
+- ✅ EXT_meshopt_compression
 - ✅ EXT_texture_webp
 - ✅ MSFT_texture_dds
 
@@ -178,6 +179,8 @@ See [External Assets](docs/external_assets.md) for design details.
 **For users**
 
 - [User Guide](docs/user-guide.md) — renderer settings, PBR materials, scene editor, camera, environment, tone mapping, common CLI flags, and troubleshooting.
+- [Agentic Workflow Foundation](docs/agentic-workflow.md) — staged plan and phase-one filesystem bridge for optional external generation tools.
+- [ComfyUI Agentic Setup](docs/comfyui-agentic-setup.md) — local ComfyUI installation, model setup, workflow export, and bridge troubleshooting for HDRI and beautifier generation.
 - [glTF Resources](docs/resources.md) — curated collection of glTF models, HDR environments, specifications, and tools.
 
 **For contributors**

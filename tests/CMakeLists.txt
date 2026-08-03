@@ -43,8 +43,12 @@ set(TEST_SOURCES
     test_extensions_metadata.cpp
     # Procedural primitives (plane/cube/sphere) + new/empty-scene workflow
     test_primitives.cpp
+    # Agentic workflow bridge contract
+    test_agentic_bridge.cpp
     # Need tinygltf implementation
     ${CMAKE_SOURCE_DIR}/src/tiny_stb_implementation.cpp
+    # Optional external generation bridge
+    ${CMAKE_SOURCE_DIR}/src/agentic_bridge.cpp
     # Local glTF scene implementation
     ${CMAKE_SOURCE_DIR}/src/gltf_compact_model.cpp
     ${CMAKE_SOURCE_DIR}/src/gltf_compact_scene.cpp
@@ -141,6 +145,7 @@ add_executable(${BENCHMARK_NAME}
     # Local glTF scene implementation
     ${CMAKE_SOURCE_DIR}/src/gltf_animation_pointer.cpp
     ${CMAKE_SOURCE_DIR}/src/gltf_compact_model.cpp
+    ${CMAKE_SOURCE_DIR}/src/gltf_compact_scene.cpp
     ${CMAKE_SOURCE_DIR}/src/gltf_scene.cpp
     ${CMAKE_SOURCE_DIR}/src/gltf_scene_editor.cpp
     ${CMAKE_SOURCE_DIR}/src/gltf_scene_animation.cpp

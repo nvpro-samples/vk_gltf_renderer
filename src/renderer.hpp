@@ -58,6 +58,9 @@
 #include "gizmo_visuals_vk.hpp"
 #include "timeline_pipeline.hpp"
 #include "undo_redo.hpp"
+#ifdef USE_AGENTIC
+#include "agentic.hpp"
+#endif
 
 class GltfRenderer : public nvapp::IAppElement
 {
@@ -84,6 +87,11 @@ public:
   void                                        registerRecentFilesHandler();
   void                                        setDlssHardwareAvailability(bool rrAvailable, bool srAvailable);
   void                                        setOpacityMicromapAvailable(bool available);
+#ifdef USE_AGENTIC
+  /// Override the optional Agentic bridge root (from --agenticBridgeRoot). Applied
+  /// to the controller once it is initialized in onAttach.
+  void setAgenticBridgeRoot(const std::filesystem::path& root);
+#endif
   /// Ensures path-tracer accumulation covers the full headless run (--maxFrames >= --frames).
   void alignMaxFramesForHeadless(uint32_t headlessFrames);
 
@@ -118,6 +126,7 @@ private:
   void resetFrame();
   void silhouette(VkCommandBuffer cmd);
   void tonemap(VkCommandBuffer cmd);
+  void runTonemapPass(VkCommandBuffer cmd, bool skipBeautifiedOverlay);
   void renderVisualHelpers(VkCommandBuffer cmd);
 #if defined(USE_DLSS)
   Dlss*       activeDlss();
@@ -192,6 +201,15 @@ private:
 
   // Recent files management
   std::vector<std::filesystem::path> m_recentFiles;
+
+  // Optional Agentic bridge controller (HDRI from prompt, image-to-image
+  // beautify). All state, polling, Vulkan upload of the beautified image, and
+  // adapter-heartbeat tracking live in agentic::Controller; renderAgenticWindow
+  // in ui_agentic.cpp drives the UI. Compiled only when USE_AGENTIC is defined.
+#ifdef USE_AGENTIC
+  agentic::Controller   m_agentic;
+  std::filesystem::path m_agenticBridgeRootOverride;  // from --agenticBridgeRoot; applied after m_agentic.init()
+#endif
 
   // File dialog directories
   std::filesystem::path m_lastSceneDirectory;

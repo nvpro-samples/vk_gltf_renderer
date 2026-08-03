@@ -50,11 +50,16 @@
 #define IMGUI_DEFINE_MATH_OPERATORS
 
 #include <cmath>
+#include <cstdio>
+#include <fstream>
+#include <iterator>
+#include <span>
 #include <thread>
 #include <unordered_set>
 #include <utility>
 #include <vulkan/vulkan_core.h>
 #include <webp/decode.h>
+#include <stb/stb_image.h>
 
 #include "GLFW/glfw3.h"
 #undef APIENTRY
@@ -75,12 +80,14 @@
 #include "_autogen/hdr_prefilter_glossy.slang.h"
 
 //
+#include <backends/imgui_impl_vulkan.h>
 #include <nvaftermath/aftermath.hpp>
 #include <nvutils/profiler.hpp>
 #include <nvutils/timers.hpp>
 #include <nvvk/check_error.hpp>
 #include <nvvk/commands.hpp>
 #include <nvvk/debug_util.hpp>
+#include <nvvk/default_structs.hpp>
 #include <nvvk/formats.hpp>
 #include <nvvk/mipmaps.hpp>
 #include "gltf_camera_utils.hpp"
@@ -129,6 +136,7 @@ bool webPLoadCallback(nvvkgltf::SceneVk::SceneImage& image, const void* data, si
   image.mipData = {std::move(decompressed)};
   return true;
 }
+
 }  // namespace
 
 namespace {
@@ -240,6 +248,7 @@ void GltfRenderer::onAttach(nvapp::Application* app)
   m_settingsHandler.setSetting("showStatisticsWindow", &m_resources.settings.showStatisticsWindow);
   m_settingsHandler.setSetting("showSceneBrowserWindow", &m_resources.settings.showSceneBrowserWindow);
   m_settingsHandler.setSetting("showInspectorWindow", &m_resources.settings.showInspectorWindow);
+  m_settingsHandler.setSetting("showAgenticWindow", &m_resources.settings.showAgenticWindow);
   m_settingsHandler.setSetting("envSystem", (int*)&m_resources.settings.envSystem);
   m_settingsHandler.setSetting("renderSystem", (int*)&m_resources.settings.renderSystem);
   m_settingsHandler.setSetting("useSolidBackground", &m_resources.settings.useSolidBackground);
@@ -266,7 +275,7 @@ void GltfRenderer::onAttach(nvapp::Application* app)
   });  // Allocator
 
   // If there is a leak (nvvkAllocID -> ID)
-  // m_resources.allocator.setLeakID(32914);
+  // m_resources.allocator.setLeakID(155);
 
 
   m_transientCmdPool = nvvk::createTransientCommandPool(m_device, app->getQueue(0).familyIndex);
@@ -450,7 +459,40 @@ void GltfRenderer::onAttach(nvapp::Application* app)
       }
     });
   }
+
+#ifdef USE_AGENTIC
+  // ===== Agentic bridge controller =====
+  // Done last so all the resources / queues / path-tracer state the callbacks
+  // reach into are fully initialized.
+  m_agentic.init({
+      .app              = m_app,
+      .resources        = &m_resources,
+      .device           = m_device,
+      .transientCmdPool = m_transientCmdPool,
+      // Atomic "load + apply this HDR" action used when an HDRI job comes back.
+      .applyHdri =
+          [this](const std::filesystem::path& path) {
+            createHDR(path);
+            m_resources.settings.envSystem                 = shaderio::EnvSystem::eHdr;
+            m_pathTracer.m_pushConst.fireflyClampThreshold = m_resources.hdrIbl.getIntegral();
+          },
+      .resetFrame     = [this]() { resetFrame(); },
+      .runTonemapPass = [this](VkCommandBuffer cmd,
+                               bool            skipBeautifiedOverlay) { runTonemapPass(cmd, skipBeautifiedOverlay); },
+  });
+
+  // Apply the optional --agenticBridgeRoot override now that the controller has
+  // set up its default root; a no-op when the flag was not passed.
+  m_agentic.setBridgeRoot(m_agenticBridgeRootOverride);
+#endif  // USE_AGENTIC
 }
+
+#ifdef USE_AGENTIC
+void GltfRenderer::setAgenticBridgeRoot(const std::filesystem::path& root)
+{
+  m_agenticBridgeRootOverride = root;
+}
+#endif
 
 //--------------------------------------------------------------------------------------------------
 // Detach the renderers and destroy the resources
@@ -993,12 +1035,27 @@ void GltfRenderer::tonemap(VkCommandBuffer cmd)
 {
   NVVK_DBG_SCOPE(cmd);  // <-- Helps to debug in NSight
   auto timerSection = m_profilerGpuTimer.cmdFrameSection(cmd, __FUNCTION__);
+  runTonemapPass(cmd, /*skipBeautifiedOverlay=*/false);
+}
 
+void GltfRenderer::runTonemapPass(VkCommandBuffer cmd, bool skipBeautifiedOverlay)
+{
   // Select which buffer to tonemap based on user selection
   VkDescriptorImageInfo inputBuffer =
       m_resources.gBuffers.getColorSampleDescriptorImageInfo(Resources::eImgRendered, m_resources.linearSampler);
   VkExtent2D gbufSize         = m_resources.gBuffers.getSize();
   bool       usingGuideBuffer = false;
+  bool       bypassTonemapper = false;
+
+#ifdef USE_AGENTIC
+  if(!skipBeautifiedOverlay && m_resources.settings.displayBuffer == DisplayBuffer::eAgenticBeautified
+     && m_agentic.hasBeautifiedImage())
+  {
+    // Using beautified image as input buffer
+    inputBuffer      = m_agentic.beautifiedDescriptor();
+    bypassTonemapper = true;
+  }
+#endif
 
   // OptiX denoised output (path-tracer only). Routed via the global DisplayBuffer toggle the
   // OptiXDenoiser writes when the user clicks its thumbnail; behavior is unchanged.
@@ -1042,6 +1099,10 @@ void GltfRenderer::tonemap(VkCommandBuffer cmd)
   if((m_resources.settings.visualization != shaderio::Visualization::eRendered
       && m_resources.settings.visualization != shaderio::Visualization::eClay)
      || usingGuideBuffer)
+  {
+    tonemapperData.isActive = 0;
+  }
+  if(bypassTonemapper)
   {
     tonemapperData.isActive = 0;
   }
@@ -1981,6 +2042,11 @@ bool GltfRenderer::updateFrameCounter()
 // If the filename is empty, a default environment map (empty) is created, which allow the descriptor set to be updated
 void GltfRenderer::createHDR(const std::filesystem::path& hdrFilename)
 {
+  // Agentic HDRI reload can happen mid-frame (pollNow from renderUI). Wait until
+  // in-flight work finishes before tearing down env images the rasterizer/path
+  // tracer may still be sampling.
+  NVVK_CHECK(vkDeviceWaitIdle(m_device));
+
   VkCommandBuffer cmd{};
   nvvk::beginSingleTimeCommands(cmd, m_device, m_transientCmdPool);
   nvvk::StagingUploader uploader;
@@ -1989,7 +2055,12 @@ void GltfRenderer::createHDR(const std::filesystem::path& hdrFilename)
   // Load an HDR and create the important sampling acceleration structure
   std::filesystem::path filename;
   if(!hdrFilename.empty())
-    filename = nvutils::findFile(hdrFilename, nvsamples::getResourcesDirs(), false);
+  {
+    if(std::filesystem::exists(hdrFilename))
+      filename = hdrFilename;
+    else
+      filename = nvutils::findFile(hdrFilename, nvsamples::getResourcesDirs(), false);
+  }
   m_resources.hdrIbl.destroyEnvironment();
   m_resources.hdrIbl.loadEnvironment(cmd, uploader, filename, true);
 
@@ -2025,6 +2096,12 @@ void GltfRenderer::createHDR(const std::filesystem::path& hdrFilename)
 // This ensures proper synchronization and prevents use-after-free errors
 void GltfRenderer::destroyResources()
 {
+#ifdef USE_AGENTIC
+  // Free the beautified image + its ImGui texture first, while the allocator and
+  // ImGui backend are still alive and before the descriptor pool / layouts go.
+  m_agentic.deinit();
+#endif
+
   m_loadPipeline.destroy();
 
   m_resources.allocator.destroyBuffer(m_resources.bFrameInfo);

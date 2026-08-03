@@ -1,0 +1,53 @@
+{
+  "schema": "vk_gltf_renderer.agentic_bridge.prompts",
+  "schemaVersion": 1,
+  "_comment": "Ready-made prompts shown in the Agentic window's Presets dropdowns. Edit freely, or drop a copy of this file into the bridge root (<bridge>/prompts.json) to override per project. The first 'beautify' entry mirrors the app's default beautify prompt.",
+  "hdri": [
+    {
+      "name": "Sunset courtyard",
+      "prompt": "Professional HDRI environment map, 360 degree equirectangular spherical panorama, 2:1 aspect ratio, seamless horizontal wrap, full sky and ground, horizon centered, eye-level camera, realistic natural lighting, physically plausible shadows and reflections, high dynamic range lighting reference, clean uncluttered environment, no main subject, suitable for lighting 3D renders, natural color balance, detailed environment textures, photorealistic, sharp but not oversharpened. Open modern courtyard at sunset, concrete ground, glass buildings, warm low sun, soft long shadows, realistic sky, subtle clouds."
+    },
+    {
+      "name": "Overcast soft studio",
+      "prompt": "Professional HDRI environment map, 360 degree equirectangular spherical panorama, 2:1 aspect ratio, seamless horizontal wrap, horizon centered, eye-level, high dynamic range lighting reference, no main subject, suitable for lighting 3D renders. Soft overcast daylight, large even sky, gentle diffuse shadows, neutral white balance, calm minimal environment, subtle ground reflections, photorealistic."
+    },
+    {
+      "name": "Golden hour desert",
+      "prompt": "Professional HDRI environment map, 360 degree equirectangular spherical panorama, 2:1 aspect ratio, seamless horizontal wrap, horizon centered, eye-level, high dynamic range lighting reference, no main subject, suitable for lighting 3D renders. Wide open desert at golden hour, warm low sun near the horizon, long soft shadows, clear gradient sky, faint haze, sand and rock, photorealistic natural exposure."
+    },
+    {
+      "name": "Night city neon",
+      "prompt": "Professional HDRI environment map, 360 degree equirectangular spherical panorama, 2:1 aspect ratio, seamless horizontal wrap, horizon centered, eye-level, high dynamic range lighting reference, no main subject, suitable for lighting 3D renders. Night city street, wet asphalt, colorful neon signs and shop windows, mixed warm and cool light sources, strong reflections, deep shadows, photorealistic high dynamic range."
+    },
+    {
+      "name": "Indoor window light",
+      "prompt": "Professional HDRI environment map, 360 degree equirectangular spherical panorama, 2:1 aspect ratio, seamless horizontal wrap, horizon centered, eye-level, high dynamic range lighting reference, no main subject, suitable for lighting 3D renders. Bright interior room with large windows, soft directional daylight, neutral walls, gentle indoor bounce light, calm and clean, photorealistic natural exposure."
+    }
+  ],
+  "beautify": [
+    {
+      "name": "Photorealistic",
+      "prompt": "Photorealistic camera capture of the provided scene. Preserve the original render faithfully: same composition, camera angle, object identity, shapes, layout, lighting direction, colors, and materials. Enhance only realism and image quality: physically plausible lighting, natural exposure, realistic material micro-detail, subtle real-world imperfections, accurate reflections, soft contact shadows, natural contrast, balanced color grading, slight lens softness, subtle sensor grain, high-resolution real photograph, full-frame camera, reality."
+    },
+    {
+      "name": "Pencil sketch",
+      "prompt": "A hand-drawn pencil sketch of the provided scene. Preserve the composition, camera angle, object shapes, proportions, and layout. Confident graphite linework, light construction lines, subtle hatching and shading, soft paper texture, white sketchbook background, minimal color, elegant design drawing, high-quality presentation sketch."
+    },
+    {
+      "name": "Architectural blueprint",
+      "prompt": "An architectural blueprint of the provided scene. Preserve the composition, camera angle, object shapes, proportions, and layout. Clean perspective construction lines, fine white outlines on a blue background, technical drawing style, measured and precise, minimal shading, professional blueprint presentation."
+    },
+    {
+      "name": "Cartoon / anime",
+      "prompt": "A cartoon illustration of the provided scene in a clean Japanese anime style. Preserve the composition, camera angle, object shapes, proportions, and layout. Bold clean outlines, flat cel shading, bright saturated colors, simple stylized highlights and shadows, appealing and readable, not photorealistic."
+    },
+    {
+      "name": "Watercolor",
+      "prompt": "A watercolor painting of the provided scene. Preserve the composition, camera angle, object shapes, proportions, and layout. Soft translucent washes, visible paper texture, gentle color bleeds, loose expressive edges, light and airy, artistic and hand-painted."
+    },
+    {
+      "name": "Clay / toy model",
+      "prompt": "The provided scene rendered as a cute miniature clay / toy model. Preserve the composition, camera angle, object shapes, proportions, and layout. Soft matte clay materials, rounded edges, tiny handcrafted look, tilt-shift shallow depth of field, soft studio lighting, charming diorama."
+    }
+  ]
+}

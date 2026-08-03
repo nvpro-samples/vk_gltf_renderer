@@ -14,6 +14,7 @@ set(CMAKE_EXPORT_COMPILE_COMMANDS ON)
 option(NVPRO2_ENABLE_nvgl off)
 option(USE_DEFAULT_SCENE "Using a default scene at startup" OFF)
 option(REQUIRE_NVML_MONITOR "Fail configuration if NVML support is unavailable" OFF)
+option(USE_AGENTIC "Build the optional Agentic external-generation bridge (ComfyUI HDRI + beautify)" ON)
 
 # Path to glTF-Sample-Assets repository (for testing)
 # Optional. Set via -DGLTF_SAMPLE_ASSETS_PATH=..., environment variable GLTF_SAMPLE_ASSETS_PATH, or CMake GUI.
@@ -131,6 +132,12 @@ list(FILTER EXE_SOURCES EXCLUDE REGEX "dlss*")
 list(FILTER EXE_SOURCES EXCLUDE REGEX "vk_cuda*")
 list(FILTER EXE_SOURCES EXCLUDE REGEX "optix_denoiser*")
 
+# Optional Agentic bridge: exclude its sources (agentic*.cpp/.hpp, ui_agentic.cpp)
+# when the feature is off. The renderer guards its integration points on USE_AGENTIC.
+if(NOT USE_AGENTIC)
+  list(FILTER EXE_SOURCES EXCLUDE REGEX "agentic")
+endif()
+
 # source_group("Source Files" FILES ${EXE_SOURCES})
 
 # Add the executable
@@ -161,6 +168,10 @@ add_project_definitions(${PROJECT_NAME})
 # Add compile definition for USE_DEFAULT_SCENE option
 if(USE_DEFAULT_SCENE)
   target_compile_definitions(${PROJECT_NAME} PRIVATE USE_DEFAULT_SCENE)
+endif()
+
+if(USE_AGENTIC)
+  target_compile_definitions(${PROJECT_NAME} PRIVATE USE_AGENTIC)
 endif()
 
 # Include directory for generated files
@@ -381,6 +392,78 @@ copy_to_runtime_and_install(${PROJECT_NAME}
   LOCAL_DIRS "${CMAKE_CURRENT_LIST_DIR}/shaders" "${CMAKE_CURRENT_LIST_DIR}/resources"
   AUTO
 )
+
+#####################################################################################
+# Ship the optional Agentic bridge utilities (Python adapter + helper + workflows)
+# next to the executable. The renderer's Agentic Window resolves the adapter script
+# at runtime via <exe_dir>/utils/comfy_bridge/comfy_bridge.py so the "Adapter not
+# running" hint can display an exact, copy-pasteable command for the user.
+#
+# Build-time: POST_BUILD copy_if_different so dev runs from _bin/<config>/ work.
+# Install-time: install(FILES ...) into <prefix>/utils/... so packaged builds match.
+if(USE_AGENTIC)
+set(AGENTIC_UTILS_SRC "${CMAKE_CURRENT_LIST_DIR}/utils")
+file(GLOB AGENTIC_ADAPTER_FILES
+  CONFIGURE_DEPENDS
+  "${AGENTIC_UTILS_SRC}/comfy_bridge/*.py"
+  "${AGENTIC_UTILS_SRC}/comfy_bridge/*.md"
+  "${AGENTIC_UTILS_SRC}/comfy_bridge/*.json"  # prompts.json (Agentic prompt presets)
+)
+file(GLOB AGENTIC_WORKFLOW_FILES
+  CONFIGURE_DEPENDS
+  "${AGENTIC_UTILS_SRC}/comfy_bridge/workflows/*.json"
+)
+file(GLOB AGENTIC_ROOT_UTILS_FILES
+  CONFIGURE_DEPENDS
+  "${AGENTIC_UTILS_SRC}/png_to_hdr.py"
+)
+
+# Make the destination directories exist before per-file copy_if_different runs.
+add_custom_command(
+  TARGET ${PROJECT_NAME} POST_BUILD
+  COMMAND ${CMAKE_COMMAND} -E make_directory
+    "$<TARGET_FILE_DIR:${PROJECT_NAME}>/utils/comfy_bridge/workflows"
+  VERBATIM
+)
+foreach(_F IN LISTS AGENTIC_ADAPTER_FILES)
+  add_custom_command(
+    TARGET ${PROJECT_NAME} POST_BUILD
+    COMMAND ${CMAKE_COMMAND} -E copy_if_different
+      "${_F}" "$<TARGET_FILE_DIR:${PROJECT_NAME}>/utils/comfy_bridge/"
+    VERBATIM
+  )
+endforeach()
+foreach(_F IN LISTS AGENTIC_WORKFLOW_FILES)
+  add_custom_command(
+    TARGET ${PROJECT_NAME} POST_BUILD
+    COMMAND ${CMAKE_COMMAND} -E copy_if_different
+      "${_F}" "$<TARGET_FILE_DIR:${PROJECT_NAME}>/utils/comfy_bridge/workflows/"
+    VERBATIM
+  )
+endforeach()
+foreach(_F IN LISTS AGENTIC_ROOT_UTILS_FILES)
+  add_custom_command(
+    TARGET ${PROJECT_NAME} POST_BUILD
+    COMMAND ${CMAKE_COMMAND} -E copy_if_different
+      "${_F}" "$<TARGET_FILE_DIR:${PROJECT_NAME}>/utils/"
+    VERBATIM
+  )
+endforeach()
+
+install(FILES ${AGENTIC_ADAPTER_FILES}       DESTINATION "utils/comfy_bridge")
+install(FILES ${AGENTIC_WORKFLOW_FILES}      DESTINATION "utils/comfy_bridge/workflows")
+install(FILES ${AGENTIC_ROOT_UTILS_FILES}    DESTINATION "utils")
+
+# Surface the file lists in the IDE so they're easy to find and edit.
+source_group("Agentic Utils\\Adapter"   FILES ${AGENTIC_ADAPTER_FILES})
+source_group("Agentic Utils\\Workflows" FILES ${AGENTIC_WORKFLOW_FILES})
+source_group("Agentic Utils\\Helpers"   FILES ${AGENTIC_ROOT_UTILS_FILES})
+target_sources(${PROJECT_NAME} PRIVATE
+  ${AGENTIC_ADAPTER_FILES}
+  ${AGENTIC_WORKFLOW_FILES}
+  ${AGENTIC_ROOT_UTILS_FILES}
+)
+endif() # USE_AGENTIC
 
 # Add Windows resource file
 if(WIN32)
