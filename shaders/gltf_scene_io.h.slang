@@ -123,8 +123,9 @@ struct GltfTextureInfo
 #if MAT_EXT_TEXTURE_TRANSFORM
   float3x2 uvTransform = float3x2(1);  // KHR_texture_transform (24 bytes, 3x2 matrix)
 #endif
-  int index    = -1;  // 4 bytes
-  int texCoord = 0;   // 4 bytes
+  int     index        = -1;  // 4 bytes  glTF texture index -> images[] (eTextures)
+  int16_t texCoord     = 0;   // 2 bytes  texcoord set: 0 or 1
+  int16_t samplerIndex = 0;   // 2 bytes  resolved GPU sampler slot -> samplers[] (eSamplers); 0 = default sampler
 };
 
 /*-------------------------------------------------------------------------------------------------

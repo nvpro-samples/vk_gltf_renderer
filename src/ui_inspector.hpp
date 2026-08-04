@@ -31,15 +31,18 @@
  * - Light: Light properties
  */
 
+#include <filesystem>
 #include <functional>
 #include <memory>
 #include <string>
 #include <vector>
 
+#include <imgui.h>
 #include <glm/gtc/quaternion.hpp>
 #include <nvutils/bounding_box.hpp>
 
 #include "scene_selection.hpp"
+#include "ui_host_services.hpp"
 
 class UndoStack;
 
@@ -63,6 +66,17 @@ public:
   void setUndoStack(UndoStack* undoStack) { m_undoStack = undoStack; }
   void setBbox(nvutils::Bbox bbox) { m_bbox = bbox; }
 
+  // Host services shared with the scene browser: image file dialog, texture thumbnails, toasts. Without
+  // them the "Load from file" action, slot/picker thumbnails, and error toasts are unavailable.
+  void setHostServices(UiHostServices services) { m_host = std::move(services); }
+  // Open the large image viewer for a glTF image index (wired to the scene browser's viewer). Lets a
+  // click on a slot's thumbnail show the full-size image. No-op when unset.
+  void setViewImageCallback(std::function<void(int)> cb) { m_onViewImage = std::move(cb); }
+
+  // Rebuild the cached texture-name list from the current model. Call after the texture set changes
+  // outside the inspector (e.g. undo/redo of an import).
+  void refreshTextureNames();
+
   void render(bool* show = nullptr, bool isBusy = false);
 
 private:
@@ -83,6 +97,27 @@ private:
   void renderTransformSection(int nodeIdx);
   void renderMaterialSection(int matIdx, bool allowEdit = true);
   void renderMaterialAssignmentToolbar(int meshIdx, int primIdx, int nodeIdx, int matIdx);
+
+  // One editable texture slot: name + actions (assign existing / load from file / clear). Returns true
+  // when the slot's texture index changed (assign / switch / clear / import), so the caller writes back
+  // copy-based rows and records the undo step.
+  template <typename T>
+  bool renderTextureEditRow(const char* label, T& info);
+
+  // Renders the "SwitchTexture" modal (filterable list/grid picker of existing textures). Returns true
+  // when a selection is committed into info via OK. Must be called within the slot's ImGui ID scope.
+  template <typename T>
+  bool renderTexturePicker(T& info, bool hasTexture);
+
+  // "Load from file" action for a slot: opens the file dialog, imports the image as a new texture, and
+  // assigns it to info. Returns true if a texture was imported (a normal material change for the caller).
+  template <typename T>
+  bool importTextureIntoSlot(T& info);
+
+  // Per-binding KHR_texture_transform editor: a small button in the slot that opens an add/edit/remove
+  // popup. Edited on the material's texture reference (not the shared texture). Returns true on change.
+  template <typename T>
+  bool renderTextureTransformButton(T& info);
 
   //==================================================================================================
   // OPERATIONS (buttons/actions)
@@ -127,6 +162,10 @@ private:
   SceneSelection*  m_selection = nullptr;
   UndoStack*       m_undoStack = nullptr;
   nvutils::Bbox    m_bbox;
+
+  // Renderer-provided host services (file dialog, thumbnails, toasts) shared with the scene browser.
+  UiHostServices           m_host;
+  std::function<void(int)> m_onViewImage;  // open the large image viewer for an image index
 
   // Cached texture names (for material dropdowns)
   std::vector<std::string> m_textureNames;

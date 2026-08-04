@@ -396,6 +396,10 @@ auto main(int argc, char** argv) -> int
   appInfo.physicalDevice = vkContext.getPhysicalDevice();
   appInfo.queues         = vkContext.getQueueInfos();
   appInfo.useMenu        = !benchmarkOptions.enabled;
+  // ImGui descriptor pool: default 128 is too small once the inspector/scene-browser show live
+  // texture thumbnails (one descriptor per on-screen thumbnail, bounded by ThumbnailCache). Raise
+  // it to leave ample headroom above the viewport/denoiser images the app already registers.
+  appInfo.texturePoolSize = 1024U;
 
   // Setting up the layout of the application
   appInfo.dockSetup = [](ImGuiID viewportID) {

@@ -47,7 +47,8 @@
 // Bindings
 // clang-format off
 [[vk::push_constant]]                                       ConstantBuffer<RasterPushConstant>  pushConst;
-[[vk::binding(BindingPoints::eTextures, 0)]]                Sampler2D                           allTextures[];
+[[vk::binding(BindingPoints::eTextures, 0)]]                Texture2D                           allImages[];
+[[vk::binding(BindingPoints::eSamplers, 0)]]                SamplerState                        allSamplers[];
 [[vk::binding(BindingPoints::eTexturesHdr, 0)]]             Sampler2D                           texturesHdr[];
 [[vk::binding(BindingPoints::eTexturesCube, 0)]]            SamplerCube                         texturesCube[];
 // clang-format on
@@ -321,7 +322,7 @@ PixelOutput fragmentMain(VertexOutput input, uint primitiveID: SV_PrimitiveID, f
   // Evaluate the material at the hit point
   MeshState mesh          = MeshState(hit.nrm, hit.tangent, hit.bitangent, hit.geonrm, hit.uv, false, 0.0f);
   mesh.baseColorVertexMul = hit.color;
-  PbrMaterial pbrMat      = evaluateMaterial(material, mesh, allTextures, pushConst.gltfScene->textureInfos);
+  PbrMaterial pbrMat      = evaluateMaterial(material, mesh, allImages, allSamplers, pushConst.gltfScene->textureInfos);
 
   output.color.xyz = pbrMat.baseColor;
   output.color.a   = pbrMat.opacity * (1.0 - pbrMat.transmission);

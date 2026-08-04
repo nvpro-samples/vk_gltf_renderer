@@ -328,6 +328,18 @@ void GltfRenderer::loadHdrFileDialog()
   }
 }
 
+// Image picker for the inspector's "Load from file" texture action (see UiInspector import hooks).
+std::filesystem::path GltfRenderer::pickImageFile()
+{
+  const std::filesystem::path filename =
+      nvgui::windowOpenFileDialog(m_app->getWindowHandle(), "Load Texture Image",
+                                  "Images|*.png;*.jpg;*.jpeg;*.ktx;*.ktx2;*.dds;*.webp;*.tga;*.bmp;*.hdr;*.exr",
+                                  m_lastImageDirectory);
+  if(!filename.empty())
+    m_lastImageDirectory = filename.parent_path();
+  return filename;
+}
+
 void GltfRenderer::renderBenchmarkViewport()
 {
   // GPU rendering runs in onRender(); the swapchain only shows content when ImGui draws
@@ -421,6 +433,9 @@ void GltfRenderer::renderUI()
       // hidden/collapsed (e.g. triggered from the menu-bar "Create"). requestAddPrimitive() remains
       // the trigger; this just renders the pending modal.
       m_sceneBrowser.showAddPrimitivePopup();
+      // Same rationale for the image viewer: it can be opened from the inspector (thumbnail click), so
+      // render it here rather than inside the Scene Browser's tab body.
+      m_sceneBrowser.showImageViewer();
     }
 
 #ifdef USE_AGENTIC

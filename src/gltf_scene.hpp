@@ -484,13 +484,14 @@ public:
 
   struct DirtyFlags
   {
-    std::unordered_set<int> renderNodesVk;                       // RenderNode indices for SceneVk
-    std::unordered_set<int> renderNodesRtx;                      // RenderNode indices for SceneRTX
-    std::unordered_set<int> materials;                           // Material indices
-    std::unordered_set<int> lights;                              // Light indices (glTF light array)
-    std::unordered_set<int> nodes;                               // Node indices (for transform updates)
-    bool                    allRenderNodesDirty        = false;  // Full RN upload (count change or massive reorder)
-    bool                    primitivesChanged          = false;  // BLAS rebuild needed (primitive set changed)
+    std::unordered_set<int> renderNodesVk;                // RenderNode indices for SceneVk
+    std::unordered_set<int> renderNodesRtx;               // RenderNode indices for SceneRTX
+    std::unordered_set<int> materials;                    // Material indices
+    std::unordered_set<int> lights;                       // Light indices (glTF light array)
+    std::unordered_set<int> nodes;                        // Node indices (for transform updates)
+    bool                    allRenderNodesDirty = false;  // Full RN upload (count change or massive reorder)
+    bool                    primitivesChanged   = false;  // BLAS rebuild needed (primitive set changed)
+    bool                    texturesChanged     = false;  // Full texture rebuild needed (image/texture set changed)
     bool                    tlasVisibilityNeedsCpuSync = false;  // KHR_node_visibility: SceneEditor::updateVisibility
 
     void clear()
@@ -502,13 +503,14 @@ public:
       nodes.clear();
       allRenderNodesDirty        = false;
       primitivesChanged          = false;
+      texturesChanged            = false;
       tlasVisibilityNeedsCpuSync = false;
     }
 
     [[nodiscard]] bool isEmpty() const
     {
       return renderNodesVk.empty() && renderNodesRtx.empty() && materials.empty() && lights.empty() && nodes.empty()
-             && !allRenderNodesDirty && !primitivesChanged && !tlasVisibilityNeedsCpuSync;
+             && !allRenderNodesDirty && !primitivesChanged && !texturesChanged && !tlasVisibilityNeedsCpuSync;
     }
   };
 

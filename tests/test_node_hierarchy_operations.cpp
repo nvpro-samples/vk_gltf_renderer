@@ -24,7 +24,7 @@
 #include <filesystem>
 #include <map>
 #include <set>
-#include <fmt/core.h>
+#include <fmt/format.h>
 
 using namespace gltf_test;
 

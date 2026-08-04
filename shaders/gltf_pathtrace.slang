@@ -59,7 +59,8 @@ static bool doDebug = false;
 
 // Bindings
 [[vk::push_constant]]                           ConstantBuffer<PathtracePushConstant> pushConst;
-[[vk::binding(BindingPoints::eTextures, 0)]]    Sampler2D allTextures[];
+[[vk::binding(BindingPoints::eTextures, 0)]]    Texture2D allImages[];
+[[vk::binding(BindingPoints::eSamplers, 0)]]    SamplerState allSamplers[];
 [[vk::binding(BindingPoints::eTexturesHdr, 0)]] Sampler2D texturesHdr[];
 [[vk::binding(BindingPoints::eTlas, 1)]]        RaytracingAccelerationStructure topLevelAS;
 [[vk::binding(BindingPoints::eOutImages, 1)]]   RWTexture2D<float4> outImages[];
@@ -196,7 +197,7 @@ PathStepResult pathTraceOneBounce(IRaytracer raytracer, inout RayDesc ray, inout
       float     texGrad = worldFoot * hit.texelDensity * pushConst.texGradScale;
       MeshState mesh    = MeshState(hit.nrm, hit.tangent, hit.bitangent, hit.geonrm, hit.uv, ptIsInside(pt), texGrad);
       mesh.baseColorVertexMul = hit.color;
-      pbrMat                  = evaluateMaterial(materialIndex, mesh, allTextures, texInfos, materials);
+      pbrMat                  = evaluateMaterial(materialIndex, mesh, allImages, allSamplers, texInfos, materials);
 
 #if WIREFRAME
       // Wireframe is only used for the camera-visible surface, so compute it once here on the

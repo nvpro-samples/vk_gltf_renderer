@@ -32,9 +32,9 @@ Adjust paths if your install differs:
 2. Run `update\update_comfyui_and_python_dependencies.bat` once.
 3. Start `run_nvidia_gpu.bat` — browser should open `http://127.0.0.1:8188`. Leave ComfyUI running.
 
-![ComfyUI on first launch](comfyui_first_launch.png)
+![ComfyUI on first launch](images/comfyui_first_launch.png)
 
-Create under `ComfyUI\models\` if missing: `checkpoints\`, `diffusion_models\`, `text_encoders\`, `vae\`.
+Create under `ComfyUI\models\` if missing: `diffusion_models\`, `text_encoders\`, `vae\` — the three folders the workflow loaders read from.
 
 ---
 
@@ -100,7 +100,9 @@ You need **three** processes:
 | B | Renderer | `vk_gltf_renderer.exe` → **Agentic** window (F7). It shows two lights, **Bridge** and **ComfyUI**; generation enables once both are green. (Bridge folder / polling live under **Advanced**.) |
 | C | Adapter | Second terminal (command below) |
 
-**Adapter** (from repo root; match Debug/Release bridge path):
+**Start the adapter (step C).** In the **Agentic** window (F7), click **Copy start command** — it fills in *your* paths — then paste and run it in a second terminal. Prefer this over typing paths by hand.
+
+Only if that button is unavailable, adapt the template below: replace every `D:\…` path with yours, and match your build (`_bin\Release` or `_bin\Debug`).
 
 ```bat
 cd /d D:\src\nvpro-samples\vk_gltf_renderer
@@ -111,9 +113,22 @@ python utils\comfy_bridge\comfy_bridge.py ^
   --converter-python "D:\tools\ComfyUI_windows_portable\python_embeded\python.exe"
 ```
 
-The Agentic window can **Copy command** with your paths. Status dot: **green** = adapter OK, **red** = start step C.
+Status dot: **green** = adapter OK, **red** = start step C.
 
 Workflow JSON is copied next to the exe on build (`utils\comfy_bridge\workflows\`).
+
+### Verify before you generate
+
+Confirm each piece before the first (slow) generation:
+
+| Check | How |
+|-------|-----|
+| ComfyUI up | Browser opens `http://127.0.0.1:8188`, or `curl http://127.0.0.1:8188/system_stats` returns JSON |
+| Models in place | Every file from §2 sits in the exact folder (`diffusion_models\` / `text_encoders\` / `vae\`); press **R** in ComfyUI after adding files |
+| Adapter running | The second terminal shows `comfy_bridge.py` polling, with no traceback |
+| Both lights green | **Bridge** and **ComfyUI** in the **Agentic** window (F7) are green — generation enables only then |
+
+Any red? See [Troubleshooting](#troubleshooting).
 
 ---
 

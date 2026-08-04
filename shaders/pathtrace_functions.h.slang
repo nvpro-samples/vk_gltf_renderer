@@ -207,7 +207,7 @@ float getOpacity(GltfRenderNode renderNode, GltfRenderPrimitive renderPrim, int 
     {
       GltfTextureInfo texInfo = texInfos[mat.pbrDiffuseTexture];
       float2          uv = getInterpolatedVertexTexCoord(renderPrim, texInfo.texCoord, triangleIndex, barycentrics);
-      baseColorAlpha *= allTextures[texInfo.index].SampleLevel(uv, 0.0f).a;
+      baseColorAlpha *= allImages[texInfo.index].SampleLevel(allSamplers[texInfo.samplerIndex], uv, 0.0f).a;
     }
   }
   else
@@ -219,7 +219,7 @@ float getOpacity(GltfRenderNode renderNode, GltfRenderPrimitive renderPrim, int 
       GltfTextureInfo texInfo = texInfos[mat.pbrBaseColorTexture];
       float2          uv = getInterpolatedVertexTexCoord(renderPrim, texInfo.texCoord, triangleIndex, barycentrics);
 
-      baseColorAlpha *= allTextures[texInfo.index].SampleLevel(uv, 0.0f).a;
+      baseColorAlpha *= allImages[texInfo.index].SampleLevel(allSamplers[texInfo.samplerIndex], uv, 0.0f).a;
     }
   }
 
@@ -326,7 +326,7 @@ float3 getShadowTransmission(GltfRenderNode      renderNode,
       GltfTextureInfo texInfo = texInfos[mat.pbrMetallicRoughnessTexture];
       float2          uv      = getInterpolatedVertexTexCoord(renderPrim, texInfo.texCoord, indices, barycentrics);
 
-      float4 mr_sample = allTextures[texInfo.index].SampleLevel(uv, 0.0f);
+      float4 mr_sample = allImages[texInfo.index].SampleLevel(allSamplers[texInfo.samplerIndex], uv, 0.0f);
       roughness *= mr_sample.g;
       metallic *= mr_sample.b;
     }
@@ -734,7 +734,7 @@ float3 dlssGetClearGlassGuideAlbedo(IRaytracer      raytracer,
       guideMat.pbrBaseColorFactor *= guideHit.color;
       MeshState guideMesh =
           MeshState(guideHit.nrm, guideHit.tangent, guideHit.bitangent, guideHit.geonrm, guideHit.uv, isInside, 0.0f);
-      PbrMaterial guidePbrMat = evaluateMaterial(guideMat, guideMesh, allTextures, texInfos);
+      PbrMaterial guidePbrMat = evaluateMaterial(guideMat, guideMesh, allImages, allSamplers, texInfos);
       bgAlbedo                = guidePbrMat.baseColor.xyz;
     }
   }

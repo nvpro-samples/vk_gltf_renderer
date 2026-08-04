@@ -73,10 +73,13 @@ struct MeshState
 #define USE_TEXTURES
 #endif
 
-float4 getTexture(Sampler2D textures[], in GltfTextureInfo textureInfo, in float2 texCoords[2], float texGrad)
+float4 getTexture(Texture2D images[], SamplerState samplers[], in GltfTextureInfo textureInfo, in float2 texCoords[2], float texGrad)
 {
 #ifdef USE_TEXTURES
-  float2 tt = texCoords[textureInfo.texCoord];
+  // Images and samplers are now separate bindless arrays (see GltfTextureInfo.index / samplerIndex).
+  Texture2D    tex     = images[textureInfo.index];
+  SamplerState sampler = samplers[textureInfo.samplerIndex];
+  float2       tt      = texCoords[textureInfo.texCoord];
 #if GLTF_USE_TEXTURE_TRANSFORM
   // KHR_texture_transform
   tt = mul(float3(tt, 1), textureInfo.uvTransform).xy;
@@ -86,11 +89,11 @@ float4 getTexture(Sampler2D textures[], in GltfTextureInfo textureInfo, in float
 #if GLTF_USE_TEXTURE_TRANSFORM
     float2 ddx_uv = textureInfo.uvTransform[0] * texGrad;
     float2 ddy_uv = textureInfo.uvTransform[1] * texGrad;
-    return textures[textureInfo.index].SampleGrad(tt, ddx_uv, ddy_uv);
+    return tex.SampleGrad(sampler, tt, ddx_uv, ddy_uv);
 #else
     float2 ddx_uv = float2(texGrad, 0.0f);
     float2 ddy_uv = float2(0.0f, texGrad);
-    return textures[textureInfo.index].SampleGrad(tt, ddx_uv, ddy_uv);
+    return tex.SampleGrad(sampler, tt, ddx_uv, ddy_uv);
 #endif
   }
   // texGrad == 0 means "use the sharpest mip". In a fragment shader (RASTER_PIPELINE) the
@@ -100,9 +103,9 @@ float4 getTexture(Sampler2D textures[], in GltfTextureInfo textureInfo, in float
   // geometry silhouettes/discontinuities, snapping to the coarsest mip and flattening the
   // texture to its average (~base color). Force explicit mip 0 there so both RT paths match.
 #ifdef RASTER_PIPELINE
-  return textures[textureInfo.index].Sample(tt);
+  return tex.Sample(sampler, tt);
 #else
-  return textures[textureInfo.index].SampleLevel(tt, 0.0f);
+  return tex.SampleLevel(sampler, tt, 0.0f);
 #endif
 #else
   return float4(1.0F);
@@ -165,7 +168,7 @@ float3 convertSGToMR(float3 diffuseColor, float3 specularColor, float glossiness
 # Function `evaluateMaterial`
 > From the incoming `material` and `mesh` info, return a `PbrMaterial` struct for the BSDF system.
 -------------------------------------------------------------------------------------------------*/
-PbrMaterial evaluateMaterial(in GltfShadeMaterial material, MeshState state, Sampler2D textures[], GltfTextureInfo* texInfos)
+PbrMaterial evaluateMaterial(in GltfShadeMaterial material, MeshState state, Texture2D images[], SamplerState samplers[], GltfTextureInfo* texInfos)
 {
   // Start from a fully-initialized material so that gating out any extension with MAT_EXT_*
   // cannot leave downstream BSDF reads undefined.
@@ -181,13 +184,13 @@ PbrMaterial evaluateMaterial(in GltfShadeMaterial material, MeshState state, Sam
 
     if(isTexturePresent(material.pbrDiffuseTexture))
     {
-      diffuse *= getTexture(textures, texInfos[material.pbrDiffuseTexture], state.tc, state.texGrad);
+      diffuse *= getTexture(images, samplers, texInfos[material.pbrDiffuseTexture], state.tc, state.texGrad);
     }
 
     if(isTexturePresent(material.pbrSpecularGlossinessTexture))
     {
       float4 specularGlossinessSample =
-          getTexture(textures, texInfos[material.pbrSpecularGlossinessTexture], state.tc, state.texGrad);
+          getTexture(images, samplers, texInfos[material.pbrSpecularGlossinessTexture], state.tc, state.texGrad);
       specular *= specularGlossinessSample.rgb;
       glossiness *= specularGlossinessSample.a;
     }
@@ -202,7 +205,7 @@ PbrMaterial evaluateMaterial(in GltfShadeMaterial material, MeshState state, Sam
     float4 baseColor = material.pbrBaseColorFactor * state.baseColorVertexMul;
     if(isTexturePresent(material.pbrBaseColorTexture))
     {
-      baseColor *= getTexture(textures, texInfos[material.pbrBaseColorTexture], state.tc, state.texGrad);
+      baseColor *= getTexture(images, samplers, texInfos[material.pbrBaseColorTexture], state.tc, state.texGrad);
     }
     pbrMat.baseColor = baseColor.rgb;
     pbrMat.opacity   = baseColor.a;
@@ -212,7 +215,7 @@ PbrMaterial evaluateMaterial(in GltfShadeMaterial material, MeshState state, Sam
     if(isTexturePresent(material.pbrMetallicRoughnessTexture))
     {
       float4 metallicRoughnessSample =
-          getTexture(textures, texInfos[material.pbrMetallicRoughnessTexture], state.tc, state.texGrad);
+          getTexture(images, samplers, texInfos[material.pbrMetallicRoughnessTexture], state.tc, state.texGrad);
       roughness *= metallicRoughnessSample.g;
       metallic *= metallicRoughnessSample.b;
     }
@@ -224,7 +227,7 @@ PbrMaterial evaluateMaterial(in GltfShadeMaterial material, MeshState state, Sam
   pbrMat.occlusion = material.occlusionStrength;
   if(isTexturePresent(material.occlusionTexture))
   {
-    float occlusion  = getTexture(textures, texInfos[material.occlusionTexture], state.tc, state.texGrad).r;
+    float occlusion  = getTexture(images, samplers, texInfos[material.occlusionTexture], state.tc, state.texGrad).r;
     pbrMat.occlusion = 1.0 + pbrMat.occlusion * (occlusion - 1.0);
   }
 
@@ -237,7 +240,7 @@ PbrMaterial evaluateMaterial(in GltfShadeMaterial material, MeshState state, Sam
 
   if(isTexturePresent(material.normalTexture))
   {
-    float3 normal_vector = getTexture(textures, texInfos[material.normalTexture], state.tc, state.texGrad).xyz;
+    float3 normal_vector = getTexture(images, samplers, texInfos[material.normalTexture], state.tc, state.texGrad).xyz;
     normal_vector        = normal_vector * 2.0F - 1.0F;
     normal_vector *= float3(material.normalTextureScale, material.normalTextureScale, 1.0F);
     float3x3 tbn       = float3x3(state.T, state.B, state.N);
@@ -249,7 +252,7 @@ PbrMaterial evaluateMaterial(in GltfShadeMaterial material, MeshState state, Sam
   pbrMat.emissive = material.emissiveFactor;
   if(isTexturePresent(material.emissiveTexture))
   {
-    pbrMat.emissive *= getTexture(textures, texInfos[material.emissiveTexture], state.tc, state.texGrad).rgb;
+    pbrMat.emissive *= getTexture(images, samplers, texInfos[material.emissiveTexture], state.tc, state.texGrad).rgb;
   }
   pbrMat.emissive = max(float3(0.0F), pbrMat.emissive);
 
@@ -264,7 +267,7 @@ PbrMaterial evaluateMaterial(in GltfShadeMaterial material, MeshState state, Sam
   if(isTexturePresent(material.thicknessTexture))
   {
     // KHR_materials_volume spec: per-fragment thickness = thicknessFactor * thicknessTexture.g.
-    pbrMat.thickness *= getTexture(textures, texInfos[material.thicknessTexture], state.tc, state.texGrad).g;
+    pbrMat.thickness *= getTexture(images, samplers, texInfos[material.thicknessTexture], state.tc, state.texGrad).g;
   }
 #endif
 
@@ -274,13 +277,14 @@ PbrMaterial evaluateMaterial(in GltfShadeMaterial material, MeshState state, Sam
   pbrMat.specularColor = material.specularColorFactor;
   if(isTexturePresent(material.specularColorTexture))
   {
-    pbrMat.specularColor *= getTexture(textures, texInfos[material.specularColorTexture], state.tc, state.texGrad).rgb;
+    pbrMat.specularColor *=
+        getTexture(images, samplers, texInfos[material.specularColorTexture], state.tc, state.texGrad).rgb;
   }
 
   pbrMat.specular = material.specularFactor;
   if(isTexturePresent(material.specularTexture))
   {
-    pbrMat.specular *= getTexture(textures, texInfos[material.specularTexture], state.tc, state.texGrad).a;
+    pbrMat.specular *= getTexture(images, samplers, texInfos[material.specularTexture], state.tc, state.texGrad).a;
   }
 #endif
 
@@ -306,7 +310,7 @@ PbrMaterial evaluateMaterial(in GltfShadeMaterial material, MeshState state, Sam
   pbrMat.transmission = material.transmissionFactor;
   if(isTexturePresent(material.transmissionTexture))
   {
-    pbrMat.transmission *= getTexture(textures, texInfos[material.transmissionTexture], state.tc, state.texGrad).r;
+    pbrMat.transmission *= getTexture(images, samplers, texInfos[material.transmissionTexture], state.tc, state.texGrad).r;
   }
 #endif
 
@@ -329,19 +333,20 @@ PbrMaterial evaluateMaterial(in GltfShadeMaterial material, MeshState state, Sam
   pbrMat.Nc                 = pbrMat.N;
   if(isTexturePresent(material.clearcoatTexture))
   {
-    pbrMat.clearcoat *= getTexture(textures, texInfos[material.clearcoatTexture], state.tc, state.texGrad).r;
+    pbrMat.clearcoat *= getTexture(images, samplers, texInfos[material.clearcoatTexture], state.tc, state.texGrad).r;
   }
   if(isTexturePresent(material.clearcoatRoughnessTexture))
   {
     pbrMat.clearcoatRoughness *=
-        getTexture(textures, texInfos[material.clearcoatRoughnessTexture], state.tc, state.texGrad).g;
+        getTexture(images, samplers, texInfos[material.clearcoatRoughnessTexture], state.tc, state.texGrad).g;
   }
   if(isTexturePresent(material.clearcoatNormalTexture))
   {
-    float3x3 tbn         = float3x3(pbrMat.T, pbrMat.B, pbrMat.Nc);
-    float3 normal_vector = getTexture(textures, texInfos[material.clearcoatNormalTexture], state.tc, state.texGrad).xyz;
-    normal_vector        = normal_vector * 2.0F - 1.0F;
-    pbrMat.Nc            = normalize(mul(normal_vector, tbn));
+    float3x3 tbn = float3x3(pbrMat.T, pbrMat.B, pbrMat.Nc);
+    float3   normal_vector =
+        getTexture(images, samplers, texInfos[material.clearcoatNormalTexture], state.tc, state.texGrad).xyz;
+    normal_vector = normal_vector * 2.0F - 1.0F;
+    pbrMat.Nc     = normalize(mul(normal_vector, tbn));
   }
   pbrMat.clearcoatRoughness = max(pbrMat.clearcoatRoughness, 0.001F);
 #endif
@@ -353,11 +358,12 @@ PbrMaterial evaluateMaterial(in GltfShadeMaterial material, MeshState state, Sam
   pbrMat.iridescenceIor      = material.iridescenceIor;
   if(isTexturePresent(material.iridescenceTexture))
   {
-    iridescence *= getTexture(textures, texInfos[material.iridescenceTexture], state.tc, state.texGrad).x;
+    iridescence *= getTexture(images, samplers, texInfos[material.iridescenceTexture], state.tc, state.texGrad).x;
   }
   if(isTexturePresent(material.iridescenceThicknessTexture))
   {
-    const float t = getTexture(textures, texInfos[material.iridescenceThicknessTexture], state.tc, state.texGrad).y;
+    const float t =
+        getTexture(images, samplers, texInfos[material.iridescenceThicknessTexture], state.tc, state.texGrad).y;
     iridescenceThickness = lerp(material.iridescenceThicknessMinimum, material.iridescenceThicknessMaximum, t);
   }
   pbrMat.iridescence          = (iridescenceThickness > 0.0f) ? iridescence : 0.0f;
@@ -373,7 +379,7 @@ PbrMaterial evaluateMaterial(in GltfShadeMaterial material, MeshState state, Sam
     float2 anisotropyDirection = float2(1.0f, 0.0f);  // By default the anisotropy strength is along the tangent.
     if(isTexturePresent(material.anisotropyTexture))
     {
-      const float4 anisotropyTex = getTexture(textures, texInfos[material.anisotropyTexture], state.tc, state.texGrad);
+      const float4 anisotropyTex = getTexture(images, samplers, texInfos[material.anisotropyTexture], state.tc, state.texGrad);
       // .xy encodes the direction in (tangent, bitangent) space. Remap from [0, 1] to [-1, 1].
       anisotropyDirection = normalize(float2(anisotropyTex.xy) * 2.0f - 1.0f);
       // .z encodes the strength in range [0, 1].
@@ -412,13 +418,15 @@ PbrMaterial evaluateMaterial(in GltfShadeMaterial material, MeshState state, Sam
   if(isTexturePresent(material.sheenColorTexture))
   {
     // sRGB texture
-    pbrMat.sheenColor *= float3(getTexture(textures, texInfos[material.sheenColorTexture], state.tc, state.texGrad).xyz);
+    pbrMat.sheenColor *=
+        float3(getTexture(images, samplers, texInfos[material.sheenColorTexture], state.tc, state.texGrad).xyz);
   }
 
   pbrMat.sheenRoughness = material.sheenRoughnessFactor;
   if(isTexturePresent(material.sheenRoughnessTexture))
   {
-    pbrMat.sheenRoughness *= getTexture(textures, texInfos[material.sheenRoughnessTexture], state.tc, state.texGrad).w;
+    pbrMat.sheenRoughness *=
+        getTexture(images, samplers, texInfos[material.sheenRoughnessTexture], state.tc, state.texGrad).w;
   }
   pbrMat.sheenRoughness = max(MICROFACET_MIN_ROUGHNESS, pbrMat.sheenRoughness);
 #endif
@@ -434,13 +442,13 @@ PbrMaterial evaluateMaterial(in GltfShadeMaterial material, MeshState state, Sam
   if(isTexturePresent(material.diffuseTransmissionTexture))
   {
     pbrMat.diffuseTransmissionFactor *=
-        getTexture(textures, texInfos[material.diffuseTransmissionTexture], state.tc, state.texGrad).a;
+        getTexture(images, samplers, texInfos[material.diffuseTransmissionTexture], state.tc, state.texGrad).a;
   }
   pbrMat.diffuseTransmissionColor = material.diffuseTransmissionColor;
   if(isTexturePresent(material.diffuseTransmissionColorTexture))
   {
     pbrMat.diffuseTransmissionColor *=
-        getTexture(textures, texInfos[material.diffuseTransmissionColorTexture], state.tc, state.texGrad).rgb;
+        getTexture(images, samplers, texInfos[material.diffuseTransmissionColorTexture], state.tc, state.texGrad).rgb;
   }
 #endif
 
@@ -449,16 +457,17 @@ PbrMaterial evaluateMaterial(in GltfShadeMaterial material, MeshState state, Sam
   pbrMat.retroreflection = material.retroreflectionFactor;
   if(isTexturePresent(material.retroreflectionTexture))
   {
-    pbrMat.retroreflection *= getTexture(textures, texInfos[material.retroreflectionTexture], state.tc, state.texGrad).r;
+    pbrMat.retroreflection *=
+        getTexture(images, samplers, texInfos[material.retroreflectionTexture], state.tc, state.texGrad).r;
   }
 #endif
 
   return pbrMat;
 }
 
-PbrMaterial evaluateMaterial(uint materialIndex, MeshState state, Sampler2D textures[], GltfTextureInfo* texInfos, GltfShadeMaterial* materials)
+PbrMaterial evaluateMaterial(uint materialIndex, MeshState state, Texture2D images[], SamplerState samplers[], GltfTextureInfo* texInfos, GltfShadeMaterial* materials)
 {
-  return evaluateMaterial(materials[materialIndex], state, textures, texInfos);
+  return evaluateMaterial(materials[materialIndex], state, images, samplers, texInfos);
 }
 
 

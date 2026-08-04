@@ -26,7 +26,7 @@ TEST(MaterialCache, BuildFromEmptyMaterials)
 {
   nvvkgltf::MaterialCache         cache;
   std::vector<tinygltf::Material> materials;
-  cache.buildFromMaterials(materials);
+  cache.buildFromMaterials(materials, {});
 
   EXPECT_TRUE(cache.getShadeMaterials().empty());
   EXPECT_EQ(cache.getTextureInfos().size(), 1u);  // Sentinel entry at index 0
@@ -44,7 +44,7 @@ TEST(MaterialCache, BuildFromSingleOpaqueMaterial)
   mat.pbrMetallicRoughness.roughnessFactor = 0.8;
 
   std::vector<tinygltf::Material> materials = {mat};
-  cache.buildFromMaterials(materials);
+  cache.buildFromMaterials(materials, {});
 
   ASSERT_EQ(cache.getShadeMaterials().size(), 1u);
 
@@ -69,7 +69,7 @@ TEST(MaterialCache, BuildFromMaskAndBlendAlphaModes)
   blendMat.alphaMode = "BLEND";
 
   std::vector<tinygltf::Material> materials = {maskMat, blendMat};
-  cache.buildFromMaterials(materials);
+  cache.buildFromMaterials(materials, {});
 
   ASSERT_EQ(cache.getShadeMaterials().size(), 2u);
   EXPECT_EQ(cache.getShadeMaterials()[0].alphaMode, 1);  // MASK
@@ -86,13 +86,34 @@ TEST(MaterialCache, BuildWithBaseColorTexture)
   mat.pbrMetallicRoughness.baseColorTexture.texCoord = 0;
 
   std::vector<tinygltf::Material> materials = {mat};
-  cache.buildFromMaterials(materials);
+  cache.buildFromMaterials(materials, {});
 
   ASSERT_EQ(cache.getShadeMaterials().size(), 1u);
   // Texture index > 0 means a texture info was added
   EXPECT_GT(cache.getShadeMaterials()[0].pbrBaseColorTexture, 0u);
   // Sentinel + at least one real texture info
   EXPECT_GE(cache.getTextureInfos().size(), 2u);
+}
+
+TEST(MaterialCache, BuildResolvesSamplerIndexFromSlots)
+{
+  nvvkgltf::MaterialCache cache;
+
+  tinygltf::Material mat;
+  mat.pbrMetallicRoughness.baseColorTexture.index = 1;  // references glTF texture 1
+
+  std::vector<tinygltf::Material> materials = {mat};
+  // Per-texture sampler slots: texture 0 -> default (0), texture 1 -> a non-default sampler (3).
+  const std::vector<int> textureSamplerSlots = {0, 3};
+  cache.buildFromMaterials(materials, textureSamplerSlots);
+
+  ASSERT_EQ(cache.getShadeMaterials().size(), 1u);
+  const uint32_t infoSlot = cache.getShadeMaterials()[0].pbrBaseColorTexture;
+  ASSERT_GT(infoSlot, 0u);  // 0 is the sentinel
+  ASSERT_LT(infoSlot, cache.getTextureInfos().size());
+  const auto& info = cache.getTextureInfos()[infoSlot];
+  EXPECT_EQ(info.index, 1);
+  EXPECT_EQ(static_cast<int>(info.samplerIndex), 3);  // propagated from textureSamplerSlots[1]
 }
 
 TEST(MaterialCache, UpdateMaterialInPlace)
@@ -105,11 +126,11 @@ TEST(MaterialCache, UpdateMaterialInPlace)
   mat.pbrMetallicRoughness.baseColorTexture.index = 0;
 
   std::vector<tinygltf::Material> materials = {mat};
-  cache.buildFromMaterials(materials);
+  cache.buildFromMaterials(materials, {});
 
   // Modify roughness
   mat.pbrMetallicRoughness.roughnessFactor = 0.9;
-  auto result                              = cache.updateMaterial(0, mat);
+  auto result                              = cache.updateMaterial(0, mat, {});
 
   EXPECT_FALSE(result.topologyChanged);
   EXPECT_FLOAT_EQ(cache.getShadeMaterials()[0].pbrRoughnessFactor, 0.9f);
@@ -123,11 +144,11 @@ TEST(MaterialCache, UpdateDetectsTopologyChangeWhenTextureAdded)
   mat.alphaMode = "OPAQUE";
 
   std::vector<tinygltf::Material> materials = {mat};
-  cache.buildFromMaterials(materials);
+  cache.buildFromMaterials(materials, {});
 
   // Now add a base color texture — topology change
   mat.pbrMetallicRoughness.baseColorTexture.index = 0;
-  auto result                                     = cache.updateMaterial(0, mat);
+  auto result                                     = cache.updateMaterial(0, mat, {});
 
   EXPECT_TRUE(result.topologyChanged);
 }
@@ -140,11 +161,11 @@ TEST(MaterialCache, UpdateDetectsTopologyChangeWhenTextureRemoved)
   mat.pbrMetallicRoughness.baseColorTexture.index = 0;
 
   std::vector<tinygltf::Material> materials = {mat};
-  cache.buildFromMaterials(materials);
+  cache.buildFromMaterials(materials, {});
 
   // Remove the texture — topology change
   mat.pbrMetallicRoughness.baseColorTexture.index = -1;
-  auto result                                     = cache.updateMaterial(0, mat);
+  auto result                                     = cache.updateMaterial(0, mat, {});
 
   EXPECT_TRUE(result.topologyChanged);
 }
@@ -155,9 +176,9 @@ TEST(MaterialCache, UpdateOutOfRangeReturnsEmpty)
 
   tinygltf::Material              mat;
   std::vector<tinygltf::Material> materials = {mat};
-  cache.buildFromMaterials(materials);
+  cache.buildFromMaterials(materials, {});
 
-  auto result = cache.updateMaterial(5, mat);
+  auto result = cache.updateMaterial(5, mat, {});
   EXPECT_FALSE(result.topologyChanged);
   EXPECT_FALSE(result.span.hasAny());
 }
@@ -168,7 +189,7 @@ TEST(MaterialCache, ClearResetsAll)
 
   tinygltf::Material              mat;
   std::vector<tinygltf::Material> materials = {mat};
-  cache.buildFromMaterials(materials);
+  cache.buildFromMaterials(materials, {});
 
   cache.clear();
   EXPECT_TRUE(cache.getShadeMaterials().empty());

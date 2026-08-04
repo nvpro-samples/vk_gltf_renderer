@@ -500,6 +500,7 @@ void GltfRenderer::onDetach()
 {
   // SYNC NOTE: Full device wait during shutdown is the standard Vulkan teardown pattern.
   vkDeviceWaitIdle(m_device);
+  m_thumbnailCache.clear();  // release ImGui thumbnail descriptor sets while idle
   m_visualHelpers.deinit();
   m_pathTracer.onDetach(m_resources);
   m_rasterizer.onDetach(m_resources);
@@ -614,14 +615,66 @@ void GltfRenderer::saveHeadlessOutputImage()
   m_app->saveImageToFile(m_resources.gBuffers.getColorImage(Resources::eImgTonemapped), m_resources.gBuffers.getSize(), outputPath);
 }
 
+// Consume a pending image/texture-set change (import/replace/remove/reload/sampler/undo) at the very
+// start of the frame, BEFORE any ImGui::Image is recorded this frame.
+//
+// Why here and nowhere else: rebuildVulkanSceneFull() frees the ImGui thumbnail descriptor sets
+// (ThumbnailCache::clear) and destroys the scene image views they reference. If it ran after the panels
+// have already recorded ImGui::Image draw commands, ImGui_ImplVulkan_RenderDrawData would later replay
+// them with freed descriptors (VUID-vkCmdBindDescriptorSets-pDescriptorSets-parameter: "Invalid
+// VkDescriptorSet Object"). rebuildVulkanSceneFull() waits on the queue first, so the prior frame that
+// used the now-freed thumbnails/views has finished; the current frame re-acquires fresh thumbnails in
+// renderUI(). The prior frame's material copy-struct write-backs (spec/gloss) have also flushed, so
+// sRGB detection sees the final material usage.
+//
+// Two other sites deliberately defer to this method (grep DirtyFlags::texturesChanged):
+//   - reconcileGeometryIfNeeded(): must NOT rebuild here (it runs mid-frame via onUndoRedo).
+//   - updateSceneChanges(): skips its per-frame sync while the flag is pending, so the material buffer
+//     never references a texture index that eTextures[] does not contain yet.
+void GltfRenderer::applyPendingTextureRebuild()
+{
+  nvvkgltf::Scene* scene = m_resources.getScene();
+  if(!scene || !scene->getDirtyFlags().texturesChanged)
+    return;
+
+  scene->getDirtyFlags().texturesChanged = false;
+  rebuildVulkanSceneFull();
+  resetFrame();
+  m_sceneBrowser.markCachesDirty();
+  m_inspector.refreshTextureNames();
+}
+
 void GltfRenderer::onUIRender()
 {
+  applyPendingTextureRebuild();  // frame-top: rebuild GPU textures for a prior-frame edit (see method)
+
+  // Advance the thumbnail cache's deferred-free ring before any panel acquires thumbnails this frame.
+  m_thumbnailCache.beginFrame(m_app->getFrameCycleSize());
+
   if(isBenchmarkMode())
   {
     renderBenchmarkViewport();
     return;
   }
   renderUI();
+  m_toasts.render();  // transient notifications overlay (drawn on top of the panels)
+}
+
+//--------------------------------------------------------------------------------------------------
+// Resolve a glTF texture / image index to a bounded ImGui thumbnail. Returns 0 when the index is out
+// of range or the image is not resident on the GPU (e.g. an unused image that was never uploaded).
+ImTextureID GltfRenderer::thumbnailForTexture(int textureIndex)
+{
+  if(textureIndex < 0)
+    return 0;
+  return m_thumbnailCache.acquire(m_resources.sceneVk.textureView(static_cast<uint32_t>(textureIndex)));
+}
+
+ImTextureID GltfRenderer::thumbnailForImage(int imageIndex)
+{
+  if(imageIndex < 0)
+    return 0;
+  return m_thumbnailCache.acquire(m_resources.sceneVk.imageView(static_cast<uint32_t>(imageIndex)));
 }
 
 
@@ -1414,18 +1467,37 @@ void GltfRenderer::wireSceneToUi()
 {
   nvvkgltf::Scene* scene = m_resources.getScene();
 
+  // Host services shared by both panels (file dialog, texture thumbnails, toasts). Built once here and
+  // handed to each, instead of wiring the same three hooks separately. IMAGE/TEXTURE edits made through
+  // these set DirtyFlags::texturesChanged and are consumed at frame top by applyPendingTextureRebuild().
+  UiHostServices host;
+  host.pickImageFile    = [this] { return pickImageFile(); };
+  host.textureThumbnail = [this](int i) { return thumbnailForTexture(i); };
+  host.notify           = [this](const std::string& msg, bool err) { notify(msg, err); };
+
   m_sceneBrowser.setScene(scene);
   m_sceneBrowser.setSelection(&m_sceneSelection);
   m_sceneBrowser.setUndoStack(&m_undoStack);
   m_sceneBrowser.setBbox(scene->getSceneBounds());
   m_sceneBrowser.setPendingDelete(&m_pendingDeleteNode, &m_openDeletePopupNextFrame);
+  m_sceneBrowser.setHostServices(host);
+  // GEOMETRY edits fire this callback (immediate reconcile), unlike image/texture edits which defer.
   m_sceneBrowser.setGeometryChangedCallback([this] { reconcileGeometryIfNeeded(); });
   m_sceneBrowser.setBeforeCreateCallback([this] { ensureEmptyScene(); });
+  m_sceneBrowser.setImageThumbnailCallback([this](int i) { return thumbnailForImage(i); });
 
   m_inspector.setScene(scene);
   m_inspector.setSelection(&m_sceneSelection);
   m_inspector.setUndoStack(&m_undoStack);
   m_inspector.setBbox(scene->getSceneBounds());
+  m_inspector.setHostServices(host);
+  m_inspector.setViewImageCallback([this](int imageIndex) { m_sceneBrowser.openImageViewer(imageIndex); });
+}
+
+// Push a transient notification (isError = red) to the on-screen toast overlay.
+void GltfRenderer::notify(const std::string& message, bool isError)
+{
+  m_toasts.push(message, isError ? UiToasts::Level::Error : UiToasts::Level::Info);
 }
 
 //--------------------------------------------------------------------------------------------------
@@ -1579,6 +1651,11 @@ void GltfRenderer::rebuildVulkanSceneInternal(bool rebuildTextures)
   // SYNC NOTE: Full scene rebuild (merge/compact/geometry change) -- wait ensures GPU is idle.
   NVVK_CHECK(vkQueueWaitIdle(m_app->getQueue(0).queue));
 
+  // Thumbnails reference the texture/image views that a texture rebuild is about to destroy. Release
+  // them now (GPU is idle); panels lazily re-acquire against the new views on the next frame.
+  if(rebuildTextures)
+    m_thumbnailCache.clear();
+
   nvvkgltf::Scene* scene = m_resources.getScene();
 
   {
@@ -1699,6 +1776,9 @@ void GltfRenderer::reconcileGeometryIfNeeded()
   {
     rebuildSceneGeometry();  // geometry-only (recreates vertex/index buffers + BLAS/TLAS, resets frame)
   }
+  // NOTE: DirtyFlags::texturesChanged is intentionally NOT handled here. A full texture rebuild frees
+  // the ImGui thumbnail descriptor sets, so it must run at the START of the frame, not mid-frame from
+  // here (this runs during onUIRender, e.g. via onUndoRedo). See applyPendingTextureRebuild().
 }
 
 //--------------------------------------------------------------------------------------------------
@@ -1858,10 +1938,16 @@ void GltfRenderer::createDescriptorSets()
   VkPhysicalDeviceProperties deviceProperties;
   vkGetPhysicalDeviceProperties(m_app->getPhysicalDevice(), &deviceProperties);
   m_maxTextures = std::min(m_maxTextures, deviceProperties.limits.maxDescriptorSetSampledImages - 1);  // Set limits of sample textures (defaut: 100 000)
+  m_maxSamplers = std::min(m_maxTextures, deviceProperties.limits.maxDescriptorSetSamplers - 1);
 
-  // 0: Descriptor SET: all textures of the scene
-  m_resources.descriptorBinding[0].addBinding(shaderio::BindingPoints::eTextures, VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER,
+  // 0: Descriptor SET: scene material images (SAMPLED_IMAGE) and samplers (SAMPLER) are now separate
+  // bindless arrays instead of one combined-image-sampler array (see GltfTextureInfo.index/samplerIndex).
+  m_resources.descriptorBinding[0].addBinding(shaderio::BindingPoints::eTextures, VK_DESCRIPTOR_TYPE_SAMPLED_IMAGE,
                                               m_maxTextures, VK_SHADER_STAGE_ALL, nullptr,
+                                              VK_DESCRIPTOR_BINDING_UPDATE_AFTER_BIND_BIT | VK_DESCRIPTOR_BINDING_UPDATE_UNUSED_WHILE_PENDING_BIT
+                                                  | VK_DESCRIPTOR_BINDING_PARTIALLY_BOUND_BIT);
+  m_resources.descriptorBinding[0].addBinding(shaderio::BindingPoints::eSamplers, VK_DESCRIPTOR_TYPE_SAMPLER,
+                                              m_maxSamplers, VK_SHADER_STAGE_ALL, nullptr,
                                               VK_DESCRIPTOR_BINDING_UPDATE_AFTER_BIND_BIT | VK_DESCRIPTOR_BINDING_UPDATE_UNUSED_WHILE_PENDING_BIT
                                                   | VK_DESCRIPTOR_BINDING_PARTIALLY_BOUND_BIT);
   // 2D IBL/transmission textures (see shaderio.h HDR_* indices):
@@ -1883,9 +1969,9 @@ void GltfRenderer::createDescriptorSets()
       m_device, VK_DESCRIPTOR_SET_LAYOUT_CREATE_UPDATE_AFTER_BIND_POOL_BIT, &m_resources.descriptorSetLayout[0]));
   NVVK_DBG_NAME(m_resources.descriptorSetLayout[0]);
 
-  // Pool sizes: the scene's texture set (descriptorBinding[0]) needs COMBINED_IMAGE_SAMPLER.
-  // Each nvapp::ImTexture (viewport: 1, DLSS guides: 8, OptiX denoised: 1 + margin) uses one
-  // VK_DESCRIPTOR_TYPE_SAMPLED_IMAGE descriptor (ImGui 2026-04-22 backend).
+  // Pool sizes are derived from descriptorBinding[0] (now SAMPLED_IMAGE + SAMPLER for the scene, plus
+  // COMBINED_IMAGE_SAMPLER for the HDR/cube arrays). Each nvapp::ImTexture (viewport: 1, DLSS guides: 8,
+  // OptiX denoised: 1 + margin) additionally uses one VK_DESCRIPTOR_TYPE_SAMPLED_IMAGE descriptor.
   constexpr uint32_t                kImTextureMaxSets = 15;
   std::vector<VkDescriptorPoolSize> poolSize          = m_resources.descriptorBinding[0].calculatePoolSizes();
   poolSize.push_back({VK_DESCRIPTOR_TYPE_SAMPLED_IMAGE, kImTextureMaxSets});
@@ -1943,31 +2029,46 @@ void GltfRenderer::compileShaders()
 // Textures are updated in the descriptor set (0)
 bool GltfRenderer::updateTextures()
 {
-  // Now do the textures
-  nvvk::WriteSetContainer write{};
-  VkWriteDescriptorSet allTextures = m_resources.descriptorBinding[0].getWriteSet(shaderio::BindingPoints::eTextures);
-  allTextures.dstSet               = m_resources.descriptorSet;
+  const uint32_t imageCount   = m_resources.sceneVk.textureCount();
+  const uint32_t samplerCount = m_resources.sceneVk.samplerCount();
 
-  uint32_t sceneTextureCount = m_resources.sceneVk.textureCount();
-
-  if(sceneTextureCount == 0)
+  if(imageCount == 0)
     return true;
 
-  // CRITICAL: Materials directly index into allTextures[] - if scene exceeds capacity,
-  // materials will access uninitialized descriptors causing crashes or corruption
-  if(sceneTextureCount > m_maxTextures)
+  // CRITICAL: materials index eTextures[] / eSamplers[] directly; exceeding capacity would read
+  // uninitialized descriptors (undefined behavior). Fail loudly instead.
+  if(imageCount > m_maxTextures)
   {
-    LOGE("FATAL: Scene has %u textures but descriptor set only supports %u!", sceneTextureCount, m_maxTextures);
-    LOGE("       Materials would access invalid texture descriptors (undefined behavior).");
-    LOGE("       Solutions:");
-    LOGE("         1. Increase m_maxTextures in renderer.hpp (currently %u)", m_maxTextures);
-    LOGE("         2. Reduce scene texture count (optimize/deduplicate textures)");
+    LOGE("FATAL: Scene has %u material images but the descriptor set only supports %u!", imageCount, m_maxTextures);
+    LOGE("       Increase m_maxTextures in renderer.hpp, or reduce/deduplicate scene textures.");
+    return false;
+  }
+  if(samplerCount > m_maxSamplers)
+  {
+    LOGE("FATAL: Scene has %u samplers but the descriptor set only supports %u!", samplerCount, m_maxSamplers);
     return false;
   }
 
-  allTextures.descriptorCount = sceneTextureCount;
+  nvvk::WriteSetContainer write{};
 
-  write.append(allTextures, m_resources.sceneVk.textures().data());
+  // eTextures: SAMPLED_IMAGE array. The nvvk::Image descriptors supply imageView + layout; their
+  // sampler field is ignored by Vulkan for this descriptor type.
+  VkWriteDescriptorSet allImages = m_resources.descriptorBinding[0].getWriteSet(shaderio::BindingPoints::eTextures);
+  allImages.dstSet               = m_resources.descriptorSet;
+  allImages.descriptorCount      = imageCount;
+  write.append(allImages, m_resources.sceneVk.textures().data());
+
+  // eSamplers: SAMPLER array. Only the sampler field is used; imageView stays null.
+  std::vector<VkDescriptorImageInfo> samplerInfos(samplerCount);
+  const std::vector<VkSampler>&      samplers = m_resources.sceneVk.samplers();
+  for(uint32_t i = 0; i < samplerCount; ++i)
+    samplerInfos[i] =
+        VkDescriptorImageInfo{.sampler = samplers[i], .imageView = VK_NULL_HANDLE, .imageLayout = VK_IMAGE_LAYOUT_UNDEFINED};
+  VkWriteDescriptorSet allSamplers = m_resources.descriptorBinding[0].getWriteSet(shaderio::BindingPoints::eSamplers);
+  allSamplers.dstSet               = m_resources.descriptorSet;
+  allSamplers.descriptorCount      = samplerCount;
+  write.append(allSamplers, samplerInfos.data());
+
   vkUpdateDescriptorSets(m_device, write.size(), write.data(), 0, nullptr);
   return true;
 }
@@ -2009,6 +2110,7 @@ void GltfRenderer::onUndoRedo()
   reconcileGeometryIfNeeded();
   resetFrame();
   m_sceneBrowser.markCachesDirty();
+  m_inspector.refreshTextureNames();  // undo/redo of a texture import changes the texture set
 }
 
 //--------------------------------------------------------------------------------------------------
@@ -2239,7 +2341,12 @@ bool GltfRenderer::updateAnimation(VkCommandBuffer cmd)
       }
     }
 
+    // Preserve the deferred texture-rebuild signal across this per-frame flag clear: texturesChanged is
+    // consumed at frame top by applyPendingTextureRebuild(), not here, so a texture/image/sampler edit
+    // made while an animation plays must not be wiped before that rebuild runs.
+    const bool pendingTextures = scn.getDirtyFlags().texturesChanged;
     scn.clearDirtyFlags();
+    scn.getDirtyFlags().texturesChanged = pendingTextures;
     return true;
   }
 
@@ -2354,6 +2461,14 @@ bool GltfRenderer::updateSceneChanges(VkCommandBuffer cmd)
 #ifndef NDEBUG
   m_skipGpuSyncValidation = false;
 #endif
+
+  // A texture-set change is pending (import/replace/remove/reload/sampler/undo). The GPU material
+  // buffer must not be updated to reference a new texture index before eTextures[] is rebuilt to
+  // contain it -- that rebuild runs at the next frame top (applyPendingTextureRebuild()). Skip this
+  // frame's sync and keep rendering the previous, self-consistent GPU state; the rebuild re-uploads
+  // everything and the dirty flags persist until then.
+  if(scene->getDirtyFlags().texturesChanged)
+    return false;
 
   const auto& df             = scene->getDirtyFlags();
   bool        changed        = !df.isEmpty();

@@ -329,6 +329,8 @@ inline void getValue(const tinygltf::Value& value, const std::string& name, tiny
     getValue(t, "index", result.index);
     getValue(t, "texCoord", result.texCoord);
     getValue(t, "extensions", result.extensions);
+    if(t.Has("extras"))
+      result.extras = t.Get("extras");  // preserve per-binding metadata across a round-trip
   }
 }
 
@@ -351,10 +353,18 @@ inline void setValue(tinygltf::Value& value, const std::string& key, const T& va
 -------------------------------------------------------------------------------------------------*/
 inline void setValue(tinygltf::Value& value, const std::string& key, const tinygltf::TextureInfo& textureInfo)
 {
-  auto& t                                      = value.Get<tinygltf::Value::Object>()[key];
-  t.Get<tinygltf::Value::Object>()["index"]    = tinygltf::Value(textureInfo.index);
-  t.Get<tinygltf::Value::Object>()["texCoord"] = tinygltf::Value(textureInfo.texCoord);
-  value.Get<tinygltf::Value::Object>()[key]    = t;
+  // Build a proper OBJECT_TYPE Value: writing through Get<Object>() alone leaves the entry NULL_TYPE,
+  // so a later Has()/Get() (which require IsObject()) reads nothing back and the assignment is lost.
+  tinygltf::Value::Object t;
+  t["index"]    = tinygltf::Value(textureInfo.index);
+  t["texCoord"] = tinygltf::Value(textureInfo.texCoord);
+  // Preserve per-binding texture extensions (e.g. KHR_texture_transform) instead of dropping them.
+  if(!textureInfo.extensions.empty())
+    t["extensions"] = tinygltf::Value(textureInfo.extensions);
+  // Preserve per-binding extras metadata too (paired with the reader above).
+  if(textureInfo.extras.Type() != tinygltf::NULL_TYPE)
+    t["extras"] = textureInfo.extras;
+  value.Get<tinygltf::Value::Object>()[key] = tinygltf::Value(std::move(t));
 }
 
 
@@ -1189,6 +1199,35 @@ inline KHR_texture_transform getTextureTransform(const T& tinfo)
   return gmat;
 }
 
+// True when this texture binding carries a KHR_texture_transform (i.e. a non-identity transform is
+// explicitly present). Absence means identity.
+template <typename T>
+inline bool hasTextureTransform(const T& tinfo)
+{
+  return tinygltf::utils::findExtension(tinfo.extensions, KHR_TEXTURE_TRANSFORM_EXTENSION_NAME) != nullptr;
+}
+
+// Write offset / rotation / scale into the binding's KHR_texture_transform (creating it if absent).
+// texCoord is intentionally not written: this renderer selects the UV set from the binding's own
+// texCoord (see getTextureInfoImpl in gltf_material_cache.cpp), so the extension's texCoord is unused.
+template <typename T>
+inline void setTextureTransform(T& tinfo, const KHR_texture_transform& tt)
+{
+  tinygltf::Value& ext    = tinygltf::utils::ensureExtension(tinfo.extensions, KHR_TEXTURE_TRANSFORM_EXTENSION_NAME);
+  glm::vec2        offset = tt.offset;
+  glm::vec2        scale  = tt.scale;
+  tinygltf::utils::setArrayValue(ext, "offset", 2, glm::value_ptr(offset));
+  tinygltf::utils::setValue(ext, "rotation", tt.rotation);
+  tinygltf::utils::setArrayValue(ext, "scale", 2, glm::value_ptr(scale));
+}
+
+// Drop the KHR_texture_transform from this binding (reverts to identity).
+template <typename T>
+inline void removeTextureTransform(T& tinfo)
+{
+  tinfo.extensions.erase(KHR_TEXTURE_TRANSFORM_EXTENSION_NAME);
+}
+
 /*-------------------------------------------------------------------------------------------------
 ## Function `getTextureImageIndex`
 > Effective glTF image index for a texture: `texture.source`, overridden by extension `source`
@@ -1196,6 +1235,15 @@ inline KHR_texture_transform getTextureTransform(const T& tinfo)
 > the last listed extension wins (same order as the implementation).
 -------------------------------------------------------------------------------------------------*/
 int getTextureImageIndex(const tinygltf::Texture& texture);
+
+/*-------------------------------------------------------------------------------------------------
+## Function `getTextureImageSources`
+> All distinct backing-image indices a texture *serializes*: the core `texture.source` plus any
+> extension `source` (`EXT_texture_webp` / `MSFT_texture_dds` / `KHR_texture_basisu`). Unlike
+> `getTextureImageIndex` (which returns only the effective one), this is what image ref-counting must
+> use so a fallback `source` still counts as in-use when an override image is present.
+-------------------------------------------------------------------------------------------------*/
+std::vector<int> getTextureImageSources(const tinygltf::Texture& texture);
 
 /*-------------------------------------------------------------------------------------------------
 ## Function `getTextureUiLabel`

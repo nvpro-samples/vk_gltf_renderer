@@ -236,6 +236,10 @@ void nvvkgltf::SceneVk::create(VkCommandBuffer        cmd,
       imageSearchPaths.push_back(baseDir);
   }
 
+  // Resolve per-texture sampler slots first: uploadMaterials() bakes them into GltfTextureInfo.samplerIndex,
+  // so they must exist before it runs (createTextureImages, which creates the VkSamplers, comes later).
+  buildTextureSamplerSlots(scn.getModel());
+
   uploadMaterials(staging, scn);
   uploadRenderNodes(staging, scn);
   createVertexBuffers(cmd, staging, scn);
@@ -411,7 +415,7 @@ void nvvkgltf::SceneVk::uploadMaterials(nvvk::StagingUploader& staging, const nv
   // Rebuild all materials and texture infos into cache
   if(doFullUpdate)
   {
-    m_materialCache.buildFromMaterials(materials);
+    m_materialCache.buildFromMaterials(materials, m_textureSamplerSlots);
   }
 
   const bool buffersResized = ensureMaterialBuffers();
@@ -445,7 +449,7 @@ void nvvkgltf::SceneVk::uploadMaterials(nvvk::StagingUploader& staging, const nv
     if(idx < 0 || idx >= static_cast<int>(materials.size()) || idx >= static_cast<int>(shadeMaterials.size()))
       continue;
 
-    MaterialUpdateResult update = m_materialCache.updateMaterial(idx, materials[idx]);
+    MaterialUpdateResult update = m_materialCache.updateMaterial(idx, materials[idx], m_textureSamplerSlots);
     if(update.topologyChanged)
     {
       topologyChanged = true;
@@ -456,7 +460,7 @@ void nvvkgltf::SceneVk::uploadMaterials(nvvk::StagingUploader& staging, const nv
 
   if(topologyChanged)
   {
-    m_materialCache.buildFromMaterials(materials);
+    m_materialCache.buildFromMaterials(materials, m_textureSamplerSlots);
     const bool resized = ensureMaterialBuffers();
     if(resized)
       m_sceneDescDirty = true;
@@ -956,12 +960,6 @@ void nvvkgltf::SceneVk::createTextureImages(VkCommandBuffer                     
   nvutils::ScopedTimer   st(std::string(__FUNCTION__) + "\n");
   const tinygltf::Model& model = scn.getModel();
 
-  VkSamplerCreateInfo default_sampler{VK_STRUCTURE_TYPE_SAMPLER_CREATE_INFO};
-  default_sampler.minFilter  = VK_FILTER_LINEAR;
-  default_sampler.magFilter  = VK_FILTER_LINEAR;
-  default_sampler.mipmapMode = VK_SAMPLER_MIPMAP_MODE_LINEAR;
-  default_sampler.maxLod     = VK_LOD_CLAMP_NONE;
-
   // Find and all textures/images that should be sRgb encoded.
   findSrgbImages(model);
 
@@ -980,13 +978,11 @@ void nvvkgltf::SceneVk::createTextureImages(VkCommandBuffer                     
     nvvk::DebugUtil::getInstance().setObjectName(m_images[idx].imageTexture.image, "Dummy");
   };
 
-  // Adds a texture that points to image 0, so that every texture points to some image.
+  // Adds a texture that points to image 0, so that every texture points to some image. Samplers are a
+  // separate array now, so a texture entry carries only the image view.
   auto addDefaultTexture = [&]() {
     assert(!m_images.empty());
-    nvvk::Image tex = m_images[0].imageTexture;
-    NVVK_CHECK(m_samplerPool->acquireSampler(tex.descriptor.sampler));
-    NVVK_DBG_NAME(tex.descriptor.sampler);
-    m_textures.push_back(tex);
+    m_textures.push_back(m_images[0].imageTexture);
   };
 
   // Collect images that are in use by textures
@@ -1080,20 +1076,42 @@ void nvvkgltf::SceneVk::createTextureImages(VkCommandBuffer                     
       continue;
     }
 
-    VkSamplerCreateInfo sampler = getSampler(model, texture.sampler);
-
-    SceneImage& sceneImage = m_images[source_image];
-
-    nvvk::Image tex = sceneImage.imageTexture;
-    NVVK_CHECK(m_samplerPool->acquireSampler(tex.descriptor.sampler, sampler));
-    NVVK_DBG_NAME(tex.descriptor.sampler);
-    m_textures.push_back(tex);
+    m_textures.push_back(m_images[source_image].imageTexture);  // image view only; sampler is separate
   }
 
   // Add a default texture, cannot work with empty descriptor set
   if(model.textures.empty())
   {
     addDefaultTexture();
+  }
+
+  // Build the separate sampler array (slot 0 = default, slots 1..N = model.samplers) plus the
+  // per-texture sampler-slot table consumed by MaterialCache -> GltfTextureInfo.samplerIndex.
+  m_samplers.clear();
+  m_samplers.reserve(model.samplers.size() + 1);
+  VkSampler defaultSampler{};
+  NVVK_CHECK(m_samplerPool->acquireSampler(defaultSampler));  // slot 0
+  m_samplers.push_back(defaultSampler);
+  for(size_t j = 0; j < model.samplers.size(); ++j)
+  {
+    VkSampler                 smp{};
+    const VkSamplerCreateInfo ci = getSampler(model, static_cast<int>(j));
+    NVVK_CHECK(m_samplerPool->acquireSampler(smp, ci));
+    m_samplers.push_back(smp);
+  }
+
+  // The per-texture slot table was already built in create() (before uploadMaterials); keep it in sync
+  // here in case createTextureImages is ever driven independently.
+  buildTextureSamplerSlots(model);
+}
+
+void nvvkgltf::SceneVk::buildTextureSamplerSlots(const tinygltf::Model& model)
+{
+  m_textureSamplerSlots.resize(model.textures.size());
+  for(size_t i = 0; i < model.textures.size(); ++i)
+  {
+    const int s              = model.textures[i].sampler;
+    m_textureSamplerSlots[i] = (s >= 0 && s < static_cast<int>(model.samplers.size())) ? (s + 1) : 0;
   }
 }
 
@@ -1492,10 +1510,11 @@ void nvvkgltf::SceneVk::destroy()
     m_bRenderNode = {};  // Reset to ensure clean state
   }
 
-  // Destroy textures and images
-  for(auto& texture : m_textures)
+  // Destroy samplers, textures and images. Samplers are a deduplicated array now (one release each),
+  // and texture entries are shallow image-view copies of m_images (no per-texture sampler to release).
+  for(VkSampler sampler : m_samplers)
   {
-    m_samplerPool->releaseSampler(texture.descriptor.sampler);
+    m_samplerPool->releaseSampler(sampler);
   }
   for(auto& image : m_images)
   {
@@ -1507,6 +1526,8 @@ void nvvkgltf::SceneVk::destroy()
   }
   m_images.clear();
   m_textures.clear();
+  m_samplers.clear();
+  m_textureSamplerSlots.clear();
 
   m_sRgbImages.clear();
 

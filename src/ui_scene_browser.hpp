@@ -34,12 +34,14 @@
 #include <unordered_set>
 #include <unordered_map>
 
+#include <imgui.h>
 #include <glm/glm.hpp>
 #include <glm/gtc/quaternion.hpp>
 #include <nvutils/bounding_box.hpp>
 
 #include "scene_selection.hpp"
 #include "gltf_scene_editor.hpp"  // nvvkgltf::PrimitiveKind, PrimitiveParams
+#include "ui_host_services.hpp"
 
 class UndoStack;
 
@@ -49,8 +51,9 @@ class Scene;
 
 // Forward declarations (no need for full headers here)
 namespace tinygltf {
-class Node;  // Actually a struct, but forward declared as class in tinygltf
-}
+class Node;      // Actually a struct, but forward declared as class in tinygltf
+struct Sampler;  // glTF sampler (wrap/filter); used by the sampler editors
+}  // namespace tinygltf
 
 class UiSceneBrowser
 {
@@ -75,6 +78,11 @@ public:
   // Called at the start of every create action so a scene can be stood up on demand (e.g. the
   // menu-bar "Create" running with nothing loaded). No-op when a scene already exists.
   void setBeforeCreateCallback(std::function<void()> cb) { m_onBeforeCreate = std::move(cb); }
+  // Host services shared with the inspector: image file dialog, texture thumbnails, toasts. Enables
+  // the Textures thumbnails, the image viewer's "Replace from file", and image-replace error toasts.
+  void setHostServices(UiHostServices services) { m_host = std::move(services); }
+  // Resolve a glTF image index to a bounded ImGui thumbnail (0 if none) for the Images panel.
+  void setImageThumbnailCallback(std::function<ImTextureID(int)> cb) { m_getImageThumbnail = std::move(cb); }
   void markCachesDirty();
 
   void render(bool* show = nullptr, bool isBusy = false);
@@ -83,6 +91,12 @@ public:
   // from an always-rendered top-level UI path -- NOT from render(), which is skipped when the Scene
   // Browser window is hidden/collapsed -- so the modal still surfaces when triggered from the menu bar.
   void showAddPrimitivePopup();
+
+  // Request the large image viewer for a glTF image index (e.g. from an inspector thumbnail click).
+  void openImageViewer(int imageIndex);
+  // Renders the image-viewer modal. Like showAddPrimitivePopup, call from an always-rendered top-level
+  // path so it surfaces regardless of which Scene Browser tab is active or whether the window is shown.
+  void showImageViewer();
 
   // Object-creation catalog (Empty Node + Mesh submenu + Light submenu), shared by the menu-bar
   // "Create" menu, the node context "Add Child" and the scene-root context "Add". parentIndex = -1
@@ -139,9 +153,17 @@ private:
   void renderMaterialsGroup();
   void renderCamerasGroup();
   void renderLightsGroup();
-  void renderTexturesGroup();    // Display-only (non-selectable)
-  void renderImagesGroup();      // Display-only (non-selectable)
-  void renderAnimationsGroup();  // Display-only (non-selectable)
+  void renderTexturesGroup();                     // Texture list: thumbnail + clickable image/sampler IDs + edit
+  void renderTextureEditPopup(int textureIndex);  // "textureEdit" popup: image/sampler IDs ({ source, sampler })
+  void renderSamplerEditPopup(int samplerIndex);  // "samplerEdit" popup: wrap/filter for an existing sampler
+  void renderSamplersGroup();                     // Sampler list: wrap/filter + used-by, jump target from textures
+  void renderImagesGroup();                       // Image list with thumbnails, usage counts, view/replace/delete
+  void renderImageViewer();                       // Modal image viewer (large preview + metadata + replace/reload)
+  void renderAnimationsGroup();                   // Display-only (non-selectable)
+
+  // Renders the four wrap/filter combos for `cur`; when a field changes, invokes commit(edited) with a
+  // copy of cur carrying that change. Shared by the texture and sampler edit popups.
+  void renderSamplerFields(const tinygltf::Sampler& cur, const std::function<void(const tinygltf::Sampler&)>& commit);
 
   //==================================================================================================
   // CONTEXT MENUS
@@ -194,9 +216,11 @@ private:
   std::unordered_set<int> m_expandedNodes;     // Only force-open these nodes (from selection)
   bool                    m_doScroll = false;  // Auto-scroll to selection
 
-  // Scene List: jump from texture row to Images group (scroll to image index)
-  int  m_pendingScrollToImageIndex = -1;
-  bool m_forceImagesSectionOpen    = false;
+  // Scene List: jump from a texture row to the Images / Samplers group (scroll to the referenced index)
+  int  m_pendingScrollToImageIndex   = -1;
+  bool m_forceImagesSectionOpen      = false;
+  int  m_pendingScrollToSamplerIndex = -1;
+  bool m_forceSamplersSectionOpen    = false;
 
   // Scene transform state (per scene)
   struct SceneTransformState
@@ -236,9 +260,19 @@ private:
   bool* m_openDeletePopupNextFrame = nullptr;
 
   // Add-primitive popup state (deferred-open pattern like rename/delete)
-  std::function<void()>     m_onGeometryChanged;
-  std::function<void()>     m_onBeforeCreate;  // ensure a scene exists before any create action
-  nvvkgltf::PrimitiveKind   m_pendingPrimitiveKind = nvvkgltf::PrimitiveKind::eCube;
+  std::function<void()>           m_onGeometryChanged;
+  std::function<void()>           m_onBeforeCreate;     // ensure a scene exists before any create action
+  std::function<ImTextureID(int)> m_getImageThumbnail;  // image index -> ImGui thumbnail
+  UiHostServices                  m_host;               // shared services (file dialog, texture thumbnails, toasts)
+
+  // Image viewer modal state.
+  int  m_viewerImageIndex = -1;     // image shown in the viewer (-1 = none)
+  bool m_openImageViewer  = false;  // request to open the viewer next frame
+
+  // Deferred image removal: recorded during the (clippered) table loop, applied after it finishes so
+  // the model vector is not mutated mid-iteration.
+  int                       m_pendingDeleteImageIndex = -1;
+  nvvkgltf::PrimitiveKind   m_pendingPrimitiveKind    = nvvkgltf::PrimitiveKind::eCube;
   nvvkgltf::PrimitiveParams m_pendingPrimitiveParams;
   int                       m_pendingPrimitiveParent         = -1;
   bool                      m_openAddPrimitivePopupNextFrame = false;

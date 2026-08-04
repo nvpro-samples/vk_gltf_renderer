@@ -65,11 +65,13 @@ struct MaterialUpdateResult
 class MaterialCache
 {
 public:
-  void buildFromMaterials(const std::vector<tinygltf::Material>& materials);
+  // textureSamplerSlots maps each glTF texture index to a resolved GPU sampler slot (SceneVk::samplers();
+  // slot 0 = default). Written into each GltfTextureInfo.samplerIndex.
+  void buildFromMaterials(const std::vector<tinygltf::Material>& materials, const std::vector<int>& textureSamplerSlots);
 
   // Update one cached material in place. Returns span of texture infos and whether
   // texture slot topology changed (if true, caller should rebuild cache).
-  [[nodiscard]] MaterialUpdateResult updateMaterial(int index, const tinygltf::Material& srcMat);
+  [[nodiscard]] MaterialUpdateResult updateMaterial(int index, const tinygltf::Material& srcMat, const std::vector<int>& textureSamplerSlots);
 
   void clear();
 

@@ -234,3 +234,79 @@ TEST(ExtensionsMetadata, SaveReloadReconcilesUsed)
 
   std::filesystem::remove_all(tempDir);
 }
+
+// Regression: setValue(TextureInfo) used to populate the nested map through Get<Object>() without
+// setting the Value's type to OBJECT_TYPE. Has()/Get() require IsObject(), so the read back returned
+// nothing and the whole assignment was silently lost. It also dropped the binding's own extensions.
+TEST(ExtensionsMetadata, SetValueTextureInfoRoundTrips)
+{
+  tinygltf::Value host(tinygltf::Value::Object{});
+
+  tinygltf::TextureInfo in;
+  in.index                                            = 7;
+  in.texCoord                                         = 1;
+  in.extensions[KHR_TEXTURE_TRANSFORM_EXTENSION_NAME] = tinygltf::Value(tinygltf::Value::Object());  // per-binding ext
+
+  tinygltf::utils::setValue(host, "someTexture", in);
+
+  tinygltf::TextureInfo out;
+  tinygltf::utils::getValue(host, "someTexture", out);
+
+  EXPECT_EQ(out.index, 7);
+  EXPECT_EQ(out.texCoord, 1);
+  EXPECT_NE(out.extensions.find(KHR_TEXTURE_TRANSFORM_EXTENSION_NAME), out.extensions.end());  // survived round-trip
+}
+
+// Regression: assigning a texture to an extension-owned slot (e.g. KHR_materials_transmission) failed
+// because the write went through the broken setValue(TextureInfo) and read back empty. Core slots
+// worked because they are direct material members, not serialized through a Value.
+TEST(ExtensionsMetadata, ExtensionTextureAssignmentPersists)
+{
+  tinygltf::Material         mat;
+  KHR_materials_transmission t;
+  t.factor        = 0.5f;
+  t.texture.index = 3;
+  tinygltf::utils::setTransmission(mat, t);
+
+  KHR_materials_transmission back = tinygltf::utils::getTransmission(mat);
+  EXPECT_EQ(back.texture.index, 3);
+  EXPECT_FLOAT_EQ(back.factor, 0.5f);
+}
+
+// KHR_texture_transform add / edit / remove helpers used by the inspector's per-binding UV editor.
+TEST(ExtensionsMetadata, TextureTransformHelpersRoundTrip)
+{
+  tinygltf::TextureInfo info;
+  info.index = 0;
+  EXPECT_FALSE(tinygltf::utils::hasTextureTransform(info));  // absent == identity
+
+  KHR_texture_transform tt;
+  tt.offset   = {0.25f, 0.5f};
+  tt.rotation = 1.0f;
+  tt.scale    = {2.0f, 3.0f};
+  tinygltf::utils::setTextureTransform(info, tt);
+
+  EXPECT_TRUE(tinygltf::utils::hasTextureTransform(info));
+  KHR_texture_transform got = tinygltf::utils::getTextureTransform(info);
+  EXPECT_FLOAT_EQ(got.offset.x, 0.25f);
+  EXPECT_FLOAT_EQ(got.offset.y, 0.5f);
+  EXPECT_FLOAT_EQ(got.rotation, 1.0f);
+  EXPECT_FLOAT_EQ(got.scale.x, 2.0f);
+  EXPECT_FLOAT_EQ(got.scale.y, 3.0f);
+
+  tinygltf::utils::removeTextureTransform(info);
+  EXPECT_FALSE(tinygltf::utils::hasTextureTransform(info));
+}
+
+// A UV transform set on an extension-owned texture binding (e.g. transmission) must survive the
+// material extension write-back / read-back, since the inspector edits those slots the same way.
+TEST(ExtensionsMetadata, TextureTransformOnExtensionSlotRoundTrips)
+{
+  tinygltf::Material         mat;
+  KHR_materials_transmission tr;
+  tr.texture.index = 2;
+  tinygltf::utils::setTextureTransform(tr.texture, KHR_texture_transform{});
+  tinygltf::utils::setTransmission(mat, tr);
+
+  EXPECT_TRUE(tinygltf::utils::hasTextureTransform(tinygltf::utils::getTransmission(mat).texture));
+}

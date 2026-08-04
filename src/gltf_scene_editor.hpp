@@ -20,6 +20,7 @@
 #pragma once
 
 #include <array>
+#include <filesystem>
 #include <optional>
 #include <string>
 #include <unordered_map>
@@ -186,6 +187,40 @@ public:
   void clearNodeCamera(int nodeIndex);
   void clearNodeSkin(int nodeIndex);
 
+  // ---------- Texture / image import ----------
+  // Import an image file (PNG/JPEG/KTX2/DDS/...) as a new texture appended at the tail of the model.
+  // The file is validated/decoded up front; on failure returns -1 and fills *error (if given) without
+  // mutating the model. On success returns the new texture index (== model.textures.size()-1) and:
+  //   * appends one tinygltf::Image (referenced by absolute URI - Scene::save relocates/copies it) and
+  //     one tinygltf::Texture pointing at it,
+  //   * registers the file's directory as an image search path so the URI resolves,
+  //   * sets DirtyFlags::texturesChanged so the next reconcile triggers a full GPU texture rebuild.
+  // Color space (sRGB vs linear) is resolved on that rebuild from the material slot the texture is
+  // assigned to, so callers should assign the returned index to a slot before the rebuild runs.
+  [[nodiscard]] int importImageAsTexture(const std::filesystem::path& path, std::string* error = nullptr);
+
+  // Replace the pixels of an existing image (by index) with those of a file, in place: every texture
+  // and material keeps pointing at this image index. Validated up front; false + *error on failure.
+  // Sets DirtyFlags::texturesChanged.
+  [[nodiscard]] bool replaceImageFromFile(int imageIndex, const std::filesystem::path& path, std::string* error = nullptr);
+
+  // Per-image count of textures whose (core or extension) source resolves to it (size == images.size()).
+  // A 0 entry means the image is referenced by nothing and is safe to remove with removeImageAt().
+  [[nodiscard]] std::vector<int> computeImageRefCounts() const;
+
+  // Number of textures whose (core or extension) source resolves to imageIndex. 0 means the image is
+  // referenced by nothing and is safe to remove with removeImageAt().
+  [[nodiscard]] int countTextureRefsToImage(int imageIndex) const;
+
+  // Remove an image no texture references (asserts the precondition), shifting higher image indices
+  // down and remapping every texture source accordingly. Sets DirtyFlags::texturesChanged. Pair with
+  // insertImageAt() for undo.
+  void removeImageAt(int imageIndex);
+
+  // Inverse of removeImageAt(): shift image indices at/after imageIndex up and insert `image` there,
+  // remapping texture sources. Sets DirtyFlags::texturesChanged.
+  void insertImageAt(int imageIndex, const tinygltf::Image& image);
+
   // ---------- Material ops ----------
   void              setPrimitiveMaterial(int meshIndex, int primIndex, int newMaterialID);
   [[nodiscard]] int duplicateMaterial(int originalIndex);
@@ -202,6 +237,9 @@ public:
 
 private:
   Scene& m_scene;
+
+  // Register an image file's directory as an image search path so its (absolute) URI resolves at load.
+  void registerImageSearchDir(const std::filesystem::path& path);
 
   // Referenced external-asset subtrees (glTF 2.1) are read-only. Returns true (and logs) when an
   // edit on nodeIndex must be blocked; call sites early-out on true.

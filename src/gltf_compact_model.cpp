@@ -70,6 +70,54 @@ void collectPrimitiveAccessors(const tinygltf::Primitive& primitive, std::set<in
   }
 }
 
+// EXT_mesh_opacity_micromap keeps its opacity data outside the normal attribute graph: each root
+// micromaps[] entry points at `data`/`triangles` bufferViews, and every primitive that uses a
+// micromap may reference a `micromapIndices` accessor. Those references are invisible to the
+// attribute/skin/animation/image walks, so collect (and later remap) them explicitly or compaction
+// would strip the micromap payload and orphan the extension. See src/gltf_scene_omm.cpp for the
+// layout this mirrors.
+void collectOpacityMicromapAccessors(const tinygltf::Model& model, std::set<int>& usedAccessors)
+{
+  for(const auto& mesh : model.meshes)
+  {
+    for(const auto& primitive : mesh.primitives)
+    {
+      const tinygltf::Value* primExt =
+          tinygltf::utils::findExtension(primitive.extensions, EXT_MESH_OPACITY_MICROMAP_EXTENSION_NAME);
+      if(primExt && primExt->Has("micromapIndices") && primExt->Get("micromapIndices").IsInt())
+      {
+        const int accessorIdx = primExt->Get("micromapIndices").Get<int>();
+        if(accessorIdx >= 0)
+          usedAccessors.insert(accessorIdx);
+      }
+    }
+  }
+}
+
+// See collectOpacityMicromapAccessors: the root micromaps[] entries reference `data`/`triangles`
+// bufferViews directly (not through accessors), so they need their own collection pass.
+void collectOpacityMicromapBufferViews(const tinygltf::Model& model, std::set<int>& usedBufferViews)
+{
+  const tinygltf::Value* rootExt = tinygltf::utils::findExtension(model.extensions, EXT_MESH_OPACITY_MICROMAP_EXTENSION_NAME);
+  if(rootExt == nullptr || !rootExt->Has("micromaps") || !rootExt->Get("micromaps").IsArray())
+    return;
+
+  const tinygltf::Value& micromaps = rootExt->Get("micromaps");
+  for(size_t i = 0; i < micromaps.ArrayLen(); i++)
+  {
+    const tinygltf::Value& mm = micromaps.Get(int(i));
+    for(const char* key : {"data", "triangles"})
+    {
+      if(mm.Has(key) && mm.Get(key).IsInt())
+      {
+        const int bvIdx = mm.Get(key).Get<int>();
+        if(bvIdx >= 0)
+          usedBufferViews.insert(bvIdx);
+      }
+    }
+  }
+}
+
 //--------------------------------------------------------------------------------------------------
 // Phase 1: Collect all accessor indices referenced by meshes, skins, and animations.
 //--------------------------------------------------------------------------------------------------
@@ -84,6 +132,8 @@ std::set<int> collectUsedAccessors(const tinygltf::Model& model)
       collectPrimitiveAccessors(primitive, usedAccessors);
     }
   }
+
+  collectOpacityMicromapAccessors(model, usedAccessors);
 
   for(const auto& skin : model.skins)
   {
@@ -136,6 +186,8 @@ std::set<int> collectUsedBufferViews(const tinygltf::Model& model, const std::se
       usedBufferViews.insert(image.bufferView);
   }
 
+  collectOpacityMicromapBufferViews(model, usedBufferViews);
+
   return usedBufferViews;
 }
 
@@ -173,6 +225,12 @@ bool isCompactionNeeded(const tinygltf::Model& model,
 {
   if(usedAccessors.size() < model.accessors.size() || usedBufferViews.size() < model.bufferViews.size()
      || usedBuffers.size() < model.buffers.size())
+    return true;
+
+  // Compaction consolidates everything into a single buffer[0]. If the model still spans more than
+  // one buffer (e.g. a primitive added in the editor appended its geometry as a new buffer), merging
+  // is worthwhile even when no data is orphaned or wasted.
+  if(usedBuffers.size() > 1)
     return true;
 
   size_t usedDataSize = 0;
@@ -301,6 +359,51 @@ std::vector<tinygltf::Accessor> buildCompactAccessors(const tinygltf::Model&  mo
   return newAccessors;
 }
 
+// Rewrite the EXT_mesh_opacity_micromap references that collectOpacityMicromap*() kept alive so they
+// point at the compacted accessor/bufferView indices. Mirror of those collectors: `micromapIndices`
+// accessors on primitive extensions, and `data`/`triangles` bufferViews on the root micromaps[].
+void updateOpacityMicromapReferences(tinygltf::Model& model, const std::vector<int>& accessorRemap, const std::vector<int>& bufferViewRemap)
+{
+  for(auto& mesh : model.meshes)
+  {
+    for(auto& primitive : mesh.primitives)
+    {
+      auto it = primitive.extensions.find(EXT_MESH_OPACITY_MICROMAP_EXTENSION_NAME);
+      if(it == primitive.extensions.end() || !it->second.Has("micromapIndices"))
+        continue;
+
+      tinygltf::Value::Object& ext = it->second.Get<tinygltf::Value::Object>();
+      tinygltf::Value&         mi  = ext["micromapIndices"];
+      if(!mi.IsInt())
+        continue;
+      const int oldIdx = mi.Get<int>();
+      if(oldIdx >= 0 && oldIdx < static_cast<int>(accessorRemap.size()) && accessorRemap[oldIdx] >= 0)
+        mi = tinygltf::Value(accessorRemap[oldIdx]);
+    }
+  }
+
+  auto rootIt = model.extensions.find(EXT_MESH_OPACITY_MICROMAP_EXTENSION_NAME);
+  if(rootIt == model.extensions.end() || !rootIt->second.Has("micromaps") || !rootIt->second.Get("micromaps").IsArray())
+    return;
+
+  tinygltf::Value::Array& micromaps = rootIt->second.Get<tinygltf::Value::Object>()["micromaps"].Get<tinygltf::Value::Array>();
+  for(tinygltf::Value& mm : micromaps)
+  {
+    if(!mm.IsObject())
+      continue;
+    tinygltf::Value::Object& mmObj = mm.Get<tinygltf::Value::Object>();
+    for(const char* key : {"data", "triangles"})
+    {
+      auto f = mmObj.find(key);
+      if(f == mmObj.end() || !f->second.IsInt())
+        continue;
+      const int oldIdx = f->second.Get<int>();
+      if(oldIdx >= 0 && oldIdx < static_cast<int>(bufferViewRemap.size()) && bufferViewRemap[oldIdx] >= 0)
+        f->second = tinygltf::Value(bufferViewRemap[oldIdx]);
+    }
+  }
+}
+
 //--------------------------------------------------------------------------------------------------
 // Phase 8: Update all accessor references in meshes, skins, animations, and images.
 //--------------------------------------------------------------------------------------------------
@@ -355,6 +458,8 @@ void updateModelReferences(tinygltf::Model& model, const std::vector<int>& acces
     if(image.bufferView >= 0 && image.bufferView < static_cast<int>(bufferViewRemap.size()))
       image.bufferView = bufferViewRemap[image.bufferView];
   }
+
+  updateOpacityMicromapReferences(model, accessorRemap, bufferViewRemap);
 }
 
 }  // anonymous namespace

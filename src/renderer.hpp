@@ -54,6 +54,8 @@
 #include "ui_busy_window.hpp"
 #include "ui_scene_browser.hpp"
 #include "ui_inspector.hpp"
+#include "ui_thumbnail_cache.hpp"
+#include "ui_toast.hpp"
 #include "scene_selection.hpp"
 #include "gizmo_visuals_vk.hpp"
 #include "timeline_pipeline.hpp"
@@ -113,6 +115,7 @@ private:
   void rebuildSceneFromModel();  // Rebuild Vulkan scene after modifying the glTF model in-place (preserves textures); clears undo
   void rebuildSceneGeometry();  // Geometry-only rebuild (preserves textures); does NOT clear undo (used by undoable geometry edits)
   void reconcileGeometryIfNeeded();  // Rebuild geometry when GPU buffers are behind the render-primitive count (e.g. added primitive)
+  void applyPendingTextureRebuild();  // Consume DirtyFlags::texturesChanged at frame top: full texture rebuild + cache refresh
   void refreshCpuSceneGraphFromModel();
   void rebuildVulkanSceneInternal(bool rebuildTextures);  // GPU upload + AS; CPU scene must already be parsed
   void compileShaders();
@@ -199,6 +202,19 @@ private:
   void          setGltfCameraFromView(int cameraIndex);
   void          loadHdrFileDialog();
 
+  // Opens an image file dialog for the inspector's "Load from file" texture action. Returns the chosen
+  // path, or an empty path if cancelled.
+  std::filesystem::path pickImageFile();
+
+  // Resolve a glTF texture / image index to a bounded ImGui thumbnail (0 if not resident). Handed to
+  // the inspector and scene browser so their panels can show thumbnails without knowing about the GPU.
+  ImTextureID thumbnailForTexture(int textureIndex);
+  ImTextureID thumbnailForImage(int imageIndex);
+
+  // Push a transient notification to the on-screen toast overlay (isError = red). Wired into the
+  // inspector / scene browser so their edit actions can surface failures beyond the log.
+  void notify(const std::string& message, bool isError);
+
   // Recent files management
   std::vector<std::filesystem::path> m_recentFiles;
 
@@ -214,6 +230,7 @@ private:
   // File dialog directories
   std::filesystem::path m_lastSceneDirectory;
   std::filesystem::path m_lastHdrDirectory;
+  std::filesystem::path m_lastImageDirectory;
 
   //--------------------------------------------------------------------------------------------------
   //
@@ -233,7 +250,8 @@ private:
   bool m_skipGpuSyncValidation{false};  // GPU transform path skipped uploadRenderNodes / CPU TLAS sync
 #endif
 
-  uint32_t m_maxTextures{100'000U};  // Maximum number of textures supported by the descriptor set
+  uint32_t m_maxTextures{100'000U};  // Maximum number of material images (eTextures SAMPLED_IMAGE array)
+  uint32_t m_maxSamplers{0U};        // Maximum number of samplers (eSamplers SAMPLER array); set from device limits
 
   Resources  m_resources;
   PathTracer m_pathTracer;  // Path tracer renderer
@@ -243,6 +261,8 @@ private:
   SceneSelection m_sceneSelection;  // Shared selection state
   UiSceneBrowser m_sceneBrowser;    // New scene browser
   UiInspector    m_inspector;       // New inspector
+  ThumbnailCache m_thumbnailCache;  // Bounded ImGui thumbnails for scene textures/images
+  UiToasts       m_toasts;          // Transient error/info notifications (e.g. failed image import)
   BusyWindow     m_busy;
   Silhouette     m_silhouette;     // Silhouette renderer
   VisualHelpers  m_visualHelpers;  // Grid + transform gizmo overlay

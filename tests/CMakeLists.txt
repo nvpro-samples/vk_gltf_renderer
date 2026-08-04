@@ -45,6 +45,8 @@ set(TEST_SOURCES
     test_primitives.cpp
     # Agentic workflow bridge contract
     test_agentic_bridge.cpp
+    # Geometry compaction preserves EXT_mesh_opacity_micromap payload
+    test_opacity_micromap_compaction.cpp
     # Need tinygltf implementation
     ${CMAKE_SOURCE_DIR}/src/tiny_stb_implementation.cpp
     # Optional external generation bridge
@@ -55,6 +57,7 @@ set(TEST_SOURCES
     ${CMAKE_SOURCE_DIR}/src/gltf_material_cache.cpp
     ${CMAKE_SOURCE_DIR}/src/gltf_scene.cpp
     ${CMAKE_SOURCE_DIR}/src/gltf_scene_editor.cpp
+    ${CMAKE_SOURCE_DIR}/src/gltf_image_loader.cpp
     ${CMAKE_SOURCE_DIR}/src/gltf_scene_animation.cpp
     ${CMAKE_SOURCE_DIR}/src/gltf_scene_validator.cpp
     ${CMAKE_SOURCE_DIR}/src/gltf_scene_merger.cpp
@@ -148,6 +151,7 @@ add_executable(${BENCHMARK_NAME}
     ${CMAKE_SOURCE_DIR}/src/gltf_compact_scene.cpp
     ${CMAKE_SOURCE_DIR}/src/gltf_scene.cpp
     ${CMAKE_SOURCE_DIR}/src/gltf_scene_editor.cpp
+    ${CMAKE_SOURCE_DIR}/src/gltf_image_loader.cpp
     ${CMAKE_SOURCE_DIR}/src/gltf_scene_animation.cpp
     ${CMAKE_SOURCE_DIR}/src/gltf_scene_validator.cpp
     ${CMAKE_SOURCE_DIR}/src/gltf_scene_merger.cpp

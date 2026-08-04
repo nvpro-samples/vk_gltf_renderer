@@ -384,6 +384,77 @@ void EditMaterialCommand::mergeWith(const ICommand& other)
   *m_newMaterial = *o.m_newMaterial;
 }
 
+// ReplaceImageCommand / EditSamplerCommand / EditTextureCommand are header-only aliases of the
+// TextureResourceEditCommand<> template (see undo_redo.hpp).
+
+//--------------------------------------------------------------------------------------------------
+// RemoveImageCommand
+//--------------------------------------------------------------------------------------------------
+
+RemoveImageCommand::RemoveImageCommand(nvvkgltf::Scene& scene, int imageIndex, const tinygltf::Image& removedImage)
+    : m_scene(scene)
+    , m_imageIndex(imageIndex)
+    , m_image(std::make_unique<tinygltf::Image>(removedImage))
+{
+}
+
+RemoveImageCommand::~RemoveImageCommand() = default;
+
+void RemoveImageCommand::execute()
+{
+  m_scene.editor().removeImageAt(m_imageIndex);
+}
+
+void RemoveImageCommand::undo()
+{
+  m_scene.editor().insertImageAt(m_imageIndex, *m_image);
+}
+
+std::string RemoveImageCommand::description() const
+{
+  return fmt::format("Remove Image {}", m_imageIndex);
+}
+
+
+//--------------------------------------------------------------------------------------------------
+// ImportImageAsTextureCommand
+//--------------------------------------------------------------------------------------------------
+
+ImportImageAsTextureCommand::ImportImageAsTextureCommand(nvvkgltf::Scene& scene, int imageIndex, int textureIndex, std::string description)
+    : m_scene(scene)
+    , m_imageIndex(imageIndex)
+    , m_textureIndex(textureIndex)
+    , m_image(std::make_unique<tinygltf::Image>(scene.getModel().images[imageIndex]))
+    , m_texture(std::make_unique<tinygltf::Texture>(scene.getModel().textures[textureIndex]))
+    , m_description(std::move(description))
+{
+}
+
+ImportImageAsTextureCommand::~ImportImageAsTextureCommand() = default;
+
+void ImportImageAsTextureCommand::execute()
+{
+  // Redo: re-append the image (insertImageAt remaps sources; a tail insert touches nothing) then the
+  // texture, which already points at m_imageIndex.
+  tinygltf::Model& model = m_scene.getModel();
+  m_scene.editor().insertImageAt(m_imageIndex, *m_image);
+  model.textures.insert(model.textures.begin() + m_textureIndex, *m_texture);
+  m_scene.getDirtyFlags().texturesChanged = true;
+}
+
+void ImportImageAsTextureCommand::undo()
+{
+  // Remove the appended texture first so the image is unreferenced, then the image. Both are at the
+  // tail (import always appends; undo is LIFO), so removeImageAt's ref-count assert and source remap
+  // are satisfied with no shifting.
+  tinygltf::Model& model = m_scene.getModel();
+  if(m_textureIndex >= 0 && m_textureIndex < static_cast<int>(model.textures.size()))
+    model.textures.erase(model.textures.begin() + m_textureIndex);
+  m_scene.editor().removeImageAt(m_imageIndex);
+  m_scene.getDirtyFlags().texturesChanged = true;
+}
+
+
 //--------------------------------------------------------------------------------------------------
 // AddLightCommand
 //--------------------------------------------------------------------------------------------------

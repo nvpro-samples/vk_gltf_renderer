@@ -879,10 +879,14 @@ bool Scene::compactModel()
   UsedResources used;
   collectReferencedResources(m_model, used);
 
-  bool needsCompaction =
-      (used.meshes.size() < origMesh) || (used.materials.size() < origMat) || (used.textures.size() < origTex)
-      || (used.images.size() < origImg) || (used.samplers.size() < origSamp) || (used.skins.size() < origSkin)
-      || (used.cameras.size() < origCam) || (used.animations.size() < origAnim) || (used.lights.size() < origLight);
+  // Geometry compaction (::compactModel) consolidates everything into a single buffer[0], so a model
+  // that still spans more than one buffer — e.g. a primitive added in the editor appended its geometry
+  // as a new buffer — is worth compacting even when no high-level resource is orphaned.
+  bool needsCompaction = (used.meshes.size() < origMesh) || (used.materials.size() < origMat)
+                         || (used.textures.size() < origTex) || (used.images.size() < origImg)
+                         || (used.samplers.size() < origSamp) || (used.skins.size() < origSkin)
+                         || (used.cameras.size() < origCam) || (used.animations.size() < origAnim)
+                         || (used.lights.size() < origLight) || (m_model.buffers.size() > 1);
   if(!needsCompaction)
   {
     LOGI("Scene compaction: No orphaned resources found\n");

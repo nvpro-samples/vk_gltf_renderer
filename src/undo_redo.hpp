@@ -279,6 +279,116 @@ private:
 };
 
 //--------------------------------------------------------------------------------------------------
+// ReplaceImageCommand - Undo/redo for replacing an image's pixels in place (SceneEditor::replaceImageFromFile)
+//--------------------------------------------------------------------------------------------------
+
+// Undo/redo for an in-place swap of one element of a model resource vector (image / sampler / texture).
+// All three edits just flag DirtyFlags::texturesChanged; the renderer does the GPU rebuild. GetVec
+// returns the target vector from the model. See the aliases below.
+template <typename T, std::vector<T>& (*GetVec)(tinygltf::Model&)>
+class TextureResourceEditCommand : public ICommand
+{
+public:
+  TextureResourceEditCommand(nvvkgltf::Scene& scene, int index, const T& oldValue, const T& newValue, std::string description)
+      : m_scene(scene)
+      , m_index(index)
+      , m_old(std::make_unique<T>(oldValue))
+      , m_new(std::make_unique<T>(newValue))
+      , m_description(std::move(description))
+  {
+  }
+
+  void                      execute() override { restore(*m_new); }
+  void                      undo() override { restore(*m_old); }
+  [[nodiscard]] std::string description() const override { return m_description; }
+
+private:
+  void restore(const T& value)
+  {
+    std::vector<T>& vec = GetVec(m_scene.getModel());
+    if(m_index >= 0 && m_index < static_cast<int>(vec.size()))
+    {
+      vec[m_index]                            = value;
+      m_scene.getDirtyFlags().texturesChanged = true;
+    }
+  }
+
+  nvvkgltf::Scene&   m_scene;
+  int                m_index;
+  std::unique_ptr<T> m_old;
+  std::unique_ptr<T> m_new;
+  std::string        m_description;
+};
+
+inline std::vector<tinygltf::Image>& modelImages(tinygltf::Model& m)
+{
+  return m.images;
+}
+inline std::vector<tinygltf::Sampler>& modelSamplers(tinygltf::Model& m)
+{
+  return m.samplers;
+}
+inline std::vector<tinygltf::Texture>& modelTextures(tinygltf::Model& m)
+{
+  return m.textures;
+}
+
+using ReplaceImageCommand = TextureResourceEditCommand<tinygltf::Image, &modelImages>;     // replace an image's pixels
+using EditSamplerCommand = TextureResourceEditCommand<tinygltf::Sampler, &modelSamplers>;  // edit a sampler's wrap/filter
+using EditTextureCommand = TextureResourceEditCommand<tinygltf::Texture, &modelTextures>;  // edit a texture's image/sampler ref
+
+//--------------------------------------------------------------------------------------------------
+// RemoveImageCommand - Undo/redo for removing an unreferenced image (SceneEditor::removeImageAt)
+//
+// The image (referenced by no texture) is removed live; undo re-inserts the stored copy at its
+// original index. Both directions remap texture image sources via the editor.
+//--------------------------------------------------------------------------------------------------
+
+class RemoveImageCommand : public ICommand
+{
+public:
+  RemoveImageCommand(nvvkgltf::Scene& scene, int imageIndex, const tinygltf::Image& removedImage);
+  ~RemoveImageCommand() override;
+
+  void                      execute() override;  // redo: remove again
+  void                      undo() override;     // re-insert the stored image
+  [[nodiscard]] std::string description() const override;
+
+private:
+  nvvkgltf::Scene&                 m_scene;
+  int                              m_imageIndex;
+  std::unique_ptr<tinygltf::Image> m_image;
+};
+
+//--------------------------------------------------------------------------------------------------
+// ImportImageAsTextureCommand - Undo/redo for importing a file as a new image + texture.
+//
+// SceneEditor::importImageAsTexture appends both at the tail of model.images / model.textures. This
+// command (pushed via pushExecuted after the import already succeeded) makes that undoable: undo()
+// removes the texture then the image (both at the tail); execute() re-appends the stored copies for
+// redo. The slot assignment that follows an import is recorded separately as an EditMaterialCommand.
+//--------------------------------------------------------------------------------------------------
+
+class ImportImageAsTextureCommand : public ICommand
+{
+public:
+  ImportImageAsTextureCommand(nvvkgltf::Scene& scene, int imageIndex, int textureIndex, std::string description);
+  ~ImportImageAsTextureCommand() override;
+
+  void                      execute() override;  // redo: re-append the stored image + texture
+  void                      undo() override;     // remove the appended texture + image
+  [[nodiscard]] std::string description() const override { return m_description; }
+
+private:
+  nvvkgltf::Scene&                   m_scene;
+  int                                m_imageIndex;
+  int                                m_textureIndex;
+  std::unique_ptr<tinygltf::Image>   m_image;
+  std::unique_ptr<tinygltf::Texture> m_texture;
+  std::string                        m_description;
+};
+
+//--------------------------------------------------------------------------------------------------
 // AddLightCommand - Undo/redo for adding a light node (snapshot-based)
 //
 // Takes a SceneGraphSnapshot before creation so undo can reliably restore

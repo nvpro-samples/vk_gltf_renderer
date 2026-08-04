@@ -30,13 +30,13 @@
 
 The application provides two Vulkan renderer modes that share GPU resources (geometry, materials, textures, and shading code). The **Path Tracer** is the primary quality reference for ray tracing and PBR materials; the **Rasterizer** is the fast fallback preview mode. Switch at any time from the **Settings** panel.
 
-![](renderers.jpg)
+![](images/renderers.jpg)
 
 ### Path Tracer
 
 A Monte Carlo path tracer with global illumination, progressive accumulation, and physically based light transport. This is the primary ray tracing mode and the reference implementation for glTF PBR material accuracy.
 
-![](pathtracer_settings.jpg)
+![](images/pathtracer_settings.jpg)
 
 | Setting | Description |
 |---|---|
@@ -52,7 +52,7 @@ A Monte Carlo path tracer with global illumination, progressive accumulation, an
 
 ### AI-Accelerated Denoisers
 
-![](denoisers.jpg)
+![](images/denoisers.jpg)
 
 Two denoisers are available to reduce path tracing noise while preserving detail:
 
@@ -60,7 +60,7 @@ Two denoisers are available to reduce path tracing noise while preserving detail
 
 [DLSS Ray Reconstruction](https://developer.nvidia.com/rtx/dlss) provides AI denoising with strong temporal stability for ray-traced content.
 
-![](dlss.jpg)
+![](images/dlss.jpg)
 
 - When activated, select the rendering resolution (Min / Optimal / Max) — lower internal resolution means faster rendering, DLSS upscales to the viewport.
 - View the AI guide buffers (albedo, normal, motion, depth, specular) by clicking on thumbnails. Click again to toggle back to the rendered image.
@@ -72,16 +72,26 @@ Two denoisers are available to reduce path tracing noise while preserving detail
 
 [OptiX AI Denoiser](https://developer.nvidia.com/optix-denoiser) uses albedo and normal guide buffers to preserve detail while removing Monte Carlo noise.
 
-![](optix.jpg)
+![](images/optix.jpg)
 
 - Click the **Denoise** button to denoise the current accumulation, or enable **Auto-Denoise** to trigger automatically every N frames.
 - The denoised image is visible when **Denoise Result** is active, indicated by a green outline.
 
 **How to enable:** Set `USE_OPTIX_DENOISER=ON` in CMake (enabled by default when CUDA Toolkit is found). OptiX headers are downloaded automatically — no separate SDK install needed. Requires the [CUDA Toolkit](https://developer.nvidia.com/cuda-downloads) (11.0+).
 
+### Opacity Micromap (EXT_mesh_opacity_micromap)
+
+[Opacity Micromaps (OMM)](https://developer.nvidia.com/blog/improve-ray-tracing-performance-with-opacity-micromaps/) pre-classify each micro-triangle in alpha-tested geometry as opaque, transparent, or unknown. The ray tracer skips the any-hit shader for opaque micro-triangles, eliminating per-ray alpha evaluation on most of the surface.
+
+This renderer loads scenes that already contain `EXT_mesh_opacity_micromap` data and binds it when building the BLAS. Bake OMMs with [gltf_omm_baker](https://github.com/nvpro-samples/gltf_omm_baker) (NVIDIA-internal), which writes the extension into the glTF file.
+
+The **Opacity Micromap** visualization mode (Settings → Visualization) is a debug view for alpha-tested geometry that shows where the ray tracer still pays for alpha (any-hit) shading. Surfaces resolved by an opacity micromap as opaque are drawn green (no alpha work); "unknown" micro-triangles that still run the alpha shader are drawn yellow; transparent micro-triangles are culled, so those pixels show the environment behind. On a scene without an opacity micromap the whole alpha-tested surface reads yellow, illustrating the cost the OMM removes. The view is meaningful in the RayTracing (RT pipeline) technique, which consults the micromap.
+
+<img src="images/omm_bake.png" alt="Left: scene with OMM (mostly green = OMM-resolved, some yellow = unknown micro-triangles). Right: same scene without OMM (all yellow = full any-hit evaluation on every ray)." width="480">
+
 ### Rasterizer
 
-![](raster_settings.jpg)
+![](images/raster_settings.jpg)
 
 The rasterizer provides a fast PBR preview using forward rendering. It shares the same Vulkan resources as the path tracer:
 
@@ -91,7 +101,7 @@ The rasterizer provides a fast PBR preview using forward rendering. It shares th
 
 It does not implement the full glTF PBR model and is not intended as the main material-reference implementation. It is designed as a fast navigation and fallback mode with shared scene resources.
 
-![](wireframe.png)
+![](images/wireframe.png)
 
 Wireframe mode can be toggled for mesh inspection.
 
@@ -103,27 +113,27 @@ Wireframe mode can be toggled for mesh inspection.
 
 A built-in physically based Sun & Sky shader module simulates atmospheric scattering. Adjust sun direction, turbidity, and ground albedo for different times of day and weather conditions.
 
-![](sky_1.jpg) ![](sky_2.jpg) ![](sky_3.jpg)
+![](images/sky_1.jpg) ![](images/sky_2.jpg) ![](images/sky_3.jpg)
 
 ### HDR Environment
 
 Lighting can come from HDR environment maps (`.hdr` files). Drag and drop an HDR file onto the viewport, or load via **File > Load HDR Environment** (`Ctrl+Shift+O`).
 
-![](hdr_1.jpg) ![](hdr_2.jpg) ![](hdr_3.jpg) ![](hdr_4.jpg) <br> ![](hdr_5.jpg) ![](hdr_6.jpg) ![](hdr_7.jpg) ![](hdr_8.jpg)
+![](images/hdr_1.jpg) ![](images/hdr_2.jpg) ![](images/hdr_3.jpg) ![](images/hdr_4.jpg) <br> ![](images/hdr_5.jpg) ![](images/hdr_6.jpg) ![](images/hdr_7.jpg) ![](images/hdr_8.jpg)
 
 The environment can be **blurred** to soften reflections and lighting:
 
-![](hdr_1.jpg) ![](hdr_blur_1.jpg) ![](hdr_blur_2.jpg) ![](hdr_blur_3.jpg)
+![](images/hdr_1.jpg) ![](images/hdr_blur_1.jpg) ![](images/hdr_blur_2.jpg) ![](images/hdr_blur_3.jpg)
 
 And **rotated** to position the light source where you need it:
 
-![](hdr_1.jpg) ![](hdr_rot_1.jpg)
+![](images/hdr_1.jpg) ![](images/hdr_rot_1.jpg)
 
 ### Background
 
 The background can also be a solid color. When saving as PNG, the alpha channel is preserved — useful for compositing renders over custom backgrounds.
 
-![](background_1.jpg) ![](background_2.jpg) ![](background_3.png)
+![](images/background_1.jpg) ![](images/background_2.jpg) ![](images/background_3.png)
 
 ---
 
@@ -131,7 +141,7 @@ The background can also be a solid color. When saving as PNG, the alpha channel 
 
 A tone mapper is essential for converting HDR rendering output to displayable LDR images. Tone mapping is performed with a compute shader, and settings like exposure, contrast, saturation, and vignette are adjustable in real time.
 
-![](tonemapper.jpg)
+![](images/tonemapper.jpg)
 
 Supported tone mappers:
 
@@ -152,14 +162,14 @@ Camera navigation follows the [Softimage](https://en.wikipedia.org/wiki/Softimag
 
 ### Controls
 
-![](cam_info.png)
+![](images/cam_info.png)
 
 ### Overview
-![](cam_1.png)
+![](images/cam_1.png)
 
 ### Copy / Restore / Save
 
-![](cam_2.png)
+![](images/cam_2.png)
 
 - Click the **home** icon to restore the camera to its original position.
 - Click the **camera+** icon to save the current view; saved cameras appear as #1, #2, etc.
@@ -169,7 +179,7 @@ Camera navigation follows the [Softimage](https://en.wikipedia.org/wiki/Softimag
 
 ### Navigation Modes 
 
-![](cam_3.png)
+![](images/cam_3.png)
 
 | Mode | Description |
 |---|---|
@@ -183,7 +193,7 @@ Camera navigation follows the [Softimage](https://en.wikipedia.org/wiki/Softimag
 
 Depth of field is available in the path tracer under **Settings → Path Tracer** (Aperture, Auto Focus, Focal Distance). Adjust aperture and focal distance for cinematic bokeh.
 
-![](dof_1.jpg) ![](dof_2.jpg)
+![](images/dof_1.jpg) ![](images/dof_2.jpg)
 
 Use **Auto Focus** to automatically set the focal distance to the camera's interest point.
 
@@ -191,7 +201,7 @@ Use **Auto Focus** to automatically set the focal distance to the camera's inter
 
 ## Scene Asset Editor
 
-![](scene_graph_ui.png)
+![](images/scene_graph_ui.png)
 
 The application includes a full **glTF scene asset editor** that allows non-destructive modifications to the loaded scene. All changes operate directly on the in-memory glTF model and can be saved back to disk as `.gltf` or `.glb`.
 
@@ -251,6 +261,29 @@ The **Inspector** panel provides full PBR material editing when a material or pr
 - All glTF PBR material extensions: clearcoat, transmission, volume, volume scatter, sheen, specular, IOR, iridescence, anisotropy, diffuse transmission, dispersion, emissive strength, unlit, and specular-glossiness
 - Material copy/paste via clipboard (right-click on materials)
 
+Each texture slot shows a thumbnail of the assigned image — click it to open the full-size **image
+viewer** — and offers **switch** to another existing texture (a filterable, thumbnailed picker), **load
+from file** (import a new image — available even on a scene that starts with no textures), **clear**, and
+a **UV transform** button. The transform button opens
+a small popup for `KHR_texture_transform` (offset, rotation, scale): glTF stores the transform on the
+material's texture *reference* — not the shared texture — so it is edited here per binding, and the same
+texture used by two materials can carry two different transforms. The button offers **Add** when the
+extension is absent, then the fields plus **Remove**. Imported images are referenced externally and copied
+next to the file on save.
+
+### Textures, Images, and Samplers
+
+The Scene List's **Textures**, **Images**, and **Samplers** groups mirror the glTF data for developers
+inspecting or editing a scene, with thumbnails alongside the text listing (text stays the fastest way
+to find one in large scenes). Each **Textures** row shows the referenced **image** and **sampler** as
+clickable ID links (jump to that element) and a developer-style popup to edit those indices — matching
+the glTF texture object, which is just `{ source, sampler }`. Wrap and filter modes are edited in the
+**Samplers** group (each row also reports how many textures use it); the per-binding UV transform is edited
+from the material Inspector (above). In the **Images** group each row reports how many textures reference
+the image; clicking a thumbnail opens the **image viewer** (large preview + metadata) where the image can
+be **replaced from file** or **reloaded**. Images that no texture references can be removed from there;
+other unused resources are cleared by **Compact Scene** (`Ctrl+K`).
+
 ### Punctual Lights
 
 The editor supports creating and editing **KHR_lights_punctual** lights — point, directional, and spot lights that are part of the glTF standard.
@@ -299,7 +332,7 @@ context-menu **Make Editable** to break the lock on a referenced subtree, and
 ### Save and Compact
 
 - **File > Save / Save As** writes the modified scene to `.gltf` or `.glb`, including all edits (transforms, hierarchy changes, material tweaks, merged content, image copying)
-- **Tools > Compact Scene** removes orphaned resources (unused meshes, materials, textures, images, accessors, buffer views, buffers) left behind by delete/merge operations — reduces file size and cleans up the model
+- **Tools > Compact Scene** removes orphaned resources (unused meshes, materials, textures, images, accessors, buffer views, buffers) left behind by delete/merge operations and consolidates all geometry into a single buffer — reduces file size, cleans up the model, and collapses the extra buffers that editor operations (e.g. adding a primitive) leave behind. Pre-baked `EXT_mesh_opacity_micromap` data is preserved through compaction so OMM coverage survives the save/compact workflow.
 
 ### Visibility
 
@@ -324,7 +357,7 @@ Assets that carry a `KHR_interactivity` behavior graph show a read-only **Intera
 
 If the loaded scene contains animations, an **Animation** control panel appears:
 
-![](animation_controls.png)
+![](images/animation_controls.png)
 
 - **Play / Pause** the active animation
 - **Step** forward one frame at a time
@@ -338,13 +371,13 @@ Supported animation types: keyframe translation/rotation/scale, skeletal skinnin
 
 If the glTF file contains multiple scenes, a scene selector appears. Click a scene name to switch.
 
-![](multiple_scenes.png)
+![](images/multiple_scenes.png)
 
 ## Material Variants
 
 If the scene uses `KHR_materials_variants`, a variant selector shows all variant names. Click to apply a variant to all meshes that support it.
 
-![](material_variant.png)
+![](images/material_variant.png)
 
 ---
 
@@ -354,11 +387,9 @@ Inspect individual material channels to diagnose shading issues:
 
 |metallic|roughness|normal|base color|emissive|opacity|tangent|tex coord|
 |---|---|---|---|---|---|---|---|
-|![](dbg_metallic.jpg)|![](dbg_roughness.jpg)|![](dbg_normal.jpg)|![](dbg_base_color.jpg)|![](dbg_emissive.jpg)|![](dbg_opacity.jpg)|![](dbg_tangent.jpg)|![](dbg_tex_coord.jpg)|
+|![](images/dbg_metallic.jpg)|![](images/dbg_roughness.jpg)|![](images/dbg_normal.jpg)|![](images/dbg_base_color.jpg)|![](images/dbg_emissive.jpg)|![](images/dbg_opacity.jpg)|![](images/dbg_tangent.jpg)|![](images/dbg_tex_coord.jpg)|
 
-Select the visualization mode from the **Visualization** combo in the **Settings** panel. The full set of modes is defined by `shaderio::Visualization` in `shaders/shaderio.h`.
-
-The **Opacity Micromap** mode is a debug view for alpha-tested geometry that shows where the ray tracer still pays for alpha (any-hit) shading. Surfaces resolved by an opacity micromap as opaque are drawn green (no alpha work); "unknown" micro-triangles that still run the alpha shader are drawn yellow; transparent micro-triangles are culled, so those pixels show the environment behind. On a scene without an opacity micromap the whole alpha-tested surface reads yellow, illustrating the cost the OMM removes. The view is meaningful in the RayTracing (RT pipeline) technique, which consults the micromap.
+Select the visualization mode from the **Visualization** combo in the **Settings** panel. The full set of modes is defined by `shaderio::Visualization` in `shaders/shaderio.h`. See also the [Opacity Micromap](#opacity-micromap-ext_mesh_opacity_micromap) section for the OMM coverage debug view.
 
 ---
 
@@ -368,20 +399,20 @@ The ray tracing path tracer implements all glTF PBR material extensions with phy
 
 | | |
 |--|--|
-| Anisotropy | ![](AnisotropyBarnLamp.jpg) ![](AnisotropyDiscTest.jpg) ![](AnisotropyRotationTest.jpg) ![](AnisotropyStrengthTest.jpg) <br> ![](CompareAnisotropy.jpg)|
-| Attenuation | ![](DragonAttenuation.jpg) ![](AttenuationTest.jpg)|
-| Alpha Blend | ![](AlphaBlendModeTest.jpg) ![](CompareAlphaCoverage.jpg) |
-| Clear Coat | ![](ClearCoatCarPaint.jpg) ![](ClearCoatTest.jpg) ![](ClearcoatWicker.jpg) ![](CompareClearcoat.jpg)|
-| Dispersion | ![](DispersionTest.jpg) ![](DragonDispersion.jpg) ![](CompareDispersion.jpg) |
-| IOR | ![](IORTestGrid.jpg) ![](CompareIor.jpg) |
-| Emissive | ![](EmissiveStrengthTest.jpg) ![](CompareEmissiveStrength.jpg) |
-| Iridescence | ![](IridescenceAbalone.jpg) ![](IridescenceDielectricSpheres.jpg) ![](IridescenceLamp.jpg) ![](IridescenceSuzanne.jpg) |
-| Punctual Lights | ![](LightsPunctualLamp.jpg) ![](light.jpg) |
-| Sheen | ![](SheenChair.jpg) ![](SheenCloth.jpg) ![](SheenTestGrid.jpg) ![](CompareSheen.jpg) |
-| Transmission | ![](TransmissionRoughnessTest.jpg) ![](TransmissionTest.jpg) ![](TransmissionThinwallTestGrid.jpg) ![](CompareTransmission.jpg) <br> ![](CompareVolume.jpg) ![](GlassBrokenWindow.jpg) ![](MosquitoInAmber.jpg) |
-| Volume | ![](volume.png) ![](volume_scatter.png) |
-| Variant | ![](MaterialsVariantsShoe_1.jpg) ![](MaterialsVariantsShoe_2.jpg) ![](MaterialsVariantsShoe_3.jpg) |
-| Others | ![](BoxVertexColors.jpg) ![](Duck.jpg) ![](MandarinOrange.jpg) ![](SpecularTest.jpg) ![](NormalTangentTest.jpg) ![](NormalTangentMirrorTest.jpg) <br> ![](BarramundiFish.jpg) ![](CarbonFibre.jpg) ![](cornellBox.jpg) ![](GlamVelvetSofa_1.jpg) ![](SimpleInstancing.jpg) ![](CompareSpecular.jpg) |
+| Anisotropy | ![](images/AnisotropyBarnLamp.jpg) ![](images/AnisotropyDiscTest.jpg) ![](images/AnisotropyRotationTest.jpg) ![](images/AnisotropyStrengthTest.jpg) <br> ![](images/CompareAnisotropy.jpg)|
+| Attenuation | ![](images/DragonAttenuation.jpg) ![](images/AttenuationTest.jpg)|
+| Alpha Blend | ![](images/AlphaBlendModeTest.jpg) ![](images/CompareAlphaCoverage.jpg) |
+| Clear Coat | ![](images/ClearCoatCarPaint.jpg) ![](images/ClearCoatTest.jpg) ![](images/ClearcoatWicker.jpg) ![](images/CompareClearcoat.jpg)|
+| Dispersion | ![](images/DispersionTest.jpg) ![](images/DragonDispersion.jpg) ![](images/CompareDispersion.jpg) |
+| IOR | ![](images/IORTestGrid.jpg) ![](images/CompareIor.jpg) |
+| Emissive | ![](images/EmissiveStrengthTest.jpg) ![](images/CompareEmissiveStrength.jpg) |
+| Iridescence | ![](images/IridescenceAbalone.jpg) ![](images/IridescenceDielectricSpheres.jpg) ![](images/IridescenceLamp.jpg) ![](images/IridescenceSuzanne.jpg) |
+| Punctual Lights | ![](images/LightsPunctualLamp.jpg) ![](images/light.jpg) |
+| Sheen | ![](images/SheenChair.jpg) ![](images/SheenCloth.jpg) ![](images/SheenTestGrid.jpg) ![](images/CompareSheen.jpg) |
+| Transmission | ![](images/TransmissionRoughnessTest.jpg) ![](images/TransmissionTest.jpg) ![](images/TransmissionThinwallTestGrid.jpg) ![](images/CompareTransmission.jpg) <br> ![](images/CompareVolume.jpg) ![](images/GlassBrokenWindow.jpg) ![](images/MosquitoInAmber.jpg) |
+| Volume | ![](images/volume.png) ![](images/volume_scatter.png) |
+| Variant | ![](images/MaterialsVariantsShoe_1.jpg) ![](images/MaterialsVariantsShoe_2.jpg) ![](images/MaterialsVariantsShoe_3.jpg) |
+| Others | ![](images/BoxVertexColors.jpg) ![](images/Duck.jpg) ![](images/MandarinOrange.jpg) ![](images/SpecularTest.jpg) ![](images/NormalTangentTest.jpg) ![](images/NormalTangentMirrorTest.jpg) <br> ![](images/BarramundiFish.jpg) ![](images/CarbonFibre.jpg) ![](images/cornellBox.jpg) ![](images/GlamVelvetSofa_1.jpg) ![](images/SimpleInstancing.jpg) ![](images/CompareSpecular.jpg) |
 
 ---
 
@@ -391,19 +422,19 @@ The ray tracing path tracer implements all glTF PBR material extensions with phy
 
 Measure time spent on each rendering stage (path tracing, rasterization, tone mapping, UI) with per-frame GPU timestamps.
 
-![](profiler.png)
+![](images/profiler.png)
 
 ### Logger
 
 A dockable log window showing all application messages. Filter by level (Info, Warning, Error) to focus on what matters.
 
-![](logger.png)
+![](images/logger.png)
 
 ### NVML GPU Monitor
 
 Real-time GPU monitoring via NVML: temperature, power draw, memory usage, and clock speeds. Useful for identifying thermal throttling during long renders.
 
-![](nvml.png)
+![](images/nvml.png)
 
 ### Tangent Space Repair
 

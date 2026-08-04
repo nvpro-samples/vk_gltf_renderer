@@ -70,9 +70,10 @@ enum BindingPoints
   eTlas = 0,      // Top level acceleration structure
   eOutImages,     // Output image (RGBA32); eSelectImage slot = ObjectID in .r (R32_SFLOAT)
   eOutDepth,      // Scene depth output (D32_SFLOAT as r32f storage image)
-  eTextures,      // glTF material textures (bindless array)
+  eTextures,      // glTF material images (bindless SAMPLED_IMAGE array; indexed by GltfTextureInfo.index)
   eTexturesCube,  // Prefiltered HDR env cubemaps (HDR_DIFFUSE_INDEX, HDR_GLOSSY_INDEX)
   eTexturesHdr,   // 2D IBL/transmission textures (HDR_{IMAGE,LUT,SHEEN,OPAQUE}_INDEX)
+  eSamplers,      // glTF samplers (bindless SAMPLER array; indexed by GltfTextureInfo.samplerIndex, slot 0 = default)
 };
 
 // Fixed resolution of the opaque-pass color capture used for screen-space transmission.

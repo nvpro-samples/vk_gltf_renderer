@@ -59,11 +59,16 @@ namespace nvvkgltf {
 
 namespace {
 
+// samplerSlots maps a glTF texture index to a resolved GPU sampler slot (see SceneVk::samplers();
+// slot 0 = default). Indexed by tinfo.index.
 template <typename T>
-shaderio::GltfTextureInfo getTextureInfoImpl(const T& tinfo)
+shaderio::GltfTextureInfo getTextureInfoImpl(const T& tinfo, const std::vector<int>& samplerSlots)
 {
   shaderio::GltfTextureInfo ti{};
-  ti.index = tinfo.index;
+  ti.index        = tinfo.index;
+  ti.samplerIndex = (tinfo.index >= 0 && tinfo.index < static_cast<int>(samplerSlots.size())) ?
+                        static_cast<int16_t>(samplerSlots[tinfo.index]) :
+                        0;
 
   // The renderer only uploads TEXCOORD_0 and TEXCOORD_1 (see VertexBuffers::texCoords[2]
   // in shaders/gltf_scene_io.h.slang). glTF allows TEXCOORD_N for higher N but we clamp
@@ -76,7 +81,7 @@ shaderio::GltfTextureInfo getTextureInfoImpl(const T& tinfo)
         "TEXCOORD_0 and TEXCOORD_1; clamping to TEXCOORD_1.\n",
         tinfo.texCoord);
   }
-  ti.texCoord = std::min(tinfo.texCoord, 1);
+  ti.texCoord = static_cast<int16_t>(std::clamp(tinfo.texCoord, 0, 1));
 
 #if MAT_EXT_TEXTURE_TRANSFORM
   const KHR_texture_transform& transform = tinygltf::utils::getTextureTransform(tinfo);
@@ -87,9 +92,9 @@ shaderio::GltfTextureInfo getTextureInfoImpl(const T& tinfo)
 }
 
 template <typename T>
-uint16_t addTextureInfoImpl(const T& tinfo, std::vector<shaderio::GltfTextureInfo>& textureInfos)
+uint16_t addTextureInfoImpl(const T& tinfo, std::vector<shaderio::GltfTextureInfo>& textureInfos, const std::vector<int>& samplerSlots)
 {
-  shaderio::GltfTextureInfo ti = getTextureInfoImpl(tinfo);
+  shaderio::GltfTextureInfo ti = getTextureInfoImpl(tinfo, samplerSlots);
   if(ti.index != -1)
   {
     uint16_t idx = static_cast<uint16_t>(textureInfos.size());
@@ -234,7 +239,7 @@ void populateShaderMaterial(shaderio::GltfShadeMaterial& dstMat, const tinygltf:
 
 }  // namespace
 
-void MaterialCache::buildFromMaterials(const std::vector<tinygltf::Material>& materials)
+void MaterialCache::buildFromMaterials(const std::vector<tinygltf::Material>& materials, const std::vector<int>& textureSamplerSlots)
 {
   m_textureInfos.clear();
   m_textureInfos.push_back({});
@@ -243,14 +248,14 @@ void MaterialCache::buildFromMaterials(const std::vector<tinygltf::Material>& ma
   for(const auto& srcMat : materials)
   {
     shaderio::GltfShadeMaterial dstMat = {};
-    populateShaderMaterial(dstMat, srcMat, [this](uint16_t& texIndex, const auto& srcTexInfo) {
-      texIndex = addTextureInfoImpl(srcTexInfo, m_textureInfos);
+    populateShaderMaterial(dstMat, srcMat, [&](uint16_t& texIndex, const auto& srcTexInfo) {
+      texIndex = addTextureInfoImpl(srcTexInfo, m_textureInfos, textureSamplerSlots);
     });
     m_shadeMaterials.emplace_back(dstMat);
   }
 }
 
-MaterialUpdateResult MaterialCache::updateMaterial(int index, const tinygltf::Material& srcMat)
+MaterialUpdateResult MaterialCache::updateMaterial(int index, const tinygltf::Material& srcMat, const std::vector<int>& textureSamplerSlots)
 {
   MaterialUpdateResult result{};
   if(index < 0 || index >= static_cast<int>(m_shadeMaterials.size()))
@@ -274,7 +279,7 @@ MaterialUpdateResult MaterialCache::updateMaterial(int index, const tinygltf::Ma
       return;
     }
 
-    infos[texIndex]    = getTextureInfoImpl(srcTexInfo);
+    infos[texIndex]    = getTextureInfoImpl(srcTexInfo, textureSamplerSlots);
     result.span.minIdx = std::min(result.span.minIdx, texIndex);
     result.span.maxIdx = std::max(result.span.maxIdx, texIndex);
     result.span.count++;

@@ -128,8 +128,26 @@ public:
   void                            setOpacityMicromapEnabled(bool enabled) { m_sceneOmm.setEnabled(enabled); }
   const std::vector<nvvk::Image>& textures() const { return m_textures; }
   [[nodiscard]] uint32_t          textureCount() const { return static_cast<uint32_t>(m_textures.size()); }
-  const GpuMemoryTracker&         getMemoryTracker() const { return m_memoryTracker; }
-  GpuMemoryTracker&               getMemoryTracker() { return m_memoryTracker; }
+
+  // Deduplicated glTF samplers, bound as a separate SAMPLER array (eSamplers). Slot 0 is the default
+  // sampler; slots 1..N mirror model.samplers. GltfTextureInfo.samplerIndex indexes into this.
+  const std::vector<VkSampler>& samplers() const { return m_samplers; }
+  [[nodiscard]] uint32_t        samplerCount() const { return static_cast<uint32_t>(m_samplers.size()); }
+  // Maps each glTF texture index to its resolved sampler slot (0 = default). Fed to MaterialCache.
+  const std::vector<int>& textureSamplerSlots() const { return m_textureSamplerSlots; }
+
+  // GPU image view for a glTF texture / image index, or VK_NULL_HANDLE when out of range or not
+  // resident (e.g. an unused image that was not uploaded). Used by the UI to build thumbnails.
+  [[nodiscard]] VkImageView textureView(uint32_t textureIndex) const
+  {
+    return textureIndex < m_textures.size() ? m_textures[textureIndex].descriptor.imageView : VK_NULL_HANDLE;
+  }
+  [[nodiscard]] VkImageView imageView(uint32_t imageIndex) const
+  {
+    return imageIndex < m_images.size() ? m_images[imageIndex].imageTexture.descriptor.imageView : VK_NULL_HANDLE;
+  }
+  const GpuMemoryTracker& getMemoryTracker() const { return m_memoryTracker; }
+  GpuMemoryTracker&       getMemoryTracker() { return m_memoryTracker; }
 
   // An image to be loaded and created.
   struct SceneImage
@@ -173,6 +191,10 @@ protected:
                                    nvvkgltf::Scene&                          scn,
                                    const std::vector<std::filesystem::path>& imageSearchPaths);
 
+  // Fill m_textureSamplerSlots (glTF texture index -> sampler slot) from the model. Pure model data, so
+  // it must run before uploadMaterials(), which bakes the slots into GltfTextureInfo.samplerIndex.
+  void buildTextureSamplerSlots(const tinygltf::Model& model);
+
   void findSrgbImages(const tinygltf::Model& model);
 
   // Rebuild scene descriptor buffer (buffer addresses + numLights). Called internally when buffers change.
@@ -202,7 +224,9 @@ protected:
   std::vector<nvvk::Buffer>  m_bIndices;
   std::vector<VertexBuffers> m_vertexBuffers;
   std::vector<SceneImage>    m_images;
-  std::vector<nvvk::Image>   m_textures;  // Vector of all textures of the scene
+  std::vector<nvvk::Image>   m_textures;  // One per glTF texture; bound as a SAMPLED_IMAGE array (image views only)
+  std::vector<VkSampler> m_samplers;  // Deduplicated samplers; slot 0 = default, 1..N = model.samplers (SAMPLER array)
+  std::vector<int>       m_textureSamplerSlots;  // glTF texture index -> sampler slot in m_samplers (0 = default)
 
   // All images the glTF specification implies should be forced to use the sRGB
   // transfer function. This is used to fix cases where an image is loaded as

@@ -65,10 +65,51 @@ using uicolor::colorEdit4Linear;
 // HELPER FUNCTIONS
 //==================================================================================================
 
-// Texture editing UI - handles add/remove/change texture
+// "Load from file" for a texture slot: pick an image, import it as a new texture appended to the model,
+// and assign it to this slot. Returns true when a texture was imported so the caller propagates it as a
+// normal material change (write-back of copy-based rows + per-frame EditMaterialCommand for undo of the
+// slot). importImageAsTexture sets DirtyFlags::texturesChanged; the renderer does the GPU rebuild after
+// the panels render, so material write-backs have flushed and it can resolve sRGB from final usage.
 template <typename T>
-static bool renderTextureEditRow(const char* label, T& info, const tinygltf::Model& model, const std::vector<std::string>& textureItems)
+bool UiInspector::importTextureIntoSlot(T& info)
 {
+  if(!m_host.canPickImage() || !m_scene)
+    return false;
+
+  const std::filesystem::path path = m_host.pickImage();
+  if(path.empty())
+    return false;  // cancelled
+
+  std::string error;
+  const int   textureIndex = m_scene->editor().importImageAsTexture(path, &error);
+  if(textureIndex < 0)
+  {
+    LOGE("Texture import failed: %s\n", error.c_str());
+    m_host.toast("Texture import failed: " + error, true);
+    return false;
+  }
+
+  // Make the resource append undoable (the slot assignment below rides the caller's EditMaterialCommand).
+  if(m_undoStack)
+  {
+    const int imageIndex = m_scene->getModel().textures[textureIndex].source;
+    m_undoStack->pushExecuted(std::make_unique<ImportImageAsTextureCommand>(*m_scene, imageIndex, textureIndex,
+                                                                            "Import texture " + path.stem().string()));
+  }
+
+  info.index = textureIndex;  // keep the slot's existing texCoord (UV set); only the image changes
+  refreshTextureNames();      // new texture appears in the picker/rows immediately
+  return true;
+}
+
+// Texture editing UI - one editable slot. Returns true when the slot's texture index changed (assign /
+// switch / clear / import), so the caller writes back copy-based rows and records the undo step.
+template <typename T>
+bool UiInspector::renderTextureEditRow(const char* label, T& info)
+{
+  const tinygltf::Model& model       = m_scene->getModel();
+  const bool             canPickFile = m_host.canPickImage();
+
   bool changed = false;
 
   ImGui::TableNextRow();
@@ -79,15 +120,45 @@ static bool renderTextureEditRow(const char* label, T& info, const tinygltf::Mod
   const bool hasTexture = info.index >= 0;
   if(hasTexture)
   {
-    // Use pre-computed texture name from textureItems
-    const std::string displayName = (info.index >= 0 && info.index < static_cast<int>(textureItems.size())) ?
-                                        textureItems[info.index] :
+    // Use pre-computed texture name from m_textureNames
+    const std::string displayName = (info.index >= 0 && info.index < static_cast<int>(m_textureNames.size())) ?
+                                        m_textureNames[info.index] :
                                         "Invalid texture " + std::to_string(info.index);
 
+    // Small thumbnail swatch. Advancing the cursor past it means the name/button width math below
+    // (which reads GetContentRegionAvail) already accounts for it.
+    const ImTextureID thumb = m_host.thumbnail(info.index);
+    if(thumb != 0)
+    {
+      // A button (not a plain Image) so the click reliably registers and the swatch shows a hover
+      // highlight. Zero frame padding keeps its footprint at one text line, so the name/button width
+      // math below is unchanged. str_id = label keeps it unique across the material's slots.
+      const float sz = ImGui::GetTextLineHeight();
+      ImGui::PushStyleVar(ImGuiStyleVar_FramePadding, ImVec2(0, 0));
+      const bool clicked = ImGui::ImageButton(label, thumb, ImVec2(sz, sz));
+      ImGui::PopStyleVar();
+      if(ImGui::IsItemHovered())
+      {
+        ImGui::SetMouseCursor(ImGuiMouseCursor_Hand);
+        ImGui::SetTooltip("Click to view full image");
+      }
+      // Click the swatch to open the full-size image viewer (resolving the texture to its backing image).
+      if(m_onViewImage && clicked && info.index < static_cast<int>(model.textures.size()))
+      {
+        const int imgIdx = tinygltf::utils::getTextureImageIndex(model.textures[info.index]);
+        if(imgIdx >= 0)
+          m_onViewImage(imgIdx);
+      }
+      ImGui::SameLine(0.0f, 4.0f);
+    }
+
+    // Reserve room for the action buttons that follow (switch, [load], UV transform, delete) so the
+    // ellipsized name never overlaps them.
+    const int    buttonCount  = canPickFile ? 4 : 3;
     const float  buttonWidth  = ImGui::CalcTextSize(ICON_MS_DELETE).x + ImGui::GetStyle().FramePadding.x * 2.0f;
     const float  spacing      = ImGui::GetStyle().ItemSpacing.x;
     const float  available    = ImGui::GetContentRegionAvail().x;
-    const float  textMaxWidth = std::max(0.0f, available - 2 * buttonWidth - 2 * spacing);
+    const float  textMaxWidth = std::max(0.0f, available - buttonCount * (buttonWidth + spacing));
     const ImVec2 textStart    = ImGui::GetCursorScreenPos();
     const ImVec2 textEnd(textStart.x + textMaxWidth, textStart.y + ImGui::GetTextLineHeight());
 
@@ -100,6 +171,10 @@ static bool renderTextureEditRow(const char* label, T& info, const tinygltf::Mod
     {
       ImGui::BeginTooltip();
       ImGui::TextUnformatted(displayName.c_str());
+
+      // Enlarged preview so the user can actually see the image, not just its name.
+      if(thumb != 0)
+        ImGui::Image(thumb, ImVec2(160.0f, 160.0f));
 
       // Show texture -> image -> URI path
       if(info.index >= 0 && info.index < static_cast<int>(model.textures.size()))
@@ -147,6 +222,22 @@ static bool renderTextureEditRow(const char* label, T& info, const tinygltf::Mod
       ImGui::TextUnformatted("Switch texture");
       ImGui::EndTooltip();
     }
+    if(canPickFile)
+    {
+      ImGui::SameLine(0.0f, 2.0f);
+      if(ImGui::SmallButton(ICON_MS_FILE_OPEN))
+      {
+        changed |= importTextureIntoSlot(info);
+      }
+      if(ImGui::IsItemHovered())
+      {
+        ImGui::BeginTooltip();
+        ImGui::TextUnformatted("Load from file");
+        ImGui::EndTooltip();
+      }
+    }
+    ImGui::SameLine(0.0f, 2.0f);
+    changed |= renderTextureTransformButton(info);
     ImGui::SameLine(0.0f, 2.0f);  // Reduce spacing between buttons
     if(ImGui::SmallButton(ICON_MS_DELETE))
     {
@@ -162,69 +253,258 @@ static bool renderTextureEditRow(const char* label, T& info, const tinygltf::Mod
   }
   else
   {
-    if(textureItems.empty())
+    // Empty slot: assign an existing texture (only when the scene has any) and always allow loading a
+    // new one from file. The load path works even on a scene with zero textures.
+    bool needSpacing = false;
+    if(!m_textureNames.empty())
     {
-      ImGui::TextDisabled(ICON_MS_ADD_CIRCLE);
-    }
-    else
-    {
-      if(ImGui::SmallButton(ICON_MS_ADD_CIRCLE))
+      if(ImGui::SmallButton(ICON_MS_IMAGE_SEARCH))
       {
         ImGui::OpenPopup("SwitchTexture");
       }
       if(ImGui::IsItemHovered())
       {
         ImGui::BeginTooltip();
-        ImGui::TextUnformatted("Add texture");
+        ImGui::TextUnformatted("Assign existing texture");
+        ImGui::EndTooltip();
+      }
+      needSpacing = true;
+    }
+    if(canPickFile)
+    {
+      if(needSpacing)
+        ImGui::SameLine(0.0f, 2.0f);
+      if(ImGui::SmallButton(ICON_MS_FILE_OPEN))
+      {
+        changed |= importTextureIntoSlot(info);
+      }
+      if(ImGui::IsItemHovered())
+      {
+        ImGui::BeginTooltip();
+        ImGui::TextUnformatted("Load from file");
         ImGui::EndTooltip();
       }
     }
+    else if(m_textureNames.empty())
+    {
+      ImGui::TextDisabled(ICON_MS_ADD_CIRCLE);  // no import hook wired: nothing to do
+    }
   }
 
-  // Unified texture selection popup (works for both add and switch)
-  if(!textureItems.empty())
-  {
-    bool open = true;
-    ImGui::SetNextWindowSize(ImVec2(520.0f, 0.0f), ImGuiCond_Once);
-    if(ImGui::BeginPopupModal("SwitchTexture", &open, ImGuiWindowFlags_None))
-    {
-      ImGuiStorage* storage = ImGui::GetStateStorage();
-      ImGuiID       listId  = ImGui::GetID("texture_select_index");
-      int           selIdx  = storage->GetInt(listId, hasTexture ? info.index : 0);
-      selIdx                = std::clamp(selIdx, 0, static_cast<int>(textureItems.size() - 1));
+  // Existing-texture selection popup (assign / switch). Only meaningful when the scene has textures.
+  changed |= renderTexturePicker(info, hasTexture);
+  ImGui::PopID();
 
-      ImGui::TextUnformatted(hasTexture ? "Switch to texture:" : "Select texture:");
-      ImVec2 listSize(-FLT_MIN, 8.0f * ImGui::GetTextLineHeightWithSpacing());
-      if(ImGui::BeginListBox("##TextureList", listSize))
+  return changed;
+}
+
+// Small per-slot UV-transform (KHR_texture_transform) editor: a button that opens a popup. glTF stores
+// the transform on this material's texture reference, so it is edited here per binding -- not on the
+// shared texture, whose other references may use a different transform. Absent extension -> the popup
+// offers "Add"; present -> offset/rotation/scale + "Remove". The returned flag folds into the row's
+// change flag, so the edit rides the material's existing EditMaterialCommand undo step.
+template <typename T>
+bool UiInspector::renderTextureTransformButton(T& info)
+{
+  bool       changed = false;
+  const bool hasT    = tinygltf::utils::hasTextureTransform(info);
+
+  if(hasT)
+    ImGui::PushStyleColor(ImGuiCol_Text, ImVec4(0.40f, 0.70f, 1.00f, 1.00f));  // tint when a transform is present
+  const bool open = ImGui::SmallButton(ICON_MS_TRANSFORM);
+  if(hasT)
+    ImGui::PopStyleColor();
+  if(open)
+    ImGui::OpenPopup("UVTransform");
+  if(ImGui::IsItemHovered())
+  {
+    ImGui::BeginTooltip();
+    ImGui::TextUnformatted(hasT ? "UV transform (KHR_texture_transform)" : "Add UV transform (KHR_texture_transform)");
+    ImGui::EndTooltip();
+  }
+
+  if(ImGui::BeginPopup("UVTransform"))
+  {
+    if(tinygltf::utils::hasTextureTransform(info))
+    {
+      KHR_texture_transform tt     = tinygltf::utils::getTextureTransform(info);
+      bool                  edited = false;
+      ImGui::SetNextItemWidth(160.0f);
+      edited |= ImGui::DragFloat2("Offset", glm::value_ptr(tt.offset), 0.001f, 0.0f, 0.0f, "%.4f");
+      ImGui::SetNextItemWidth(160.0f);
+      edited |= ImGui::DragFloat("Rotation", &tt.rotation, 0.005f, 0.0f, 0.0f, "%.4f rad");
+      ImGui::SetNextItemWidth(160.0f);
+      edited |= ImGui::DragFloat2("Scale", glm::value_ptr(tt.scale), 0.01f, 0.0f, 0.0f, "%.4f");
+      if(edited)
       {
-        for(int i = 0; i < static_cast<int>(textureItems.size()); ++i)
+        tinygltf::utils::setTextureTransform(info, tt);
+        changed = true;
+      }
+      ImGui::Separator();
+      if(ImGui::SmallButton("Remove"))
+      {
+        tinygltf::utils::removeTextureTransform(info);
+        changed = true;
+        ImGui::CloseCurrentPopup();
+      }
+    }
+    else
+    {
+      ImGui::TextDisabled("No KHR_texture_transform on this binding.");
+      if(ImGui::SmallButton("Add"))
+      {
+        tinygltf::utils::setTextureTransform(info, KHR_texture_transform{});  // identity; fields appear next frame
+        changed = true;
+      }
+    }
+    ImGui::EndPopup();
+  }
+  return changed;
+}
+
+template <typename T>
+bool UiInspector::renderTexturePicker(T& info, bool hasTexture)
+{
+  if(m_textureNames.empty())
+    return false;
+
+  bool changed = false;
+  bool open    = true;
+  ImGui::SetNextWindowSize(ImVec2(520.0f, 440.0f), ImGuiCond_Once);
+  if(!ImGui::BeginPopupModal("SwitchTexture", &open, ImGuiWindowFlags_None))
+    return false;
+
+  ImGuiStorage* storage = ImGui::GetStateStorage();
+  ImGuiID       listId  = ImGui::GetID("texture_select_index");
+  int           selIdx  = storage->GetInt(listId, hasTexture ? info.index : 0);
+  selIdx                = std::clamp(selIdx, 0, static_cast<int>(m_textureNames.size() - 1));
+
+  ImGui::TextUnformatted(hasTexture ? "Switch to texture:" : "Select texture:");
+
+  // Text filter first: at thousands of textures, typing a name is the fast way to find one.
+  static ImGuiTextFilter s_filter;
+  s_filter.Draw(ICON_MS_SEARCH " Filter", 240.0f);
+
+  // List / grid view toggle (persisted for the session). A pressed-looking button marks the active view.
+  static bool s_gridView = false;
+  auto        toggleView = [&](const char* icon, bool active) {
+    if(active)
+      ImGui::PushStyleColor(ImGuiCol_Button, ImGui::GetStyleColorVec4(ImGuiCol_ButtonActive));
+    const bool clicked = ImGui::Button(icon);
+    if(active)
+      ImGui::PopStyleColor();
+    return clicked;
+  };
+  ImGui::SameLine();
+  if(toggleView(ICON_MS_VIEW_LIST, !s_gridView))
+    s_gridView = false;
+  ImGui::SameLine(0.0f, 2.0f);
+  if(toggleView(ICON_MS_GRID_VIEW, s_gridView))
+    s_gridView = true;
+
+  // Filtered index list. Both views clip so only on-screen entries request a thumbnail (bounding the
+  // number of live descriptor sets on huge scenes).
+  std::vector<int> filtered;
+  filtered.reserve(m_textureNames.size());
+  for(int i = 0; i < static_cast<int>(m_textureNames.size()); ++i)
+    if(s_filter.PassFilter(m_textureNames[i].c_str()))
+      filtered.push_back(i);
+
+  // The list fills the popup, leaving only the OK/Cancel row below, so it grows when the window resizes.
+  const float  lineH = ImGui::GetTextLineHeight();
+  const ImVec2 listSize(-FLT_MIN, -ImGui::GetFrameHeightWithSpacing());
+  if(ImGui::BeginChild("##TextureList", listSize, ImGuiChildFlags_FrameStyle))
+  {
+    if(s_gridView)
+    {
+      const float tile  = 72.0f;
+      const float pad   = ImGui::GetStyle().ItemSpacing.x;
+      const int   cols  = std::max(1, static_cast<int>((ImGui::GetContentRegionAvail().x + pad) / (tile + pad)));
+      const int   nrows = (static_cast<int>(filtered.size()) + cols - 1) / cols;
+
+      ImGuiListClipper clipper;
+      clipper.Begin(nrows, tile + lineH + ImGui::GetStyle().ItemSpacing.y);
+      while(clipper.Step())
+      {
+        for(int r = clipper.DisplayStart; r < clipper.DisplayEnd; ++r)
         {
+          for(int c = 0; c < cols; ++c)
+          {
+            const int flat = r * cols + c;
+            if(flat >= static_cast<int>(filtered.size()))
+              break;
+            const int i = filtered[flat];
+            if(c > 0)
+              ImGui::SameLine();
+            ImGui::PushID(i);
+            const bool   selected = (selIdx == i);
+            const ImVec2 p0       = ImGui::GetCursorScreenPos();
+            if(ImGui::Selectable("##tile", selected, ImGuiSelectableFlags_None, ImVec2(tile, tile + lineH)))
+              selIdx = i;
+            if(selected)
+              ImGui::SetItemDefaultFocus();
+            if(ImGui::IsItemHovered())
+              ImGui::SetTooltip("%s", m_textureNames[i].c_str());
+            // Draw the thumbnail + ellipsized name on the draw list so only the selectable drives layout.
+            ImDrawList*       dl = ImGui::GetWindowDrawList();
+            const ImTextureID th = m_host.thumbnail(i);
+            if(th != 0)
+              dl->AddImage(th, p0, ImVec2(p0.x + tile, p0.y + tile));
+            ImGui::RenderTextEllipsis(dl, ImVec2(p0.x, p0.y + tile), ImVec2(p0.x + tile, p0.y + tile + lineH),
+                                      p0.x + tile, m_textureNames[i].c_str(), nullptr, nullptr);
+            ImGui::PopID();
+          }
+        }
+      }
+      clipper.End();
+    }
+    else
+    {
+      const float      thumbSz = 22.0f;
+      const float      rowH    = std::max(24.0f, lineH) + ImGui::GetStyle().ItemSpacing.y;
+      ImGuiListClipper clipper;
+      clipper.Begin(static_cast<int>(filtered.size()), rowH);
+      while(clipper.Step())
+      {
+        for(int row = clipper.DisplayStart; row < clipper.DisplayEnd; ++row)
+        {
+          const int i = filtered[row];
+          ImGui::PushID(i);
           const bool selected = (selIdx == i);
-          if(ImGui::Selectable(textureItems[i].c_str(), selected))
+          if(ImGui::Selectable("##row", selected, ImGuiSelectableFlags_None, ImVec2(0.0f, thumbSz)))
             selIdx = i;
           if(selected)
             ImGui::SetItemDefaultFocus();
+          ImGui::SameLine(0.0f, 4.0f);
+          const ImTextureID th = m_host.thumbnail(i);
+          if(th != 0)
+            ImGui::Image(th, ImVec2(thumbSz, thumbSz));
+          else
+            ImGui::Dummy(ImVec2(thumbSz, thumbSz));
+          ImGui::SameLine(0.0f, 6.0f);
+          ImGui::AlignTextToFramePadding();
+          ImGui::TextUnformatted(m_textureNames[i].c_str());
+          ImGui::PopID();
         }
-        ImGui::EndListBox();
       }
-      storage->SetInt(listId, selIdx);
-
-      if(ImGui::Button(ICON_MS_CHECK " OK"))
-      {
-        info.index    = selIdx;
-        info.texCoord = 0;
-        changed       = true;
-        ImGui::CloseCurrentPopup();
-      }
-      ImGui::SameLine();
-      if(ImGui::Button(ICON_MS_CANCEL " Cancel"))
-      {
-        ImGui::CloseCurrentPopup();
-      }
-      ImGui::EndPopup();
+      clipper.End();
     }
   }
-  ImGui::PopID();
+  ImGui::EndChild();
+  storage->SetInt(listId, selIdx);
+
+  if(ImGui::Button(ICON_MS_CHECK " OK"))
+  {
+    info.index = selIdx;  // keep the slot's existing texCoord (UV set); only the referenced texture changes
+    changed    = true;
+    ImGui::CloseCurrentPopup();
+  }
+  ImGui::SameLine();
+  if(ImGui::Button(ICON_MS_CANCEL " Cancel"))
+  {
+    ImGui::CloseCurrentPopup();
+  }
+  ImGui::EndPopup();
 
   return changed;
 }
@@ -240,12 +520,21 @@ void UiInspector::setScene(nvvkgltf::Scene* scene)
   m_scene = scene;
 
   if(!scene)
+  {
+    m_textureNames.clear();
+    return;
+  }
+
+  refreshTextureNames();
+}
+
+void UiInspector::refreshTextureNames()
+{
+  m_textureNames.clear();
+  if(!m_scene)
     return;
 
-  const tinygltf::Model& model = scene->getModel();
-
-  // Build texture names cache
-  m_textureNames.clear();
+  const tinygltf::Model& model = m_scene->getModel();
   m_textureNames.reserve(model.textures.size());
   for(int i = 0; i < static_cast<int>(model.textures.size()); ++i)
   {
@@ -886,7 +1175,7 @@ void UiInspector::renderMaterialSection(int matIdx, bool allowEdit)
         sg.diffuseFactor = diffuse;
         modif            = true;
       }
-      modif |= renderTextureEditRow("Diffuse", sg.diffuseTexture, m_scene->getModel(), m_textureNames);
+      modif |= renderTextureEditRow("Diffuse", sg.diffuseTexture);
 
       glm::vec3 specular = sg.specularFactor;
       if(colorEdit3Linear("Specular", glm::value_ptr(specular),
@@ -903,7 +1192,7 @@ void UiInspector::renderMaterialSection(int matIdx, bool allowEdit)
       {
         modif = true;
       }
-      modif |= renderTextureEditRow("Specular-Glossiness", sg.specularGlossinessTexture, m_scene->getModel(), m_textureNames);
+      modif |= renderTextureEditRow("Specular-Glossiness", sg.specularGlossinessTexture);
 
       if(modif)
         tinygltf::utils::setPbrSpecularGlossiness(material, sg);
@@ -923,7 +1212,7 @@ void UiInspector::renderMaterialSection(int matIdx, bool allowEdit)
         pbr.baseColorFactor[3] = baseColor.w;
         modif                  = true;
       }
-      modif |= renderTextureEditRow("Base Color", pbr.baseColorTexture, m_scene->getModel(), m_textureNames);
+      modif |= renderTextureEditRow("Base Color", pbr.baseColorTexture);
 
       float metallic = static_cast<float>(pbr.metallicFactor);
       if(PE::DragFloat("Metallic", &metallic, 0.01f, 0.0f, 1.0f, "%.3f", 0,
@@ -942,7 +1231,7 @@ void UiInspector::renderMaterialSection(int matIdx, bool allowEdit)
         pbr.roughnessFactor = roughness;
         modif               = true;
       }
-      modif |= renderTextureEditRow("Metallic-Roughness", pbr.metallicRoughnessTexture, m_scene->getModel(), m_textureNames);
+      modif |= renderTextureEditRow("Metallic-Roughness", pbr.metallicRoughnessTexture);
     }
 
     // Emissive
@@ -958,9 +1247,9 @@ void UiInspector::renderMaterialSection(int matIdx, bool allowEdit)
       material.emissiveFactor[2] = emissive.z;
       modif                      = true;
     }
-    modif |= renderTextureEditRow("Emissive", material.emissiveTexture, m_scene->getModel(), m_textureNames);
-    modif |= renderTextureEditRow("Normal", material.normalTexture, m_scene->getModel(), m_textureNames);
-    modif |= renderTextureEditRow("Occlusion", material.occlusionTexture, m_scene->getModel(), m_textureNames);
+    modif |= renderTextureEditRow("Emissive", material.emissiveTexture);
+    modif |= renderTextureEditRow("Normal", material.normalTexture);
+    modif |= renderTextureEditRow("Occlusion", material.occlusionTexture);
 
     // Alpha mode
     const char* alphaModes[] = {"OPAQUE", "MASK", "BLEND"};
@@ -1324,7 +1613,7 @@ bool UiInspector::materialAnisotropy(tinygltf::Material& material)
           modif |= PE::DragFloat("Rotation", &rotation, 0.01f, -3.14f, 3.14f, "%.3f", 0,
                                  "Rotation of the anisotropy direction in radians, counter-clockwise from tangent.\n"
                                  "Additional rotation on top of the anisotropy texture direction.");
-          modif |= renderTextureEditRow("Anisotropy", anisotropy.anisotropyTexture, m_scene->getModel(), m_textureNames);
+          modif |= renderTextureEditRow("Anisotropy", anisotropy.anisotropyTexture);
           if(modif)
           {
             anisotropy.anisotropyStrength = strength;
@@ -1354,9 +1643,9 @@ bool UiInspector::materialClearcoat(tinygltf::Material& material)
           modif |= PE::DragFloat("Roughness", &clearcoat.roughnessFactor, 0.01f, 0.0f, 1.0f, "%.3f", 0,
                                  "Clearcoat layer roughness [0,1].\n"
                                  "Independent from base material roughness. Usually very low.");
-          modif |= renderTextureEditRow("Clearcoat", clearcoat.texture, m_scene->getModel(), m_textureNames);
-          modif |= renderTextureEditRow("Clearcoat Roughness", clearcoat.roughnessTexture, m_scene->getModel(), m_textureNames);
-          modif |= renderTextureEditRow("Clearcoat Normal", clearcoat.normalTexture, m_scene->getModel(), m_textureNames);
+          modif |= renderTextureEditRow("Clearcoat", clearcoat.texture);
+          modif |= renderTextureEditRow("Clearcoat Roughness", clearcoat.roughnessTexture);
+          modif |= renderTextureEditRow("Clearcoat Normal", clearcoat.normalTexture);
           PE::end();
         }
         if(modif)
@@ -1378,7 +1667,7 @@ bool UiInspector::materialTransmission(tinygltf::Material& material)
           modif |= PE::DragFloat("Factor", &transmission.factor, 0.01f, 0.0f, 1.0f, "%.3f", 0,
                                  "Percentage of non-specularly-reflected light transmitted through the surface [0,1].\n"
                                  "For thin-wall transparency (glass, plastic). Tinted by base color.");
-          modif |= renderTextureEditRow("Transmission", transmission.texture, m_scene->getModel(), m_textureNames);
+          modif |= renderTextureEditRow("Transmission", transmission.texture);
           PE::end();
         }
         if(modif)
@@ -1402,7 +1691,7 @@ bool UiInspector::materialRetroreflection(tinygltf::Material& material)
                                  "microfacet (1). Modulated per-texel by Retroreflection texture (R channel).\n"
                                  "Portsmouth et al. 2026 (JCGT, MRM model).");
 
-          modif |= renderTextureEditRow("Retroreflection", retro.retroreflectionTexture, m_scene->getModel(), m_textureNames);
+          modif |= renderTextureEditRow("Retroreflection", retro.retroreflectionTexture);
           PE::end();
         }
         if(modif)
@@ -1427,9 +1716,8 @@ bool UiInspector::materialDiffuseTransmission(tinygltf::Material& material)
           modif |= colorEdit3Linear("Color", glm::value_ptr(dt.diffuseTransmissionColor),
                                     "Color that modulates the diffusely transmitted light (shown/edited in linear; swatch/wheel perceptual).\n"
                                     "Acts as a transmission-side tint, independent of base color.");
-          modif |= renderTextureEditRow("Diffuse Transmission", dt.diffuseTransmissionTexture, m_scene->getModel(), m_textureNames);
-          modif |= renderTextureEditRow("Diffuse Transmission Color", dt.diffuseTransmissionColorTexture,
-                                        m_scene->getModel(), m_textureNames);
+          modif |= renderTextureEditRow("Diffuse Transmission", dt.diffuseTransmissionTexture);
+          modif |= renderTextureEditRow("Diffuse Transmission Color", dt.diffuseTransmissionColorTexture);
           PE::end();
         }
         if(modif)
@@ -1527,9 +1815,8 @@ bool UiInspector::materialIridescence(tinygltf::Material& material)
                                  "Maximum thin-film thickness in nanometers.\n"
                                  "Maps to thickness texture value 1.0. Default: 400 nm.\n"
                                  "Visible light is 380-750 nm; half-wavelength gives strongest effect.");
-          modif |= renderTextureEditRow("Iridescence", iridescence.iridescenceTexture, m_scene->getModel(), m_textureNames);
-          modif |= renderTextureEditRow("Iridescence Thickness", iridescence.iridescenceThicknessTexture,
-                                        m_scene->getModel(), m_textureNames);
+          modif |= renderTextureEditRow("Iridescence", iridescence.iridescenceTexture);
+          modif |= renderTextureEditRow("Iridescence Thickness", iridescence.iridescenceThicknessTexture);
           PE::end();
         }
         if(modif)
@@ -1554,8 +1841,8 @@ bool UiInspector::materialSheen(tinygltf::Material& material)
           modif |= PE::DragFloat("Sheen Roughness", &sheen.sheenRoughnessFactor, 0.01f, 0.0f, 1.0f, "%.3f", 0,
                                  "Sheen roughness [0,1]. Controls micro-fiber divergence.\n"
                                  "Low = sharp grazing-angle highlights. High = soft, broad sheen.");
-          modif |= renderTextureEditRow("Sheen Color", sheen.sheenColorTexture, m_scene->getModel(), m_textureNames);
-          modif |= renderTextureEditRow("Sheen Roughness", sheen.sheenRoughnessTexture, m_scene->getModel(), m_textureNames);
+          modif |= renderTextureEditRow("Sheen Color", sheen.sheenColorTexture);
+          modif |= renderTextureEditRow("Sheen Roughness", sheen.sheenRoughnessTexture);
           PE::end();
         }
         if(modif)
@@ -1580,8 +1867,8 @@ bool UiInspector::materialSpecular(tinygltf::Material& material)
           modif |= PE::DragFloat("Specular Factor", &specular.specularFactor, 0.01f, 0.0f, 1.0f, "%.3f", 0,
                                  "Strength of dielectric specular reflection [0,1]. 0 = pure diffuse.\n"
                                  "Does not affect metals. Scales both F0 and F90.");
-          modif |= renderTextureEditRow("Specular", specular.specularTexture, m_scene->getModel(), m_textureNames);
-          modif |= renderTextureEditRow("Specular Color", specular.specularColorTexture, m_scene->getModel(), m_textureNames);
+          modif |= renderTextureEditRow("Specular", specular.specularTexture);
+          modif |= renderTextureEditRow("Specular Color", specular.specularColorTexture);
           PE::end();
         }
         if(modif)
@@ -1635,7 +1922,7 @@ bool UiInspector::materialVolume(tinygltf::Material& material, int matIdx)
           }
 
           ImGui::BeginDisabled(true);
-          modif |= renderTextureEditRow("Thickness", volume.thicknessTexture, m_scene->getModel(), m_textureNames);
+          modif |= renderTextureEditRow("Thickness", volume.thicknessTexture);
           ImGui::EndDisabled();
           PE::end();
         }

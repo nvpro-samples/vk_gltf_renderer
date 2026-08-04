@@ -81,20 +81,25 @@ static float sceneGraphRowHeight()
   return std::max(ImGui::GetTextLineHeightWithSpacing(), ImGui::GetTextLineHeight() + style.CellPadding.y * 2.0f);
 }
 
+// Human-readable name for an image: its URI, else its glTF name, else "Embedded image N".
+static std::string imageDisplayName(const tinygltf::Model& model, int imageIndex)
+{
+  if(imageIndex < 0 || imageIndex >= static_cast<int>(model.images.size()))
+    return {};
+  const tinygltf::Image& image = model.images[imageIndex];
+  if(!image.uri.empty())
+    return image.uri;
+  if(!image.name.empty())
+    return image.name;
+  return "Embedded image " + std::to_string(imageIndex);
+}
+
+// Same, prefixed with "[idx] " for the Textures panel's image-source column.
 static std::string getImageSourceLabel(const tinygltf::Model& model, int imageIndex)
 {
   if(imageIndex < 0 || imageIndex >= static_cast<int>(model.images.size()))
     return {};
-
-  const tinygltf::Image& image = model.images[imageIndex];
-  std::string            base;
-  if(!image.uri.empty())
-    base = image.uri;
-  else if(!image.name.empty())
-    base = image.name;
-  else
-    base = "Embedded image " + std::to_string(imageIndex);
-  return "[" + std::to_string(imageIndex) + "] " + base;
+  return "[" + std::to_string(imageIndex) + "] " + imageDisplayName(model, imageIndex);
 }
 
 //==================================================================================================
@@ -131,8 +136,10 @@ void UiSceneBrowser::setScene(nvvkgltf::Scene* scene)
   m_lightToNodeMapDirty  = true;
   m_cameraToNodeMapDirty = true;
 
-  m_pendingScrollToImageIndex = -1;
-  m_forceImagesSectionOpen    = false;
+  m_pendingScrollToImageIndex   = -1;
+  m_forceImagesSectionOpen      = false;
+  m_pendingScrollToSamplerIndex = -1;
+  m_forceSamplersSectionOpen    = false;
 
   // Initialize scene transforms (only TRS state, node list will be rebuilt dynamically)
   m_sceneTransforms.clear();
@@ -263,6 +270,20 @@ void UiSceneBrowser::render(bool* show, bool isBusy)
     renderRenameDialog();
   }
   ImGui::End();
+}
+
+// Public entry points for the image viewer. Rendered from an always-on top-level path (see
+// GltfRenderer::renderUI) so the modal surfaces regardless of the active tab or window visibility --
+// e.g. when opened by a click on an inspector texture thumbnail.
+void UiSceneBrowser::openImageViewer(int imageIndex)
+{
+  m_viewerImageIndex = imageIndex;
+  m_openImageViewer  = true;
+}
+
+void UiSceneBrowser::showImageViewer()
+{
+  renderImageViewer();
 }
 
 //==================================================================================================
@@ -560,6 +581,7 @@ void UiSceneBrowser::renderSceneListTab()
   renderLightsGroup();
   renderTexturesGroup();
   renderImagesGroup();
+  renderSamplersGroup();
   renderAnimationsGroup();
 }
 
@@ -1278,6 +1300,144 @@ void UiSceneBrowser::renderLightsGroup()
   }
 }
 
+// glTF sampler enum/name tables, shared by the combo editors and the Samplers-panel display.
+static const int kWrapEnum[] = {TINYGLTF_TEXTURE_WRAP_REPEAT, TINYGLTF_TEXTURE_WRAP_CLAMP_TO_EDGE, TINYGLTF_TEXTURE_WRAP_MIRRORED_REPEAT};
+static const char* const kWrapNames[] = {"Repeat", "Clamp to edge", "Mirrored repeat"};
+static const int         kMagEnum[]   = {-1, TINYGLTF_TEXTURE_FILTER_NEAREST, TINYGLTF_TEXTURE_FILTER_LINEAR};
+static const char* const kMagNames[]  = {"Default", "Nearest", "Linear"};
+static const int         kMinEnum[]   = {-1,
+                                         TINYGLTF_TEXTURE_FILTER_NEAREST,
+                                         TINYGLTF_TEXTURE_FILTER_LINEAR,
+                                         TINYGLTF_TEXTURE_FILTER_NEAREST_MIPMAP_NEAREST,
+                                         TINYGLTF_TEXTURE_FILTER_LINEAR_MIPMAP_NEAREST,
+                                         TINYGLTF_TEXTURE_FILTER_NEAREST_MIPMAP_LINEAR,
+                                         TINYGLTF_TEXTURE_FILTER_LINEAR_MIPMAP_LINEAR};
+static const char* const kMinNames[]  = {
+    "Default",          "Nearest", "Linear", "Nearest/Nearest mip", "Linear/Nearest mip", "Nearest/Linear mip",
+    "Linear/Linear mip"};
+
+// Combo over parallel enum/name arrays of the same size. *value holds the glTF enum; true when changed.
+template <size_t N>
+static bool samplerEnumCombo(const char* label, int* value, const int (&enums)[N], const char* const (&names)[N])
+{
+  int cur = 0;
+  for(size_t j = 0; j < N; ++j)
+    if(enums[j] == *value)
+      cur = static_cast<int>(j);
+  if(ImGui::Combo(label, &cur, names, static_cast<int>(N)))
+  {
+    *value = enums[cur];
+    return true;
+  }
+  return false;
+}
+
+// Short display name for a glTF enum value from an (enums, names) table ("?" if unknown).
+template <size_t N>
+static const char* samplerEnumName(int value, const int (&enums)[N], const char* const (&names)[N])
+{
+  for(size_t j = 0; j < N; ++j)
+    if(enums[j] == value)
+      return names[j];
+  return "?";
+}
+
+void UiSceneBrowser::renderSamplerFields(const tinygltf::Sampler& cur, const std::function<void(const tinygltf::Sampler&)>& commit)
+{
+  // One field per combo; a change hands back a copy of cur with that field applied (one field/frame).
+  auto edit = [&](const char* label, int tinygltf::Sampler::* field, const auto& enums, const auto& names) {
+    ImGui::SetNextItemWidth(180.0f);
+    int v = cur.*field;
+    if(samplerEnumCombo(label, &v, enums, names))
+    {
+      tinygltf::Sampler edited = cur;
+      edited.*field            = v;
+      commit(edited);
+    }
+  };
+  edit("Wrap S", &tinygltf::Sampler::wrapS, kWrapEnum, kWrapNames);
+  edit("Wrap T", &tinygltf::Sampler::wrapT, kWrapEnum, kWrapNames);
+  edit("Mag filter", &tinygltf::Sampler::magFilter, kMagEnum, kMagNames);
+  edit("Min filter", &tinygltf::Sampler::minFilter, kMinEnum, kMinNames);
+}
+
+// Texture "tune" button popup: developer-style editing of a texture -- its image and sampler indices
+// as plain numeric fields, matching the glTF texture object ({ source, sampler }). Sampler wrap/filter
+// is edited from the Samplers group; the per-binding UV transform is edited in the material inspector.
+// One undo step per change.
+void UiSceneBrowser::renderTextureEditPopup(int textureIndex)
+{
+  if(!ImGui::BeginPopup("textureEdit"))
+    return;
+
+  const tinygltf::Model&   model = m_scene->getModel();
+  const tinygltf::Texture& tex   = model.textures[textureIndex];
+  ImGui::TextDisabled("Texture %d", textureIndex);
+  ImGui::Separator();
+
+  // Commit a change to the texture's image/sampler reference as one undo step.
+  auto commitTexture = [&](const tinygltf::Texture& edited) {
+    if(m_undoStack)
+      m_undoStack->executeCommand(std::make_unique<EditTextureCommand>(*m_scene, textureIndex, tex, edited,
+                                                                       "Edit texture " + std::to_string(textureIndex)));
+  };
+
+  // Image index (source). Clamped to a valid image.
+  int imageIdx = tex.source;
+  ImGui::SetNextItemWidth(120.0f);
+  if(ImGui::InputInt("Image", &imageIdx) && !model.images.empty())
+  {
+    imageIdx = std::clamp(imageIdx, 0, static_cast<int>(model.images.size()) - 1);
+    if(imageIdx != tex.source)
+    {
+      tinygltf::Texture edited = tex;
+      edited.source            = imageIdx;
+      commitTexture(edited);
+    }
+  }
+
+  // Sampler index (-1 = the default sampler).
+  int samplerIdx = tex.sampler;
+  ImGui::SetNextItemWidth(120.0f);
+  if(ImGui::InputInt("Sampler (-1=default)", &samplerIdx))
+  {
+    samplerIdx = std::clamp(samplerIdx, -1, static_cast<int>(model.samplers.size()) - 1);
+    if(samplerIdx != tex.sampler)
+    {
+      tinygltf::Texture edited = tex;
+      edited.sampler           = samplerIdx;
+      commitTexture(edited);
+    }
+  }
+
+  ImGui::EndPopup();
+}
+
+// Samplers-panel "tune" button popup: edits an existing sampler in place.
+void UiSceneBrowser::renderSamplerEditPopup(int samplerIndex)
+{
+  if(!ImGui::BeginPopup("samplerEdit"))
+    return;
+
+  const tinygltf::Model& model = m_scene->getModel();
+  if(samplerIndex < 0 || samplerIndex >= static_cast<int>(model.samplers.size()))
+  {
+    ImGui::EndPopup();
+    return;
+  }
+  ImGui::TextDisabled("Sampler %d", samplerIndex);
+  ImGui::Separator();
+
+  const tinygltf::Sampler cur = model.samplers[samplerIndex];
+  renderSamplerFields(cur, [&](const tinygltf::Sampler& edited) {
+    if(m_undoStack)
+      m_undoStack->executeCommand(std::make_unique<EditSamplerCommand>(*m_scene, samplerIndex, cur, edited,
+                                                                       "Edit sampler " + std::to_string(samplerIndex)));
+  });
+
+  ImGui::EndPopup();
+}
+
 void UiSceneBrowser::renderTexturesGroup()
 {
   if(!m_scene)
@@ -1294,43 +1454,88 @@ void UiSceneBrowser::renderTexturesGroup()
 
     static ImGuiTableFlags s_texturesTableFlags = ImGuiTableFlags_ScrollY | ImGuiTableFlags_RowBg | ImGuiTableFlags_BordersOuter
                                                   | ImGuiTableFlags_BordersV | ImGuiTableFlags_Resizable;
-    if(ImGui::BeginTable("TexturesTable", 3, s_texturesTableFlags))
+    if(ImGui::BeginTable("TexturesTable", 6, s_texturesTableFlags))
     {
+      const float thumbSz = 24.0f;
       ImGui::TableSetupScrollFreeze(0, 1);
       ImGui::TableSetupColumn("#", ImGuiTableColumnFlags_WidthFixed, 36.0f);
+      ImGui::TableSetupColumn("", ImGuiTableColumnFlags_WidthFixed, thumbSz + 4.0f);  // thumbnail
       ImGui::TableSetupColumn("Name", ImGuiTableColumnFlags_WidthStretch);
-      ImGui::TableSetupColumn("Image source", ImGuiTableColumnFlags_WidthStretch);
+      ImGui::TableSetupColumn("Image", ImGuiTableColumnFlags_WidthFixed, 60.0f);
+      ImGui::TableSetupColumn("Sampler", ImGuiTableColumnFlags_WidthFixed, 60.0f);
+      ImGui::TableSetupColumn("", ImGuiTableColumnFlags_WidthFixed, 30.0f);  // edit
       ImGui::TableHeadersRow();
 
-      for(int i = 0; i < static_cast<int>(model.textures.size()); ++i)
-      {
-        const tinygltf::Texture& texture = model.textures[i];
-
-        ImGui::TableNextRow();
-        ImGui::TableNextColumn();
-        ImGui::Text("%d", i);
-        ImGui::TableNextColumn();
-        ImGui::TextUnformatted(m_textureNames[i].c_str());
-        ImGui::TableNextColumn();
-
-        const int imageIdx = tinygltf::utils::getTextureImageIndex(texture);
-        if(imageIdx >= 0 && imageIdx < static_cast<int>(model.images.size()))
+      // A clickable blue "[id]" that jumps to another Scene List group (scroll-to + force-open). idTag
+      // makes the ImGui ID unique per column (both cells would otherwise share the label "[0]").
+      auto idLink = [&](int id, const char* idTag, int& pendingScroll, bool& forceOpen) {
+        const std::string label = "[" + std::to_string(id) + "]##" + idTag;
+        ImGui::PushStyleColor(ImGuiCol_Text, ImVec4(0.40f, 0.70f, 1.00f, 1.00f));
+        if(ImGui::Selectable(label.c_str(), false, ImGuiSelectableFlags_AllowOverlap))
         {
-          const std::string srcLabel = getImageSourceLabel(model, imageIdx);
-          ImGui::PushID(i);
-          ImGui::PushStyleColor(ImGuiCol_Text, ImVec4(0.40f, 0.70f, 1.00f, 1.00f));
-          if(ImGui::Selectable(srcLabel.c_str(), false, ImGuiSelectableFlags_AllowOverlap))
-          {
-            m_pendingScrollToImageIndex = imageIdx;
-            m_forceImagesSectionOpen    = true;
-            m_currentTab                = ViewTab::SceneList;
-          }
-          ImGui::PopStyleColor();
-          ImGui::PopID();
+          pendingScroll = id;
+          forceOpen     = true;
+          m_currentTab  = ViewTab::SceneList;
         }
-        else
+        ImGui::PopStyleColor();
+      };
+
+      // Clip so only on-screen rows request a thumbnail (bounds live descriptor sets on huge scenes).
+      ImGuiListClipper clipper;
+      clipper.Begin(static_cast<int>(model.textures.size()));
+      while(clipper.Step())
+      {
+        for(int i = clipper.DisplayStart; i < clipper.DisplayEnd; ++i)
         {
-          ImGui::TextDisabled("-");
+          const tinygltf::Texture& texture = model.textures[i];
+
+          ImGui::TableNextRow();
+          ImGui::PushID(i);
+          ImGui::TableNextColumn();
+          ImGui::Text("%d", i);
+          ImGui::TableNextColumn();
+          // m_textureNames is rebuilt in setScene; guard against a frame where it lags model.textures.
+          const char* texName = (i < static_cast<int>(m_textureNames.size())) ? m_textureNames[i].c_str() : "";
+
+          const ImTextureID thumb = m_host.thumbnail(i);
+          if(thumb != 0)
+          {
+            ImGui::Image(thumb, ImVec2(thumbSz, thumbSz));
+            if(ImGui::IsItemHovered())
+              ImGui::SetTooltip("%s", texName);
+          }
+          ImGui::TableNextColumn();
+          ImGui::TextUnformatted(texName);
+
+          // Image ID -> jumps to the Images group.
+          ImGui::TableNextColumn();
+          const int imageIdx = tinygltf::utils::getTextureImageIndex(texture);
+          if(imageIdx >= 0 && imageIdx < static_cast<int>(model.images.size()))
+          {
+            idLink(imageIdx, "img", m_pendingScrollToImageIndex, m_forceImagesSectionOpen);
+            if(ImGui::IsItemHovered())
+              ImGui::SetTooltip("%s", imageDisplayName(model, imageIdx).c_str());
+          }
+          else
+          {
+            ImGui::TextDisabled("-");
+          }
+
+          // Sampler ID -> jumps to the Samplers group ("default" when the texture has no sampler).
+          ImGui::TableNextColumn();
+          if(texture.sampler >= 0 && texture.sampler < static_cast<int>(model.samplers.size()))
+            idLink(texture.sampler, "smp", m_pendingScrollToSamplerIndex, m_forceSamplersSectionOpen);
+          else
+            ImGui::TextDisabled("default");
+
+          // Edit: image/sampler IDs + wrap/filter.
+          ImGui::TableNextColumn();
+          if(ImGui::SmallButton(ICON_MS_TUNE))
+            ImGui::OpenPopup("textureEdit");
+          if(ImGui::IsItemHovered())
+            ImGui::SetTooltip("Edit texture (image / sampler)");
+          renderTextureEditPopup(i);
+          ImGui::PopID();
         }
       }
 
@@ -1364,46 +1569,292 @@ void UiSceneBrowser::renderImagesGroup()
     // Add scrollable child region with max height
     ImGui::BeginChild("ImagesScrollRegion", ImVec2(0, 200), false, ImGuiWindowFlags_HorizontalScrollbar);
 
+    // Per-image texture-reference count (0 => unreferenced, safe to delete). Cheap O(textures) recompute
+    // while this section is open.
+    const std::vector<int> imageRefs = m_scene->editor().computeImageRefCounts();
+
     static ImGuiTableFlags s_imagesTableFlags = ImGuiTableFlags_ScrollY | ImGuiTableFlags_RowBg | ImGuiTableFlags_BordersOuter
                                                 | ImGuiTableFlags_BordersV | ImGuiTableFlags_Resizable;
-    if(ImGui::BeginTable("ImagesTable", 3, s_imagesTableFlags))
+    if(ImGui::BeginTable("ImagesTable", 6, s_imagesTableFlags))
+    {
+      const float thumbSz = 24.0f;
+      ImGui::TableSetupScrollFreeze(0, 1);
+      ImGui::TableSetupColumn("#", ImGuiTableColumnFlags_WidthFixed, 36.0f);
+      ImGui::TableSetupColumn("", ImGuiTableColumnFlags_WidthFixed, thumbSz + 4.0f);  // thumbnail
+      ImGui::TableSetupColumn("Name", ImGuiTableColumnFlags_WidthStretch);
+      ImGui::TableSetupColumn("Resolution", ImGuiTableColumnFlags_WidthFixed, 84.0f);
+      ImGui::TableSetupColumn("Used by", ImGuiTableColumnFlags_WidthFixed, 60.0f);
+      ImGui::TableSetupColumn("", ImGuiTableColumnFlags_WidthFixed, 56.0f);  // actions
+      ImGui::TableHeadersRow();
+
+      // Clip so only on-screen rows request a thumbnail. Ensure a pending "scroll to" target is always
+      // submitted (even if off-screen) so SetScrollHereY can bring it into view.
+      ImGuiListClipper clipper;
+      clipper.Begin(static_cast<int>(model.images.size()));
+      if(m_pendingScrollToImageIndex >= 0)
+        clipper.IncludeItemByIndex(m_pendingScrollToImageIndex);
+      while(clipper.Step())
+      {
+        for(int i = clipper.DisplayStart; i < clipper.DisplayEnd; ++i)
+        {
+          const tinygltf::Image& image       = model.images[i];
+          const std::string      displayName = imageDisplayName(model, i);
+
+          ImGui::TableNextRow();
+          if(m_pendingScrollToImageIndex == i)
+          {
+            ImGui::SetScrollHereY(0.5f);
+            m_pendingScrollToImageIndex = -1;
+          }
+          ImGui::PushID(i);
+          ImGui::TableNextColumn();
+          ImGui::Text("%d", i);
+          if(ImGui::IsItemHovered())
+          {
+            ImGui::SetTooltip("URI: %s", image.uri.empty() ? "(embedded)" : image.uri.c_str());
+          }
+          ImGui::TableNextColumn();
+          const ImTextureID thumb = m_getImageThumbnail ? m_getImageThumbnail(i) : 0;
+          if(thumb != 0)
+          {
+            // Click the thumbnail to open the viewer.
+            if(ImGui::ImageButton("view", thumb, ImVec2(thumbSz, thumbSz)))
+            {
+              m_viewerImageIndex = i;
+              m_openImageViewer  = true;
+            }
+          }
+          ImGui::TableNextColumn();
+          ImGui::TextUnformatted(displayName.c_str());
+          ImGui::TableNextColumn();
+          if(image.width > 0 && image.height > 0)
+            ImGui::Text("%dx%d", image.width, image.height);
+          else
+            ImGui::TextDisabled("-");
+          ImGui::TableNextColumn();
+          if(imageRefs[i] > 0)
+            ImGui::Text("%d", imageRefs[i]);
+          else
+            ImGui::TextColored(ImVec4(0.95f, 0.75f, 0.20f, 1.0f), "0");  // unreferenced
+          ImGui::TableNextColumn();
+          // View
+          if(ImGui::SmallButton(ICON_MS_VISIBILITY))
+          {
+            m_viewerImageIndex = i;
+            m_openImageViewer  = true;
+          }
+          if(ImGui::IsItemHovered())
+            ImGui::SetTooltip("View image");
+          // Delete (only when no texture references this image). Recorded and applied after the loop.
+          ImGui::SameLine(0.0f, 2.0f);
+          const bool deletable = (imageRefs[i] == 0);
+          ImGui::BeginDisabled(!deletable);
+          if(ImGui::SmallButton(ICON_MS_DELETE))
+            m_pendingDeleteImageIndex = i;
+          ImGui::EndDisabled();
+          if(ImGui::IsItemHovered())
+            ImGui::SetTooltip(deletable ? "Remove unreferenced image" : "In use - not removable (referenced by a texture)");
+          ImGui::PopID();
+        }
+      }
+
+      ImGui::EndTable();
+    }
+
+    ImGui::EndChild();
+
+    // Apply a deferred image removal now that the table (and its clipper) has finished iterating.
+    if(m_pendingDeleteImageIndex >= 0 && m_pendingDeleteImageIndex < static_cast<int>(model.images.size()) && m_undoStack)
+    {
+      const int idx = m_pendingDeleteImageIndex;
+      if(m_scene->editor().countTextureRefsToImage(idx) == 0)  // re-check: state may have shifted
+      {
+        m_undoStack->executeCommand(std::make_unique<RemoveImageCommand>(*m_scene, idx, model.images[idx]));
+        if(m_viewerImageIndex == idx)
+          m_viewerImageIndex = -1;
+      }
+    }
+    m_pendingDeleteImageIndex = -1;
+  }
+}
+
+//--------------------------------------------------------------------------------------------------
+// Image viewer: large aspect-fit preview + metadata, with replace-from-file and reload. Opened from
+// the Images panel. Model edits set DirtyFlags::texturesChanged; the GPU rebuild fires at end of render().
+void UiSceneBrowser::renderImageViewer()
+{
+  if(!m_scene)
+    return;
+  const tinygltf::Model& model = m_scene->getModel();
+
+  if(m_openImageViewer)
+  {
+    ImGui::OpenPopup("Image Viewer");
+    m_openImageViewer = false;
+  }
+
+  ImGui::SetNextWindowSize(ImVec2(560.0f, 640.0f), ImGuiCond_Appearing);
+  bool open = true;
+  if(!ImGui::BeginPopupModal("Image Viewer", &open, ImGuiWindowFlags_None))
+    return;
+
+  const int i = m_viewerImageIndex;
+  if(i < 0 || i >= static_cast<int>(model.images.size()))
+  {
+    ImGui::TextDisabled("No image.");
+    if(ImGui::Button("Close"))
+      ImGui::CloseCurrentPopup();
+    ImGui::EndPopup();
+    return;
+  }
+
+  const tinygltf::Image& image = model.images[i];
+
+  // Metadata
+  ImGui::Text("Image %d", i);
+  ImGui::SameLine();
+  ImGui::TextDisabled("(%s)", image.uri.empty() ? "embedded" : "external");
+  ImGui::TextWrapped("%s", imageDisplayName(model, i).c_str());
+  if(image.width > 0 && image.height > 0)
+    ImGui::Text("Resolution: %d x %d", image.width, image.height);
+  ImGui::Separator();
+
+  // Aspect-fit preview into the region above the button row.
+  const float buttonsH    = ImGui::GetFrameHeightWithSpacing() + ImGui::GetStyle().ItemSpacing.y;
+  ImVec2      avail       = ImGui::GetContentRegionAvail();
+  avail.y                 = std::max(64.0f, avail.y - buttonsH);
+  const ImTextureID thumb = m_getImageThumbnail ? m_getImageThumbnail(i) : 0;
+  if(thumb != 0 && image.width > 0 && image.height > 0)
+  {
+    const float aspect = static_cast<float>(image.width) / static_cast<float>(image.height);
+    float       w      = avail.x;
+    float       h      = w / aspect;
+    if(h > avail.y)
+    {
+      h = avail.y;
+      w = h * aspect;
+    }
+    if(const float offset = (avail.x - w) * 0.5f; offset > 0.0f)
+      ImGui::SetCursorPosX(ImGui::GetCursorPosX() + offset);
+    ImGui::Image(thumb, ImVec2(w, h));
+  }
+  else
+  {
+    ImGui::TextDisabled("(no GPU preview - image not resident)");
+  }
+
+  // Actions
+  ImGui::BeginDisabled(!m_host.canPickImage());
+  if(ImGui::Button(ICON_MS_FILE_OPEN " Replace..."))
+  {
+    const std::filesystem::path path = m_host.pickImage();
+    if(!path.empty())
+    {
+      const tinygltf::Image oldImage = image;  // copy before replace
+      std::string           err;
+      if(m_scene->editor().replaceImageFromFile(i, path, &err))
+      {
+        if(m_undoStack)
+          m_undoStack->pushExecuted(std::make_unique<ReplaceImageCommand>(*m_scene, i, oldImage, m_scene->getModel().images[i],
+                                                                          "Replace image " + std::to_string(i)));
+      }
+      else
+      {
+        LOGE("Replace image failed: %s\n", err.c_str());
+        m_host.toast("Replace image failed: " + err, true);
+      }
+    }
+  }
+  ImGui::EndDisabled();
+  ImGui::SameLine();
+  if(ImGui::Button(ICON_MS_REFRESH " Reload"))
+  {
+    m_scene->getDirtyFlags().texturesChanged = true;  // force re-decode from the (external) URI on rebuild
+  }
+  ImGui::SameLine();
+  if(ImGui::Button("Close"))
+    ImGui::CloseCurrentPopup();
+
+  ImGui::EndPopup();
+}
+
+void UiSceneBrowser::renderSamplersGroup()
+{
+  if(!m_scene)
+    return;
+
+  const tinygltf::Model& model = m_scene->getModel();
+
+  if(m_pendingScrollToSamplerIndex >= static_cast<int>(model.samplers.size()))
+    m_pendingScrollToSamplerIndex = -1;
+  if(m_forceSamplersSectionOpen)
+  {
+    ImGui::SetNextItemOpen(true);
+    m_forceSamplersSectionOpen = false;
+  }
+
+  if(ImGui::CollapsingHeader((std::string(ICON_MS_TUNE) + " Samplers (" + std::to_string(model.samplers.size()) + ")").c_str()))
+  {
+    ImGui::TextDisabled("(Display only - not selectable)");
+
+    // "Used by" per sampler: textures referencing it. Textures with sampler -1 use the implicit default.
+    std::vector<int> usedBy(model.samplers.size(), 0);
+    for(const tinygltf::Texture& t : model.textures)
+      if(t.sampler >= 0 && t.sampler < static_cast<int>(usedBy.size()))
+        ++usedBy[t.sampler];
+
+    ImGui::BeginChild("SamplersScrollRegion", ImVec2(0, 160), false, ImGuiWindowFlags_HorizontalScrollbar);
+
+    static ImGuiTableFlags s_flags = ImGuiTableFlags_ScrollY | ImGuiTableFlags_RowBg | ImGuiTableFlags_BordersOuter
+                                     | ImGuiTableFlags_BordersV | ImGuiTableFlags_Resizable;
+    if(ImGui::BeginTable("SamplersTable", 7, s_flags))
     {
       ImGui::TableSetupScrollFreeze(0, 1);
       ImGui::TableSetupColumn("#", ImGuiTableColumnFlags_WidthFixed, 36.0f);
-      ImGui::TableSetupColumn("Name", ImGuiTableColumnFlags_WidthStretch);
-      ImGui::TableSetupColumn("Resolution", ImGuiTableColumnFlags_WidthFixed, 100.0f);
+      ImGui::TableSetupColumn("Wrap S", ImGuiTableColumnFlags_WidthStretch);
+      ImGui::TableSetupColumn("Wrap T", ImGuiTableColumnFlags_WidthStretch);
+      ImGui::TableSetupColumn("Mag", ImGuiTableColumnFlags_WidthStretch);
+      ImGui::TableSetupColumn("Min", ImGuiTableColumnFlags_WidthStretch);
+      ImGui::TableSetupColumn("Used by", ImGuiTableColumnFlags_WidthFixed, 60.0f);
+      ImGui::TableSetupColumn("", ImGuiTableColumnFlags_WidthFixed, 30.0f);  // edit
       ImGui::TableHeadersRow();
 
-      for(int i = 0; i < static_cast<int>(model.images.size()); i++)
+      ImGuiListClipper clipper;
+      clipper.Begin(static_cast<int>(model.samplers.size()));
+      if(m_pendingScrollToSamplerIndex >= 0)
+        clipper.IncludeItemByIndex(m_pendingScrollToSamplerIndex);
+      while(clipper.Step())
       {
-        const tinygltf::Image& image = model.images[i];
-        std::string            displayName;
-        if(!image.uri.empty())
-          displayName = image.uri;
-        else if(!image.name.empty())
-          displayName = image.name;
-        else
-          displayName = "Embedded image " + std::to_string(i);
-
-        ImGui::TableNextRow();
-        if(m_pendingScrollToImageIndex == i)
+        for(int i = clipper.DisplayStart; i < clipper.DisplayEnd; ++i)
         {
-          ImGui::SetScrollHereY(0.5f);
-          m_pendingScrollToImageIndex = -1;
+          const tinygltf::Sampler& s = model.samplers[i];
+          ImGui::TableNextRow();
+          if(m_pendingScrollToSamplerIndex == i)
+          {
+            ImGui::SetScrollHereY(0.5f);
+            m_pendingScrollToSamplerIndex = -1;
+          }
+          ImGui::PushID(i);
+          ImGui::TableNextColumn();
+          ImGui::Text("%d", i);
+          ImGui::TableNextColumn();
+          ImGui::TextUnformatted(samplerEnumName(s.wrapS, kWrapEnum, kWrapNames));
+          ImGui::TableNextColumn();
+          ImGui::TextUnformatted(samplerEnumName(s.wrapT, kWrapEnum, kWrapNames));
+          ImGui::TableNextColumn();
+          ImGui::TextUnformatted(samplerEnumName(s.magFilter, kMagEnum, kMagNames));
+          ImGui::TableNextColumn();
+          ImGui::TextUnformatted(samplerEnumName(s.minFilter, kMinEnum, kMinNames));
+          ImGui::TableNextColumn();
+          ImGui::Text("%d", usedBy[i]);
+          ImGui::TableNextColumn();
+          if(ImGui::SmallButton(ICON_MS_TUNE))
+            ImGui::OpenPopup("samplerEdit");
+          if(ImGui::IsItemHovered())
+            ImGui::SetTooltip("Edit sampler (wrap / filter)");
+          renderSamplerEditPopup(i);
+          ImGui::PopID();
         }
-        ImGui::TableNextColumn();
-        ImGui::Text("%d", i);
-        if(ImGui::IsItemHovered())
-        {
-          ImGui::SetTooltip("URI: %s", image.uri.empty() ? "(embedded)" : image.uri.c_str());
-        }
-        ImGui::TableNextColumn();
-        ImGui::TextUnformatted(displayName.c_str());
-        ImGui::TableNextColumn();
-        if(image.width > 0 && image.height > 0)
-          ImGui::Text("%dx%d", image.width, image.height);
-        else
-          ImGui::TextDisabled("-");
       }
 
       ImGui::EndTable();

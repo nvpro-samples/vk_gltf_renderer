@@ -33,9 +33,12 @@
 #include <nvutils/logger.hpp>
 #include <nvutils/primitives.hpp>
 
+#include <nvutils/file_operations.hpp>
+
 #include "gltf_scene_editor.hpp"
 #include "gltf_scene_animation.hpp"
 #include "gltf_compact_model.hpp"
+#include "gltf_image_loader.hpp"
 #include "tinygltf_utils.hpp"
 
 namespace nvvkgltf {
@@ -1160,6 +1163,170 @@ void SceneEditor::remapIndicesAfterNodeDeletion(int deletedIndex)
   }
 
   m_scene.animation().resetPointer();
+}
+
+//--------------------------------------------------------------------------------------------------
+// Texture / image import
+//--------------------------------------------------------------------------------------------------
+
+namespace {
+// Validate/decode an image file up front (so a bad file is rejected without mutating the model) and
+// build a tinygltf::Image referencing it by absolute URI (relocated to a relative path on save). The
+// srgb flag here only affects this validation pass; real color space is resolved from material usage
+// at GPU rebuild time. Returns false and fills *error on failure.
+bool buildImageFromFile(const std::filesystem::path& path, tinygltf::Image& out, std::string* error)
+{
+  auto fail = [&](const std::string& msg) -> bool {
+    if(error)
+      *error = msg;
+    LOGE("Image import: %s\n", msg.c_str());
+    return false;
+  };
+
+  std::error_code ec;
+  if(path.empty() || !std::filesystem::exists(path, ec))
+    return fail("File does not exist: " + nvutils::utf8FromPath(path));
+
+  const std::string bytes = nvutils::loadFile(path);
+  if(bytes.empty())
+    return fail("Could not read file: " + nvutils::utf8FromPath(path));
+
+  nvvkgltf::LoadedImageData decoded;
+  if(!nvvkgltf::loadFromMemory(decoded, bytes.data(), bytes.size(), /*srgb*/ false))
+    return fail("Unsupported or corrupt image: " + nvutils::utf8FromPath(path));
+
+  out            = tinygltf::Image{};
+  out.uri        = nvutils::utf8FromPath(std::filesystem::absolute(path, ec));
+  out.name       = path.stem().string();
+  out.width      = static_cast<int>(decoded.size.width);
+  out.height     = static_cast<int>(decoded.size.height);
+  out.bufferView = -1;
+  return true;
+}
+
+// Apply an image-index remap (old -> new, -1 to drop) to every texture's core and extension source.
+void remapAllTextureImageSources(tinygltf::Model& model, const std::vector<int>& imageRemap)
+{
+  for(tinygltf::Texture& t : model.textures)
+  {
+    if(t.source >= 0)
+      t.source = imageRemap[t.source];
+    tinygltf::utils::remapTextureExtensionImageSources(t, imageRemap);
+  }
+}
+}  // namespace
+
+// Ensure the file's directory is registered so its (absolute) URI resolves at load time: findFile
+// iterates the search paths, so at least one entry is required even for an absolute URI.
+void SceneEditor::registerImageSearchDir(const std::filesystem::path& path)
+{
+  std::error_code             ec;
+  const std::filesystem::path dir = std::filesystem::absolute(path, ec).parent_path();
+  if(std::find(m_scene.m_imageSearchPaths.begin(), m_scene.m_imageSearchPaths.end(), dir) == m_scene.m_imageSearchPaths.end())
+    m_scene.m_imageSearchPaths.push_back(dir);
+}
+
+int SceneEditor::importImageAsTexture(const std::filesystem::path& path, std::string* error)
+{
+  tinygltf::Image image;
+  if(!buildImageFromFile(path, image, error))
+    return -1;
+
+  registerImageSearchDir(path);
+
+  tinygltf::Model& model = m_scene.m_model;
+
+  const int imageIndex = static_cast<int>(model.images.size());
+  model.images.push_back(std::move(image));
+
+  const int         textureIndex = static_cast<int>(model.textures.size());
+  tinygltf::Texture texture;
+  texture.name   = path.stem().string();
+  texture.source = imageIndex;
+  model.textures.push_back(std::move(texture));
+
+  m_scene.m_dirtyFlags.texturesChanged = true;
+
+  return textureIndex;
+}
+
+bool SceneEditor::replaceImageFromFile(int imageIndex, const std::filesystem::path& path, std::string* error)
+{
+  tinygltf::Model& model = m_scene.m_model;
+  if(imageIndex < 0 || imageIndex >= static_cast<int>(model.images.size()))
+    return false;
+
+  tinygltf::Image image;
+  if(!buildImageFromFile(path, image, error))
+    return false;
+
+  registerImageSearchDir(path);
+  // Swap the image in place: all textures/materials keep pointing at this index, so only the pixels
+  // (and reported dimensions/URI) change. bufferView is reset to -1 so a previously-embedded image is
+  // now sourced from the new file.
+  model.images[imageIndex]             = std::move(image);
+  m_scene.m_dirtyFlags.texturesChanged = true;
+  return true;
+}
+
+std::vector<int> SceneEditor::computeImageRefCounts() const
+{
+  const tinygltf::Model& model = m_scene.m_model;
+  std::vector<int>       counts(model.images.size(), 0);
+  // Count every serialized source (core + webp/dds/basisu), not just the effective image, so an image
+  // kept only as a fallback source is still reported in-use (see getTextureImageSources).
+  for(const tinygltf::Texture& t : model.textures)
+    for(int idx : tinygltf::utils::getTextureImageSources(t))
+      if(idx >= 0 && idx < static_cast<int>(counts.size()))
+        ++counts[idx];
+  return counts;
+}
+
+int SceneEditor::countTextureRefsToImage(int imageIndex) const
+{
+  const tinygltf::Model& model = m_scene.m_model;
+  int                    count = 0;
+  // A texture counts once if any of its serialized sources references the image (fallback source
+  // included), so removeImageAt's guard treats fallback references as in-use.
+  for(const tinygltf::Texture& t : model.textures)
+  {
+    const std::vector<int> sources = tinygltf::utils::getTextureImageSources(t);
+    if(std::find(sources.begin(), sources.end(), imageIndex) != sources.end())
+      ++count;
+  }
+  return count;
+}
+
+void SceneEditor::removeImageAt(int imageIndex)
+{
+  tinygltf::Model& model = m_scene.m_model;
+  if(imageIndex < 0 || imageIndex >= static_cast<int>(model.images.size()))
+    return;
+  assert(countTextureRefsToImage(imageIndex) == 0 && "removeImageAt requires an image no texture references");
+
+  // Remap: drop imageIndex, shift everything above it down by one.
+  std::vector<int> imageRemap(model.images.size());
+  for(int i = 0; i < static_cast<int>(imageRemap.size()); ++i)
+    imageRemap[i] = (i < imageIndex) ? i : (i == imageIndex ? -1 : i - 1);
+  remapAllTextureImageSources(model, imageRemap);
+
+  model.images.erase(model.images.begin() + imageIndex);
+  m_scene.m_dirtyFlags.texturesChanged = true;
+}
+
+void SceneEditor::insertImageAt(int imageIndex, const tinygltf::Image& image)
+{
+  tinygltf::Model& model = m_scene.m_model;
+  imageIndex             = std::clamp(imageIndex, 0, static_cast<int>(model.images.size()));
+
+  // Inverse of removeImageAt: everything at >= imageIndex shifts up by one before the insert.
+  std::vector<int> imageRemap(model.images.size());
+  for(int i = 0; i < static_cast<int>(imageRemap.size()); ++i)
+    imageRemap[i] = (i < imageIndex) ? i : i + 1;
+  remapAllTextureImageSources(model, imageRemap);
+
+  model.images.insert(model.images.begin() + imageIndex, image);
+  m_scene.m_dirtyFlags.texturesChanged = true;
 }
 
 //--------------------------------------------------------------------------------------------------

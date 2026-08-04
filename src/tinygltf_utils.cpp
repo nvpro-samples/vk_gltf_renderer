@@ -731,6 +731,28 @@ int tinygltf::utils::getTextureImageIndex(const tinygltf::Texture& texture)
   return source_image;
 }
 
+std::vector<int> tinygltf::utils::getTextureImageSources(const tinygltf::Texture& texture)
+{
+  std::vector<int> sources;
+  auto             add = [&sources](int idx) {
+    if(idx >= 0 && std::find(sources.begin(), sources.end(), idx) == sources.end())
+      sources.push_back(idx);
+  };
+
+  add(texture.source);
+  for(const char* extName : kTextureImageSourceExtensionNames)
+  {
+    if(hasElementName(texture.extensions, extName))
+    {
+      const tinygltf::Value& ext = getElementValue(texture.extensions, extName);
+      int                    src = -1;
+      getValue(ext, "source", src);
+      add(src);
+    }
+  }
+  return sources;
+}
+
 void tinygltf::utils::remapTextureExtensionImageSources(tinygltf::Texture& texture, const std::vector<int>& imageRemap)
 {
   auto safeRemap = [&imageRemap](int oldIdx) -> int {
