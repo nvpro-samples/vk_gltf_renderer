@@ -294,6 +294,34 @@ nvutils::Bbox GltfRenderer::getRenderNodesBbox(const std::unordered_set<int>& re
   return unionBbox;
 }
 
+// Centered warning banner drawn over the viewport image when Environment Type = None leaves the
+// scene with no light source (no punctual lights, no emissive materials), so the frame is fully
+// black. Anchored to the top-center of the passed image rectangle.
+static void drawNoLightOverlay(const ImVec2& imageTopLeft, const ImVec2& imageSize)
+{
+  const char* line1 = ICON_MS_WARNING " Environment Type is \"None\" and the scene has no lights";
+  const char* line2 = "Add a light or an emissive material, or set Environment to Sky / HDR";
+
+  ImDrawList*  dl = ImGui::GetWindowDrawList();
+  const ImVec2 pad(14.f, 10.f);
+  const ImVec2 sz1     = ImGui::CalcTextSize(line1);
+  const ImVec2 sz2     = ImGui::CalcTextSize(line2);
+  const float  spacing = ImGui::GetStyle().ItemSpacing.y;
+  const float  boxW    = std::max(sz1.x, sz2.x) + pad.x * 2.f;
+  const float  boxH    = sz1.y + sz2.y + spacing + pad.y * 2.f;
+
+  const float  cx  = imageTopLeft.x + imageSize.x * 0.5f;
+  const float  top = imageTopLeft.y + imageSize.y * 0.12f;  // upper area, not flush against the edge
+  const ImVec2 boxMin(cx - boxW * 0.5f, top);
+  const ImVec2 boxMax(boxMin.x + boxW, boxMin.y + boxH);
+
+  dl->AddRectFilled(boxMin, boxMax, IM_COL32(30, 25, 0, 210), 6.f);
+  dl->AddRect(boxMin, boxMax, IM_COL32(230, 190, 40, 230), 6.f, 0, 1.5f);
+
+  dl->AddText(ImVec2(cx - sz1.x * 0.5f, boxMin.y + pad.y), IM_COL32(255, 210, 70, 255), line1);
+  dl->AddText(ImVec2(cx - sz2.x * 0.5f, boxMin.y + pad.y + sz1.y + spacing), IM_COL32(220, 220, 220, 235), line2);
+}
+
 void GltfRenderer::windowTitle()
 {
   static float dirty_timer = 0.0F;
@@ -566,6 +594,18 @@ void GltfRenderer::renderUI()
     const ImVec2 imageTopLeft = ImGui::GetCursorScreenPos();
     const ImVec2 imageSize    = ImGui::GetContentRegionAvail();
     ImGui::Image(m_resources.tonemappedUi, imageSize);
+
+    // Black-viewport guard: with Environment Type = None there is no sky/HDR light. If the scene
+    // also has no punctual lights and no emissive materials, nothing is lit. Unless a Solid Color
+    // background is set (which still fills the frame), the viewport is fully black -- warn the user
+    // rather than leaving them staring at an empty frame.
+    if(m_resources.settings.envSystem == shaderio::EnvSystem::eNone && !m_resources.settings.useSolidBackground)
+    {
+      const nvvkgltf::Scene* scene = m_resources.getScene();
+      const bool hasLight = scene && (!scene->getRenderLights().empty() || m_resources.sceneVk.numEmissiveTriangles() > 0);
+      if(scene && !hasLight)
+        drawNoLightOverlay(imageTopLeft, imageSize);
+    }
 
     // Axis gizmo: anchored to the 3D image's bottom-left, nudged up by one
     // frame-height when the Animation Strip is showing so the two don't overlap.
@@ -1782,10 +1822,10 @@ void GltfRenderer::renderEnvironmentWindow()
 
   if(PE::begin())
   {
-    if(PE::Combo("Environment Type", (int*)&m_resources.settings.envSystem, "Sky\0HDR\0\0"))  // 0: Sky, 1: HDR
+    if(PE::Combo("Environment Type", (int*)&m_resources.settings.envSystem, "Sky\0HDR\0None\0\0"))  // 0: Sky, 1: HDR, 2: None
     {
       m_pathTracer.m_pushConst.fireflyClampThreshold =
-          (m_resources.settings.envSystem == shaderio::EnvSystem::eSky) ? 10.0f : m_resources.hdrIbl.getIntegral();
+          (m_resources.settings.envSystem == shaderio::EnvSystem::eHdr) ? m_resources.hdrIbl.getIntegral() : 10.0f;
       changed |= true;
     }
     changed |= PE::Checkbox("Solid Color", &m_resources.settings.useSolidBackground);
@@ -1813,7 +1853,7 @@ void GltfRenderer::renderEnvironmentWindow()
       PE::end();
     }
   }
-  else
+  else if(m_resources.settings.envSystem == shaderio::EnvSystem::eSky)
   {
     changed |= nvgui::skyPhysicalParameterUI(m_resources.skyParams);
   }

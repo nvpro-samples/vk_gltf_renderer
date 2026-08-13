@@ -354,10 +354,15 @@ void Rasterizer::onRender(VkCommandBuffer cmd, Resources& resources)
   std::array<VkRenderingAttachmentInfo, kColorAttachmentCount> attachments;
   attachments.fill(DEFAULT_VkRenderingAttachmentInfo);
 
+  // The dome (Sky/HDR) writes the backdrop above; keep it with LOAD. Otherwise CLEAR: to the
+  // solid color when enabled, or to black when the environment is disabled (eNone).
+  const bool drawsEnvDome = !resources.settings.useSolidBackground
+                            && (resources.settings.envSystem == shaderio::EnvSystem::eSky
+                                || resources.settings.envSystem == shaderio::EnvSystem::eHdr);
+  const glm::vec3 clearColor = resources.settings.useSolidBackground ? resources.settings.solidBackgroundColor : glm::vec3(0.f);
   attachments[0].imageView  = targets.colorView;
-  attachments[0].clearValue = {{{resources.settings.solidBackgroundColor.x, resources.settings.solidBackgroundColor.y,
-                                 resources.settings.solidBackgroundColor.z, 0.f}}};
-  attachments[0].loadOp = resources.settings.useSolidBackground ? VK_ATTACHMENT_LOAD_OP_CLEAR : VK_ATTACHMENT_LOAD_OP_LOAD;
+  attachments[0].clearValue = {{{clearColor.x, clearColor.y, clearColor.z, 0.f}}};
+  attachments[0].loadOp     = drawsEnvDome ? VK_ATTACHMENT_LOAD_OP_LOAD : VK_ATTACHMENT_LOAD_OP_CLEAR;
 
   attachments[1].imageView = targets.selectionView;
 
@@ -389,20 +394,35 @@ void Rasterizer::onRender(VkCommandBuffer cmd, Resources& resources)
   // This is for the fragment shader to know if the opaque color is ready.
   m_pushConst.opaqueColorReady = 0;
 
-  // Patch jitter and imageSize into SceneFrameInfo for up-to-date shader access to current render extent and sub-pixel offset.
-  const glm::vec2 imageSizePx{static_cast<float>(targets.extent.width), static_cast<float>(targets.extent.height)};
-  vkCmdUpdateBuffer(cmd, resources.bFrameInfo.buffer, offsetof(shaderio::SceneFrameInfo, imageSize), sizeof(glm::vec2), &imageSizePx);
+  // renderer.cpp already wrote the full SceneFrameInfo (imageSize = gBuffer size) and barriered it for compute
+  // reads. Override only the fields this path needs: imageSize when it renders at a different extent (DLSS), and
+  // jitter when DLSS owns the sub-pixel offset. Both overlap that earlier transfer write, so order them with a
+  // barrier to avoid a WRITE_AFTER_WRITE. The common case (matching extent, no DLSS) skips the writes and barrier.
+  const VkExtent2D gbufSize       = resources.gBuffers.getSize();
+  const bool       patchImageSize = targets.extent.width != gbufSize.width || targets.extent.height != gbufSize.height;
 
-  glm::vec2 jitterPx{0.0f};
-#if defined(USE_DLSS)
-  if(dlssActive)
+  if(patchImageSize || dlssActive)
   {
+    nvvk::cmdMemoryBarrier(cmd, VK_PIPELINE_STAGE_2_ALL_TRANSFER_BIT | VK_PIPELINE_STAGE_2_COMPUTE_SHADER_BIT,
+                           VK_PIPELINE_STAGE_2_ALL_TRANSFER_BIT,
+                           VK_ACCESS_2_TRANSFER_WRITE_BIT | VK_ACCESS_2_SHADER_READ_BIT, VK_ACCESS_2_TRANSFER_WRITE_BIT);
 
-    // Dlss owns the Halton jitter + frame-index counter.
-    jitterPx = m_dlss->beginFrame().jitter;
-    vkCmdUpdateBuffer(cmd, resources.bFrameInfo.buffer, offsetof(shaderio::SceneFrameInfo, jitter), sizeof(glm::vec2), &jitterPx);
-  }
+    if(patchImageSize)
+    {
+      const glm::vec2 imageSizePx{static_cast<float>(targets.extent.width), static_cast<float>(targets.extent.height)};
+      vkCmdUpdateBuffer(cmd, resources.bFrameInfo.buffer, offsetof(shaderio::SceneFrameInfo, imageSize),
+                        sizeof(glm::vec2), &imageSizePx);
+    }
+#if defined(USE_DLSS)
+    if(dlssActive)  // Dlss owns the Halton jitter + frame-index counter.
+    {
+      const glm::vec2 jitterPx = m_dlss->beginFrame().jitter;
+      vkCmdUpdateBuffer(cmd, resources.bFrameInfo.buffer, offsetof(shaderio::SceneFrameInfo, jitter), sizeof(glm::vec2), &jitterPx);
+    }
 #endif
+  }
+
+  // Make the frame-info (and sky) transfer writes visible to the raster draw.
   nvvk::cmdMemoryBarrier(cmd, VK_PIPELINE_STAGE_2_TRANSFER_BIT,
                          VK_PIPELINE_STAGE_2_VERTEX_SHADER_BIT | VK_PIPELINE_STAGE_2_FRAGMENT_SHADER_BIT);
 

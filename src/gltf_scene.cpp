@@ -1442,6 +1442,7 @@ void nvvkgltf::Scene::parseScene()
     if(prevRN.size() != newRN.size())
     {
       m_dirtyFlags.allRenderNodesDirty = true;
+      m_dirtyFlags.emissiveDirty       = true;  // render-node set changed -> emissive area lights may change
     }
     else if(!newRN.empty())
     {
@@ -1451,6 +1452,14 @@ void nvvkgltf::Scene::parseScene()
 
       for(size_t i = 0; i < newRN.size(); i++)
       {
+        // A transform change alters a triangle's world area (its emitter selection weight), and a
+        // material/primitive reassignment changes which triangles emit -- both change the emissive
+        // list. Flag it independently of the render-node sync so the GPU-transform path (which skips
+        // the render-node upload, using only eSyncMaterials | eSyncLights) still rebuilds it.
+        if(newRN[i].worldMatrix != prevRN[i].worldMatrix || newRN[i].materialID != prevRN[i].materialID
+           || newRN[i].renderPrimID != prevRN[i].renderPrimID)
+          m_dirtyFlags.emissiveDirty = true;
+
         if(newRN[i].worldMatrix != prevRN[i].worldMatrix || newRN[i].materialID != prevRN[i].materialID
            || newRN[i].renderPrimID != prevRN[i].renderPrimID || newRN[i].visible != prevRN[i].visible)
         {
@@ -1493,7 +1502,10 @@ void nvvkgltf::Scene::parseScene()
 void nvvkgltf::Scene::markMaterialDirty(int materialIndex)
 {
   if(materialIndex >= 0 && materialIndex < static_cast<int>(m_model.materials.size()))
+  {
     m_dirtyFlags.materials.insert(materialIndex);
+    m_dirtyFlags.emissiveDirty = true;  // a material edit can change the emissive area-light set
+  }
 }
 
 void nvvkgltf::Scene::markLightDirty(int lightIndex)
@@ -1653,6 +1665,45 @@ void nvvkgltf::Scene::updateLocalMatricesAndLights()
 
   for(auto& light : m_lights)
     light.worldMatrix = computeNodeWorldMatrix(light.nodeID);
+
+  // Emissive area lights are consumed CPU-side (SceneVk::uploadEmissiveTriangles builds the emitter
+  // list from render-node world matrices, just as the light buffer is built from light world matrices
+  // above). This GPU-transform path leaves the render-node CPU mirror stale on purpose, so refresh
+  // each emitter's world matrix here and flag a rebuild when one actually moved -- a transform changes
+  // its world area, which is the emitter's selection weight. Emitters are few (like lights), so the
+  // per-edit scan is cheap; non-emitters are skipped by the material test before any matrix work.
+  const bool               hasGpuInstancing = !m_gpuInstanceLocalMatrices.empty();
+  std::vector<RenderNode>& renderNodes      = m_renderNodeRegistry.getRenderNodes();
+  for(RenderNode& rn : renderNodes)
+  {
+    if(!isEmissiveAreaLight(rn))
+      continue;
+    // KHR/EXT_mesh_gpu_instancing: a node maps to several render nodes whose worldMatrix embeds a
+    // per-instance transform (node x instance). computeNodeWorldMatrix() returns only the node
+    // matrix, so applying it here would collapse all instances onto it and corrupt instanced
+    // emitters. Skip them; their refresh falls back to the full CPU world-matrix path
+    // (updateNodeWorldMatrices), which is instance-correct and also flags emissiveDirty.
+    auto instIt = m_gpuInstanceLocalMatrices.find(rn.refNodeID);
+    if(hasGpuInstancing && instIt != m_gpuInstanceLocalMatrices.end() && !instIt->second.empty())
+      continue;
+    const glm::mat4 world = computeNodeWorldMatrix(rn.refNodeID);
+    if(world != rn.worldMatrix)
+    {
+      rn.worldMatrix             = world;
+      m_dirtyFlags.emissiveDirty = true;
+    }
+  }
+}
+
+// True if a render node is a constant emissive area light (its triangles are in the NEE emitter list
+// built by SceneVk::uploadEmissiveTriangles). Shared by the transform-refresh paths so a moving
+// emitter flags the emitter list for rebuild (its world area is the selection weight).
+bool nvvkgltf::Scene::isEmissiveAreaLight(const RenderNode& rn) const
+{
+  if(rn.materialID < 0 || rn.materialID >= static_cast<int>(m_model.materials.size()))
+    return false;
+  const glm::vec3 radiance = tinygltf::utils::getConstantEmissiveRadiance(m_model.materials[rn.materialID]);
+  return radiance.x > 0.0f || radiance.y > 0.0f || radiance.z > 0.0f;  // weights are non-negative
 }
 
 //--------------------------------------------------------------------------------------------------
@@ -1742,11 +1793,15 @@ void nvvkgltf::Scene::updateWorldMatricesSerial()
       size_t idx = 0;
       for(int renderNodeID : m_renderNodeRegistry.getRenderNodesForNode(nodeID))
       {
-        m_renderNodeRegistry.getRenderNodes()[renderNodeID].worldMatrix =
-            (instMatrices && instCount > 0) ? m_nodesWorldMatrices[nodeID] * instMatrices[idx % instCount] :
-                                              m_nodesWorldMatrices[nodeID];
+        RenderNode& rn = m_renderNodeRegistry.getRenderNodes()[renderNodeID];
+        rn.worldMatrix = (instMatrices && instCount > 0) ? m_nodesWorldMatrices[nodeID] * instMatrices[idx % instCount] :
+                                                           m_nodesWorldMatrices[nodeID];
         m_dirtyFlags.renderNodesVk.insert(renderNodeID);
         m_dirtyFlags.renderNodesRtx.insert(renderNodeID);
+        // An emitter moved -> its world area (the NEE selection weight) changed. The GPU-transform
+        // path syncs only materials+lights, so latch a rebuild independently of the render-node sync.
+        if(isEmissiveAreaLight(rn))
+          m_dirtyFlags.emissiveDirty = true;
         idx++;
       }
     }
@@ -1851,6 +1906,10 @@ void nvvkgltf::Scene::updateWorldMatricesParallel()
     {
       m_dirtyFlags.renderNodesVk.insert(static_cast<int>(i));
       m_dirtyFlags.renderNodesRtx.insert(static_cast<int>(i));
+      // An emitter moved -> its world area (the NEE selection weight) changed. Latch a rebuild here
+      // (serial post-pass, no data race) so the GPU-transform path rebuilds the emitter list too.
+      if(isEmissiveAreaLight(m_renderNodeRegistry.getRenderNodes()[i]))
+        m_dirtyFlags.emissiveDirty = true;
     }
   }
 }

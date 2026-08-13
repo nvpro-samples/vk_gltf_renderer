@@ -129,6 +129,12 @@ And **rotated** to position the light source where you need it:
 
 ![](images/hdr_1.jpg) ![](images/hdr_rot_1.jpg)
 
+### No Environment
+
+Setting the **Environment Type** to **None** disables the sky and HDR entirely: the scene receives no environment lighting (only its own punctual and emissive lights contribute), and unless a **Solid Color** background is enabled the backdrop is black. Prefer this over dialing HDR intensity to zero — it also skips environment importance sampling and the dome pass.
+
+If **None** is selected while the scene has neither punctual lights nor emissive materials, nothing is lit. With no **Solid Color** background the frame is then fully black, so the viewport shows a warning banner in that case so the empty result isn't mistaken for a bug.
+
 ### Background
 
 The background can also be a solid color. When saving as PNG, the alpha channel is preserved — useful for compositing renders over custom backgrounds.
@@ -526,7 +532,7 @@ The bridge is also driven from the **Agentic** window (press F7, or open it from
 | Parameter | Description |
 |---|---|
 | `--renderSystem <0-1>` | Path tracer (0) or Rasterizer (1) |
-| `--envSystem <0-1>` | Sky (0) or HDR (1) |
+| `--envSystem <0-2>` | Sky (0), HDR (1), or None (2) |
 | `--maxFrames <N>` | Maximum path tracer iterations |
 | `--visualization <N>` | Visualization mode (0 = Rendered). Values map to `shaderio::Visualization` in `shaders/shaderio.h` — see that enum for the current list. |
 | `--useSolidBackground` | Use solid background color |

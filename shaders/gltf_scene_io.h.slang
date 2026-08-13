@@ -63,6 +63,21 @@ struct GltfRenderPrimitive
   VertexBuffers vertexBuffer;
 };
 
+// One emissive triangle referenced for area-light sampling (next-event estimation). Stored as a
+// reference (render node + primitive + triangle) rather than baked world-space vertices, so the
+// sampler reads live geometry/transforms and the list depends only on materials (rebuilt on the
+// material dirty flag; see docs/RENDERING_ARCHITECTURE.md).
+struct EmissiveTriangle
+{
+  float3 radiance;      // constant emitted radiance (emissiveFactor * KHR_materials_emissive_strength)
+  float  aliasProb;     // Vose alias table: probability of keeping this bin (else take aliasIndex). O(1) select.
+  uint   renderNodeID;  // index into GltfScene.renderNodes
+  uint   renderPrimID;  // index into GltfScene.renderPrimitives
+  uint   triangleID;    // triangle within the primitive
+  uint   doubleSided;   // 1 = emit from both faces
+  uint   aliasIndex;    // Vose alias table: fallback bin
+};
+
 
 /*-------------------------------------------------------------------------------------------------
 Common structures used for lights other than environment lighting.
@@ -320,7 +335,17 @@ struct GltfScene
   GltfRenderPrimitive* renderPrimitives;
   GltfLight*           lights;
   int                  numLights;  // number of punctual lights
+  EmissiveTriangle*    emissiveTriangles;
+  int                  numEmissiveTriangles;  // number of sampled emissive triangles (area lights)
+  float                emissiveTotalWeight;   // sum of per-triangle selection weights (area * defensive luminance)
+  float                emissiveMeanLum;       // area-weighted mean emitter luminance (for defensive sampling)
 };
+
+// Defensive emissive selection: blend power-weighted selection (area * luminance) with area-uniform
+// selection so a dim emitter is never starved to a near-zero selection probability. Each emitter's
+// luminance is pulled toward the scene's area-weighted mean: lum' = (1-f)*lum + f*meanLum.
+// 0 = pure power-weighted, 1 = pure area-uniform. Host and device must use the same value.
+static const float EMISSIVE_DEFENSIVE_FRACTION = 0.5f;
 
 
 NAMESPACE_SHADERIO_END()

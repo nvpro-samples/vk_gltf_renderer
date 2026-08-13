@@ -116,8 +116,9 @@ private:
   void rebuildSceneGeometry();  // Geometry-only rebuild (preserves textures); does NOT clear undo (used by undoable geometry edits)
   void reconcileGeometryIfNeeded();  // Rebuild geometry when GPU buffers are behind the render-primitive count (e.g. added primitive)
   void applyPendingTextureRebuild();  // Consume DirtyFlags::texturesChanged at frame top: full texture rebuild + cache refresh
+  void applyPendingTextureTailSync();  // Consume DirtyFlags::texturesTailChanged at frame top: incremental append/remove of tail textures
   void refreshCpuSceneGraphFromModel();
-  void rebuildVulkanSceneInternal(bool rebuildTextures);  // GPU upload + AS; CPU scene must already be parsed
+  void rebuildVulkanSceneInternal(nvvkgltf::SceneGpu::RebuildMode mode);  // GPU upload + AS; CPU scene must already be parsed
   void compileShaders();
   void createDescriptorSets();
   void createResourceBuffers();
@@ -139,6 +140,9 @@ private:
   bool dlssGuideRequired() const;  // True when the path tracer currently needs DLSS/OptiX guide-buffer capture code.
   void updateGizmoAttachment();
   bool updateTextures();
+  // Write a contiguous range of scene texture / sampler descriptors (eTextures / eSamplers). updateTextures()
+  // writes the whole set; applyPendingTextureTailSync() writes only the newly appended slots.
+  bool writeTextureDescriptorRange(uint32_t firstTexture, uint32_t textureCount, uint32_t firstSampler, uint32_t samplerCount);
   void updateHdrImages();
 
   bool updateSceneChanges(VkCommandBuffer cmd);

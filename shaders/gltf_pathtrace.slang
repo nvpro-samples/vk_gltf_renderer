@@ -291,7 +291,20 @@ PathStepResult pathTraceOneBounce(IRaytracer raytracer, inout RayDesc ray, inout
     //-----------------------------------------------------------------------
     // Adding emissive
     //-----------------------------------------------------------------------
-    pt.radiance += pbrMat.emissive * pt.throughput;
+    // Emitters that are also sampled as area lights (constant emissive, no emissive texture) get
+    // hit by BSDF rays too; MIS-weight those against the light technique, mirroring the env-hit
+    // MIS above. Textured emitters are not in the light list, so they stay unweighted.
+    if(any(pbrMat.emissive > float3(0.0)))
+    {
+      float emissiveMis = 1.0;
+      if(!hitInfinitePlane && !isTexturePresent(materials[materialIndex].emissiveTexture))
+      {
+        // Power-weighted MIS pdf needs only the emitter's own radiance, its geometric normal, and
+        // W_total (the area cancels) -- no per-triangle lookup.
+        emissiveMis = computeEmitterHitMisWeight(pt.lastSamplePdf, pbrMat.emissive, hit.geonrm, ray.Direction, payload.hitT);
+      }
+      pt.radiance += emissiveMis * pbrMat.emissive * pt.throughput;
+    }
 
     //-----------------------------------------------------------------------
     // Unlit

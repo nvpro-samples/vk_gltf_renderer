@@ -1171,6 +1171,12 @@ KHR_materials_displacement   getDisplacement(const tinygltf::Material& tmat);
 void                         setDisplacement(tinygltf::Material& tmat, const KHR_materials_displacement& displacement);
 KHR_materials_emissive_strength getEmissiveStrength(const tinygltf::Material& tmat);
 void setEmissiveStrength(tinygltf::Material& tmat, const KHR_materials_emissive_strength& emissiveStrength);
+
+// Constant (non-textured) emissive radiance of a material: emissiveFactor * KHR_materials_emissive_strength.
+// Returns vec3(0) when an emissive texture is present (textured emitters are not sampled as area lights)
+// or when the material does not emit. Single source of truth for "is this an emissive area light" -- used
+// by the GPU emitter upload and the CPU-side emitter transform tracking.
+glm::vec3                 getConstantEmissiveRadiance(const tinygltf::Material& tmat);
 KHR_materials_iridescence getIridescence(const tinygltf::Material& tmat);
 void                      setIridescence(tinygltf::Material& tmat, const KHR_materials_iridescence& iridescence);
 KHR_materials_dispersion  getDispersion(const tinygltf::Material& tmat);

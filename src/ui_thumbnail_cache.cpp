@@ -107,3 +107,20 @@ void ThumbnailCache::clear()
     bin.clear();
   }
 }
+
+void ThumbnailCache::clearDeferred()
+{
+  if(m_trash.empty())
+  {
+    clear();  // No ring yet (beginFrame never ran): nothing was drawn, so immediate release is safe.
+    return;
+  }
+  // Park every live entry into the current bin; it is released once a full ring has elapsed (see
+  // beginFrame), i.e. after any in-flight frame referencing it has completed. m_entries is emptied so
+  // acquire() rebuilds fresh descriptors, so a view handle reused after its image is freed cannot hit a
+  // stale descriptor.
+  auto& bin = m_trash[m_trashHead];
+  for(auto& [view, entry] : m_entries)
+    bin.push_back(std::move(entry));
+  m_entries.clear();
+}

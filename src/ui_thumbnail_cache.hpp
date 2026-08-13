@@ -70,6 +70,12 @@ public:
   // Release all descriptor sets immediately. MUST be called while the GPU is idle.
   void clear();
 
+  // Release all descriptor sets via the deferred-free ring instead of immediately, so it is safe to call
+  // WITHOUT a GPU idle. Used when a scene image view is destroyed through deferred-free (e.g. undoing an
+  // imported texture): parking the descriptors keyed on that view prevents a later handle-reuse hit from
+  // returning a stale descriptor. Entries are re-acquired lazily afterwards.
+  void clearDeferred();
+
 private:
   struct Entry
   {

@@ -29,8 +29,10 @@ struct DirectLight
 //-----------------------------------------------------------------------
 struct LightingTechniqueProbabilities
 {
-  float lightWeight;  // Normalized probability of sampling punctual lights
-  float envWeight;    // Normalized probability of sampling environment
+  float lightWeight;     // Normalized probability of the light technique (vs environment)
+  float envWeight;       // Normalized probability of the environment technique
+  float punctualWeight;  // Within the light technique: probability of a punctual light (punctual + emissive = 1)
+  float emissiveWeight;  // Within the light technique: probability of an emissive triangle
 };
 
 static const float MIN_TRANSMISSION = 0.01f;  // Minimum shadow transmission factor for transparent materials
@@ -293,25 +295,12 @@ float3 getShadowTransmission(GltfRenderNode      renderNode,
   {
     if(isInside)
     {
-      float3 absCoeff = -log(max(mat.attenuationColor, float3(0.001))) / max(mat.attenuationDistance, 0.001);
-
-#if GLTF_USE_VOLUME_SCATTER
-      float3 scatterCoeff = absCoeff * multiToSingleScatterAlbedo(mat.multiscatterColorFactor);
-#else
-      float3 scatterCoeff = float3(0.0);
-#endif
-
-      float3 extinction = absCoeff + scatterCoeff;
+      // Beer-Lambert transmittance through the medium interior. -log(c)/d is the TOTAL
+      // extinction sigma_t = sigma_a + sigma_s: the out-scattering portion is already
+      // included, so the scatter coefficient must not be added on top (that would
+      // double-count it and over-darken the ray).
+      float3 extinction = -log(max(mat.attenuationColor, float3(0.001))) / max(mat.attenuationDistance, 0.001);
       currentTransmission *= exp(-hitT * extinction);
-
-      float maxScatter = max(scatterCoeff.x, max(scatterCoeff.y, scatterCoeff.z));
-      if(maxScatter > 0.001f)
-      {
-        float maxExtinction  = max(extinction.x, max(extinction.y, extinction.z));
-        float opticalDepth   = hitT * maxExtinction;
-        float scatterPenalty = exp(-opticalDepth);
-        currentTransmission *= scatterPenalty;
-      }
     }
     isInside = !isInside;
   }
@@ -358,11 +347,13 @@ LightingTechniqueProbabilities getDirectLightingTechniqueProbabilities()
 {
   LightingTechniqueProbabilities probs;
 
-  float lightWeight = (pushConst.gltfScene.numLights > 0) ? 0.5f : 0.0f;
-  float envWeight   = (!hasFlag(pushConst.frameInfo->flags, SceneFrameInfoFlags::eSceneUseHdrEnvironment)
-                     || pushConst.frameInfo->envIntensity.x > 0.0f) ?
-                          0.5f :
-                          0.0f;
+  bool  hasPunctual = pushConst.gltfScene.numLights > 0;
+  bool  hasEmissive = pushConst.gltfScene.numEmissiveTriangles > 0;
+  float lightWeight = (hasPunctual || hasEmissive) ? 0.5f : 0.0f;
+  bool  hasEnv      = !hasFlag(pushConst.frameInfo->flags, SceneFrameInfoFlags::eSceneUseNoEnvironment)
+                && (!hasFlag(pushConst.frameInfo->flags, SceneFrameInfoFlags::eSceneUseHdrEnvironment)
+                    || pushConst.frameInfo->envIntensity.x > 0.0f);
+  float envWeight = hasEnv ? 0.5f : 0.0f;
 
   float totalWeight = lightWeight + envWeight;
   if(totalWeight > 0.0f)
@@ -371,9 +362,151 @@ LightingTechniqueProbabilities getDirectLightingTechniqueProbabilities()
     envWeight /= totalWeight;
   }
 
-  probs.lightWeight = lightWeight;
-  probs.envWeight   = envWeight;
+  // Split the light technique between punctual lights and emissive triangles so that adding many
+  // emissive triangles does not dilute punctual-light sampling (and vice versa).
+  float punctualWeight = hasPunctual ? (hasEmissive ? 0.5f : 1.0f) : 0.0f;
+  float emissiveWeight = hasEmissive ? (hasPunctual ? 0.5f : 1.0f) : 0.0f;
+
+  probs.lightWeight    = lightWeight;
+  probs.envWeight      = envWeight;
+  probs.punctualWeight = punctualWeight;
+  probs.emissiveWeight = emissiveWeight;
   return probs;
+}
+
+//-----------------------------------------------------------------------
+// Emissive-mesh area lights (next-event estimation)
+//
+// Emissive triangles are sampled directly and MIS-combined with BSDF sampling, mirroring the
+// environment-light MIS. Selection is POWER-WEIGHTED: triangle i is chosen with probability
+// proportional to (world area * luminance), in O(1) via a Vose alias table. The key simplification
+// is that the world area cancels in the solid-angle pdf:
+//     pdf(i) = P(select i) * dist^2 / (area_i * cos) = luminance_i * dist^2 / (W_total * cos)
+// so the MIS pdf for a BSDF ray landing on an emitter is still recovered from local hit geometry
+// (its own radiance + W_total) with NO per-triangle lookup table. Triangles are stored as
+// references, so vertices/transforms are read live here.
+//-----------------------------------------------------------------------
+// Defensive luminance: pull the emitter's luminance toward the scene's area-weighted mean so a dim
+// emitter is never starved. Uses the shared Rec. 709 luminance() (nvshaders/functions.h.slang); the
+// host weight (gltf_scene_vk.cpp uploadEmissiveTriangles) must use the same coefficients.
+float emitterDefensiveLuminance(float3 radiance)
+{
+  float f = EMISSIVE_DEFENSIVE_FRACTION;
+  return (1.0f - f) * luminance(radiance) + f * pushConst.gltfScene.emissiveMeanLum;
+}
+
+struct EmissiveSample
+{
+  float3 direction;  // from the shading point toward the sampled point on the emitter
+  float  distance;   // shadow-ray TMax (stops just short of the emitter surface)
+  float3 radiance;   // emitted radiance of the triangle
+  float  pdf;        // solid-angle pdf of the sample; 0 when the sample is invalid
+};
+
+// World-space vertices of a referenced emissive triangle.
+void getEmissiveTriangleWorld(EmissiveTriangle et, out float3 p0, out float3 p1, out float3 p2)
+{
+  GltfRenderNode      node = pushConst.gltfScene.renderNodes[et.renderNodeID];
+  GltfRenderPrimitive prim = pushConst.gltfScene.renderPrimitives[et.renderPrimID];
+  uint3               idx  = getTriangleIndices(prim, int(et.triangleID));
+  p0                       = mul(float4(getVertexPosition(prim, idx.x), 1.0), node.objectToWorld).xyz;
+  p1                       = mul(float4(getVertexPosition(prim, idx.y), 1.0), node.objectToWorld).xyz;
+  p2                       = mul(float4(getVertexPosition(prim, idx.z), 1.0), node.objectToWorld).xyz;
+}
+
+// Select an emissive triangle proportional to its selection weight in O(1) via a Vose alias table.
+// One uniform picks a bin; its fractional part chooses between that bin and its alias.
+int selectEmissiveTriangle(float u01)
+{
+  int              n      = pushConst.gltfScene.numEmissiveTriangles;
+  float            scaled = u01 * float(n);
+  int              bin    = min(int(scaled), n - 1);
+  float            uf     = scaled - float(bin);  // reuse the fractional part as the second uniform
+  EmissiveTriangle et     = pushConst.gltfScene.emissiveTriangles[bin];
+  return (uf < et.aliasProb) ? bin : int(et.aliasIndex);
+}
+
+// Power-weighted sample of emissive triangle `emissiveIndex` as seen from `shadingPos`.
+EmissiveSample sampleEmissiveTriangle(int emissiveIndex, float3 shadingPos, inout uint seed)
+{
+  EmissiveSample es = {float3(0, 0, 1), 0.0, float3(0), 0.0};
+
+  EmissiveTriangle et = pushConst.gltfScene.emissiveTriangles[emissiveIndex];
+  float3           p0, p1, p2;
+  getEmissiveTriangleWorld(et, p0, p1, p2);
+
+  // Uniform barycentric sample over the triangle area.
+  float2 u        = float2(rand(seed), rand(seed));
+  float  su0      = sqrt(u.x);
+  float  b1       = 1.0 - su0;
+  float  b2       = u.y * su0;
+  float3 lightPos = p0 * (1.0 - b1 - b2) + p1 * b1 + p2 * b2;
+
+  float3 toLight = lightPos - shadingPos;
+  float  dist2   = dot(toLight, toLight);
+  if(dist2 <= 1e-12)
+    return es;
+  float  dist = sqrt(dist2);
+  float3 dir  = toLight / dist;
+
+  float3 ng      = cross(p1 - p0, p2 - p0);
+  float  twoArea = length(ng);
+  if(twoArea <= 1e-12)
+    return es;  // degenerate triangle
+  float3 lightN = ng / twoArea;
+
+  float cosLight = dot(lightN, -dir);
+  if(et.doubleSided != 0)
+    cosLight = abs(cosLight);
+  if(cosLight <= 1e-6)
+    return es;  // one-sided emitter facing away, or grazing
+
+  float wtot = pushConst.gltfScene.emissiveTotalWeight;
+  if(wtot <= 0.0)
+    return es;
+
+  es.direction = dir;
+  // Stop short of the emitter surface so the shadow ray does not self-intersect it. Use a small
+  // absolute offset rather than a dist-relative one: scaling by dist skips a large segment in front
+  // of a far emitter (missed occluders -> light leak). Clamp so very near emitters stay positive.
+  es.distance = dist - min(dist * 0.5f, 1e-2f);
+  es.radiance = et.radiance;
+  // Power-weighted solid-angle pdf; the triangle area cancels (see header). Uses the defensive
+  // luminance so it matches the host selection weight.
+  es.pdf = emitterDefensiveLuminance(et.radiance) * dist2 / (wtot * cosLight);
+  return es;
+}
+
+// NEE solid-angle pdf (within the light technique) of sampling the hit emissive triangle in the hit
+// direction. Power-weighted selection makes the area cancel, so this needs only the emitter's own
+// radiance, the geometric normal, and W_total -- no per-triangle lookup. 0 if not a valid emitter dir.
+float emitterHitSolidAnglePdf(float3 radiance, float3 geoNormal, float3 rayDir, float hitDist)
+{
+  float wtot = pushConst.gltfScene.emissiveTotalWeight;
+  if(pushConst.gltfScene.numEmissiveTriangles <= 0 || wtot <= 0.0)
+    return 0.0;
+  // No sidedness gate needed: one-sided emitters cull their back faces (SceneRtx omits the
+  // FACING_CULL_DISABLE bit for them, and the path-trace rays use RAY_FLAG_CULL_BACK_FACING_TRIANGLES),
+  // so only front faces are hit -- exactly the side the sampler samples. abs() gives the right cosine
+  // magnitude for both one-sided (front) and double-sided (either face, sampler also uses abs) emitters.
+  float cosLight = abs(dot(geoNormal, rayDir));  // geonrm is pre-flipped toward the ray
+  if(cosLight <= 1e-6)
+    return 0.0;
+  return emitterDefensiveLuminance(radiance) * (hitDist * hitDist) / (wtot * cosLight);
+}
+
+// MIS weight for a BSDF ray that landed on an emissive triangle, weighted against the emissive-NEE
+// technique. Mirrors computeEnvHitMisWeight; the competing NEE pdf is
+// lightWeight * emissiveWeight * (emitter solid-angle pdf).
+float computeEmitterHitMisWeight(float lastSamplePdf, float3 radiance, float3 geoNormal, float3 rayDir, float hitDist)
+{
+  if(lastSamplePdf == DIRAC)
+    return 1.0f;
+  LightingTechniqueProbabilities probs = getDirectLightingTechniqueProbabilities();
+  float emitterNeePdf = probs.lightWeight * probs.emissiveWeight * emitterHitSolidAnglePdf(radiance, geoNormal, rayDir, hitDist);
+  if(emitterNeePdf <= 0.0)
+    return 1.0f;
+  return lastSamplePdf / (lastSamplePdf + emitterNeePdf);
 }
 
 void sampleLights(in float3 pos, float3 normal, in float3 worldRayDirection, inout uint seed, out DirectLight directLight, in bool isVolumeSample = false)
@@ -384,9 +517,10 @@ void sampleLights(in float3 pos, float3 normal, in float3 worldRayDirection, ino
   directLight.radianceOverPdf = float3(0.0f);
   float envPdf                = 0.0f;
 
-  LightingTechniqueProbabilities probs       = getDirectLightingTechniqueProbabilities();
-  float                          lightWeight = probs.lightWeight;
-  float                          envWeight   = probs.envWeight;
+  LightingTechniqueProbabilities probs          = getDirectLightingTechniqueProbabilities();
+  float                          lightWeight    = probs.lightWeight;
+  float                          envWeight      = probs.envWeight;
+  float                          emissiveWeight = probs.emissiveWeight;
 
   if(lightWeight == 0.0f && envWeight == 0.0f)
   {
@@ -397,19 +531,48 @@ void sampleLights(in float3 pos, float3 normal, in float3 worldRayDirection, ino
 
   if(sampleLight)
   {
-    float selectionPdf = 1.0 / pushConst.gltfScene.numLights;
+    // Within the light technique, pick punctual vs emissive (punctualWeight + emissiveWeight = 1).
+    // Guard the categories explicitly: rand() can return exactly 1.0, so never fall into a branch
+    // whose category is empty (e.g. the punctual branch when there are no punctual lights).
+    bool pickEmissive;
+    if(probs.emissiveWeight <= 0.0f)
+      pickEmissive = false;  // no emitters -> punctual
+    else if(probs.punctualWeight <= 0.0f)
+      pickEmissive = true;  // no punctual lights -> emissive
+    else
+      pickEmissive = (rand(seed) < emissiveWeight);
 
-    int       lightIndex = min(int(rand(seed) * pushConst.gltfScene.numLights), pushConst.gltfScene.numLights - 1);
-    GltfLight light      = pushConst.gltfScene.lights[lightIndex];
+    if(!pickEmissive)
+    {
+      int       numPunctual  = pushConst.gltfScene.numLights;
+      float     selectionPdf = probs.punctualWeight / numPunctual;
+      int       lightIndex   = min(int(rand(seed) * numPunctual), numPunctual - 1);
+      GltfLight light        = pushConst.gltfScene.lights[lightIndex];
 
-    float3 cullNormal = (isVolumeSample && light.type == LightType::eLightTypeDirectional) ? -light.direction : normal;
-    LightContrib contrib = singleLightContribution(light, pos, cullNormal, float2(rand(seed), rand(seed)));
+      float3 cullNormal = (isVolumeSample && light.type == LightType::eLightTypeDirectional) ? -light.direction : normal;
+      LightContrib contrib = singleLightContribution(light, pos, cullNormal, float2(rand(seed), rand(seed)));
 
-    directLight.direction = -contrib.incidentVector;
-    directLight.distance  = contrib.distance;
-    radiance              = contrib.intensity / (selectionPdf * lightWeight);
+      directLight.direction = -contrib.incidentVector;
+      directLight.distance  = contrib.distance;
+      radiance              = contrib.intensity / (selectionPdf * lightWeight);
 
-    directLight.pdf = (contrib.pdf == DIRAC) ? DIRAC : selectionPdf * contrib.pdf;
+      directLight.pdf = (contrib.pdf == DIRAC) ? DIRAC : selectionPdf * contrib.pdf;
+    }
+    else
+    {
+      // Emissive triangle (area light): power-weighted selection, then divide by the solid-angle pdf.
+      int            tri    = selectEmissiveTriangle(rand(seed));
+      EmissiveSample es     = sampleEmissiveTriangle(tri, pos, seed);
+      directLight.direction = es.direction;
+      directLight.distance  = es.distance;
+      if(es.pdf > 0.0)
+      {
+        // es.pdf already includes the power-weighted selection; fold in the emissive sub-weight.
+        float pdfLight  = emissiveWeight * es.pdf;
+        radiance        = es.radiance / (lightWeight * pdfLight);
+        directLight.pdf = pdfLight;  // left as 0 otherwise -> caller skips NEE
+      }
+    }
   }
 
   if(envWeight > 0 && directLight.pdf != DIRAC)
@@ -465,6 +628,14 @@ void sampleLights(in float3 pos, float3 normal, in float3 worldRayDirection, ino
 
 void sampleEnvironment(float3 direction, SceneFrameInfo* frameInfo, out float3 envColor, out float envPdf)
 {
+  if(hasFlag(frameInfo->flags, SceneFrameInfoFlags::eSceneUseNoEnvironment))
+  {
+    // No environment: contributes no radiance and cannot be importance-sampled.
+    envColor = float3(0.0f);
+    envPdf   = 0.0f;
+    return;
+  }
+
   if(!hasFlag(frameInfo->flags, SceneFrameInfoFlags::eSceneUseHdrEnvironment))
   {
     envColor = evalPhysicalSky(*pushConst.skyParams, direction);

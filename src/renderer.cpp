@@ -159,7 +159,7 @@ GltfRenderer::GltfRenderer(nvutils::ParameterRegistry* paramReg, const nvutils::
     , m_benchmark(benchmarkOptions)
 {
   // All parameters that can be set from the command line
-  paramReg->add({"envSystem", "Environment: [Sky:0, HDR:1]"}, (int*)&m_resources.settings.envSystem);
+  paramReg->add({"envSystem", "Environment: [Sky:0, HDR:1, None:2]"}, (int*)&m_resources.settings.envSystem);
   paramReg->add({"renderSystem", "Renderer [Path tracer:0, Rasterizer:1]"}, (int*)&m_resources.settings.renderSystem);
   paramReg->add({"showAxis", "Show Axis"}, &m_resources.settings.showAxis);
   paramReg->add({"showMemStats", "Show Memory Statistics"}, &m_resources.settings.showMemStats);
@@ -180,6 +180,8 @@ GltfRenderer::GltfRenderer(nvutils::ParameterRegistry* paramReg, const nvutils::
 
   paramReg->add({"tmMethod", "Tonemapper method: [Filmic:0, Uncharted:1, Clip:2, ACES:3, AgX:4, KhronosPBR:5]"},
                 &m_resources.tonemapperData.method);
+  paramReg->add({"tmAutoExposure", "Tonemapper auto-exposure: [Off:0, On:1] (turn off for reproducible headless captures)"},
+                &m_resources.tonemapperData.autoExposure);
   paramReg->add({"tmExposure", "Tonemapper exposure"}, &m_resources.tonemapperData.exposure);
   paramReg->add({"tmGamma", "Tonemapper brightness"}, &m_resources.tonemapperData.brightness);
   paramReg->add({"tmContrast", "Tonemapper contrast"}, &m_resources.tonemapperData.contrast);
@@ -254,6 +256,8 @@ void GltfRenderer::onAttach(nvapp::Application* app)
   m_settingsHandler.setSetting("useSolidBackground", &m_resources.settings.useSolidBackground);
   m_settingsHandler.setSetting("solidBackgroundColor", &m_resources.settings.solidBackgroundColor);
   m_settingsHandler.setSetting("optimalShader", &m_resources.settings.optimalShader);
+  m_settingsHandler.setSetting("tmMethod", &m_resources.tonemapperData.method);
+  m_settingsHandler.setSetting("tmAutoExposure", &m_resources.tonemapperData.autoExposure);
   m_pathTracer.setSettingsHandler(&m_settingsHandler);
   m_rasterizer.setSettingsHandler(&m_settingsHandler);
   m_settingsHandler.setLoadFilter([this](const std::string& key) {
@@ -644,9 +648,60 @@ void GltfRenderer::applyPendingTextureRebuild()
   m_inspector.refreshTextureNames();
 }
 
+// Consume a pending TAIL-ONLY texture change (import / undo / redo of an imported texture) at frame top,
+// alongside applyPendingTextureRebuild(). Unlike the full rebuild, this reconciles only the appended or
+// removed tail (SceneVk::syncTextureTail): it neither stalls the GPU nor frees existing image views, so
+// thumbnails and in-flight frames stay valid and no acceleration-structure work is needed. The per-frame
+// material sync (which carries the new texture index) stays gated until the flag clears -- see the
+// texturesTailChanged guard in updateSceneChanges().
+void GltfRenderer::applyPendingTextureTailSync()
+{
+  nvvkgltf::Scene* scene = m_resources.getScene();
+  if(!scene || !scene->getDirtyFlags().texturesTailChanged)
+    return;
+
+  const uint32_t firstTexture = m_resources.sceneVk.textureCount();
+  const uint32_t firstSampler = m_resources.sceneVk.samplerCount();
+
+  // Load/create new tail images (or deferred-free removed ones) on a transient command buffer, uploaded
+  // asynchronously via the load pipeline -- the same pattern as the full rebuild, minus the queue wait.
+  VkCommandBuffer cmd{};
+  nvvk::beginSingleTimeCommands(cmd, m_device, m_transientCmdPool);
+  m_resources.sceneVk.syncTextureTail(cmd, m_resources.staging, *scene);
+  NVVK_CHECK(vkEndCommandBuffer(cmd));
+  m_loadPipeline.enqueue(cmd);
+
+  // Write only the newly appended descriptors; removed tail slots become unused (PARTIALLY_BOUND) and
+  // need no write. The image views exist immediately (created above); their contents land once the
+  // enqueued upload completes, before any frame samples the new texture.
+  const uint32_t newTexture = m_resources.sceneVk.textureCount();
+  const uint32_t newSampler = m_resources.sceneVk.samplerCount();
+  if(newTexture > firstTexture || newSampler > firstSampler)
+  {
+    if(!writeTextureDescriptorRange(firstTexture, newTexture > firstTexture ? newTexture - firstTexture : 0,  //
+                                    firstSampler, newSampler > firstSampler ? newSampler - firstSampler : 0))
+      return;  // capacity overflow (logged FATAL): leave texturesTailChanged set so updateSceneChanges keeps
+               // the material sync gated -- the material must not reference a texture whose descriptor is unwritten.
+  }
+
+  // Descriptors are now consistent with the model; lift the per-frame material-sync gate.
+  scene->getDirtyFlags().texturesTailChanged = false;
+
+  // A tail shrink (undo) deferred-freed the removed image views. Park any thumbnail descriptors keyed on
+  // them so a later view-handle reuse cannot hit a stale descriptor (a grow frees nothing, so it needs no
+  // eviction, and existing thumbnails stay valid).
+  if(newTexture < firstTexture)
+    m_thumbnailCache.clearDeferred();
+
+  resetFrame();
+  m_sceneBrowser.markCachesDirty();
+  m_inspector.refreshTextureNames();
+}
+
 void GltfRenderer::onUIRender()
 {
-  applyPendingTextureRebuild();  // frame-top: rebuild GPU textures for a prior-frame edit (see method)
+  applyPendingTextureRebuild();   // frame-top: full GPU texture rebuild for a prior-frame structural edit (see method)
+  applyPendingTextureTailSync();  // frame-top: incremental append/remove for a prior-frame import/undo/redo (see method)
 
   // Advance the thumbnail cache's deferred-free ring before any panel acquires thumbnails this frame.
   m_thumbnailCache.beginFrame(m_app->getFrameCycleSize());
@@ -780,6 +835,7 @@ void GltfRenderer::onRender(VkCommandBuffer cmd)
         .flags = ((m_cameraManip->getProjectionType() == nvutils::CameraManipulator::Orthographic) ? shaderio::eSceneIsOrthographic : 0)
                  | (m_resources.settings.useSolidBackground ? shaderio::eSceneUseSolidBackground : 0)
                  | ((m_resources.settings.envSystem == shaderio::EnvSystem::eHdr) ? shaderio::eSceneUseHdrEnvironment : 0)
+                 | ((m_resources.settings.envSystem == shaderio::EnvSystem::eNone) ? shaderio::eSceneUseNoEnvironment : 0)
                  | (m_resources.settings.useInfinitePlane ? shaderio::eSceneUseInfinitePlane : 0)
                  | ((m_resources.settings.useInfinitePlane && m_resources.settings.isShadowCatcher) ? shaderio::eSceneInfinitePlaneShadowCatcher :
                                                                                                       0),
@@ -891,13 +947,20 @@ void GltfRenderer::addSceneFromFile(const std::filesystem::path& filename, bool 
   m_busy.start(asReference ? "Referencing Scene" : "Merging Scene");
 
   std::thread([=, this]() {
-    const int         nodeIdx = asReference ? m_resources.getScene()->referenceScene(filename) :
-                                              m_resources.getScene()->mergeScene(filename, static_cast<uint32_t>(m_maxTextures));
+    nvvkgltf::Scene* scene = m_resources.getScene();
+    // Capture BEFORE the import mutates the model: merge/reference is a pure tail-append, so when the base
+    // already has images and textures we preserve them on the GPU and load only the new tail
+    // (eMergeAppend). An empty / texture-less base carries 1x1 GPU dummy defaults whose sizes don't match
+    // the model, so it still needs a full rebuild.
+    const bool wasTextured = scene && !scene->getModel().images.empty() && !scene->getModel().textures.empty();
+
+    const int         nodeIdx = asReference ? scene->referenceScene(filename) :
+                                              scene->mergeScene(filename, static_cast<uint32_t>(m_maxTextures));
     const std::string name    = nvutils::utf8FromPath(filename.filename());
     if(nodeIdx >= 0)
     {
       m_undoStack.clear();
-      rebuildVulkanSceneFull();
+      rebuildVulkanSceneInternal(wasTextured ? nvvkgltf::SceneGpu::RebuildMode::eMergeAppend : nvvkgltf::SceneGpu::RebuildMode::eFull);
       // Imported glTF may bring extensions the previous scene didn't use; recompute so optimal-mode
       // rebuilds the shader if the feature set widened.
       m_resources.recomputeSceneFeatures(dlssGuideRequired());
@@ -1646,14 +1709,20 @@ void GltfRenderer::refreshCpuSceneGraphFromModel()
 // Does not call parseScene — callers that modified the glTF without mergeScene/parseScene must call
 // refreshCpuSceneGraphFromModel() first (e.g. compact, rebuildSceneFromModel).
 //
-void GltfRenderer::rebuildVulkanSceneInternal(bool rebuildTextures)
+void GltfRenderer::rebuildVulkanSceneInternal(nvvkgltf::SceneGpu::RebuildMode mode)
 {
+  using RebuildMode = nvvkgltf::SceneGpu::RebuildMode;
+  // Modes that add or reload images (eFull re-reads all; eMergeAppend loads only the new tail). Both
+  // need the WebP loader and a descriptor rewrite; eGeometryOnly leaves textures untouched.
+  const bool touchesTextures = (mode == RebuildMode::eFull || mode == RebuildMode::eMergeAppend);
+
   // SYNC NOTE: Full scene rebuild (merge/compact/geometry change) -- wait ensures GPU is idle.
   NVVK_CHECK(vkQueueWaitIdle(m_app->getQueue(0).queue));
 
-  // Thumbnails reference the texture/image views that a texture rebuild is about to destroy. Release
-  // them now (GPU is idle); panels lazily re-acquire against the new views on the next frame.
-  if(rebuildTextures)
+  // Only eFull destroys the existing texture/image views; release the thumbnails referencing them now
+  // (GPU is idle) so panels re-acquire against the new views. eMergeAppend keeps existing views, so the
+  // thumbnails stay valid and must NOT be cleared.
+  if(mode == RebuildMode::eFull)
     m_thumbnailCache.clear();
 
   nvvkgltf::Scene* scene = m_resources.getScene();
@@ -1662,13 +1731,13 @@ void GltfRenderer::rebuildVulkanSceneInternal(bool rebuildTextures)
     if(scene)
       m_resources.transformCompute.destroyGpuBuffers();  // Before scene RTX rebuild
 
-    // Add WebP loading support to SceneVk (only needed for full rebuild with textures)
-    if(rebuildTextures)
+    // Add WebP loading support to SceneVk (needed whenever images are (re)loaded)
+    if(touchesTextures)
       m_resources.sceneVk.setImageLoadCallback(webPLoadCallback);
 
     VkCommandBuffer cmd{};
     nvvk::beginSingleTimeCommands(cmd, m_device, m_transientCmdPool);
-    m_resources.sceneGpu.rebuild(cmd, *scene, rebuildTextures);
+    m_resources.sceneGpu.rebuild(cmd, *scene, mode);
     NVVK_CHECK(vkEndCommandBuffer(cmd));
     m_loadPipeline.enqueue(cmd);
   }
@@ -1703,8 +1772,9 @@ void GltfRenderer::rebuildVulkanSceneInternal(bool rebuildTextures)
       animCtrl.showStrip = true;
   }
 
-  // Update textures if requested
-  if(rebuildTextures)
+  // Update textures if images were (re)loaded. eFull rewrites the whole array; eMergeAppend rewrites it
+  // too (cheap, no disk) so the new tail textures become visible. eGeometryOnly preserves textures.
+  if(touchesTextures)
   {
     if(!updateTextures())
     {
@@ -1738,9 +1808,9 @@ void GltfRenderer::rebuildSceneFromModel()
 void GltfRenderer::rebuildSceneGeometry()
 {
   refreshCpuSceneGraphFromModel();
-  rebuildVulkanSceneInternal(false);  // Geometry only, preserve textures
-  resetFrame();                       // geometry changed -> restart path-tracer accumulation (the rebuild clears the
-                                      // dirty flags before updateSceneChanges runs, so nothing else would reset it)
+  rebuildVulkanSceneInternal(nvvkgltf::SceneGpu::RebuildMode::eGeometryOnly);  // Geometry only, preserve textures
+  resetFrame();  // geometry changed -> restart path-tracer accumulation (the rebuild clears the
+                 // dirty flags before updateSceneChanges runs, so nothing else would reset it)
 }
 
 //--------------------------------------------------------------------------------------------------
@@ -1788,7 +1858,7 @@ void GltfRenderer::reconcileGeometryIfNeeded()
 //
 void GltfRenderer::rebuildVulkanSceneFull()
 {
-  rebuildVulkanSceneInternal(true);
+  rebuildVulkanSceneInternal(nvvkgltf::SceneGpu::RebuildMode::eFull);
 }
 
 //--------------------------------------------------------------------------------------------------
@@ -2029,23 +2099,30 @@ void GltfRenderer::compileShaders()
 // Textures are updated in the descriptor set (0)
 bool GltfRenderer::updateTextures()
 {
-  const uint32_t imageCount   = m_resources.sceneVk.textureCount();
-  const uint32_t samplerCount = m_resources.sceneVk.samplerCount();
-
+  const uint32_t imageCount = m_resources.sceneVk.textureCount();
   if(imageCount == 0)
     return true;
+  return writeTextureDescriptorRange(0, imageCount, 0, m_resources.sceneVk.samplerCount());
+}
 
+//--------------------------------------------------------------------------------------------------
+// Write a contiguous range of the scene texture (eTextures) and sampler (eSamplers) descriptor arrays.
+// updateTextures() writes the whole set (elements 0..count); applyPendingTextureTailSync() writes only
+// the appended tail. The arrays are bindless (UPDATE_AFTER_BIND + PARTIALLY_BOUND), so a partial write
+// leaves the untouched slots -- and any in-flight frames referencing them -- valid.
+bool GltfRenderer::writeTextureDescriptorRange(uint32_t firstTexture, uint32_t textureCount, uint32_t firstSampler, uint32_t samplerCount)
+{
   // CRITICAL: materials index eTextures[] / eSamplers[] directly; exceeding capacity would read
   // uninitialized descriptors (undefined behavior). Fail loudly instead.
-  if(imageCount > m_maxTextures)
+  if(firstTexture + textureCount > m_maxTextures)
   {
-    LOGE("FATAL: Scene has %u material images but the descriptor set only supports %u!", imageCount, m_maxTextures);
+    LOGE("FATAL: Scene needs %u material images but the descriptor set only supports %u!", firstTexture + textureCount, m_maxTextures);
     LOGE("       Increase m_maxTextures in renderer.hpp, or reduce/deduplicate scene textures.");
     return false;
   }
-  if(samplerCount > m_maxSamplers)
+  if(firstSampler + samplerCount > m_maxSamplers)
   {
-    LOGE("FATAL: Scene has %u samplers but the descriptor set only supports %u!", samplerCount, m_maxSamplers);
+    LOGE("FATAL: Scene needs %u samplers but the descriptor set only supports %u!", firstSampler + samplerCount, m_maxSamplers);
     return false;
   }
 
@@ -2053,23 +2130,32 @@ bool GltfRenderer::updateTextures()
 
   // eTextures: SAMPLED_IMAGE array. The nvvk::Image descriptors supply imageView + layout; their
   // sampler field is ignored by Vulkan for this descriptor type.
-  VkWriteDescriptorSet allImages = m_resources.descriptorBinding[0].getWriteSet(shaderio::BindingPoints::eTextures);
-  allImages.dstSet               = m_resources.descriptorSet;
-  allImages.descriptorCount      = imageCount;
-  write.append(allImages, m_resources.sceneVk.textures().data());
+  if(textureCount > 0)
+  {
+    VkWriteDescriptorSet images =
+        m_resources.descriptorBinding[0].getWriteSet(shaderio::BindingPoints::eTextures, m_resources.descriptorSet,
+                                                     firstTexture, textureCount);
+    write.append(images, m_resources.sceneVk.textures().data() + firstTexture);
+  }
 
-  // eSamplers: SAMPLER array. Only the sampler field is used; imageView stays null.
-  std::vector<VkDescriptorImageInfo> samplerInfos(samplerCount);
-  const std::vector<VkSampler>&      samplers = m_resources.sceneVk.samplers();
-  for(uint32_t i = 0; i < samplerCount; ++i)
-    samplerInfos[i] =
-        VkDescriptorImageInfo{.sampler = samplers[i], .imageView = VK_NULL_HANDLE, .imageLayout = VK_IMAGE_LAYOUT_UNDEFINED};
-  VkWriteDescriptorSet allSamplers = m_resources.descriptorBinding[0].getWriteSet(shaderio::BindingPoints::eSamplers);
-  allSamplers.dstSet               = m_resources.descriptorSet;
-  allSamplers.descriptorCount      = samplerCount;
-  write.append(allSamplers, samplerInfos.data());
+  // eSamplers: SAMPLER array. Only the sampler field is used; imageView stays null. samplerInfos must
+  // outlive vkUpdateDescriptorSets below, so it lives at function scope.
+  std::vector<VkDescriptorImageInfo> samplerInfos;
+  if(samplerCount > 0)
+  {
+    samplerInfos.resize(samplerCount);
+    const std::vector<VkSampler>& samplers = m_resources.sceneVk.samplers();
+    for(uint32_t i = 0; i < samplerCount; ++i)
+      samplerInfos[i] = VkDescriptorImageInfo{
+          .sampler = samplers[firstSampler + i], .imageView = VK_NULL_HANDLE, .imageLayout = VK_IMAGE_LAYOUT_UNDEFINED};
+    VkWriteDescriptorSet allSamplers =
+        m_resources.descriptorBinding[0].getWriteSet(shaderio::BindingPoints::eSamplers, m_resources.descriptorSet,
+                                                     firstSampler, samplerCount);
+    write.append(allSamplers, samplerInfos.data());
+  }
 
-  vkUpdateDescriptorSets(m_device, write.size(), write.data(), 0, nullptr);
+  if(write.size() > 0)
+    vkUpdateDescriptorSets(m_device, write.size(), write.data(), 0, nullptr);
   return true;
 }
 
@@ -2296,6 +2382,10 @@ bool GltfRenderer::updateAnimation(VkCommandBuffer cmd)
       auto t = m_profilerGpuTimer.cmdFrameSection(cmd, "Sync to GPU");
       if(gpuTransform)
       {
+        // Animated emitters are handled upstream: updateNodeWorldMatrices() (called above) refreshes
+        // the render-node world matrices and latches DirtyFlags::emissiveDirty when an emissive node
+        // moves, so syncFromScene rebuilds the emitter list even though this restricted mask omits
+        // render-node sync.
         (void)scnVk.syncFromScene(m_resources.staging, scn, nvvkgltf::SceneVk::eSyncMaterials | nvvkgltf::SceneVk::eSyncLights);
         (void)scnVk.flushSceneDescIfDirty(m_resources.staging, scn);
       }
@@ -2341,12 +2431,14 @@ bool GltfRenderer::updateAnimation(VkCommandBuffer cmd)
       }
     }
 
-    // Preserve the deferred texture-rebuild signal across this per-frame flag clear: texturesChanged is
-    // consumed at frame top by applyPendingTextureRebuild(), not here, so a texture/image/sampler edit
-    // made while an animation plays must not be wiped before that rebuild runs.
-    const bool pendingTextures = scn.getDirtyFlags().texturesChanged;
+    // Preserve the deferred texture signals across this per-frame flag clear: both are consumed at frame
+    // top (applyPendingTextureRebuild() / applyPendingTextureTailSync()), not here, so a texture/image/
+    // sampler edit or an import/undo made while an animation plays must not be wiped before then.
+    const bool pendingTextures    = scn.getDirtyFlags().texturesChanged;
+    const bool pendingTextureTail = scn.getDirtyFlags().texturesTailChanged;
     scn.clearDirtyFlags();
-    scn.getDirtyFlags().texturesChanged = pendingTextures;
+    scn.getDirtyFlags().texturesChanged     = pendingTextures;
+    scn.getDirtyFlags().texturesTailChanged = pendingTextureTail;
     return true;
   }
 
@@ -2462,12 +2554,12 @@ bool GltfRenderer::updateSceneChanges(VkCommandBuffer cmd)
   m_skipGpuSyncValidation = false;
 #endif
 
-  // A texture-set change is pending (import/replace/remove/reload/sampler/undo). The GPU material
-  // buffer must not be updated to reference a new texture index before eTextures[] is rebuilt to
-  // contain it -- that rebuild runs at the next frame top (applyPendingTextureRebuild()). Skip this
-  // frame's sync and keep rendering the previous, self-consistent GPU state; the rebuild re-uploads
-  // everything and the dirty flags persist until then.
-  if(scene->getDirtyFlags().texturesChanged)
+  // A texture-set change is pending (structural via texturesChanged, or a tail import/undo/redo via
+  // texturesTailChanged). The GPU material buffer must not be updated to reference a new texture index
+  // before eTextures[] contains it -- that write runs at the next frame top (applyPendingTextureRebuild()
+  // / applyPendingTextureTailSync()). Skip this frame's sync and keep rendering the previous,
+  // self-consistent GPU state; the dirty flags persist until then.
+  if(scene->getDirtyFlags().texturesChanged || scene->getDirtyFlags().texturesTailChanged)
     return false;
 
   const auto& df             = scene->getDirtyFlags();

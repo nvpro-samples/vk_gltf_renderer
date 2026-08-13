@@ -357,6 +357,7 @@ public:
   void                          updateNodeWorldMatrices();
   void                          updateLocalMatricesAndLights();
   glm::mat4                     computeNodeWorldMatrix(int nodeID) const;
+  bool                          isEmissiveAreaLight(const RenderNode& rn) const;
 
   // The GPU transform path propagates world matrices on-device only, leaving the CPU mirror
   // (m_nodesWorldMatrices / RenderNode.worldMatrix) stale for the nodes it moved. That path records
@@ -491,8 +492,10 @@ public:
     std::unordered_set<int> nodes;                        // Node indices (for transform updates)
     bool                    allRenderNodesDirty = false;  // Full RN upload (count change or massive reorder)
     bool                    primitivesChanged   = false;  // BLAS rebuild needed (primitive set changed)
-    bool                    texturesChanged     = false;  // Full texture rebuild needed (image/texture set changed)
-    bool                    tlasVisibilityNeedsCpuSync = false;  // KHR_node_visibility: SceneEditor::updateVisibility
+    bool                    texturesChanged = false;  // Full texture rebuild needed (structural image/texture change)
+    bool texturesTailChanged = false;  // Only adding or removing from the end of the texture list (SceneVk::syncTextureTail)
+    bool tlasVisibilityNeedsCpuSync = false;  // KHR_node_visibility: SceneEditor::updateVisibility
+    bool emissiveDirty = false;  // Emissive area-light list must be rebuilt (SceneVk::uploadEmissiveTriangles)
 
     void clear()
     {
@@ -504,13 +507,16 @@ public:
       allRenderNodesDirty        = false;
       primitivesChanged          = false;
       texturesChanged            = false;
+      texturesTailChanged        = false;
       tlasVisibilityNeedsCpuSync = false;
+      emissiveDirty              = false;
     }
 
     [[nodiscard]] bool isEmpty() const
     {
       return renderNodesVk.empty() && renderNodesRtx.empty() && materials.empty() && lights.empty() && nodes.empty()
-             && !allRenderNodesDirty && !primitivesChanged && !texturesChanged && !tlasVisibilityNeedsCpuSync;
+             && !allRenderNodesDirty && !primitivesChanged && !texturesChanged && !texturesTailChanged
+             && !tlasVisibilityNeedsCpuSync && !emissiveDirty;
     }
   };
 

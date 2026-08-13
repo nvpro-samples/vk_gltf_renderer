@@ -19,6 +19,7 @@
 
 #pragma once
 
+#include <array>
 #include <filesystem>
 #include <functional>
 #include <set>
@@ -101,6 +102,7 @@ public:
   void uploadRenderNodes(nvvk::StagingUploader& staging, const nvvkgltf::Scene& scn, const std::unordered_set<int>& dirtyIndices = {});
   void uploadMaterials(nvvk::StagingUploader& staging, const nvvkgltf::Scene& scn, const std::unordered_set<int>& dirtyIndices = {});
   void uploadLights(nvvk::StagingUploader& staging, const nvvkgltf::Scene& scn, const std::unordered_set<int>& dirtyIndices = {});
+  void uploadEmissiveTriangles(nvvk::StagingUploader& staging, const nvvkgltf::Scene& scn);
   void uploadPrimitives(VkCommandBuffer cmd, nvvk::StagingUploader& staging, nvvkgltf::Scene& scn);
   void uploadVertexBuffers(nvvk::StagingUploader& staging, const nvvkgltf::Scene& scn);
 
@@ -113,6 +115,21 @@ public:
   // Geometry-only recreation (preserves textures) - useful after tangent generation or mesh optimization
   void destroyGeometry();
   void createGeometry(VkCommandBuffer cmd, nvvk::StagingUploader& staging, const nvvkgltf::Scene& scn);
+
+  // Incremental texture/image reconcile for a TAIL-ONLY change (DirtyFlags::texturesTailChanged): brings
+  // GPU residency in line with the model when the only edits were appends to, or removals from, the end of
+  // model.images / model.textures -- every lower index is left untouched. Growth loads + creates the new
+  // tail images and appends their texture views; shrink deferred-frees the removed tail images. This is the
+  // fast path behind importing (and undoing/redoing) a texture, avoiding a full create()/destroy() cycle
+  // that would re-read every image from disk. The caller writes only the new descriptor slots afterwards.
+  void syncTextureTail(VkCommandBuffer cmd, nvvk::StagingUploader& staging, nvvkgltf::Scene& scn);
+
+  // Rebuild for a merge/reference append: geometry, render nodes, materials and lights are re-derived
+  // from the (grown) model, but existing GPU images/textures/samplers are kept and only the new tail
+  // images are loaded (via syncTextureTail). This is create() without the destroy()/full image re-read,
+  // so a merge no longer re-reads every image from disk. Requires a tail-only, non-empty-base texture set
+  // (existing GPU arrays must match the pre-merge model sizes); the merge/reference paths guarantee this.
+  void recreatePreservingTextures(VkCommandBuffer cmd, nvvk::StagingUploader& staging, nvvkgltf::Scene& scn);
 
   // Getters
   const nvvk::Buffer&               material() const { return m_bMaterial; }
@@ -148,6 +165,9 @@ public:
   }
   const GpuMemoryTracker& getMemoryTracker() const { return m_memoryTracker; }
   GpuMemoryTracker&       getMemoryTracker() { return m_memoryTracker; }
+
+  // Number of emissive area-light triangles in the NEE emitter list (0 when no material emits).
+  [[nodiscard]] uint32_t numEmissiveTriangles() const { return m_numEmissiveTriangles; }
 
   // An image to be loaded and created.
   struct SceneImage
@@ -191,6 +211,27 @@ protected:
                                    nvvkgltf::Scene&                          scn,
                                    const std::vector<std::filesystem::path>& imageSearchPaths);
 
+  // --- Shared image/texture/sampler building blocks (used by both createTextureImages and syncTextureTail) ---
+
+  // Directories searched for image URIs: the scene's search paths, or the glTF's own folder as a fallback.
+  std::vector<std::filesystem::path> resolveImageSearchPaths(const nvvkgltf::Scene& scn) const;
+  // Resolve model.images[imageId]'s on-disk path from its URI (empty for embedded / data-URI / missing).
+  std::filesystem::path resolveImageDiskPath(const tinygltf::Model&                    model,
+                                             const std::vector<std::filesystem::path>& imageSearchPaths,
+                                             size_t                                    imageId) const;
+  // Replace m_images[idx] with a 1x1 solid-color image (magenta = load failure, white = empty scene).
+  void createDefaultImage(nvvk::StagingUploader& staging, uint32_t idx, const std::array<uint8_t, 4>& color);
+  // Create the GPU image for m_images[imageId] (already loaded), substituting the magenta default on failure.
+  void materializeImage(VkCommandBuffer cmd, nvvk::StagingUploader& staging, size_t imageId);
+  // Append one texture view to m_textures, resolving model.textures[textureIndex]'s source image (default on bad source).
+  void appendTextureView(const tinygltf::Model& model, size_t textureIndex);
+  // Append the fallback texture view (image 0) so every texture entry references some image view.
+  void pushDefaultTextureView();
+  // Ensure m_samplers holds slot 0 (default) + one per model.samplers; acquires only the missing tail slots.
+  void ensureSamplers(const tinygltf::Model& model);
+  // Destroy a GPU image via the deferred-free callback (or a queue wait fallback). Mirrors destroyBufferDeferred.
+  void destroyImageDeferred(nvvk::Image& image);
+
   // Fill m_textureSamplerSlots (glTF texture index -> sampler slot) from the model. Pure model data, so
   // it must run before uploadMaterials(), which bakes the slots into GltfTextureInfo.samplerIndex.
   void buildTextureSamplerSlots(const tinygltf::Model& model);
@@ -215,12 +256,16 @@ protected:
   nvvk::ResourceAllocator* m_alloc       = nullptr;
   nvvk::SamplerPool*       m_samplerPool = nullptr;
 
-  nvvk::Buffer               m_bMaterial;
-  nvvk::Buffer               m_bTextureInfos;
-  nvvk::Buffer               m_bLights;
-  nvvk::Buffer               m_bRenderPrim;
-  nvvk::Buffer               m_bRenderNode;
-  nvvk::Buffer               m_bSceneDesc;
+  nvvk::Buffer m_bMaterial;
+  nvvk::Buffer m_bTextureInfos;
+  nvvk::Buffer m_bLights;
+  nvvk::Buffer m_bEmissiveTriangles;  // Referenced emissive triangles sampled as area lights
+  uint32_t     m_numEmissiveTriangles = 0;
+  float        m_emissiveTotalWeight  = 0.0f;  // Sum of per-triangle selection weights (area * defensive luminance)
+  float        m_emissiveMeanLum      = 0.0f;  // Area-weighted mean emitter luminance (defensive sampling)
+  nvvk::Buffer m_bRenderPrim;
+  nvvk::Buffer m_bRenderNode;
+  nvvk::Buffer m_bSceneDesc;
   std::vector<nvvk::Buffer>  m_bIndices;
   std::vector<VertexBuffers> m_vertexBuffers;
   std::vector<SceneImage>    m_images;

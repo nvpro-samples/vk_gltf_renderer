@@ -215,6 +215,70 @@ Ray Tracing (closest hit / any hit):
   materialID  = instance.materialID
 ```
 
+### Emissive area lights (`SceneVk::uploadEmissiveTriangles`)
+
+The path tracer treats emissive triangle **meshes** as area lights it samples directly (next-event
+estimation + MIS in `sampleLights` / `gltf_pathtrace.slang`), instead of only finding them by chance
+when a bounce ray happens to hit one. Punctual lights and the environment are sampled the same way.
+Path tracer only — the rasterizer is unaffected.
+
+**How it works, step by step**
+
+Host — build the emitter list (`SceneVk::uploadEmissiveTriangles`):
+
+1. Walk every **render node** (an instance of a primitive) and look at its material.
+2. Keep it only if it is a **constant emitter**: emissive (`emissiveFactor × emissiveStrength`) is
+   non-black **and** it has no emissive texture. (Textured emitters stay on the BSDF-only path.)
+3. For each triangle of that primitive, store a **reference** — render node, primitive, triangle
+   index — plus the **radiance** (not baked vertices, so the shader reads live geometry/transforms).
+4. Compute the triangle's **world-space area** (verts × node transform) and give it a **selection
+   weight = area × luminance** (see the defensive tweak below). Build a **Vose alias table** from the
+   weights (`aliasProb` / `aliasIndex` per triangle) for O(1) GPU selection, plus the totals
+   (`numEmissiveTriangles`, `emissiveTotalWeight`, `emissiveMeanLum`).
+5. Upload the flat list + those scalars to the scene descriptor.
+
+Device — sample a light at each surface hit (`sampleLights`):
+
+6. See what light sources exist: **environment**, **punctual lights**, **emissive triangles**.
+7. **Choose a category**: first "a light" vs "the environment", then within lights "a punctual light"
+   vs "an emissive triangle" (the probabilities balance the categories).
+8. **For an emissive triangle**: pick one in **O(1) via the alias table** (bright/large ones win more)
+   → read its live world vertices → **sample a random point** on it → form direction/distance and the
+   sample's **pdf** → evaluate the surface BSDF toward it → **cast a shadow ray**; if unblocked, add
+   the light, **MIS-weighted** against BSDF sampling.
+9. Separately, when a normal bounce ray **hits an emitter directly** (`gltf_pathtrace.slang`, the
+   emissive add), its glow is added but **MIS-weighted**, so the "sampled via NEE" and "hit by chance"
+   paths combine without double-counting.
+
+**Details / why it's shaped this way**
+
+The list is derived data, regenerated wholesale (never patched). It stores references, but each
+emitter's **selection weight is its world-space area × luminance**, so it also depends on the
+emitter's transform. `syncFromScene` rebuilds it when materials, the emitter set, or an emitter's
+transform change; a `DirtyFlags::emissiveDirty` latch is consumed independently of the sync mask so
+the GPU-transform path (which syncs only materials + lights) rebuilds it too. The shader samples the
+emitter at its **live** GPU transform, and the pdf cancels the world area (below), so the host table
+and the live geometry must agree on that area — a stale table biases the estimate, it does not merely
+add noise. Because the GPU-transform path leaves the render-node CPU mirror lazily stale,
+`Scene::updateLocalMatricesAndLights` refreshes emitters' world matrices on edits (as it does light
+world matrices) and flags a rebuild when one moved.
+
+Selection is **power-weighted** (an O(1) **Vose alias table**, not a CDF binary search), with a
+**defensive floor** so a dim emitter next to a bright one is never starved: each emitter's luminance
+is pulled toward the scene's area-weighted mean, `lum' = (1−f)·lum + f·meanLum`
+(`EMISSIVE_DEFENSIVE_FRACTION`, kept in sync between host and shader). The alias table samples the
+same distribution `P(i) = weightᵢ / emissiveTotalWeight`, so the pdf is unchanged.
+The world area **cancels** in the solid-angle pdf (`pdf = lum' · dist² / (emissiveTotalWeight · cos)`),
+so the BSDF-hit MIS weight is recoverable from local hit geometry (the emitter's radiance +
+`emissiveTotalWeight` + `emissiveMeanLum`) with **no per-triangle lookup**; and because `meanLum = W/A`
+the total weight `W` is unchanged. The weight uses world area, so the list is rebuilt whenever an
+emitter's transform changes: interactive edits via `Scene::updateLocalMatricesAndLights`, and
+animated/rigid moves via the world-matrix update (`updateWorldMatrices*` latch `emissiveDirty` when a
+moving render node is an emitter). Morph/skin-deformed emitters are the one remaining case that falls
+back to last-rebuilt-pose sampling. The scene-descriptor scalars refresh whenever the count
+**or** the weights change, so radiance-only edits (e.g. dragging emissive strength) take effect
+immediately.
+
 ---
 
 ## Stage 3: cmdCreateBuildTopLevelAccelerationStructure() - Build TLAS
@@ -560,6 +624,35 @@ clearing, then compares after rebuild. This sets precise dirty flags:
 
 The renderer has **one unified sync path** (`syncFromScene` + `syncTopLevelAS`) that processes these flags.
 Buffer resize is handled automatically by size-mismatch detection in `uploadRenderNodes` and `rebuildTopLevelAS`.
+
+#### Texture-set changes
+
+Image/texture edits are consumed at frame top (before any panel records an `ImGui::Image`), not through
+`syncFromScene`, and come in two forms:
+
+- `texturesChanged` — a **structural** change (replace-in-place, reload, remove/insert at an arbitrary
+  index, sampler edit). `GltfRenderer::applyPendingTextureRebuild()` does a full
+  `rebuildVulkanSceneFull()`: it stalls the queue, frees and recreates every scene image (re-reading them
+  from disk) and rebuilds the acceleration structures.
+- `texturesTailChanged` — a **tail-only** change: image(s)/texture(s) were appended to, or removed from,
+  the end of the model with every lower index untouched (importing, and undoing/redoing an imported
+  texture — see `SceneEditor::importImageAsTexture`). `GltfRenderer::applyPendingTextureTailSync()` calls
+  `SceneVk::syncTextureTail()`, which loads/creates only the new tail images (or deferred-frees removed
+  ones) and appends their views; the renderer then writes only the new bindless descriptor slots
+  (`writeTextureDescriptorRange`). No queue stall, no re-read of existing images, no AS work. A first
+  import into a scene that has no images/textures falls back to `texturesChanged`, because the empty scene
+  carries 1×1 dummy defaults on the GPU that do not match the model sizes.
+
+Both flags gate the per-frame material sync in `updateSceneChanges()` until the frame-top reconcile has
+run, so the material buffer never references a texture index the descriptor array does not yet contain.
+
+Merging or referencing a scene reuses the same tail idea from the (threaded) rebuild path rather than the
+frame-top flags: because `SceneMerger` only appends (existing image/texture/material indices never move),
+`rebuildVulkanSceneInternal(RebuildMode::eMergeAppend)` rebuilds geometry, render nodes and materials in
+full (cheap, no disk) but calls `SceneVk::syncTextureTail()` to keep the resident textures and load only
+the new tail images — so a merge no longer re-reads every image. A merge into a scene with no textures
+still uses `eFull` (the empty-scene dummy defaults do not match the model, same reason as the import
+fallback above).
 
 ### Debug Validation (debug builds only)
 

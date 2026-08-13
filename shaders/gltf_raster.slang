@@ -407,7 +407,17 @@ PixelOutput fragmentMain(VertexOutput input, uint primitiveID: SV_PrimitiveID, f
 #endif
 
   // Indirect (IBL or sky-fallback) lighting.
-  if(!hasFlag(pushConst.frameInfo.flags, SceneFrameInfoFlags::eSceneUseHdrEnvironment))
+  if(hasFlag(pushConst.frameInfo.flags, SceneFrameInfoFlags::eSceneUseNoEnvironment))
+  {
+    // No environment: no indirect lighting. Only punctual/emissive scene lights contribute.
+    // Screen-space transmission is unrelated to the environment (it refracts whatever is behind
+    // the surface), so transmissive materials still compose it — matching the Sky/HDR branches.
+#if GLTF_USE_TRANSMISSION
+    if(haveTransmissionSample)
+      contribution = lerp(contribution, f_specular_transmission, pbrMat.transmission);
+#endif
+  }
+  else if(!hasFlag(pushConst.frameInfo.flags, SceneFrameInfoFlags::eSceneUseHdrEnvironment))
   {
     // Sky mode: cheap hemispherical ambient + sun-as-directional. The sun is fed through the
     // Khronos-faithful punctual evaluator so the BRDF math matches the IBL composite layer.

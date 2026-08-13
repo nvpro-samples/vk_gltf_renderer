@@ -68,22 +68,28 @@ void SceneGpu::create(VkCommandBuffer cmd, Scene& scn, bool generateMipmaps)
 }
 
 //--------------------------------------------------------------------------------------------------
-// Rebuild GPU resources after geometry or model changes.
-// For full rebuilds (rebuildTextures=true): destroys everything, then recreates via create().
-// For geometry-only rebuilds: destroys only geometry + animation + RTX, preserves textures.
-void SceneGpu::rebuild(VkCommandBuffer cmd, Scene& scn, bool rebuildTextures)
+// Rebuild GPU resources after geometry or model changes (see RebuildMode). All modes first destroy the
+// animation + RTX resources; they differ only in how SceneVk is recreated:
+//   eFull        -> destroy + recreate everything (textures re-read from disk)
+//   eGeometryOnly -> geometry only, textures/materials preserved
+//   eMergeAppend  -> geometry + materials rebuilt, existing textures preserved, new tail images appended
+void SceneGpu::rebuild(VkCommandBuffer cmd, Scene& scn, RebuildMode mode)
 {
   m_animationVk.destroyGpuBuffers();
   m_sceneRtx.destroy();
 
-  if(rebuildTextures)
+  switch(mode)
   {
-    m_sceneVk.create(cmd, m_staging, scn, true);
-  }
-  else
-  {
-    m_sceneVk.destroyGeometry();
-    m_sceneVk.createGeometry(cmd, m_staging, scn);
+    case RebuildMode::eFull:
+      m_sceneVk.create(cmd, m_staging, scn, true);
+      break;
+    case RebuildMode::eGeometryOnly:
+      m_sceneVk.destroyGeometry();
+      m_sceneVk.createGeometry(cmd, m_staging, scn);
+      break;
+    case RebuildMode::eMergeAppend:
+      m_sceneVk.recreatePreservingTextures(cmd, m_staging, scn);
+      break;
   }
 
   m_animationVk.createGpuBuffers(m_staging, scn);

@@ -27,6 +27,8 @@
 #include "gltf_scene_editor.hpp"
 #include "scene_selection.hpp"
 
+#include <cassert>
+
 #include <fmt/format.h>
 #include <nvutils/logger.hpp>
 
@@ -434,24 +436,38 @@ ImportImageAsTextureCommand::~ImportImageAsTextureCommand() = default;
 
 void ImportImageAsTextureCommand::execute()
 {
-  // Redo: re-append the image (insertImageAt remaps sources; a tail insert touches nothing) then the
-  // texture, which already points at m_imageIndex.
+  // Redo: LIFO guarantees the arrays are back at their pre-import length, so this is a pure tail
+  // re-append (m_imageIndex == images.size(), m_textureIndex == textures.size()) -- no source remap is
+  // needed. Signal the incremental tail path, unless the pre-append scene was empty (GPU dummy defaults
+  // present), which needs a full rebuild -- see SceneEditor::importImageAsTexture.
   tinygltf::Model& model = m_scene.getModel();
-  m_scene.editor().insertImageAt(m_imageIndex, *m_image);
-  model.textures.insert(model.textures.begin() + m_textureIndex, *m_texture);
-  m_scene.getDirtyFlags().texturesChanged = true;
+  assert(m_imageIndex == static_cast<int>(model.images.size()) && m_textureIndex == static_cast<int>(model.textures.size())
+         && "redo of import must re-append at the tail (LIFO)");
+  const bool cleanTailAppend = !model.images.empty() && !model.textures.empty();
+  model.images.push_back(*m_image);
+  model.textures.push_back(*m_texture);
+  if(cleanTailAppend)
+    m_scene.getDirtyFlags().texturesTailChanged = true;
+  else
+    m_scene.getDirtyFlags().texturesChanged = true;
 }
 
 void ImportImageAsTextureCommand::undo()
 {
-  // Remove the appended texture first so the image is unreferenced, then the image. Both are at the
-  // tail (import always appends; undo is LIFO), so removeImageAt's ref-count assert and source remap
-  // are satisfied with no shifting.
+  // Remove the appended texture then the image. Both are at the tail (import always appends; undo is
+  // LIFO), and the slot assignment was already undone (its EditMaterialCommand is later on the stack),
+  // so the image is unreferenced. Signal the incremental tail path, unless the pop empties the scene
+  // (reverting to GPU dummy defaults), which needs a full rebuild.
   tinygltf::Model& model = m_scene.getModel();
-  if(m_textureIndex >= 0 && m_textureIndex < static_cast<int>(model.textures.size()))
-    model.textures.erase(model.textures.begin() + m_textureIndex);
-  m_scene.editor().removeImageAt(m_imageIndex);
-  m_scene.getDirtyFlags().texturesChanged = true;
+  assert(m_imageIndex == static_cast<int>(model.images.size()) - 1
+         && m_textureIndex == static_cast<int>(model.textures.size()) - 1 && "undo of import must pop from the tail (LIFO)");
+  model.textures.pop_back();  // remove the texture first so the image becomes unreferenced
+  assert(m_scene.editor().countTextureRefsToImage(m_imageIndex) == 0 && "undo of import requires the image to be unreferenced");
+  model.images.pop_back();
+  if(!model.images.empty() && !model.textures.empty())
+    m_scene.getDirtyFlags().texturesTailChanged = true;
+  else
+    m_scene.getDirtyFlags().texturesChanged = true;
 }
 
 

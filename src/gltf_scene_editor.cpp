@@ -1236,6 +1236,11 @@ int SceneEditor::importImageAsTexture(const std::filesystem::path& path, std::st
 
   tinygltf::Model& model = m_scene.m_model;
 
+  // A scene with no images / textures carries 1x1 dummy defaults on the GPU (see createTextureImages),
+  // so its GPU arrays do not match the model sizes. Only when both arrays are already non-empty is this a
+  // clean tail append that syncTextureTail can reconcile; otherwise fall back to a full rebuild.
+  const bool cleanTailAppend = !model.images.empty() && !model.textures.empty();
+
   const int imageIndex = static_cast<int>(model.images.size());
   model.images.push_back(std::move(image));
 
@@ -1245,7 +1250,10 @@ int SceneEditor::importImageAsTexture(const std::filesystem::path& path, std::st
   texture.source = imageIndex;
   model.textures.push_back(std::move(texture));
 
-  m_scene.m_dirtyFlags.texturesChanged = true;
+  if(cleanTailAppend)
+    m_scene.m_dirtyFlags.texturesTailChanged = true;  // incremental append (fast path)
+  else
+    m_scene.m_dirtyFlags.texturesChanged = true;  // first texture in the scene -> full rebuild
 
   return textureIndex;
 }

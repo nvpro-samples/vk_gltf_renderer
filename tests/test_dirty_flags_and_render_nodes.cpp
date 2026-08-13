@@ -435,3 +435,123 @@ TEST_F(RenderNodesAndPrimitivesTest, UpdateNodeWorldMatricesUpdatesRenderNodeMat
             << "RenderNode " << rnID << " world matrix should match node world matrix";
   }
 }
+
+//--------------------------------------------------------------------------------------------------
+// Texture import: incremental tail path vs. full-rebuild fallback
+//
+// importImageAsTexture appends one image + one texture at the tail. On an already-textured scene this
+// must set texturesTailChanged (the incremental SceneVk::syncTextureTail path); on a scene with no
+// images/textures the GPU still carries 1x1 dummy defaults, so the arrays do not match the model and the
+// first import must fall back to texturesChanged (full rebuild). See SceneEditor::importImageAsTexture.
+//--------------------------------------------------------------------------------------------------
+
+// A real, importable image file (BoxTextured's own external texture), or empty to skip. Derived from the
+// model's URI so no texture filename is hard-coded here.
+static std::filesystem::path sampleImportableImage(const std::filesystem::path& assetsPath)
+{
+  nvvkgltf::Scene             probe;
+  const std::filesystem::path gltf = assetsPath / "Models/BoxTextured/glTF/BoxTextured.gltf";
+  if(!probe.load(gltf) || probe.getModel().images.empty() || probe.getModel().images[0].uri.empty())
+    return {};
+  return gltf.parent_path() / probe.getModel().images[0].uri;
+}
+
+TEST_F(DirtyFlagsTest, ImportTextureIntoTexturedSceneIsTailChange)
+{
+  auto assetsPath = TestResources::getSampleAssetsPath();
+  if(assetsPath.empty())
+    GTEST_SKIP() << "glTF-Sample-Assets not found at: " << GLTF_SAMPLE_ASSETS_PATH;
+
+  const std::filesystem::path imagePath = sampleImportableImage(assetsPath);
+  if(imagePath.empty() || !std::filesystem::exists(imagePath))
+    GTEST_SKIP() << "BoxTextured external image not found";
+
+  nvvkgltf::Scene scene;
+  ASSERT_TRUE(scene.load(assetsPath / "Models/BoxTextured/glTF/BoxTextured.gltf"));
+  scene.setCurrentScene(0);
+  ASSERT_FALSE(scene.getModel().images.empty());
+  ASSERT_FALSE(scene.getModel().textures.empty());
+
+  const size_t imagesBefore   = scene.getModel().images.size();
+  const size_t texturesBefore = scene.getModel().textures.size();
+  scene.clearDirtyFlags();
+
+  std::string error;
+  const int   texIndex = scene.editor().importImageAsTexture(imagePath, &error);
+  ASSERT_GE(texIndex, 0) << "import failed: " << error;
+
+  // Incremental path, not a full rebuild.
+  EXPECT_TRUE(scene.getDirtyFlags().texturesTailChanged);
+  EXPECT_FALSE(scene.getDirtyFlags().texturesChanged);
+
+  // Exactly one image + one texture, appended at the tail and linked.
+  EXPECT_EQ(scene.getModel().images.size(), imagesBefore + 1);
+  EXPECT_EQ(scene.getModel().textures.size(), texturesBefore + 1);
+  EXPECT_EQ(texIndex, static_cast<int>(texturesBefore));
+  EXPECT_EQ(scene.getModel().textures[texIndex].source, static_cast<int>(imagesBefore));
+}
+
+TEST_F(DirtyFlagsTest, ImportFirstTextureFallsBackToFullRebuild)
+{
+  auto assetsPath = TestResources::getSampleAssetsPath();
+  if(assetsPath.empty())
+    GTEST_SKIP() << "glTF-Sample-Assets not found at: " << GLTF_SAMPLE_ASSETS_PATH;
+
+  const std::filesystem::path imagePath = sampleImportableImage(assetsPath);
+  if(imagePath.empty() || !std::filesystem::exists(imagePath))
+    GTEST_SKIP() << "BoxTextured external image not found";
+
+  // Box has geometry but no images/textures, so the GPU carries dummy defaults; the first import cannot
+  // be a clean tail append and must take the full rebuild path.
+  nvvkgltf::Scene scene;
+  ASSERT_TRUE(scene.load(assetsPath / "Models/Box/glTF/Box.gltf"));
+  scene.setCurrentScene(0);
+  ASSERT_TRUE(scene.getModel().images.empty());
+  ASSERT_TRUE(scene.getModel().textures.empty());
+  scene.clearDirtyFlags();
+
+  std::string error;
+  const int   texIndex = scene.editor().importImageAsTexture(imagePath, &error);
+  ASSERT_GE(texIndex, 0) << "import failed: " << error;
+
+  EXPECT_TRUE(scene.getDirtyFlags().texturesChanged);
+  EXPECT_FALSE(scene.getDirtyFlags().texturesTailChanged);
+}
+
+// Merge/reference is a pure tail-append: existing image/texture indices stay put and imported resources
+// are appended after them. This is the precondition for the renderer's eMergeAppend rebuild, which keeps
+// the resident GPU textures and loads only the new tail images instead of re-reading everything.
+TEST_F(DirtyFlagsTest, MergePreservesExistingTexturesAndAppendsAtTail)
+{
+  auto assetsPath = TestResources::getSampleAssetsPath();
+  if(assetsPath.empty())
+    GTEST_SKIP() << "glTF-Sample-Assets not found at: " << GLTF_SAMPLE_ASSETS_PATH;
+
+  const std::filesystem::path boxTextured = assetsPath / "Models/BoxTextured/glTF/BoxTextured.gltf";
+  nvvkgltf::Scene             scene;
+  ASSERT_TRUE(scene.load(boxTextured));
+  scene.setCurrentScene(0);
+
+  const size_t imagesBefore   = scene.getModel().images.size();
+  const size_t texturesBefore = scene.getModel().textures.size();
+  ASSERT_GT(imagesBefore, 0u);
+  ASSERT_GT(texturesBefore, 0u);
+
+  // Snapshot existing image URIs / texture sources to verify the merge leaves them untouched.
+  std::vector<std::string> imageUrisBefore;
+  for(const auto& img : scene.getModel().images)
+    imageUrisBefore.push_back(img.uri);
+  std::vector<int> textureSourcesBefore;
+  for(const auto& tex : scene.getModel().textures)
+    textureSourcesBefore.push_back(tex.source);
+
+  const int wrapperIdx = scene.mergeScene(boxTextured, 100000);
+  ASSERT_GE(wrapperIdx, 0) << "self-merge should succeed";
+
+  ASSERT_GT(scene.getModel().images.size(), imagesBefore) << "merge must append images";
+  ASSERT_GT(scene.getModel().textures.size(), texturesBefore) << "merge must append textures";
+  for(size_t i = 0; i < imagesBefore; ++i)
+    EXPECT_EQ(scene.getModel().images[i].uri, imageUrisBefore[i]) << "existing image " << i << " must be unchanged";
+  for(size_t i = 0; i < texturesBefore; ++i)
+    EXPECT_EQ(scene.getModel().textures[i].source, textureSourcesBefore[i]) << "existing texture " << i << " must be unchanged";
+}

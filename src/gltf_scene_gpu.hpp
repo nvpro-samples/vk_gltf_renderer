@@ -78,10 +78,18 @@ public:
   // Does NOT build acceleration structures -- the caller handles BLAS/TLAS separately.
   void create(VkCommandBuffer cmd, Scene& scn, bool generateMipmaps = true);
 
-  // Rebuild GPU resources after geometry or model changes. Destroys old animation + RTX
-  // resources, then recreates via the same sequence as create(). For geometry-only rebuilds
-  // (rebuildTextures=false), preserves textures and materials.
-  void rebuild(VkCommandBuffer cmd, Scene& scn, bool rebuildTextures);
+  // How rebuild() reconciles the GPU scene with the (possibly changed) model.
+  enum class RebuildMode
+  {
+    eFull,  // Destroy and recreate everything, re-reading every image from disk (scene replace, structural texture change).
+    eGeometryOnly,  // Rebuild geometry only; textures and materials are left untouched (mesh/tangent edits).
+    eMergeAppend,  // Rebuild geometry + materials, preserve existing textures and append only the new tail images (merge/reference).
+  };
+
+  // Rebuild GPU resources after geometry or model changes. Destroys old animation + RTX resources, then
+  // recreates SceneVk according to mode. eMergeAppend requires a tail-only, non-empty-base texture set
+  // (the merge/reference paths guarantee this); the caller writes the texture descriptors afterwards.
+  void rebuild(VkCommandBuffer cmd, Scene& scn, RebuildMode mode);
 
   // Release scene-level GPU resources across all three subsystems (buffers, textures, AS).
   // Does NOT release pipelines or allocator references -- call deinit() for full teardown.

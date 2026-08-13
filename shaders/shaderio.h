@@ -46,8 +46,9 @@ NAMESPACE_SHADERIO_BEGIN()
 // Environment types
 enum class EnvSystem
 {
-  eSky,
-  eHdr,
+  eSky,   // Procedural physical sky
+  eHdr,   // Lat-long HDR image
+  eNone,  // No environment: no sky/HDR lighting or background (black backdrop)
 };
 
 // Output image types
@@ -143,6 +144,7 @@ enum SceneFrameInfoFlags
   eSceneUseHdrEnvironment          = 1 << 2,
   eSceneUseInfinitePlane           = 1 << 3,
   eSceneInfinitePlaneShadowCatcher = 1 << 4,
+  eSceneUseNoEnvironment           = 1 << 5,  // No sky/HDR environment lighting or background
 };
 
 // Camera info

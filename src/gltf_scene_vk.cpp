@@ -35,6 +35,7 @@
 
 
 #include <glm/glm.hpp>
+#include <glm/gtc/type_ptr.hpp>
 
 #include "shaders/gltf_scene_io.h.slang"  // Shared between host and device (local fork)
 
@@ -51,6 +52,7 @@
 #include "gltf_scene_vk.hpp"
 #include "gltf_scene_animation.hpp"
 #include "gltf_image_loader.hpp"
+#include "tinygltf_utils.hpp"
 #include "nvutils/parallel_work.hpp"
 #include "nvvk/helpers.hpp"
 
@@ -192,6 +194,36 @@ void nvvkgltf::SceneVk::destroyBufferDeferred(nvvk::Buffer& buf)
   }
 }
 
+//--------------------------------------------------------------------------------------------------
+// Destroy a GPU image after the current in-flight frames are done. Used by syncTextureTail's shrink,
+// where a removed image's view may still be referenced by a now-unused descriptor slot. Mirrors
+// destroyBufferDeferred: defers via m_deferredFree, or falls back to a graphics-queue wait.
+void nvvkgltf::SceneVk::destroyImageDeferred(nvvk::Image& image)
+{
+  if(image.image == VK_NULL_HANDLE)
+    return;
+
+  nvvk::Image              oldImage = image;
+  nvvk::ResourceAllocator* alloc    = m_alloc;
+  GpuMemoryTracker*        tracker  = &m_memoryTracker;
+  auto                     cleanup  = [=]() mutable {
+    tracker->untrack(kMemCategoryImages, oldImage.allocation);
+    alloc->destroyImage(oldImage);
+  };
+  image = {};
+
+  if(m_deferredFree)
+  {
+    m_deferredFree(std::move(cleanup));
+  }
+  else
+  {
+    if(m_graphicsQueue)
+      vkQueueWaitIdle(m_graphicsQueue);
+    cleanup();
+  }
+}
+
 void nvvkgltf::SceneVk::deinit()
 {
   if(!m_alloc)
@@ -227,14 +259,7 @@ void nvvkgltf::SceneVk::create(VkCommandBuffer        cmd,
   m_generateMipmaps   = generateMipmaps;
   m_rayTracingEnabled = enableRayTracing;
 
-  std::vector<std::filesystem::path> imageSearchPaths = scn.getImageSearchPaths();
-  if(imageSearchPaths.empty())
-  {
-    std::error_code       ec;
-    std::filesystem::path baseDir = std::filesystem::absolute(scn.getFilename().parent_path(), ec);
-    if(!ec)
-      imageSearchPaths.push_back(baseDir);
-  }
+  std::vector<std::filesystem::path> imageSearchPaths = resolveImageSearchPaths(scn);
 
   // Resolve per-texture sampler slots first: uploadMaterials() bakes them into GltfTextureInfo.samplerIndex,
   // so they must exist before it runs (createTextureImages, which creates the VkSamplers, comes later).
@@ -245,6 +270,7 @@ void nvvkgltf::SceneVk::create(VkCommandBuffer        cmd,
   createVertexBuffers(cmd, staging, scn);
   createTextureImages(cmd, staging, scn, imageSearchPaths);
   uploadLights(staging, scn);
+  uploadEmissiveTriangles(staging, scn);
 
   (void)flushSceneDescIfDirty(staging, scn);
 
@@ -310,6 +336,17 @@ uint32_t nvvkgltf::SceneVk::syncFromScene(nvvk::StagingUploader& staging, nvvkgl
     }
   }
 
+  // Emissive area-light list is derived from materials (which triangles emit) and the render-node set
+  // (node/primitive references). df.emissiveDirty latches emissive-membership changes and is consumed
+  // independently of the sync `mask`, so the GPU-transform path -- which syncs only materials+lights --
+  // still rebuilds the list on a render-node reassignment/structural change. (result & eSyncRenderNodes)
+  // additionally catches transform-only edits that shift a triangle's world area in the CPU path.
+  if((result & eSyncMaterials) || (result & eSyncRenderNodes) || df.emissiveDirty)
+  {
+    uploadEmissiveTriangles(staging, scn);
+    df.emissiveDirty = false;
+  }
+
   if(flushSceneDescIfDirty(staging, scn))
     result |= eSyncRenderNodes;  // Staging was appended; ensure caller flushes.
 
@@ -335,12 +372,16 @@ void nvvkgltf::SceneVk::updateSceneDescBuffer(nvvk::StagingUploader& staging, co
 {
   // Buffer references
   shaderio::GltfScene scene_desc{};
-  scene_desc.materials        = (shaderio::GltfShadeMaterial*)m_bMaterial.address;
-  scene_desc.textureInfos     = (shaderio::GltfTextureInfo*)m_bTextureInfos.address;
-  scene_desc.renderPrimitives = (shaderio::GltfRenderPrimitive*)m_bRenderPrim.address;
-  scene_desc.renderNodes      = (shaderio::GltfRenderNode*)m_bRenderNode.address;
-  scene_desc.lights           = (shaderio::GltfLight*)m_bLights.address;
-  scene_desc.numLights        = static_cast<int>(scn.getRenderLights().size());
+  scene_desc.materials            = (shaderio::GltfShadeMaterial*)m_bMaterial.address;
+  scene_desc.textureInfos         = (shaderio::GltfTextureInfo*)m_bTextureInfos.address;
+  scene_desc.renderPrimitives     = (shaderio::GltfRenderPrimitive*)m_bRenderPrim.address;
+  scene_desc.renderNodes          = (shaderio::GltfRenderNode*)m_bRenderNode.address;
+  scene_desc.lights               = (shaderio::GltfLight*)m_bLights.address;
+  scene_desc.numLights            = static_cast<int>(scn.getRenderLights().size());
+  scene_desc.emissiveTriangles    = (shaderio::EmissiveTriangle*)m_bEmissiveTriangles.address;
+  scene_desc.numEmissiveTriangles = static_cast<int>(m_numEmissiveTriangles);
+  scene_desc.emissiveTotalWeight  = m_emissiveTotalWeight;
+  scene_desc.emissiveMeanLum      = m_emissiveMeanLum;
 
   if(m_bSceneDesc.buffer == VK_NULL_HANDLE)
   {
@@ -617,6 +658,195 @@ void nvvkgltf::SceneVk::uploadLights(nvvk::StagingUploader& staging, const nvvkg
       }
     }
   }
+}
+
+//--------------------------------------------------------------------------------------------------
+// Rebuild + upload the emissive-triangle area-light list. Derived data: regenerated wholesale from
+// the model (which triangles emit + their radiance), never patched. Triangles are stored as
+// references (node/prim/triangle); the shader reads live geometry. Each triangle carries a
+// prefix-sum selection weight (world area * luminance) so the path tracer can power-importance-sample
+// emitters (bright/large triangles picked more often); the total is passed via the scene descriptor.
+// World area is computed from the render node's transform, so the list is rebuilt on material or
+// render-node changes (see syncFromScene). A null buffer with count 0 is a valid "no emitters" state.
+void nvvkgltf::SceneVk::uploadEmissiveTriangles(nvvk::StagingUploader& staging, const nvvkgltf::Scene& scn)
+{
+  const tinygltf::Model&                        model       = scn.getModel();
+  const std::vector<nvvkgltf::RenderNode>&      renderNodes = scn.getRenderNodes();
+  const std::vector<nvvkgltf::RenderPrimitive>& renderPrims = scn.getRenderPrimitives();
+  const std::vector<tinygltf::Material>&        materials   = model.materials;
+
+  // First pass: gather emissive triangles + per-triangle world area, and accumulate the totals used
+  // to derive the area-weighted mean luminance for defensive sampling.
+  std::vector<shaderio::EmissiveTriangle> tris;
+  std::vector<float>                      triArea;  // parallel to tris (used by the CDF pass below)
+  double                                  sumArea = 0.0, sumAreaLum = 0.0;
+  for(uint32_t nodeIdx = 0; nodeIdx < static_cast<uint32_t>(renderNodes.size()); ++nodeIdx)
+  {
+    const nvvkgltf::RenderNode& rn = renderNodes[nodeIdx];
+    if(rn.materialID < 0 || rn.materialID >= static_cast<int>(materials.size()) || rn.renderPrimID < 0
+       || rn.renderPrimID >= static_cast<int>(renderPrims.size()))
+      continue;
+
+    const tinygltf::Material& mat = materials[rn.materialID];
+
+    const glm::vec3 radiance = tinygltf::utils::getConstantEmissiveRadiance(mat);  // 0 for textured/non-emitters
+    // Rec. 709 luminance; must match the shader's luminance() (nvshaders/functions.h.slang) so the
+    // pdf's area term cancels.
+    const float lum = 0.2126f * radiance.x + 0.7152f * radiance.y + 0.0722f * radiance.z;
+    if(lum <= 0.0f)
+      continue;
+
+    const tinygltf::Primitive* prim = renderPrims[rn.renderPrimID].pPrimitive;
+    if(prim == nullptr)
+      continue;
+    const auto posIt = prim->attributes.find("POSITION");
+    if(posIt == prim->attributes.end())
+      continue;
+
+    std::vector<glm::vec3>     posStorage;
+    std::span<const glm::vec3> positions =
+        tinygltf::utils::getAccessorData<glm::vec3>(model, model.accessors[posIt->second], &posStorage);
+
+    // Indices: read the accessor, or synthesize 0..N-1 for unindexed primitives. This mirrors the
+    // 0..N-1 fallback used when building the GPU index buffer (createVertexBuffers), so host and
+    // shader agree on the triangle set; otherwise unindexed emitters would emit but be excluded from
+    // NEE, and their BSDF-hit emission would be MIS-weighted against a phantom NEE pdf (energy loss).
+    std::vector<uint32_t>     idxStorage;
+    std::span<const uint32_t> indices;
+    if(prim->indices >= 0)
+    {
+      indices = tinygltf::utils::getAccessorData<uint32_t>(model, model.accessors[prim->indices], &idxStorage);
+    }
+    else
+    {
+      idxStorage.resize(positions.size());
+      for(uint32_t i = 0; i < static_cast<uint32_t>(positions.size()); ++i)
+        idxStorage[i] = i;
+      indices = idxStorage;
+    }
+    if(positions.empty() || indices.size() < 3)
+      continue;
+
+    const glm::mat4& worldMatrix = rn.worldMatrix;
+    const uint32_t   numTri      = static_cast<uint32_t>(indices.size() / 3);
+    const uint32_t   doubleSided = mat.doubleSided ? 1u : 0u;
+    for(uint32_t t = 0; t < numTri; ++t)
+    {
+      const uint32_t i0 = indices[3 * t + 0], i1 = indices[3 * t + 1], i2 = indices[3 * t + 2];
+      if(i0 >= positions.size() || i1 >= positions.size() || i2 >= positions.size())
+        continue;
+      const glm::vec3 w0   = glm::vec3(worldMatrix * glm::vec4(positions[i0], 1.0f));
+      const glm::vec3 w1   = glm::vec3(worldMatrix * glm::vec4(positions[i1], 1.0f));
+      const glm::vec3 w2   = glm::vec3(worldMatrix * glm::vec4(positions[i2], 1.0f));
+      const float     area = 0.5f * glm::length(glm::cross(w1 - w0, w2 - w0));
+      if(area <= 0.0f)
+        continue;  // skip degenerate (zero-area) triangles
+      sumArea += area;
+      sumAreaLum += static_cast<double>(area) * lum;
+
+      shaderio::EmissiveTriangle et{};
+      et.radiance     = radiance;
+      et.renderNodeID = nodeIdx;
+      et.renderPrimID = static_cast<uint32_t>(rn.renderPrimID);
+      et.triangleID   = t;
+      et.doubleSided  = doubleSided;
+      // aliasProb / aliasIndex are filled in the alias-table pass below.
+      tris.push_back(et);
+      triArea.push_back(area);
+    }
+  }
+
+  // Second pass: defensive selection. Pull each emitter's luminance toward the area-weighted mean so
+  // a dim emitter is never starved (lum' = (1-f)*lum + f*meanLum); the weight is area * lum'. The area
+  // still cancels in the solid-angle pdf, so the shader recovers it from radiance + meanLum + totals.
+  const float         meanLum = (sumArea > 0.0) ? static_cast<float>(sumAreaLum / sumArea) : 0.0f;
+  const float         f       = shaderio::EMISSIVE_DEFENSIVE_FRACTION;
+  std::vector<double> triWeight(tris.size());
+  double              totalWeight = 0.0;
+  for(size_t i = 0; i < tris.size(); ++i)
+  {
+    const float lum    = 0.2126f * tris[i].radiance.x + 0.7152f * tris[i].radiance.y + 0.0722f * tris[i].radiance.z;
+    const float lumDef = (1.0f - f) * lum + f * meanLum;
+    triWeight[i]       = static_cast<double>(triArea[i]) * lumDef;
+    totalWeight += triWeight[i];
+  }
+
+  // Third pass: build a Vose alias table so the shader selects a triangle in O(1) (no CDF binary
+  // search). It samples the exact same distribution P(i) = weight_i / totalWeight, so the pdf is
+  // unchanged. See https://en.wikipedia.org/wiki/Alias_method.
+  if(!tris.empty() && totalWeight > 0.0)
+  {
+    const size_t          n = tris.size();
+    std::vector<float>    scaled(n);  // p_i * n; a bin with scaled < 1 borrows from a "large" bin
+    std::vector<uint32_t> smallBins, largeBins;
+    smallBins.reserve(n);
+    largeBins.reserve(n);
+    for(size_t i = 0; i < n; ++i)
+    {
+      scaled[i] = static_cast<float>(triWeight[i] / totalWeight * static_cast<double>(n));
+      (scaled[i] < 1.0f ? smallBins : largeBins).push_back(static_cast<uint32_t>(i));
+    }
+    while(!smallBins.empty() && !largeBins.empty())
+    {
+      const uint32_t l = smallBins.back();
+      smallBins.pop_back();
+      const uint32_t g = largeBins.back();
+      largeBins.pop_back();
+      tris[l].aliasProb  = scaled[l];
+      tris[l].aliasIndex = g;
+      scaled[g]          = (scaled[g] + scaled[l]) - 1.0f;  // g keeps the leftover probability
+      (scaled[g] < 1.0f ? smallBins : largeBins).push_back(g);
+    }
+    for(uint32_t g : largeBins)  // numerical remainder: these bins are always taken as themselves
+    {
+      tris[g].aliasProb  = 1.0f;
+      tris[g].aliasIndex = g;
+    }
+    for(uint32_t l : smallBins)
+    {
+      tris[l].aliasProb  = 1.0f;
+      tris[l].aliasIndex = l;
+    }
+  }
+
+  const uint32_t newCount  = static_cast<uint32_t>(tris.size());
+  const float    newWeight = static_cast<float>(totalWeight);
+  // The scene descriptor carries numEmissiveTriangles + emissiveTotalWeight + emissiveMeanLum; the pdf
+  // normalization divides by emissiveTotalWeight and uses emissiveMeanLum. A radiance-only edit (e.g.
+  // emissive strength) changes those WITHOUT changing the triangle count, so the buffer isn't resized
+  // -- refresh the descriptor here too, otherwise the pdf uses stale totals and the emitter is scaled wrong.
+  if(newCount != m_numEmissiveTriangles || newWeight != m_emissiveTotalWeight || meanLum != m_emissiveMeanLum)
+  {
+    LOGI("[emissive-NEE] %u triangles, total selection weight %.4f (meanLum %.4f)\n", newCount, newWeight, meanLum);
+    m_sceneDescDirty = true;
+  }
+  m_numEmissiveTriangles           = newCount;
+  m_emissiveTotalWeight            = newWeight;
+  m_emissiveMeanLum                = meanLum;
+  const VkDeviceSize requiredBytes = std::span(tris).size_bytes();
+
+  // Resize (or drop to empty) on count change. Mirrors uploadLights().
+  if(m_bEmissiveTriangles.bufferSize != requiredBytes)
+  {
+    if(m_bEmissiveTriangles.buffer != VK_NULL_HANDLE)
+      destroyBufferDeferred(m_bEmissiveTriangles);
+    m_bEmissiveTriangles = {};
+    m_sceneDescDirty     = true;  // pointer and/or count changed -> scene descriptor must refresh
+  }
+
+  if(tris.empty())
+    return;
+
+  if(m_bEmissiveTriangles.buffer == VK_NULL_HANDLE)
+  {
+    NVVK_CHECK(m_alloc->createBuffer(m_bEmissiveTriangles, requiredBytes,
+                                     VK_BUFFER_USAGE_2_STORAGE_BUFFER_BIT | VK_BUFFER_USAGE_2_SHADER_DEVICE_ADDRESS_BIT));
+    NVVK_DBG_NAME(m_bEmissiveTriangles.buffer);
+    m_memoryTracker.track(kMemCategorySceneData, m_bEmissiveTriangles.allocation);
+    m_sceneDescDirty = true;
+  }
+
+  staging.appendBuffer(m_bEmissiveTriangles, 0, std::span(tris));
 }
 
 //--------------------------------------------------------------------------------------------------
@@ -950,6 +1180,113 @@ static VkSamplerCreateInfo getSampler(const tinygltf::Model& model, int index)
   return samplerInfo;
 }
 
+//========== Shared image/texture/sampler building blocks ==========
+// These are the per-item bodies shared by the batch loader (createTextureImages) and the incremental
+// tail reconcile (syncTextureTail), so both stay in lockstep. createTextureImages still owns the
+// parallel decode; these helpers only cover path resolution, GPU creation, and array bookkeeping.
+
+//--------------------------------------------------------------------------------------------------
+// Directories searched for image URIs: the scene's own search paths, or the glTF folder as a fallback.
+std::vector<std::filesystem::path> nvvkgltf::SceneVk::resolveImageSearchPaths(const nvvkgltf::Scene& scn) const
+{
+  std::vector<std::filesystem::path> imageSearchPaths = scn.getImageSearchPaths();
+  if(imageSearchPaths.empty())
+  {
+    std::error_code       ec;
+    std::filesystem::path baseDir = std::filesystem::absolute(scn.getFilename().parent_path(), ec);
+    if(!ec)
+      imageSearchPaths.push_back(baseDir);
+  }
+  return imageSearchPaths;
+}
+
+//--------------------------------------------------------------------------------------------------
+// Resolve model.images[imageId]'s on-disk path from its URI. Empty for embedded (bufferView) images,
+// data: URIs, or when the file is not found in the search paths.
+std::filesystem::path nvvkgltf::SceneVk::resolveImageDiskPath(const tinygltf::Model& model,
+                                                              const std::vector<std::filesystem::path>& imageSearchPaths,
+                                                              size_t imageId) const
+{
+  const tinygltf::Image& gltfImage = model.images[imageId];
+  std::filesystem::path  diskPath;
+  if(!gltfImage.uri.empty() && gltfImage.bufferView < 0 && (gltfImage.uri.size() < 5 || gltfImage.uri.compare(0, 5, "data:") != 0))
+  {
+    std::string uriDecoded;
+    tinygltf::URIDecode(gltfImage.uri, &uriDecoded, nullptr);
+    diskPath = nvutils::findFile(nvutils::pathFromUtf8(uriDecoded), imageSearchPaths, false);
+  }
+  return diskPath;
+}
+
+//--------------------------------------------------------------------------------------------------
+// Replace m_images[idx] with a 1x1 solid-color dummy. The texture descriptor array cannot contain
+// gaps, so unused / failed / empty-scene slots get a dummy (magenta on failure, white for an empty
+// scene) to keep every texture source index valid.
+void nvvkgltf::SceneVk::createDefaultImage(nvvk::StagingUploader& staging, uint32_t idx, const std::array<uint8_t, 4>& color)
+{
+  VkImageCreateInfo image_create_info = DEFAULT_VkImageCreateInfo;
+  image_create_info.extent            = {1, 1, 1};
+  image_create_info.usage             = VK_IMAGE_USAGE_SAMPLED_BIT | VK_IMAGE_USAGE_TRANSFER_SRC_BIT;
+  nvvk::Image image;
+  NVVK_CHECK(m_alloc->createImage(image, image_create_info, DEFAULT_VkImageViewCreateInfo));
+  NVVK_CHECK(staging.appendImage(image, std::span<const uint8_t>(color.data(), 4), VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL));
+  NVVK_DBG_NAME(image.image);
+  m_images[idx] = SceneImage{.imageTexture = image};
+  nvvk::DebugUtil::getInstance().setObjectName(m_images[idx].imageTexture.image, "Dummy");
+}
+
+//--------------------------------------------------------------------------------------------------
+// Create the GPU image for the already-loaded m_images[imageId]; substitute the magenta default when
+// the source was missing, unreadable, or an unsupported format (createImage returns false).
+void nvvkgltf::SceneVk::materializeImage(VkCommandBuffer cmd, nvvk::StagingUploader& staging, size_t imageId)
+{
+  if(!createImage(cmd, staging, m_images[imageId]))
+    createDefaultImage(staging, static_cast<uint32_t>(imageId), {255, 0, 255, 255});  // not present or failed to load
+}
+
+//--------------------------------------------------------------------------------------------------
+// Append the fallback texture view (image 0) so every texture entry references some image view.
+// Samplers are a separate array, so a texture entry carries only the image view.
+void nvvkgltf::SceneVk::pushDefaultTextureView()
+{
+  assert(!m_images.empty());
+  m_textures.push_back(m_images[0].imageTexture);
+}
+
+//--------------------------------------------------------------------------------------------------
+// Append model.textures[textureIndex] to m_textures, resolving its source image view (default on a
+// missing / out-of-range source).
+void nvvkgltf::SceneVk::appendTextureView(const tinygltf::Model& model, size_t textureIndex)
+{
+  const int source_image = tinygltf::utils::getTextureImageIndex(model.textures[textureIndex]);
+  if(source_image < 0 || source_image >= static_cast<int>(m_images.size()))
+    pushDefaultTextureView();  // Incorrect source image
+  else
+    m_textures.push_back(m_images[source_image].imageTexture);  // image view only; sampler is separate
+}
+
+//--------------------------------------------------------------------------------------------------
+// Ensure m_samplers holds slot 0 (default) followed by one deduplicated sampler per model.samplers.
+// Only the missing tail slots are acquired, so this both builds the array from scratch (after destroy)
+// and extends it incrementally when new samplers appear.
+void nvvkgltf::SceneVk::ensureSamplers(const tinygltf::Model& model)
+{
+  if(m_samplers.empty())
+  {
+    VkSampler defaultSampler{};
+    NVVK_CHECK(m_samplerPool->acquireSampler(defaultSampler));  // slot 0
+    m_samplers.push_back(defaultSampler);
+  }
+  // m_samplers[0] is the default; m_samplers[1..] mirror model.samplers[0..]. Acquire only the new tail.
+  for(size_t j = m_samplers.size() - 1; j < model.samplers.size(); ++j)
+  {
+    VkSampler                 smp{};
+    const VkSamplerCreateInfo ci = getSampler(model, static_cast<int>(j));
+    NVVK_CHECK(m_samplerPool->acquireSampler(smp, ci));
+    m_samplers.push_back(smp);
+  }
+}
+
 //--------------------------------------------------------------------------------------------------
 // Create GPU images for all textures referenced by the scene. Loads from disk or embedded data.
 void nvvkgltf::SceneVk::createTextureImages(VkCommandBuffer                           cmd,
@@ -960,39 +1297,14 @@ void nvvkgltf::SceneVk::createTextureImages(VkCommandBuffer                     
   nvutils::ScopedTimer   st(std::string(__FUNCTION__) + "\n");
   const tinygltf::Model& model = scn.getModel();
 
-  // Find and all textures/images that should be sRgb encoded.
+  // Find all textures/images that should be sRgb encoded.
   findSrgbImages(model);
 
-  // Make dummy image(1,1), needed as we cannot have an empty array
-  auto addDefaultImage = [&](uint32_t idx, const std::array<uint8_t, 4>& color) {
-    VkImageCreateInfo image_create_info = DEFAULT_VkImageCreateInfo;
-    image_create_info.extent            = {1, 1, 1};
-    image_create_info.usage             = VK_IMAGE_USAGE_SAMPLED_BIT | VK_IMAGE_USAGE_TRANSFER_SRC_BIT;
-    nvvk::Image image;
-    //
-    NVVK_CHECK(m_alloc->createImage(image, image_create_info, DEFAULT_VkImageViewCreateInfo));
-    NVVK_CHECK(staging.appendImage(image, std::span<const uint8_t>(color.data(), 4), VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL));
-    NVVK_DBG_NAME(image.image);
-    // assert(idx < m_images.size());
-    m_images[idx] = SceneImage{.imageTexture = image};
-    nvvk::DebugUtil::getInstance().setObjectName(m_images[idx].imageTexture.image, "Dummy");
-  };
-
-  // Adds a texture that points to image 0, so that every texture points to some image. Samplers are a
-  // separate array now, so a texture entry carries only the image view.
-  auto addDefaultTexture = [&]() {
-    assert(!m_images.empty());
-    m_textures.push_back(m_images[0].imageTexture);
-  };
-
-  // Collect images that are in use by textures
-  // If an image is not used, it will not be loaded. Instead, a dummy image will be created to avoid modifying the texture image source index.
+  // Collect images that are in use by textures. Unused images are not loaded; materializeImage()
+  // substitutes a dummy so texture source indices stay valid.
   std::set<int> usedImages;
   for(const auto& texture : model.textures)
-  {
-    int source_image = tinygltf::utils::getTextureImageIndex(texture);
-    usedImages.insert(source_image);
-  }
+    usedImages.insert(tinygltf::utils::getTextureImageIndex(texture));
 
   // Load images in parallel, sorting by their size so larger images come first
   // for better multi-thread utilization. While we do this we also resolve
@@ -1011,18 +1323,10 @@ void nvvkgltf::SceneVk::createTextureImages(VkCommandBuffer                     
     if(usedImages.find(static_cast<int>(i)) == usedImages.end())
       continue;  // Skip unused images
 
-    const auto&           gltfImage = model.images[i];
-    std::filesystem::path diskPath;
-    if(!gltfImage.uri.empty() && gltfImage.bufferView < 0 && (gltfImage.uri.size() < 5 || gltfImage.uri.compare(0, 5, "data:") != 0))
-    {
-      std::string uriDecoded;
-      tinygltf::URIDecode(gltfImage.uri, &uriDecoded, nullptr);
-      diskPath = nvutils::findFile(nvutils::pathFromUtf8(uriDecoded), imageSearchPaths, false);
-    }
     ImageLoadItem item{.imageId = i};
-    item.diskPath       = diskPath;
-    item.numBytes       = getImageByteSize(model, gltfImage, item.diskPath);
-    m_images[i].imgName = getImageName(gltfImage, i);
+    item.diskPath       = resolveImageDiskPath(model, imageSearchPaths, i);
+    item.numBytes       = getImageByteSize(model, model.images[i], item.diskPath);
+    m_images[i].imgName = getImageName(model.images[i], i);
 
     imageLoadItems.push_back(std::move(item));
     LOGI("%s(%" PRIu64 ") %s \n", indent.c_str(), i, m_images[i].imgName.c_str());
@@ -1047,62 +1351,125 @@ void nvvkgltf::SceneVk::createTextureImages(VkCommandBuffer                     
 
   syncTinyGltfImageDimensionsFromLoadedImages(scn.getModel(), m_images);
 
-  // Create Vulkan images
+  // Create Vulkan images (magenta default substituted for unused / failed slots)
   for(size_t i = 0; i < m_images.size(); i++)
-  {
-    if(!createImage(cmd, staging, m_images[i]))
-    {
-      addDefaultImage((uint32_t)i, {255, 0, 255, 255});  // Image not present or incorrectly loaded (image.empty)
-    }
-  }
+    materializeImage(cmd, staging, i);
 
   // Add default image if nothing was loaded
   if(model.images.empty())
   {
     m_images.resize(1);
-    addDefaultImage(0, {255, 255, 255, 255});
+    createDefaultImage(staging, 0, {255, 255, 255, 255});
   }
 
   // Creating the textures using the above images
   m_textures.reserve(model.textures.size());
   for(size_t i = 0; i < model.textures.size(); i++)
-  {
-    const auto& texture      = model.textures[i];
-    int         source_image = tinygltf::utils::getTextureImageIndex(texture);
-
-    if(source_image >= model.images.size() || source_image < 0)
-    {
-      addDefaultTexture();  // Incorrect source image
-      continue;
-    }
-
-    m_textures.push_back(m_images[source_image].imageTexture);  // image view only; sampler is separate
-  }
+    appendTextureView(model, i);
 
   // Add a default texture, cannot work with empty descriptor set
   if(model.textures.empty())
-  {
-    addDefaultTexture();
-  }
+    pushDefaultTextureView();
 
   // Build the separate sampler array (slot 0 = default, slots 1..N = model.samplers) plus the
   // per-texture sampler-slot table consumed by MaterialCache -> GltfTextureInfo.samplerIndex.
-  m_samplers.clear();
-  m_samplers.reserve(model.samplers.size() + 1);
-  VkSampler defaultSampler{};
-  NVVK_CHECK(m_samplerPool->acquireSampler(defaultSampler));  // slot 0
-  m_samplers.push_back(defaultSampler);
-  for(size_t j = 0; j < model.samplers.size(); ++j)
-  {
-    VkSampler                 smp{};
-    const VkSamplerCreateInfo ci = getSampler(model, static_cast<int>(j));
-    NVVK_CHECK(m_samplerPool->acquireSampler(smp, ci));
-    m_samplers.push_back(smp);
-  }
+  ensureSamplers(model);
 
   // The per-texture slot table was already built in create() (before uploadMaterials); keep it in sync
   // here in case createTextureImages is ever driven independently.
   buildTextureSamplerSlots(model);
+}
+
+//--------------------------------------------------------------------------------------------------
+// Incremental tail reconcile -- see header. Reuses the shared building blocks above to bring GPU
+// residency in line with the model when the only edits were at the tail (import / undo / redo of an
+// imported texture). The caller guarantees a tail-only, non-empty-on-both-sides change (via
+// DirtyFlags::texturesTailChanged), so m_images / m_textures already match the pre-edit model sizes.
+void nvvkgltf::SceneVk::syncTextureTail(VkCommandBuffer cmd, nvvk::StagingUploader& staging, nvvkgltf::Scene& scn)
+{
+  const tinygltf::Model& model = scn.getModel();
+
+  // New tail images may need sRGB (e.g. imported into a base-color slot); refresh from the current
+  // material assignments before loading them. findSrgbImages recomputes the set from the model, so a
+  // stale classification for a tail index removed by a prior undo does not carry over.
+  findSrgbImages(model);
+
+  const size_t oldImageCount   = m_images.size();
+  const size_t newImageCount   = model.images.size();
+  const size_t oldTextureCount = m_textures.size();
+  const size_t newTextureCount = model.textures.size();
+
+  // --- Shrink (undo): deferred-free the removed tail images; their views may still be referenced by
+  // in-flight frames through a now-unused descriptor slot. Texture entries are shallow image-view
+  // copies (owned by m_images), so shrinking m_textures frees nothing on its own.
+  for(size_t i = newImageCount; i < oldImageCount; ++i)
+    destroyImageDeferred(m_images[i].imageTexture);
+  if(newImageCount < oldImageCount)
+    m_images.resize(newImageCount);
+  if(newTextureCount < oldTextureCount)
+    m_textures.resize(newTextureCount);
+
+  // --- Grow (import / redo): load + create the new tail images.
+  if(newImageCount > oldImageCount)
+  {
+    const std::vector<std::filesystem::path> imageSearchPaths = resolveImageSearchPaths(scn);
+    m_images.resize(newImageCount);
+    for(size_t i = oldImageCount; i < newImageCount; ++i)
+    {
+      m_images[i].imgName = getImageName(model.images[i], i);
+      loadImage(resolveImageDiskPath(model, imageSearchPaths, i), model, i);  // failure -> magenta default below
+    }
+    syncTinyGltfImageDimensionsFromLoadedImages(scn.getModel(), m_images);
+    for(size_t i = oldImageCount; i < newImageCount; ++i)
+      materializeImage(cmd, staging, i);
+  }
+
+  // Import / undo never change samplers, but keep the array consistent with the model in general.
+  ensureSamplers(model);
+
+  // --- Grow textures: append the new tail texture views.
+  if(newTextureCount > oldTextureCount)
+  {
+    m_textures.reserve(newTextureCount);
+    for(size_t t = oldTextureCount; t < newTextureCount; ++t)
+      appendTextureView(model, t);
+  }
+
+  // Refresh the per-texture sampler-slot table (cheap, CPU only) so uploadMaterials bakes the correct
+  // samplerIndex for any new textures.
+  buildTextureSamplerSlots(model);
+
+  // Flush pending appends (default images from failed loads). No-op when createImage already flushed.
+  staging.cmdUploadAppended(cmd);
+}
+
+//--------------------------------------------------------------------------------------------------
+// Merge/reference append rebuild -- see header. Mirrors create()'s sequence but replaces destroy() with
+// destroyGeometry() (existing textures/images/samplers/material buffers survive) and createTextureImages()
+// with syncTextureTail() (only the new tail images are loaded). Geometry, render nodes, materials and
+// lights are re-derived in full from the grown model; that is CPU-cheap and touches no disk.
+void nvvkgltf::SceneVk::recreatePreservingTextures(VkCommandBuffer cmd, nvvk::StagingUploader& staging, nvvkgltf::Scene& scn)
+{
+  nvutils::ScopedTimer   st(__FUNCTION__);
+  const tinygltf::Model& model = scn.getModel();
+
+  destroyGeometry();        // frees vertex/index/renderPrim/sceneDesc buffers only -- textures/materials survive
+  m_sceneDescDirty = true;  // sceneDesc buffer was freed above; force flushSceneDescIfDirty to recreate it
+
+  // Resolve per-texture sampler slots before uploadMaterials bakes them into GltfTextureInfo.samplerIndex
+  // (the new textures must be covered). Pure model data, so it runs before the samplers themselves exist.
+  buildTextureSamplerSlots(model);
+
+  uploadMaterials(staging, scn);  // empty dirty set -> full material-cache rebuild + buffer grow/upload
+  uploadRenderNodes(staging, scn);
+  createVertexBuffers(cmd, staging, scn);
+  syncTextureTail(cmd, staging, scn);  // preserve existing images/textures; load + append only the new tail
+  uploadLights(staging, scn);
+
+  (void)flushSceneDescIfDirty(staging, scn);
+
+  if(m_rayTracingEnabled)
+    m_sceneOmm.create(cmd, staging, scn);
 }
 
 void nvvkgltf::SceneVk::buildTextureSamplerSlots(const tinygltf::Model& model)
@@ -1119,6 +1486,11 @@ void nvvkgltf::SceneVk::buildTextureSamplerSlots(const tinygltf::Model& model)
 // Identify images that must use sRGB format (e.g. base color). Stored in m_sRgbImages for createImage.
 void nvvkgltf::SceneVk::findSrgbImages(const tinygltf::Model& model)
 {
+  // Recompute from scratch so the set reflects only the current model. The incremental import path
+  // (syncTextureTail) calls this without a preceding destroy(), so a stale sRGB flag for an image index
+  // that undo removed must not survive and misclassify a different image later appended at that index.
+  m_sRgbImages.clear();
+
   // Lambda helper functions
   auto addImage = [&](int texID) {
     if(texID > -1)
@@ -1503,6 +1875,13 @@ void nvvkgltf::SceneVk::destroy()
     m_alloc->destroyBuffer(m_bLights);
     m_bLights = {};  // Reset to ensure clean state
   }
+  if(m_bEmissiveTriangles.buffer != VK_NULL_HANDLE)
+  {
+    m_memoryTracker.untrack(kMemCategorySceneData, m_bEmissiveTriangles.allocation);
+    m_alloc->destroyBuffer(m_bEmissiveTriangles);
+    m_bEmissiveTriangles = {};  // Reset to ensure clean state
+  }
+  m_numEmissiveTriangles = 0;
   if(m_bRenderNode.buffer != VK_NULL_HANDLE)
   {
     m_memoryTracker.untrack(kMemCategorySceneData, m_bRenderNode.allocation);
