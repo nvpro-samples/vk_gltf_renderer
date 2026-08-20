@@ -1397,27 +1397,113 @@ void SceneEditor::setPrimitiveMaterial(int meshIndex, int primIndex, int newMate
     m_scene.bumpSceneGraphRevision();
 }
 
-int SceneEditor::duplicateMaterial(int originalIndex)
+// Invoke fn(materialValue) for each KHR_materials_variants mapping's "material" entry on `prim` (if the
+// extension is present). `fn` receives the raw tinygltf::Value so it can either read it (refcount) or
+// reassign it in place (index remap on material insert/remove) -- one traversal serves both.
+template <typename Fn>
+static void forEachVariantMaterialValue(tinygltf::Primitive& prim, Fn&& fn)
 {
-  if(originalIndex < 0 || originalIndex >= static_cast<int>(m_scene.m_model.materials.size()))
+  auto extIt = prim.extensions.find(KHR_MATERIALS_VARIANTS_EXTENSION_NAME);
+  if(extIt == prim.extensions.end() || !extIt->second.Has("mappings"))
+    return;
+  tinygltf::Value& mappingsVal = extIt->second.Get<tinygltf::Value::Object>()["mappings"];
+  if(!mappingsVal.IsArray())
+    return;
+  for(tinygltf::Value& mapping : mappingsVal.Get<tinygltf::Value::Array>())
   {
-    LOGW("Cannot duplicate invalid material index: %d\n", originalIndex);
-    return -1;
+    if(!mapping.IsObject())
+      continue;
+    auto& obj      = mapping.Get<tinygltf::Value::Object>();
+    auto  matEntry = obj.find("material");
+    if(matEntry != obj.end() && matEntry->second.IsInt())
+      fn(matEntry->second);
   }
+}
 
-  tinygltf::Material newMat = m_scene.m_model.materials[originalIndex];
-  newMat.name += "_copy";
+std::vector<int> SceneEditor::computeMaterialRefCounts() const
+{
+  std::vector<int> refs(m_scene.m_model.materials.size(), 0);
+  auto             countRef = [&refs](int m) {
+    if(m >= 0 && m < static_cast<int>(refs.size()))
+      refs[m]++;
+  };
+  for(const tinygltf::Mesh& mesh : m_scene.m_model.meshes)
+  {
+    for(const tinygltf::Primitive& prim : mesh.primitives)
+    {
+      countRef(prim.material);
+      // forEachVariantMaterialValue only needs to mutate for the remap case; the const_cast here is safe
+      // because the visitor below only reads the value (never assigns), so no mutation actually occurs.
+      forEachVariantMaterialValue(const_cast<tinygltf::Primitive&>(prim),
+                                  [&](tinygltf::Value& v) { countRef(v.Get<int>()); });
+    }
+  }
+  return refs;
+}
 
-  int newIndex = static_cast<int>(m_scene.m_model.materials.size());
-  m_scene.m_model.materials.push_back(newMat);
+int SceneEditor::insertMaterialAt(int index, const tinygltf::Material& material)
+{
+  const int n = static_cast<int>(m_scene.m_model.materials.size());
+  index       = std::clamp(index, 0, n);
+  m_scene.m_model.materials.insert(m_scene.m_model.materials.begin() + index, material);
+
+  // A middle insert shifts every material at/after `index` up by one; remap primitive references (and
+  // any KHR_materials_variants mapping) and reparse so render nodes pick up the new materialID mapping.
+  // A tail append needs neither.
+  if(index < n)
+  {
+    for(tinygltf::Mesh& mesh : m_scene.m_model.meshes)
+      for(tinygltf::Primitive& prim : mesh.primitives)
+      {
+        if(prim.material >= index)
+          prim.material++;
+        forEachVariantMaterialValue(prim, [index](tinygltf::Value& v) {
+          if(v.Get<int>() >= index)
+            v = tinygltf::Value(v.Get<int>() + 1);
+        });
+      }
+    m_scene.parseScene();
+  }
 
   for(int i = 0; i < static_cast<int>(m_scene.m_model.materials.size()); ++i)
     m_scene.markMaterialDirty(i);
 
-  LOGI("Duplicated material '%s' -> '%s' (index %d -> %d)\n", m_scene.m_model.materials[originalIndex].name.c_str(),
-       newMat.name.c_str(), originalIndex, newIndex);
+  return index;
+}
 
-  return newIndex;
+bool SceneEditor::removeMaterialAt(int index)
+{
+  const int n = static_cast<int>(m_scene.m_model.materials.size());
+  if(index < 0 || index >= n)
+  {
+    LOGW("Cannot remove invalid material index: %d\n", index);
+    return false;
+  }
+  const bool tail = (index == n - 1);
+  m_scene.m_model.materials.erase(m_scene.m_model.materials.begin() + index);
+
+  // A middle removal shifts materials above `index` down by one; remap primitive references (and any
+  // KHR_materials_variants mapping) and reparse. A tail removal cannot dangle any reference (the caller
+  // guarantees refcount 0), so it is a cheap pop.
+  if(!tail)
+  {
+    for(tinygltf::Mesh& mesh : m_scene.m_model.meshes)
+      for(tinygltf::Primitive& prim : mesh.primitives)
+      {
+        if(prim.material > index)
+          prim.material--;
+        forEachVariantMaterialValue(prim, [index](tinygltf::Value& v) {
+          if(v.Get<int>() > index)
+            v = tinygltf::Value(v.Get<int>() - 1);
+        });
+      }
+    m_scene.parseScene();
+  }
+
+  for(int i = 0; i < static_cast<int>(m_scene.m_model.materials.size()); ++i)
+    m_scene.markMaterialDirty(i);
+
+  return true;
 }
 
 int SceneEditor::duplicateMeshForNode(int meshIndex, int nodeIndex)

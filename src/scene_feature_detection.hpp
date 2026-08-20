@@ -52,7 +52,7 @@ struct SceneFeatureSet
     // GLTF_USE_* gates (not MAT_EXT_*) from these flags.
     eTransmission,
     eVolume,
-    eVolumeScatter,
+    eScatter,
     eClearcoat,
     eIridescence,
     eAnisotropy,

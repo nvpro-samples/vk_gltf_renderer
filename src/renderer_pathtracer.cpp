@@ -95,7 +95,10 @@ void PathTracer::onAttach(Resources& resources, nvvk::ProfilerGpuTimer* profiler
   m_supportSER = (bool)(m_reorderProperties.rayTracingInvocationReorderReorderingHint & VK_RAY_TRACING_INVOCATION_REORDER_MODE_REORDER_NV) ?
                      true :
                      false;
-  m_useSER = m_supportSER;
+  // Keep whatever --ptUseSER asked for (the parameter is parsed before this runs); the device
+  // capability only ever turns it off.
+  m_useSER         = m_useSER && m_supportSER;
+  m_pipelineUseSER = m_useSER;  // no pipelines exist yet; keep the first frame from invalidating
 
   // If SER is not supported, force recompiling without SER
   compileShader(resources, (m_supportSER == true) ? false : true);
@@ -127,6 +130,10 @@ void PathTracer::registerParameters(nvutils::ParameterRegistry* paramReg)
   paramReg->add({"ptFocalDistance", "PathTracer: Focal distance"}, &m_pushConst.focalDistance);
   paramReg->add({"ptAutoFocus", "PathTracer: Enable auto focus"}, &m_autoFocus);
   paramReg->add({"ptTechnique", "PathTracer: Rendering technique [RayQuery:0, RayTracing:1]"}, (int*)&m_renderTechnique);
+  // SER is a specialization constant of both path-tracing pipelines, so a change is picked up by
+  // ensureShadersAndPipelines() on the next frame -- which is what makes it settable mid-run from a
+  // benchmark sequence, not just on the command line. Silently ignored when the device lacks SER.
+  paramReg->add({"ptUseSER", "PathTracer: Use Shader Execution Reordering (ignored if unsupported)"}, &m_useSER);
   paramReg->add({"ptAdaptiveSampling", "PathTracer: Enable adaptive sampling"}, &m_adaptiveSampling);
   paramReg->add({"ptPerformanceTarget", "PathTracer: Performance target [Interactive:0, Balanced:1, Quality:2, MaxQuality:3]"},
                 (int*)&m_performanceTarget);
@@ -252,17 +259,10 @@ bool PathTracer::onUIRender(Resources& resources)
 
     if(m_supportSER && m_renderTechnique == RenderTechnique::RayTracing)
     {
-      bool oldUseSER = m_useSER;
+      // The toggle only records the wish; ensureShadersAndPipelines() drops the pipelines built with
+      // the old value on the next frame. That path also covers --ptUseSER and the ray-query
+      // pipeline, which this checkbox used to leave stale.
       changed |= PE::Checkbox("Use SER", &m_useSER, "Use shader execution reorder");
-
-      // Recreate RTX pipeline if SER setting changed
-      if(oldUseSER != m_useSER)
-      {
-        // SYNC NOTE: SER toggle (UI checkbox) — wait before destroying pipeline in use by previous frame.
-        NVVK_CHECK(vkQueueWaitIdle(resources.app->getQueue(0).queue));
-        vkDestroyPipeline(m_device, m_rtxPipeline, nullptr);
-        m_rtxPipeline = VK_NULL_HANDLE;
-      }
     }
 
     // Scene-aware shader optimization.
@@ -278,10 +278,10 @@ bool PathTracer::onUIRender(Resources& resources)
       const std::string usedFeatures = fs.toString();
       std::string sceneExtTooltip = fmt::format("Active scene feature(s): {}", usedFeatures.empty() ? "none" : usedFeatures);
       nvgui::tooltip(sceneExtTooltip.c_str(), true);
-      std::string featureGatesTooltip = fmt::format("Feature gates: Transmission: {}, Volume: {}, VolumeScatter: {}, DLSS Guide: {}",
+      std::string featureGatesTooltip = fmt::format("Feature gates: Transmission: {}, Volume: {}, Scatter: {}, DLSS Guide: {}",
                                                     fs.has(nvvkgltf::SceneFeatureSet::eTransmission) ? "ON" : "off",
                                                     fs.has(nvvkgltf::SceneFeatureSet::eVolume) ? "ON" : "off",
-                                                    fs.has(nvvkgltf::SceneFeatureSet::eVolumeScatter) ? "ON" : "off",
+                                                    fs.has(nvvkgltf::SceneFeatureSet::eScatter) ? "ON" : "off",
                                                     fs.has(nvvkgltf::SceneFeatureSet::eDlssGuide) ? "ON" : "off");
       nvgui::tooltip(featureGatesTooltip.c_str(), true);
     }
@@ -461,6 +461,28 @@ void PathTracer::ensureShadersAndPipelines(Resources& resources)
       m_busyWindow->setReason("Compiling Slang shaders...");
     compileShader(resources);
     state = getCompileStateSnapshot();
+  }
+
+  // SER (--ptUseSER / the UI checkbox) is a pipeline specialization constant, not a shader macro,
+  // so it needs no recompile -- only the pipelines built with the old value have to go. The SBT is
+  // generated from the RTX pipeline, so it goes with it.
+  m_useSER = m_useSER && m_supportSER;  // a device without SER support can never turn it on
+  if(m_useSER != m_pipelineUseSER)
+  {
+    // SYNC NOTE: pipelines may still be in use by the previous frame.
+    NVVK_CHECK(vkQueueWaitIdle(resources.app->getQueue(0).queue));
+    {
+      std::lock_guard<std::mutex> lock(m_compileMutex);
+      vkDestroyPipeline(m_device, m_rqPipeline, nullptr);
+      vkDestroyPipeline(m_device, m_rtxPipeline, nullptr);
+      m_rqPipeline  = VK_NULL_HANDLE;
+      m_rtxPipeline = VK_NULL_HANDLE;
+      resources.allocator.destroyBuffer(m_sbtBuffer);
+      m_sbtBuffer  = {};
+      m_sbtRegions = {};
+    }
+    m_pipelineUseSER = m_useSER;
+    state            = getCompileStateSnapshot();
   }
 
   const bool rqMissing  = m_renderTechnique == RenderTechnique::RayQuery && state.rqPipeline == VK_NULL_HANDLE;
@@ -1240,6 +1262,7 @@ bool PathTracer::swapVariant(Resources& resources, const VariantKey& newKey)
         e.shaderModule = m_shaderModule;
         e.rtxPipeline  = m_rtxPipeline;
         e.rqPipeline   = m_rqPipeline;
+        e.useSER       = m_pipelineUseSER;
         e.sbtBuffer    = m_sbtBuffer;
         e.sbtRegions   = m_sbtRegions;
         foundExisting  = true;
@@ -1248,7 +1271,8 @@ bool PathTracer::swapVariant(Resources& resources, const VariantKey& newKey)
     }
     if(!foundExisting)
     {
-      m_variantCache.push_back(VariantCacheEntry{currentKey, m_shaderModule, m_rtxPipeline, m_rqPipeline, m_sbtBuffer, m_sbtRegions});
+      m_variantCache.push_back(VariantCacheEntry{currentKey, m_shaderModule, m_rtxPipeline, m_rqPipeline,
+                                                 m_pipelineUseSER, m_sbtBuffer, m_sbtRegions});
     }
   }
 
@@ -1266,11 +1290,26 @@ bool PathTracer::swapVariant(Resources& resources, const VariantKey& newKey)
   {
     if(it->key == newKey)
     {
-      m_shaderModule      = it->shaderModule;
-      m_rtxPipeline       = it->rtxPipeline;
-      m_rqPipeline        = it->rqPipeline;
-      m_sbtBuffer         = it->sbtBuffer;
-      m_sbtRegions        = it->sbtRegions;
+      m_shaderModule = it->shaderModule;  // SER does not affect the SPIR-V, so this is always reusable
+      if(it->useSER == m_pipelineUseSER)
+      {
+        m_rtxPipeline = it->rtxPipeline;
+        m_rqPipeline  = it->rqPipeline;
+        m_sbtBuffer   = it->sbtBuffer;
+        m_sbtRegions  = it->sbtRegions;
+      }
+      else
+      {
+        // Cached with the other SER setting: discard the pipelines (and the SBT built from the RTX
+        // one) and let ensureShadersAndPipelines() rebuild them at the current setting.
+        vkDestroyPipeline(m_device, it->rtxPipeline, nullptr);
+        vkDestroyPipeline(m_device, it->rqPipeline, nullptr);
+        resources.allocator.destroyBuffer(it->sbtBuffer);
+        m_rtxPipeline = VK_NULL_HANDLE;
+        m_rqPipeline  = VK_NULL_HANDLE;
+        m_sbtBuffer   = {};
+        m_sbtRegions  = {};
+      }
       m_compiledWireframe = newKey.wireframe;
       m_compiledVisualize = newKey.visualize;
       m_compiledOptimal   = newKey.optimal;

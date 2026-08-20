@@ -331,7 +331,8 @@ PathStepResult pathTraceOneBounce(IRaytracer raytracer, inout RayDesc ray, inout
     // - Get the light contribution from one light source or the HDR environment
     //-----------------------------------------------------------------------
     DirectLight directLight;
-    sampleLights(hit.pos, pbrMat.N, ray.Direction, seed, directLight);
+    sampleLights(hit.pos, pbrMat.N, ray.Direction, seed, directLight, /*isVolumeSample=*/false,
+                 /*lightsFromBothSides=*/pbrMat.diffuseTransmissionFactor > 0.0f);
 
     // This checks if the light could contribute, but doesn't send a next event estimation (NEE) shadow ray yet.
     // The actual test and contribution are delayed to minimize per-bounce state.
@@ -489,7 +490,7 @@ SampleResult pathTrace(IRaytracer raytracer, RayDesc ray, inout uint seed)
     //-----------------------------------------------------------------------
     if(pt.surfaceDepth >= RR_MIN_DEPTH)
     {
-      float rrPcont = min(max(pt.throughput.x, max(pt.throughput.y, pt.throughput.z)) + 0.001F, 0.95F);
+      float rrPcont = min(max(pt.throughput.x, max(pt.throughput.y, pt.throughput.z)) + RR_PCONT_FLOOR, RR_PCONT_CAP);
       if(rand(seed) >= rrPcont)
         break;
       pt.throughput /= rrPcont;

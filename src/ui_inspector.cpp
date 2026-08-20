@@ -31,6 +31,10 @@
 #include "gltf_scene_editor.hpp"
 #include "tinygltf_utils.hpp"
 #include "ui_linear_color.hpp"
+#include "ui_gltf_labels.hpp"
+
+#include <algorithm>
+#include <cstdio>
 
 #include <imgui.h>
 #include <imgui_internal.h>
@@ -605,6 +609,22 @@ void UiInspector::render(bool* show, bool isBusy)
         renderLightProperties(sel.lightIndex);
         break;
 
+      case SceneSelection::SelectionType::eTexture:
+        renderTextureProperties(sel.textureIndex);
+        break;
+
+      case SceneSelection::SelectionType::eImage:
+        renderImageProperties(sel.imageIndex);
+        break;
+
+      case SceneSelection::SelectionType::eSampler:
+        renderSamplerProperties(sel.samplerIndex);
+        break;
+
+      case SceneSelection::SelectionType::eAnimation:
+        renderAnimationProperties(sel.animationIndex);
+        break;
+
       default:
         renderNoSelection();
         break;
@@ -636,7 +656,7 @@ void UiInspector::renderNodeProperties(int nodeIdx)
 
   const tinygltf::Node& node = model.nodes[nodeIdx];
 
-  ImGui::Text("%s Node: %s", ICON_MS_CATEGORY, node.name.c_str());
+  ImGui::Text("%s Node[%d]: %s", ICON_MS_CATEGORY, nodeIdx, node.name.c_str());
 
   // XMP button
   std::string popupId = "inspector_node_xmp_" + std::to_string(nodeIdx);
@@ -651,12 +671,279 @@ void UiInspector::renderNodeProperties(int nodeIdx)
     ImGui::TextColored(ImVec4(1.0f, 0.8f, 0.3f, 1.0f), "%s Referenced asset (read-only)", ICON_MS_LOCK);
 
   ImGui::BeginDisabled(readOnly);
-  renderTransformSection(nodeIdx);
-  if(node.light > -1)
-    renderLightProperties(node.light);
-  if(node.camera > -1)
-    renderCameraProperties(node.camera);
+  if(ImGui::CollapsingHeader("TRANSFORM", ImGuiTreeNodeFlags_DefaultOpen))
+    renderTransformSection(nodeIdx);
   ImGui::EndDisabled();
+
+  // Pure navigation (jump links), not an edit -- stays clickable on a read-only node.
+  if(ImGui::CollapsingHeader("RELATIONSHIPS", ImGuiTreeNodeFlags_DefaultOpen))
+    renderNodeRelationships(nodeIdx);
+
+  ImGui::BeginDisabled(readOnly);
+  if(ImGui::CollapsingHeader("NODE EXTENSIONS"))
+    renderNodeExtensions(nodeIdx);
+  ImGui::EndDisabled();
+}
+
+//==================================================================================================
+// ELEMENT CROSS-REFERENCE LINK + NODE RELATIONSHIPS / EXTENSIONS
+//==================================================================================================
+
+bool UiInspector::elementLink(const char* label, SceneSelection::SelectionType kind, int index)
+{
+  if(index < 0)
+  {
+    ImGui::TextDisabled("%s", label);
+    return false;
+  }
+  ImGui::PushID(label);
+  ImGui::PushStyleColor(ImGuiCol_Text, ImVec4(0.42f, 0.72f, 1.00f, 1.0f));  // link blue
+  const bool clicked = ImGui::Selectable(label, false, ImGuiSelectableFlags_None, ImGui::CalcTextSize(label));
+  ImGui::PopStyleColor();
+  ImGui::PopID();
+  if(ImGui::IsItemHovered())
+    ImGui::SetMouseCursor(ImGuiMouseCursor_Hand);
+  if(clicked && m_selection)
+  {
+    switch(kind)
+    {
+      case SceneSelection::SelectionType::eNode:
+        m_selection->selectNode(index);
+        break;
+      case SceneSelection::SelectionType::eMesh:
+        m_selection->selectMesh(index);
+        break;
+      case SceneSelection::SelectionType::eMaterial:
+        m_selection->selectMaterial(index);
+        break;
+      case SceneSelection::SelectionType::eCamera:
+        m_selection->selectCamera(index);
+        break;
+      case SceneSelection::SelectionType::eLight:
+        m_selection->selectLight(index);
+        break;
+      case SceneSelection::SelectionType::eTexture:
+        m_selection->selectTexture(index);
+        break;
+      case SceneSelection::SelectionType::eImage:
+        m_selection->selectImage(index);
+        break;
+      case SceneSelection::SelectionType::eSampler:
+        m_selection->selectSampler(index);
+        break;
+      case SceneSelection::SelectionType::eAnimation:
+        m_selection->selectAnimation(index);
+        break;
+      default:
+        break;
+    }
+  }
+  return clicked;
+}
+
+std::string UiInspector::elementRefLabel(SceneSelection::SelectionType kind, int index) const
+{
+  if(index < 0)
+    return {};
+  const tinygltf::Model& model = m_scene->getModel();
+  const char*            icon  = ICON_MS_CATEGORY;
+  std::string            name;
+  switch(kind)
+  {
+    case SceneSelection::SelectionType::eNode:
+      if(index < int(model.nodes.size()))
+      {
+        const tinygltf::Node& n = model.nodes[index];
+        icon                    = n.mesh >= 0   ? ICON_MS_VIEW_IN_AR :
+                                  n.camera >= 0 ? ICON_MS_CAMERA_ALT :
+                                  n.light >= 0  ? ICON_MS_LIGHTBULB :
+                                                  ICON_MS_CATEGORY;
+        name                    = n.name;
+      }
+      break;
+    case SceneSelection::SelectionType::eMesh:
+      icon = ICON_MS_VIEW_IN_AR;
+      if(index < int(model.meshes.size()))
+        name = model.meshes[index].name;
+      break;
+    case SceneSelection::SelectionType::eMaterial:
+      icon = ICON_MS_BRUSH;
+      if(index < int(model.materials.size()))
+        name = model.materials[index].name;
+      break;
+    case SceneSelection::SelectionType::eCamera:
+      icon = ICON_MS_CAMERA_ALT;
+      if(index < int(model.cameras.size()))
+        name = model.cameras[index].name;
+      break;
+    case SceneSelection::SelectionType::eLight:
+      icon = ICON_MS_LIGHTBULB;
+      if(index < int(model.lights.size()))
+        name = model.lights[index].name;
+      break;
+    case SceneSelection::SelectionType::eTexture:
+      icon = ICON_MS_IMAGE;
+      if(index < int(model.textures.size()))
+        name = tinygltf::utils::getTextureUiLabel(model, index);
+      break;
+    case SceneSelection::SelectionType::eImage:
+      icon = ICON_MS_PHOTO;
+      name = uigltf::imageDisplayName(model, index);
+      break;
+    case SceneSelection::SelectionType::eSampler:
+      icon = ICON_MS_TUNE;
+      name = "Sampler " + std::to_string(index);
+      break;
+    case SceneSelection::SelectionType::eAnimation:
+      icon = ICON_MS_MOVIE;
+      if(index < int(model.animations.size()))
+        name = model.animations[index].name;
+      break;
+    default:
+      break;
+  }
+  char buf[256];
+  std::snprintf(buf, sizeof(buf), "%s [%d] %s", icon, index, name.c_str());
+  return buf;
+}
+
+void UiInspector::elementLinkRow(const char* rowLabel, SceneSelection::SelectionType kind, int index, float labelWidth, const char* emptyText)
+{
+  ImGui::AlignTextToFramePadding();
+  ImGui::TextUnformatted(rowLabel);
+  ImGui::SameLine(labelWidth);
+  if(index < 0)
+    ImGui::TextDisabled("%s", emptyText);
+  else
+    elementLink(elementRefLabel(kind, index).c_str(), kind, index);
+}
+
+void UiInspector::renderTexturesUsing(const char* header, const std::function<bool(const tinygltf::Texture&)>& match)
+{
+  const tinygltf::Model& model = m_scene->getModel();
+  ImGui::TextUnformatted(header);
+  ImGui::Indent();
+  bool any = false;
+  for(int t = 0; t < int(model.textures.size()); ++t)
+    if(match(model.textures[t]))
+    {
+      any = true;
+      elementLink(elementRefLabel(SceneSelection::SelectionType::eTexture, t).c_str(), SceneSelection::SelectionType::eTexture, t);
+    }
+  if(!any)
+    ImGui::TextDisabled("(none)");
+  ImGui::Unindent();
+}
+
+void UiInspector::renderNodeRelationships(int nodeIdx)
+{
+  const tinygltf::Model& model = m_scene->getModel();
+  const tinygltf::Node&  node  = model.nodes[nodeIdx];
+
+  elementLinkRow("Parent", SceneSelection::SelectionType::eNode, m_scene->editor().getNodeParent(nodeIdx), 120.0f, "Scene root");
+  elementLinkRow("Mesh", SceneSelection::SelectionType::eMesh, node.mesh);
+  elementLinkRow("Camera", SceneSelection::SelectionType::eCamera, node.camera);
+  elementLinkRow("Light", SceneSelection::SelectionType::eLight, node.light);
+
+  // Skin has no dedicated inspector/selection kind yet; show its index/name for reference.
+  ImGui::AlignTextToFramePadding();
+  ImGui::TextUnformatted("Skin");
+  ImGui::SameLine(120.0f);
+  if(node.skin < 0)
+    ImGui::TextDisabled("-");
+  else
+    ImGui::Text("[%d] %s", node.skin, node.skin < int(model.skins.size()) ? model.skins[node.skin].name.c_str() : "");
+
+  // Children (each a jump link)
+  ImGui::Spacing();
+  ImGui::Text("Children (%zu)", node.children.size());
+  ImGui::Indent();
+  if(node.children.empty())
+    ImGui::TextDisabled("none");
+  for(int c : node.children)
+    if(c >= 0 && c < int(model.nodes.size()))
+      elementLink(elementRefLabel(SceneSelection::SelectionType::eNode, c).c_str(), SceneSelection::SelectionType::eNode, c);
+  ImGui::Unindent();
+}
+
+void UiInspector::renderNodeExtensions(int nodeIdx)
+{
+  tinygltf::Node& node = m_scene->editor().getNodeForEdit(nodeIdx);
+
+  // Snapshot the current value of `extName` (or a null-typed sentinel if absent), compute the new value
+  // by calling `setter` on a scratch node, and push an undoable SetNodeExtensionCommand -- so toggling or
+  // adding a KHR_node_* flag is a normal reversible edit instead of a direct node.extensions mutation.
+  auto pushExtensionEdit = [&](const char* extName, const auto& setter, const char* description) {
+    tinygltf::Value oldValue =
+        tinygltf::utils::hasElementName(node.extensions, extName) ? node.extensions.at(extName) : tinygltf::Value{};
+    tinygltf::Node scratch;
+    setter(scratch);
+    m_undoStack->executeCommand(std::make_unique<SetNodeExtensionCommand>(*m_scene, nodeIdx, extName, oldValue,
+                                                                          scratch.extensions.at(extName), description));
+  };
+
+  ImGui::TextDisabled("glTF KHR_node_* extensions. Toggling adds the extension to the node if absent.");
+  if(PE::begin())
+  {
+    // KHR_node_visibility
+    if(tinygltf::utils::hasElementName(node.extensions, KHR_NODE_VISIBILITY_EXTENSION_NAME))
+    {
+      KHR_node_visibility visibility = tinygltf::utils::getNodeVisibility(node);
+      if(PE::Checkbox("Visible (KHR_node_visibility)", &visibility.visible, "Hide the node and its children from rendering."))
+      {
+        pushExtensionEdit(
+            KHR_NODE_VISIBILITY_EXTENSION_NAME,
+            [&visibility](tinygltf::Node& n) { tinygltf::utils::setNodeVisibility(n, visibility); },
+            visibility.visible ? "Show node" : "Hide node");
+      }
+    }
+    else if(PE::entry("Visible (KHR_node_visibility)", [&] { return ImGui::SmallButton("Add##vis"); }, "Add KHR_node_visibility so the node can be hidden."))
+    {
+      pushExtensionEdit(
+          KHR_NODE_VISIBILITY_EXTENSION_NAME, [](tinygltf::Node& n) { tinygltf::utils::setNodeVisibility(n, {}); }, "Add node visibility");
+    }
+
+    // KHR_node_selectability (picking only)
+    if(tinygltf::utils::hasElementName(node.extensions, KHR_NODE_SELECTABILITY_EXTENSION_NAME))
+    {
+      KHR_node_selectability selectability = tinygltf::utils::getNodeSelectability(node);
+      if(PE::Checkbox("Selectable (KHR_node_selectability)", &selectability.selectable,
+                      "When off, clicking this node (or a child) selects the nearest selectable ancestor instead."))
+      {
+        pushExtensionEdit(
+            KHR_NODE_SELECTABILITY_EXTENSION_NAME,
+            [&selectability](tinygltf::Node& n) { tinygltf::utils::setNodeSelectability(n, selectability); },
+            selectability.selectable ? "Make selectable" : "Make unselectable");
+      }
+    }
+    else if(PE::entry("Selectable (KHR_node_selectability)", [&] { return ImGui::SmallButton("Add##sel"); }, {}))
+    {
+      pushExtensionEdit(
+          KHR_NODE_SELECTABILITY_EXTENSION_NAME,
+          [](tinygltf::Node& n) { tinygltf::utils::setNodeSelectability(n, {}); }, "Add node selectability");
+    }
+
+    // KHR_node_hoverability (consumed by KHR_interactivity)
+    if(tinygltf::utils::hasElementName(node.extensions, KHR_NODE_HOVERABILITY_EXTENSION_NAME))
+    {
+      KHR_node_hoverability hoverability = tinygltf::utils::getNodeHoverability(node);
+      if(PE::Checkbox("Hoverable (KHR_node_hoverability)", &hoverability.hoverable,
+                      "Whether this node and its children can be hovered (consumed by KHR_interactivity)."))
+      {
+        pushExtensionEdit(
+            KHR_NODE_HOVERABILITY_EXTENSION_NAME,
+            [&hoverability](tinygltf::Node& n) { tinygltf::utils::setNodeHoverability(n, hoverability); },
+            hoverability.hoverable ? "Make hoverable" : "Make unhoverable");
+      }
+    }
+    else if(PE::entry("Hoverable (KHR_node_hoverability)", [&] { return ImGui::SmallButton("Add##hov"); }, {}))
+    {
+      pushExtensionEdit(
+          KHR_NODE_HOVERABILITY_EXTENSION_NAME, [](tinygltf::Node& n) { tinygltf::utils::setNodeHoverability(n, {}); },
+          "Add node hoverability");
+    }
+    PE::end();
+  }
 }
 
 //==================================================================================================
@@ -679,39 +966,15 @@ void UiInspector::renderPrimitiveProperties(int nodeIdx, int primIdx, int meshId
     renderTransformSection(nodeIdx);
   }
 
-  // Primitive -- clean: identity + geometry stats only
+  // Primitive -- identity (with jump links to node/mesh) + geometry stats. The material lives in its own
+  // section below, so renderPrimitiveDetail omits the material link here.
   if(ImGui::CollapsingHeader("PRIMITIVE"))
   {
     ImGui::Text("%s Primitive %d", ICON_MS_SHAPE_LINE, primIdx);
-    if(meshIdx >= 0 && meshIdx < static_cast<int>(model.meshes.size()))
-      ImGui::Text("%s Mesh(%d): %s", ICON_MS_SUBDIRECTORY_ARROW_RIGHT, meshIdx, model.meshes[meshIdx].name.c_str());
-    if(nodeIdx >= 0 && nodeIdx < static_cast<int>(model.nodes.size()))
-      ImGui::Text("%s Node(%d): %s", ICON_MS_SUBDIRECTORY_ARROW_RIGHT, nodeIdx, model.nodes[nodeIdx].name.c_str());
+    elementLinkRow("Node", SceneSelection::SelectionType::eNode, nodeIdx);
+    elementLinkRow("Mesh", SceneSelection::SelectionType::eMesh, meshIdx);
     ImGui::Separator();
-
-    if(meshIdx >= 0 && meshIdx < static_cast<int>(model.meshes.size()))
-    {
-      const tinygltf::Mesh& mesh = model.meshes[meshIdx];
-      if(primIdx >= 0 && primIdx < static_cast<int>(mesh.primitives.size()))
-      {
-        const tinygltf::Primitive& primitive = mesh.primitives[primIdx];
-
-        int  vertexCount = 0;
-        auto posIt       = primitive.attributes.find("POSITION");
-        if(posIt != primitive.attributes.end())
-        {
-          int accessorIdx = posIt->second;
-          if(accessorIdx >= 0 && accessorIdx < static_cast<int>(model.accessors.size()))
-            vertexCount = static_cast<int>(model.accessors[accessorIdx].count);
-        }
-
-        int triangleCount = 0;
-        if(primitive.indices >= 0 && primitive.indices < static_cast<int>(model.accessors.size()))
-          triangleCount = static_cast<int>(model.accessors[primitive.indices].count) / 3;
-
-        ImGui::Text("Vertices: %d   Triangles: %d", vertexCount, triangleCount);
-      }
-    }
+    renderPrimitiveDetail(meshIdx, primIdx);
   }
 
   // Material -- single home for assignment toolbar + property editor
@@ -748,12 +1011,20 @@ void UiInspector::renderMaterialProperties(int matIdx)
 
   const tinygltf::Material& material = model.materials[matIdx];
 
-  ImGui::Text("%s Material: %s", ICON_MS_BRUSH, material.name.c_str());
+  ImGui::Text("%s Material[%d]: %s", ICON_MS_BRUSH, matIdx, material.name.c_str());
 
   // XMP button
   std::string popupId = "inspector_mat_xmp_" + std::to_string(matIdx);
   ImGui::SameLine();
   ui_xmp::renderInfoButton(&m_scene->getModel(), material.extensions, popupId.c_str());
+
+  // How many primitives reference this material.
+  int usedByPrims = 0;
+  for(const tinygltf::Mesh& mesh : model.meshes)
+    for(const tinygltf::Primitive& prim : mesh.primitives)
+      if(prim.material == matIdx)
+        usedByPrims++;
+  ImGui::TextDisabled("Used by %d primitive(s)", usedByPrims);
 
   ImGui::Separator();
 
@@ -768,6 +1039,71 @@ void UiInspector::renderMaterialProperties(int matIdx)
 // MESH PROPERTIES
 //==================================================================================================
 
+// glTF primitive.mode -> name.
+static const char* primitiveModeName(int mode)
+{
+  switch(mode)
+  {
+    case TINYGLTF_MODE_POINTS:
+      return "POINTS";
+    case TINYGLTF_MODE_LINE:
+      return "LINES";
+    case TINYGLTF_MODE_LINE_LOOP:
+      return "LINE_LOOP";
+    case TINYGLTF_MODE_LINE_STRIP:
+      return "LINE_STRIP";
+    case TINYGLTF_MODE_TRIANGLES:
+      return "TRIANGLES";
+    case TINYGLTF_MODE_TRIANGLE_STRIP:
+      return "TRIANGLE_STRIP";
+    case TINYGLTF_MODE_TRIANGLE_FAN:
+      return "TRIANGLE_FAN";
+    default:
+      return "?";
+  }
+}
+
+// Accessor element count (0 if the accessor index is invalid) and the derived vertex/triangle counts of
+// a primitive - shared by the mesh totals and the per-primitive detail section.
+static long long accessorElementCount(const tinygltf::Model& model, int accessor)
+{
+  return (accessor >= 0 && accessor < int(model.accessors.size())) ? static_cast<long long>(model.accessors[accessor].count) : 0;
+}
+static long long primitiveVertexCount(const tinygltf::Model& model, const tinygltf::Primitive& p)
+{
+  auto it = p.attributes.find("POSITION");
+  return it != p.attributes.end() ? accessorElementCount(model, it->second) : 0;
+}
+static long long primitiveTriangleCount(const tinygltf::Model& model, const tinygltf::Primitive& p)
+{
+  const long long count = p.indices >= 0 ? accessorElementCount(model, p.indices) : primitiveVertexCount(model, p);
+  return uigltf::primitiveTriangleCountForMode(p.mode, count);
+}
+
+void UiInspector::renderPrimitiveDetail(int meshIdx, int primIdx)
+{
+  const tinygltf::Model& model = m_scene->getModel();
+  if(meshIdx < 0 || meshIdx >= int(model.meshes.size()))
+    return;
+  const tinygltf::Mesh& mesh = model.meshes[meshIdx];
+  if(primIdx < 0 || primIdx >= int(mesh.primitives.size()))
+    return;
+  const tinygltf::Primitive& prim = mesh.primitives[primIdx];
+
+  ImGui::Text("Mode: %s     Vertices: %lld     Triangles: %lld", primitiveModeName(prim.mode),
+              primitiveVertexCount(model, prim), primitiveTriangleCount(model, prim));
+
+  ImGui::Text("Attributes:");
+  ImGui::Indent();
+  for(const auto& [name, accessor] : prim.attributes)
+    ImGui::BulletText("%s  (accessor %d, %lld)", name.c_str(), accessor, accessorElementCount(model, accessor));
+  if(prim.indices >= 0)
+    ImGui::BulletText("INDICES  (accessor %d, %lld)", prim.indices, accessorElementCount(model, prim.indices));
+  if(!prim.targets.empty())
+    ImGui::BulletText("Morph targets: %zu", prim.targets.size());
+  ImGui::Unindent();
+}
+
 void UiInspector::renderMeshProperties(int meshIdx)
 {
   const tinygltf::Model& model = m_scene->getModel();
@@ -776,30 +1112,53 @@ void UiInspector::renderMeshProperties(int meshIdx)
 
   const tinygltf::Mesh& mesh = model.meshes[meshIdx];
 
-  ImGui::Text("%s Mesh: %s", ICON_MS_VIEW_IN_AR, mesh.name.c_str());
-
-  // XMP button
+  ImGui::Text("%s Mesh[%d]: %s", ICON_MS_VIEW_IN_AR, meshIdx, mesh.name.c_str());
   std::string popupId = "inspector_mesh_xmp_" + std::to_string(meshIdx);
   ImGui::SameLine();
   ui_xmp::renderInfoButton(&m_scene->getModel(), mesh.extensions, popupId.c_str());
-
   ImGui::Separator();
 
-  ImGui::Text("Primitives: %zu", mesh.primitives.size());
-
-  // List primitives
-  for(int i = 0; i < static_cast<int>(mesh.primitives.size()); ++i)
+  // Totals across primitives.
+  long long totalVerts = 0, totalTris = 0;
+  for(const tinygltf::Primitive& p : mesh.primitives)
   {
-    const tinygltf::Primitive& prim   = mesh.primitives[i];
-    int                        matIdx = prim.material;
+    totalVerts += primitiveVertexCount(model, p);
+    totalTris += primitiveTriangleCount(model, p);
+  }
+  ImGui::Text("Primitives: %zu    Vertices: %lld    Triangles: %lld", mesh.primitives.size(), totalVerts, totalTris);
 
-    std::string matName = "None";
-    if(matIdx >= 0 && matIdx < static_cast<int>(model.materials.size()))
+  // Instances: nodes that reference this mesh (jump to the first).
+  int instances = 0, firstNode = -1;
+  for(int n = 0; n < int(model.nodes.size()); ++n)
+    if(model.nodes[n].mesh == meshIdx)
     {
-      matName = model.materials[matIdx].name;
+      instances++;
+      if(firstNode < 0)
+        firstNode = n;
     }
+  ImGui::Text("Instances: %d", instances);
+  if(firstNode >= 0)
+  {
+    ImGui::SameLine();
+    elementLink(elementRefLabel(SceneSelection::SelectionType::eNode, firstNode).c_str(),
+                SceneSelection::SelectionType::eNode, firstNode);
+  }
+  ImGui::Separator();
 
-    ImGui::BulletText("Primitive %d: %s", i, matName.c_str());
+  // Per-primitive detail, then this view's own material jump link (the pick inspector has a full
+  // MATERIAL section instead, so the link lives at the call site rather than inside the shared helper).
+  for(int i = 0; i < int(mesh.primitives.size()); ++i)
+  {
+    ImGui::PushID(i);
+    char hdr[64];
+    std::snprintf(hdr, sizeof(hdr), "%s Primitive %d", ICON_MS_SHAPE_LINE, i);
+    if(ImGui::TreeNodeEx(hdr, i == 0 ? ImGuiTreeNodeFlags_DefaultOpen : 0))
+    {
+      renderPrimitiveDetail(meshIdx, i);
+      elementLinkRow("Material", SceneSelection::SelectionType::eMaterial, mesh.primitives[i].material, 100.0f, "none (default material)");
+      ImGui::TreePop();
+    }
+    ImGui::PopID();
   }
 }
 
@@ -815,7 +1174,16 @@ void UiInspector::renderCameraProperties(int camIdx)
 
   tinygltf::Camera& camera = m_scene->getModel().cameras[camIdx];  // No getCameraForEdit yet; direct access
 
-  ImGui::Text("%s Camera: %s", ICON_MS_CAMERA_ALT, camera.name.c_str());
+  ImGui::Text("%s Camera[%d]: %s", ICON_MS_CAMERA_ALT, camIdx, camera.name.c_str());
+  ImGui::TextDisabled("Type: %s", camera.type.empty() ? "perspective" : camera.type.c_str());
+  int camNode = -1;
+  for(int n = 0; n < int(model.nodes.size()); ++n)
+    if(model.nodes[n].camera == camIdx)
+    {
+      camNode = n;
+      break;
+    }
+  elementLinkRow("Attached to", SceneSelection::SelectionType::eNode, camNode, 100.0f, "(unattached)");
   ImGui::Separator();
 
   if(PE::begin())
@@ -875,7 +1243,15 @@ void UiInspector::renderLightProperties(int lightIdx)
   // Snapshot before any widget can modify the light (for undo)
   tinygltf::Light preEditLight = light;
 
-  ImGui::Text("%s Light: %s", ICON_MS_LIGHTBULB, light.name.c_str());
+  ImGui::Text("%s Light[%d]: %s", ICON_MS_LIGHTBULB, lightIdx, light.name.c_str());
+  int lightNode = -1;
+  for(int n = 0; n < int(model.nodes.size()); ++n)
+    if(model.nodes[n].light == lightIdx)
+    {
+      lightNode = n;
+      break;
+    }
+  elementLinkRow("Attached to", SceneSelection::SelectionType::eNode, lightNode, 100.0f, "(unattached)");
   ImGui::Separator();
 
   bool modif = false;
@@ -1000,6 +1376,229 @@ void UiInspector::renderLightProperties(int lightIdx)
 }
 
 //==================================================================================================
+// TEXTURE / IMAGE / SAMPLER / ANIMATION PROPERTIES (resource pools)
+//==================================================================================================
+
+void UiInspector::renderTextureProperties(int textureIdx)
+{
+  const tinygltf::Model& model = m_scene->getModel();
+  if(textureIdx < 0 || textureIdx >= static_cast<int>(model.textures.size()))
+  {
+    renderNoSelection();
+    return;
+  }
+  const tinygltf::Texture& tex = model.textures[textureIdx];
+
+  ImGui::Text("%s Texture %d", ICON_MS_IMAGE, textureIdx);
+  ImGui::TextDisabled("%s", tinygltf::utils::getTextureUiLabel(model, textureIdx).c_str());
+  ImGui::Separator();
+
+  const int         imgIdx = tinygltf::utils::getTextureImageIndex(tex);
+  const ImTextureID thumb  = m_host.thumbnail(textureIdx);
+  if(thumb != ImTextureID(0))
+  {
+    if(ImGui::ImageButton("texthumb", thumb, ImVec2(96.0f, 96.0f)) && m_onViewImage && imgIdx >= 0)
+      m_onViewImage(imgIdx);
+    if(ImGui::IsItemHovered())
+      ImGui::SetTooltip("Open the full image");
+  }
+
+  // One undo step per image/sampler-reference change (matches the old texture "tune" popup).
+  auto commitTexture = [&](const tinygltf::Texture& edited) {
+    if(m_undoStack)
+      m_undoStack->executeCommand(std::make_unique<EditTextureCommand>(*m_scene, textureIdx, tex, edited,
+                                                                       "Edit texture " + std::to_string(textureIdx)));
+  };
+
+  // getTextureImageIndex() (imgIdx, above) prefers a vendor extension's own `source` over this base
+  // field when one is present (EXT_texture_webp / MSFT_texture_dds / KHR_texture_basisu) -- writing
+  // tex.source in that case would have no visible effect, so gate the field off instead.
+  const bool imageSourceOverridden = tinygltf::utils::hasTextureImageSourceOverride(tex);
+  int        imageIdx              = tex.source;
+  ImGui::BeginDisabled(imageSourceOverridden);
+  ImGui::SetNextItemWidth(120.0f);
+  if(ImGui::InputInt("Image", &imageIdx) && !model.images.empty())
+  {
+    imageIdx = std::clamp(imageIdx, 0, static_cast<int>(model.images.size()) - 1);
+    if(imageIdx != tex.source)
+    {
+      tinygltf::Texture edited = tex;
+      edited.source            = imageIdx;
+      commitTexture(edited);
+    }
+  }
+  ImGui::EndDisabled();
+  if(imageSourceOverridden)
+  {
+    ImGui::SameLine();
+    ImGui::TextDisabled("(from vendor extension)");
+    if(ImGui::IsItemHovered())
+      ImGui::SetTooltip("The active image comes from a WebP/DDS/BasisU extension override, not this base source field.");
+  }
+  if(imgIdx >= 0)
+  {
+    ImGui::SameLine();
+    char buf[64];
+    std::snprintf(buf, sizeof(buf), "%s go to image", ICON_MS_IMAGE);
+    elementLink(buf, SceneSelection::SelectionType::eImage, imgIdx);
+  }
+
+  int samplerIdx = tex.sampler;
+  ImGui::SetNextItemWidth(120.0f);
+  if(ImGui::InputInt("Sampler (-1=default)", &samplerIdx))
+  {
+    samplerIdx = std::clamp(samplerIdx, -1, static_cast<int>(model.samplers.size()) - 1);
+    if(samplerIdx != tex.sampler)
+    {
+      tinygltf::Texture edited = tex;
+      edited.sampler           = samplerIdx;
+      commitTexture(edited);
+    }
+  }
+  if(tex.sampler >= 0 && tex.sampler < static_cast<int>(model.samplers.size()))
+  {
+    ImGui::SameLine();
+    char buf[64];
+    std::snprintf(buf, sizeof(buf), "%s go to sampler", ICON_MS_TUNE);
+    elementLink(buf, SceneSelection::SelectionType::eSampler, tex.sampler);
+  }
+
+  // Inline wrap/filter editing of the referenced sampler (one undo step per field).
+  if(tex.sampler >= 0 && tex.sampler < static_cast<int>(model.samplers.size()))
+  {
+    ImGui::SeparatorText("Sampler");
+    const int               si  = tex.sampler;
+    const tinygltf::Sampler cur = model.samplers[si];
+    uigltf::renderSamplerFields(cur, [&](const tinygltf::Sampler& edited) {
+      if(m_undoStack)
+        m_undoStack->executeCommand(
+            std::make_unique<EditSamplerCommand>(*m_scene, si, cur, edited, "Edit sampler " + std::to_string(si)));
+    });
+  }
+}
+
+void UiInspector::renderImageProperties(int imageIdx)
+{
+  const tinygltf::Model& model = m_scene->getModel();
+  if(imageIdx < 0 || imageIdx >= static_cast<int>(model.images.size()))
+  {
+    renderNoSelection();
+    return;
+  }
+  const tinygltf::Image& image = model.images[imageIdx];
+
+  ImGui::Text("%s Image %d", ICON_MS_PHOTO, imageIdx);
+  ImGui::TextDisabled("%s", uigltf::imageDisplayName(model, imageIdx).c_str());
+  ImGui::Text("Source: %s", image.uri.empty() ? "embedded" : "external");
+  if(image.width > 0 && image.height > 0)
+    ImGui::Text("Resolution: %d x %d", image.width, image.height);
+  ImGui::Text("Referenced by %d texture(s)", m_scene->editor().countTextureRefsToImage(imageIdx));
+  ImGui::Separator();
+
+  const ImTextureID thumb = m_getImageThumbnail ? m_getImageThumbnail(imageIdx) : ImTextureID(0);
+  if(thumb != ImTextureID(0) && image.width > 0 && image.height > 0)
+  {
+    const float w = std::min(192.0f, static_cast<float>(image.width));
+    const float h = w * static_cast<float>(image.height) / static_cast<float>(image.width);
+    if(ImGui::ImageButton("imgview", thumb, ImVec2(w, h)) && m_onViewImage)
+      m_onViewImage(imageIdx);
+  }
+
+  ImGui::BeginDisabled(!m_host.canPickImage());
+  if(ImGui::Button(ICON_MS_FILE_OPEN " Replace..."))
+  {
+    const std::filesystem::path path = m_host.pickImage();
+    if(!path.empty())
+    {
+      const tinygltf::Image oldImage = image;  // copy before replace
+      std::string           err;
+      if(m_scene->editor().replaceImageFromFile(imageIdx, path, &err))
+      {
+        if(m_undoStack)
+          m_undoStack->pushExecuted(std::make_unique<ReplaceImageCommand>(*m_scene, imageIdx, oldImage,
+                                                                          m_scene->getModel().images[imageIdx],
+                                                                          "Replace image " + std::to_string(imageIdx)));
+      }
+      else
+      {
+        LOGE("Replace image failed: %s\n", err.c_str());
+        m_host.toast("Replace image failed: " + err, true);
+      }
+    }
+  }
+  ImGui::EndDisabled();
+  ImGui::SameLine();
+  if(ImGui::Button(ICON_MS_VISIBILITY " View") && m_onViewImage)
+    m_onViewImage(imageIdx);
+  ImGui::SameLine();
+  if(ImGui::Button(ICON_MS_REFRESH " Reload"))
+    m_scene->getDirtyFlags().texturesChanged = true;  // force re-decode from the URI on the next rebuild
+
+  // Textures that reference this image (jump links).
+  ImGui::Separator();
+  renderTexturesUsing("Used by textures:",
+                      [&](const tinygltf::Texture& tx) { return tinygltf::utils::getTextureImageIndex(tx) == imageIdx; });
+}
+
+void UiInspector::renderSamplerProperties(int samplerIdx)
+{
+  const tinygltf::Model& model = m_scene->getModel();
+  if(samplerIdx < 0 || samplerIdx >= static_cast<int>(model.samplers.size()))
+  {
+    renderNoSelection();
+    return;
+  }
+  ImGui::Text("%s Sampler %d", ICON_MS_TUNE, samplerIdx);
+  ImGui::Separator();
+
+  const tinygltf::Sampler cur = model.samplers[samplerIdx];
+  uigltf::renderSamplerFields(cur, [&](const tinygltf::Sampler& edited) {
+    if(m_undoStack)
+      m_undoStack->executeCommand(std::make_unique<EditSamplerCommand>(*m_scene, samplerIdx, cur, edited,
+                                                                       "Edit sampler " + std::to_string(samplerIdx)));
+  });
+
+  // Textures that reference this sampler (jump links).
+  ImGui::Separator();
+  renderTexturesUsing("Used by textures:", [&](const tinygltf::Texture& tx) { return tx.sampler == samplerIdx; });
+}
+
+void UiInspector::renderAnimationProperties(int animIdx)
+{
+  const tinygltf::Model& model = m_scene->getModel();
+  if(animIdx < 0 || animIdx >= static_cast<int>(model.animations.size()))
+  {
+    renderNoSelection();
+    return;
+  }
+  const tinygltf::Animation& anim = model.animations[animIdx];
+
+  ImGui::Text("%s Animation[%d]: %s", ICON_MS_MOVIE, animIdx, anim.name.empty() ? "(unnamed)" : anim.name.c_str());
+  ImGui::Separator();
+  ImGui::Text("Channels: %d    Samplers: %d", static_cast<int>(anim.channels.size()), static_cast<int>(anim.samplers.size()));
+
+  // Per-channel target: node (jump link) + animated path (translation/rotation/scale/weights/pointer).
+  ImGui::Text("Targets:");
+  ImGui::Indent();
+  for(const tinygltf::AnimationChannel& ch : anim.channels)
+  {
+    if(ch.target_node >= 0 && ch.target_node < static_cast<int>(model.nodes.size()))
+    {
+      elementLink(elementRefLabel(SceneSelection::SelectionType::eNode, ch.target_node).c_str(),
+                  SceneSelection::SelectionType::eNode, ch.target_node);
+      ImGui::SameLine();
+      ImGui::TextDisabled("\xc2\xb7 %s", ch.target_path.c_str());
+    }
+    else
+    {
+      ImGui::TextDisabled("(pointer) \xc2\xb7 %s", ch.target_path.c_str());
+    }
+  }
+  ImGui::Unindent();
+  ImGui::TextDisabled("Playback is controlled from the Animations panel.");
+}
+
+//==================================================================================================
 // TRANSFORM SECTION
 //==================================================================================================
 
@@ -1059,80 +1658,6 @@ void UiInspector::renderTransformSection(int nodeIdx)
     }
 
     m_transformModifiedLastFrame = modif;
-
-    // Visibility extension
-    bool hasVisibility = tinygltf::utils::hasElementName(node.extensions, KHR_NODE_VISIBILITY_EXTENSION_NAME);
-    if(hasVisibility)
-    {
-      KHR_node_visibility visibility = tinygltf::utils::getNodeVisibility(node);
-      if(PE::Checkbox("Visible", &visibility.visible, "KHR_node_visibility: hide the node and its children from rendering."))
-      {
-        tinygltf::utils::setNodeVisibility(node, visibility);
-        if(m_scene)
-        {
-          m_scene->editor().updateVisibility(nodeIdx);
-          m_scene->markNodeDirty(nodeIdx);
-        }
-      }
-    }
-    else
-    {
-      if(ImGui::SmallButton("Add Visibility"))
-      {
-        tinygltf::utils::setNodeVisibility(node, {});  // Default: visible = true
-        if(m_scene)
-        {
-          m_scene->editor().updateVisibility(nodeIdx);
-          m_scene->markNodeDirty(nodeIdx);
-        }
-      }
-    }
-
-    // Selectability extension (KHR_node_selectability). Does not affect rendering, only picking.
-    bool hasSelectability = tinygltf::utils::hasElementName(node.extensions, KHR_NODE_SELECTABILITY_EXTENSION_NAME);
-    if(hasSelectability)
-    {
-      KHR_node_selectability selectability = tinygltf::utils::getNodeSelectability(node);
-      if(PE::Checkbox("Selectable", &selectability.selectable,
-                      "KHR_node_selectability: when off, clicking this node or its children selects the nearest selectable ancestor instead."))
-      {
-        tinygltf::utils::setNodeSelectability(node, selectability);
-        if(m_scene)
-          m_scene->markNodeDirty(nodeIdx);
-      }
-    }
-    else
-    {
-      if(ImGui::SmallButton("Add Selectability"))
-      {
-        tinygltf::utils::setNodeSelectability(node, {});  // Default: selectable = true
-        if(m_scene)
-          m_scene->markNodeDirty(nodeIdx);
-      }
-    }
-
-    // Hoverability extension (KHR_node_hoverability). Parsed and preserved; used by KHR_interactivity.
-    bool hasHoverability = tinygltf::utils::hasElementName(node.extensions, KHR_NODE_HOVERABILITY_EXTENSION_NAME);
-    if(hasHoverability)
-    {
-      KHR_node_hoverability hoverability = tinygltf::utils::getNodeHoverability(node);
-      if(PE::Checkbox("Hoverable", &hoverability.hoverable,
-                      "KHR_node_hoverability: marks whether this node and its children can be hovered (consumed by KHR_interactivity)."))
-      {
-        tinygltf::utils::setNodeHoverability(node, hoverability);
-        if(m_scene)
-          m_scene->markNodeDirty(nodeIdx);
-      }
-    }
-    else
-    {
-      if(ImGui::SmallButton("Add Hoverability"))
-      {
-        tinygltf::utils::setNodeHoverability(node, {});  // Default: hoverable = true
-        if(m_scene)
-          m_scene->markNodeDirty(nodeIdx);
-      }
-    }
 
     PE::end();
   }
@@ -1336,8 +1861,8 @@ void UiInspector::renderMaterialAssignmentToolbar(int meshIdx, int primIdx, int 
 
   ImGui::PushID("mat_toolbar");
 
-  // [Split] -- duplicate mesh + material for independent editing
-  if(ImGui::SmallButton(ICON_MS_CALL_SPLIT))
+  // [Split] -- duplicate mesh + material for independent editing (### id for UI-test scenarios)
+  if(ImGui::SmallButton(ICON_MS_CALL_SPLIT "###split"))
   {
     int newMatIdx = m_scene->editor().splitPrimitiveMaterial(nodeIdx, primIdx);
     if(newMatIdx >= 0 && m_selection)
@@ -1357,7 +1882,7 @@ void UiInspector::renderMaterialAssignmentToolbar(int meshIdx, int primIdx, int 
 
   // [Merge] -- reverse of Split: use shared mesh, remove duplicate (search done only on click to avoid cost in large scenes)
   ImGui::SameLine(0.0f, 2.0f);
-  if(ImGui::SmallButton(ICON_MS_CALL_MERGE))
+  if(ImGui::SmallButton(ICON_MS_CALL_MERGE "###merge"))
   {
     int result = m_scene->editor().mergePrimitiveMaterial(nodeIdx);
     if(result >= 0 && m_selection)
@@ -1496,8 +2021,16 @@ void UiInspector::renderMaterialOperations(int matIdx, int nodeContext)
 
   if(ImGui::SmallButton(ICON_MS_CONTENT_COPY " Duplicate"))
   {
-    int newIdx = m_scene->editor().duplicateMaterial(matIdx);
+    const int          newIdx = static_cast<int>(m_scene->getModel().materials.size());
+    tinygltf::Material mat    = m_scene->getModel().materials[matIdx];
+    mat.name += "_copy";
+    if(m_undoStack)
+      m_undoStack->executeCommand(std::make_unique<MaterialLifecycleCommand>(*m_scene, newIdx, mat, true, "Duplicate material"));
+    else
+      (void)m_scene->editor().insertMaterialAt(newIdx, mat);  // tail append: newIdx is always the effective index
     LOGI("Duplicated material %d -> %d\n", matIdx, newIdx);
+    if(m_selection)
+      m_selection->selectMaterial(newIdx);
   }
   if(ImGui::IsItemHovered())
   {
@@ -1540,7 +2073,7 @@ bool UiInspector::renderMaterialExtensions(tinygltf::Material& material, int mat
   anyChange |= materialRetroreflection(material);
   anyChange |= materialUnlit(material);
   anyChange |= materialVolume(material, matIdx);  // Volume needs matIdx for special RTX dirty marking
-  anyChange |= materialVolumeScatter(material);
+  anyChange |= materialScatter(material);
 
   // Single point of truth for dirty marking
   if(anyChange)
@@ -1574,15 +2107,25 @@ bool UiInspector::renderMaterialExtensionSection(tinygltf::Material&          ma
                                                  const char*                  treeLabel,
                                                  const char*                  extName,
                                                  const std::function<bool()>& whenHasExt,
-                                                 const std::function<void()>& whenAdd)
+                                                 const std::function<void()>& whenAdd,
+                                                 const char*                  aliasExtName)
 {
-  bool hasExt  = tinygltf::utils::hasElementName(material.extensions, extName);
+  // aliasExtName lets an extension be recognized under a legacy name too (e.g.
+  // KHR_materials_volume_scatter for KHR_materials_scatter), so legacy assets show the populated
+  // section instead of an "Add" button. The section's editor callback migrates to extName on edit.
+  bool hasExt = tinygltf::utils::hasElementName(material.extensions, extName)
+                || (aliasExtName && tinygltf::utils::hasElementName(material.extensions, aliasExtName));
   bool changed = false;
   if(ImGui::TreeNodeEx(treeLabel, hasExt ? ImGuiTreeNodeFlags_DefaultOpen : 0))
   {
     if(hasExt)
     {
-      changed |= removeButton(material, extName);
+      if(removeButton(material, extName))
+      {
+        if(aliasExtName)
+          material.extensions.erase(aliasExtName);  // remove the legacy-named copy too
+        changed = true;
+      }
       changed |= whenHasExt();
     }
     else
@@ -1902,7 +2445,10 @@ bool UiInspector::materialVolume(tinygltf::Material& material, int matIdx)
           modif |= PE::DragFloat("Thickness", &volume.thicknessFactor, 0.01f, 0.0f, 1.0f, "%.3f", 0,
                                  "Volume thickness beneath the surface (mesh coordinate space).\n"
                                  "0 = thin-walled. > 0 = volumetric (requires closed mesh).\n"
-                                 "Ray tracers use actual distance; rasterizers use this as approximation.");
+                                 "Path tracer: acts as an on/off switch only -- the magnitude doesn't matter (0.1 looks\n"
+                                 "the same as 5.0), because absorption uses the real ray-traced hit distance instead.\n"
+                                 "Rasterizer: has no ray-traced exit point, so this value's magnitude directly scales\n"
+                                 "the approximate transmission ray length.");
           modif |= colorEdit3Linear("Attenuation Color", glm::value_ptr(volume.attenuationColor),
                                     "Color that white light becomes after traveling the attenuation distance\n"
                                     "(shown/edited in linear; swatch/wheel perceptual). Models wavelength-dependent absorption via Beer's law.");
@@ -1921,9 +2467,7 @@ bool UiInspector::materialVolume(tinygltf::Material& material, int matIdx)
                                    "Smaller = denser medium, faster color absorption.");
           }
 
-          ImGui::BeginDisabled(true);
-          modif |= renderTextureEditRow("Thickness", volume.thicknessTexture);
-          ImGui::EndDisabled();
+          modif |= renderTextureEditRow("Volume Thickness", volume.thicknessTexture);
           PE::end();
         }
         if(modif)
@@ -1937,32 +2481,44 @@ bool UiInspector::materialVolume(tinygltf::Material& material, int matIdx)
       [&material]() { tinygltf::utils::setVolume(material, {}); });
 }
 
-bool UiInspector::materialVolumeScatter(tinygltf::Material& material)
+bool UiInspector::materialScatter(tinygltf::Material& material)
 {
   return renderMaterialExtensionSection(
-      material, "Volume Scatter", KHR_MATERIALS_VOLUME_SCATTER_EXTENSION_NAME,
-      [&material]() {
-        KHR_materials_volume_scatter volumeScatter = tinygltf::utils::getVolumeScatter(material);
-        bool                         modif         = false;
+      material, "Scatter", KHR_MATERIALS_SCATTER_EXTENSION_NAME,
+      [this, &material]() {
+        KHR_materials_scatter scatter = tinygltf::utils::getScatter(material);
+        bool                  modif   = false;
         if(PE::begin())
         {
-          modif |= colorEdit3Linear("Multiscatter Color", glm::value_ptr(volumeScatter.multiscatterColorFactor),
-                                    "Multi-scatter albedo (shown/edited in linear; swatch/wheel perceptual). Black = no scattering.\n"
-                                    "Approximates the perceived color after many scattering bounces.\n"
-                                    "Requires KHR_materials_volume.");
-          modif |= PE::SliderFloat("Scatter Anisotropy", &volumeScatter.scatterAnisotropy, -1.0f, 1.0f, "%.3f", 0,
+          modif |= PE::SliderFloat("Scatter Strength", &scatter.scatterStrengthFactor, 0.0f, 1.0f, "%.3f", 0,
+                                   "Strength of the scattering effect [0, 1].\n"
+                                   "0 = no scattering (extension has no effect). 1 = full scattering.\n"
+                                   "With KHR_materials_volume (thickness > 0): volumetric scattering.\n"
+                                   "Without volume (thin-walled): anisotropy-controlled diffuse transmission/reflection.");
+          modif |= colorEdit3Linear("Multiscatter Color", glm::value_ptr(scatter.multiscatterColorFactor),
+                                    "Multi-scatter albedo (shown/edited in linear; swatch/wheel perceptual).\n"
+                                    "Approximates the perceived color after many scattering bounces.");
+          // The range is open, and the loader clamps to +/-0.999; keep the slider inside it so the
+          // edited value survives a save/reload round-trip unchanged.
+          modif |= PE::SliderFloat("Scatter Anisotropy", &scatter.scatterAnisotropy, -0.999f, 0.999f, "%.3f", 0,
                                    "Henyey-Greenstein phase function parameter (-1, 1).\n"
-                                   "0 = isotropic. Positive = forward scattering. Negative = backward scattering.");
+                                   "0 = isotropic. Positive = forward scattering. Negative = backward scattering.\n"
+                                   "Thin-walled: splits the scattered energy between transmission (+1) and reflection (-1).");
+          modif |= renderTextureEditRow("Scatter Strength", scatter.scatterStrengthTexture);
+          modif |= renderTextureEditRow("Multiscatter Color", scatter.multiscatterColorTexture);
           PE::end();
         }
         if(modif)
         {
-          // ImGui's triangle HSV picker clamps S,V to 0.0001, preventing exact black
-          if(glm::all(glm::lessThan(volumeScatter.multiscatterColorFactor, glm::vec3(0.001f))))
-            volumeScatter.multiscatterColorFactor = glm::vec3(0.0f);
-          tinygltf::utils::setVolumeScatter(material, volumeScatter);
+          // Editing migrates to the current extension name; drop any legacy-named copy.
+          material.extensions.erase(KHR_MATERIALS_VOLUME_SCATTER_EXTENSION_NAME);
+          tinygltf::utils::setScatter(material, scatter);
         }
         return modif;
       },
-      [&material]() { tinygltf::utils::setVolumeScatter(material, {}); });
+      [&material]() {
+        material.extensions.erase(KHR_MATERIALS_VOLUME_SCATTER_EXTENSION_NAME);
+        tinygltf::utils::setScatter(material, {});
+      },
+      KHR_MATERIALS_VOLUME_SCATTER_EXTENSION_NAME);
 }

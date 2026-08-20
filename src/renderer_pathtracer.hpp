@@ -101,7 +101,8 @@ public:
       VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_RAY_TRACING_INVOCATION_REORDER_PROPERTIES_NV};
 
   bool m_supportSER{false};         // True when the device supports SER (Shader Execution Reordering).
-  bool m_useSER{false};             // True when the device is using SER.
+  bool m_useSER{true};              // Requested SER state; clamped to m_supportSER each frame.
+  bool m_pipelineUseSER{false};     // SER value the currently-live pipelines were built with.
   bool m_compiledWireframe{false};  // True when the shader is the wireframe build.
   bool m_compiledVisualize{false};  // True when the shader has the debug-visualization code compiled in (USE_VISUALIZE).
   bool m_compiledOptimal{false};    // True when the shader is the scene-aware optimized build.
@@ -136,8 +137,9 @@ public:
     VkShaderModule              shaderModule = VK_NULL_HANDLE;
     VkPipeline                  rtxPipeline  = VK_NULL_HANDLE;
     VkPipeline                  rqPipeline   = VK_NULL_HANDLE;
-    nvvk::Buffer                sbtBuffer{};   // Buffer for the SBT (Shader Binding Table)
-    nvvk::SBTGenerator::Regions sbtRegions{};  // The SBT regions (raygen, miss, chit, ahit)
+    bool                        useSER       = false;  // SER value the cached pipelines were built with.
+    nvvk::Buffer                sbtBuffer{};           // Buffer for the SBT (Shader Binding Table)
+    nvvk::SBTGenerator::Regions sbtRegions{};          // The SBT regions (raygen, miss, chit, ahit)
   };
   std::vector<VariantCacheEntry> m_variantCache;  // MRU front, LRU back
   static constexpr size_t        kVariantCacheMaxEntries = 8;

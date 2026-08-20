@@ -124,6 +124,11 @@ public:
   // that would re-read every image from disk. The caller writes only the new descriptor slots afterwards.
   void syncTextureTail(VkCommandBuffer cmd, nvvk::StagingUploader& staging, nvvkgltf::Scene& scn);
 
+  // In-place update of one sampler's wrap/filter (DirtyFlags::samplers): recreates only the VkSampler
+  // at model.samplers[samplerIndex]'s slot via the sampler pool. Images and texture views are untouched;
+  // the caller only needs to rewrite that one eSamplers descriptor slot afterwards.
+  void updateSampler(const tinygltf::Model& model, int samplerIndex);
+
   // Rebuild for a merge/reference append: geometry, render nodes, materials and lights are re-derived
   // from the (grown) model, but existing GPU images/textures/samplers are kept and only the new tail
   // images are loaded (via syncTextureTail). This is create() without the destroy()/full image re-read,
@@ -231,6 +236,8 @@ protected:
   void ensureSamplers(const tinygltf::Model& model);
   // Destroy a GPU image via the deferred-free callback (or a queue wait fallback). Mirrors destroyBufferDeferred.
   void destroyImageDeferred(nvvk::Image& image);
+  // Release a VkSampler via the deferred-free callback (or a queue wait fallback). Mirrors destroyImageDeferred.
+  void releaseSamplerDeferred(VkSampler sampler);
 
   // Fill m_textureSamplerSlots (glTF texture index -> sampler slot) from the model. Pure model data, so
   // it must run before uploadMaterials(), which bakes the slots into GltfTextureInfo.samplerIndex.

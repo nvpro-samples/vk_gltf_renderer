@@ -53,6 +53,7 @@ class Scene;
 namespace tinygltf {
 struct Material;
 struct Light;
+struct Texture;
 }  // namespace tinygltf
 
 class UiInspector
@@ -72,6 +73,8 @@ public:
   // Open the large image viewer for a glTF image index (wired to the scene browser's viewer). Lets a
   // click on a slot's thumbnail show the full-size image. No-op when unset.
   void setViewImageCallback(std::function<void(int)> cb) { m_onViewImage = std::move(cb); }
+  // Resolve a glTF image index to a bounded ImGui thumbnail (0 if none) for the Image inspector.
+  void setImageThumbnailCallback(std::function<ImTextureID(int)> cb) { m_getImageThumbnail = std::move(cb); }
 
   // Rebuild the cached texture-name list from the current model. Call after the texture set changes
   // outside the inspector (e.g. undo/redo of an import).
@@ -90,6 +93,28 @@ private:
   void renderMeshProperties(int meshIdx);
   void renderCameraProperties(int camIdx);
   void renderLightProperties(int lightIdx);
+  void renderTextureProperties(int textureIdx);
+  void renderImageProperties(int imageIdx);
+  void renderSamplerProperties(int samplerIdx);
+  void renderAnimationProperties(int animIdx);
+
+  // Clickable cross-reference: renders `label` as a link and, when clicked, selects (jumps to) element
+  // `index` of the given kind so the Inspector navigates the glTF graph. Negative index => disabled dash.
+  bool elementLink(const char* label, SceneSelection::SelectionType kind, int index);
+  // Canonical "<icon> [index] <name>" label for a cross-reference of `kind` (bounds-checked; empty if invalid).
+  std::string elementRefLabel(SceneSelection::SelectionType kind, int index) const;
+  // A "rowLabel:   <link>" row (or `emptyText` when index < 0), links aligned at labelWidth. The one place
+  // every single-reference row is formatted, so the "icon [idx] name" convention can't drift per call site.
+  void elementLinkRow(const char* rowLabel, SceneSelection::SelectionType kind, int index, float labelWidth = 120.0f, const char* emptyText = "-");
+  // "<header>" + the textures satisfying `match`, each a jump link (or "(none)"). Shared by the Image and
+  // Sampler inspectors' reverse "used by textures" lists.
+  void renderTexturesUsing(const char* header, const std::function<bool(const tinygltf::Texture&)>& match);
+  void renderNodeRelationships(int nodeIdx);  // parent / mesh / camera / light / skin / children as jump links
+  void renderNodeExtensions(int nodeIdx);     // KHR_node_visibility / selectability / hoverability (+ other exts)
+  // One primitive's detail (mode, vertex/triangle counts, attribute->accessor list). Shared by the Mesh
+  // inspector (per primitive) and the composite primitive/pick inspector. The material link is not part of
+  // this block: callers that want it append their own row (the pick inspector has a full MATERIAL section).
+  void renderPrimitiveDetail(int meshIdx, int primIdx);
 
   //==================================================================================================
   // PROPERTY SECTIONS (reusable)
@@ -136,7 +161,8 @@ private:
                                       const char*                  treeLabel,
                                       const char*                  extName,
                                       const std::function<bool()>& whenHasExt,
-                                      const std::function<void()>& whenAdd);
+                                      const std::function<void()>& whenAdd,
+                                      const char*                  aliasExtName = nullptr);
 
   // All 12 material extension functions (from original)
   // Return true if material was modified
@@ -153,7 +179,7 @@ private:
   bool materialRetroreflection(tinygltf::Material& material);
   bool materialUnlit(tinygltf::Material& material);
   bool materialVolume(tinygltf::Material& material, int matIdx);  // Needs matIdx for special RTX dirty marking
-  bool materialVolumeScatter(tinygltf::Material& material);
+  bool materialScatter(tinygltf::Material& material);
 
   //==================================================================================================
   // MEMBER VARIABLES
@@ -164,8 +190,9 @@ private:
   nvutils::Bbox    m_bbox;
 
   // Renderer-provided host services (file dialog, thumbnails, toasts) shared with the scene browser.
-  UiHostServices           m_host;
-  std::function<void(int)> m_onViewImage;  // open the large image viewer for an image index
+  UiHostServices                  m_host;
+  std::function<void(int)>        m_onViewImage;        // open the large image viewer for an image index
+  std::function<ImTextureID(int)> m_getImageThumbnail;  // image index -> ImGui thumbnail (Image inspector)
 
   // Cached texture names (for material dropdowns)
   std::vector<std::string> m_textureNames;

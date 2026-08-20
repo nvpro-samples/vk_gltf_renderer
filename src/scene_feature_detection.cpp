@@ -37,7 +37,7 @@ struct FeatureName
 constexpr std::array<FeatureName, SceneFeatureSet::kFeatureCount> kFeatureNames{{
     {SceneFeatureSet::eTransmission, "transmission"},
     {SceneFeatureSet::eVolume, "volume"},
-    {SceneFeatureSet::eVolumeScatter, "volumeScatter"},
+    {SceneFeatureSet::eScatter, "scatter"},
     {SceneFeatureSet::eClearcoat, "clearcoat"},
     {SceneFeatureSet::eIridescence, "iridescence"},
     {SceneFeatureSet::eAnisotropy, "anisotropy"},
@@ -187,8 +187,8 @@ SceneFeatureSet detectSceneFeatures(const std::vector<tinygltf::Material>& mater
       set.enable(SceneFeatureSet::eTransmission);
     if(hasExt(ext, KHR_MATERIALS_VOLUME_EXTENSION_NAME))
       set.enable(SceneFeatureSet::eVolume);
-    if(hasExt(ext, KHR_MATERIALS_VOLUME_SCATTER_EXTENSION_NAME))
-      set.enable(SceneFeatureSet::eVolumeScatter);
+    if(hasExt(ext, KHR_MATERIALS_SCATTER_EXTENSION_NAME) || hasExt(ext, KHR_MATERIALS_VOLUME_SCATTER_EXTENSION_NAME))
+      set.enable(SceneFeatureSet::eScatter);
     if(hasExt(ext, KHR_MATERIALS_CLEARCOAT_EXTENSION_NAME))
       set.enable(SceneFeatureSet::eClearcoat);
     if(hasExt(ext, KHR_MATERIALS_IRIDESCENCE_EXTENSION_NAME))
@@ -221,12 +221,15 @@ SceneFeatureSet detectSceneFeatures(const std::vector<tinygltf::Material>& mater
   // it. We do it once here so operator== / toString() / unusedExtensionCount()
   // all see the fully-promoted truth.
   //
-  //   scatter  =>  volume   (scatter samples Henyey-Greenstein inside a medium - the
-  //                          medium has to exist, makeVolumeMedium is gated on volume)
+  //   scatter  =>  volume   (volumetric scatter samples Henyey-Greenstein inside a medium -
+  //                          the medium has to exist, makeVolumeMedium is gated on volume.
+  //                          Thin-walled scatter does not strictly need it, but promoting
+  //                          conservatively keeps the containment chain simple and is harmless:
+  //                          the volume code is skipped when thickness == 0.)
   //   volume   =>  transmission   (the bounce loop only enters a volume via the
   //                                transmission isInside toggle; without transmission
   //                                pt.isInside never flips so the volume code is dead)
-  if(set.has(SceneFeatureSet::eVolumeScatter))
+  if(set.has(SceneFeatureSet::eScatter))
     set.enable(SceneFeatureSet::eVolume);
   if(set.has(SceneFeatureSet::eVolume))
     set.enable(SceneFeatureSet::eTransmission);

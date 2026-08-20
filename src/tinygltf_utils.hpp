@@ -140,12 +140,17 @@ struct KHR_materials_volume
   glm::vec3             attenuationColor    = {1.0f, 1.0f, 1.0f};
 };
 
-// https://github.com/KhronosGroup/glTF/blob/e17468db6fd9ae3ce73504a9f317bd853af01a30/extensions/2.0/Khronos/KHR_materials_volume_scatter/README.md
+// https://github.com/KhronosGroup/glTF/tree/main/extensions/2.0/Khronos/KHR_materials_scatter
+#define KHR_MATERIALS_SCATTER_EXTENSION_NAME "KHR_materials_scatter"
+// Earlier draft name, still read (never written) for backward compatibility.
 #define KHR_MATERIALS_VOLUME_SCATTER_EXTENSION_NAME "KHR_materials_volume_scatter"
-struct KHR_materials_volume_scatter
+struct KHR_materials_scatter
 {
-  glm::vec3 multiscatterColorFactor = {0.0f, 0.0f, 0.0f};
-  float     scatterAnisotropy       = 0.0f;
+  float                 scatterStrengthFactor    = 0.0f;
+  tinygltf::TextureInfo scatterStrengthTexture   = {};
+  glm::vec3             multiscatterColorFactor  = {1.0f, 1.0f, 1.0f};
+  tinygltf::TextureInfo multiscatterColorTexture = {};
+  float                 scatterAnisotropy        = 0.0f;
 };
 
 
@@ -887,9 +892,10 @@ inline std::span<T> getAccessorData(tinygltf::Model& model, const tinygltf::Acce
   }
   else
   {
-    // The component is smaller than 32 bits and needs to be converted
+    // The component doesn't match T's scalar type and needs to be converted
     if(!(accessor.componentType == TINYGLTF_COMPONENT_TYPE_BYTE || accessor.componentType == TINYGLTF_COMPONENT_TYPE_UNSIGNED_BYTE
-         || accessor.componentType == TINYGLTF_COMPONENT_TYPE_SHORT || accessor.componentType == TINYGLTF_COMPONENT_TYPE_UNSIGNED_SHORT))
+         || accessor.componentType == TINYGLTF_COMPONENT_TYPE_SHORT || accessor.componentType == TINYGLTF_COMPONENT_TYPE_UNSIGNED_SHORT
+         || accessor.componentType == TINYGLTF_COMPONENT_TYPE_DOUBLE))
     {
       assert(!"Unhandled tinygltf component type!");
       return {};
@@ -943,6 +949,10 @@ inline std::span<T> getAccessorData(tinygltf::Model& model, const tinygltf::Acce
                 v = v / 65535.f;
               }
             }
+            break;
+          case TINYGLTF_COMPONENT_TYPE_DOUBLE:
+            // KHR_accessor_float64: doubles are never normalized (spec restricts `normalized` to integer types).
+            v = static_cast<ScalarType>(*(reinterpret_cast<const double*>(pElement) + c));
             break;
         }
 
@@ -1149,26 +1159,26 @@ int appendAccessor(tinygltf::Model& model, int bufferIndex, const void* data, si
 //--------------------------------------------------------------------------------------------------
 // Materials
 //--------------------------------------------------------------------------------------------------
-KHR_materials_unlit          getUnlit(const tinygltf::Material& tmat);
-void                         setUnlit(tinygltf::Material& tmat, const KHR_materials_unlit& unlit);
-KHR_materials_specular       getSpecular(const tinygltf::Material& tmat);
-void                         setSpecular(tinygltf::Material& tmat, const KHR_materials_specular& specular);
-KHR_materials_clearcoat      getClearcoat(const tinygltf::Material& tmat);
-void                         setClearcoat(tinygltf::Material& tmat, const KHR_materials_clearcoat& clearcoat);
-KHR_materials_sheen          getSheen(const tinygltf::Material& tmat);
-void                         setSheen(tinygltf::Material& tmat, const KHR_materials_sheen& sheen);
-KHR_materials_transmission   getTransmission(const tinygltf::Material& tmat);
-void                         setTransmission(tinygltf::Material& tmat, const KHR_materials_transmission& transmission);
-KHR_materials_anisotropy     getAnisotropy(const tinygltf::Material& tmat);
-void                         setAnisotropy(tinygltf::Material& tmat, const KHR_materials_anisotropy& anisotropy);
-KHR_materials_ior            getIor(const tinygltf::Material& tmat);
-void                         setIor(tinygltf::Material& tmat, const KHR_materials_ior& ior);
-KHR_materials_volume         getVolume(const tinygltf::Material& tmat);
-void                         setVolume(tinygltf::Material& tmat, const KHR_materials_volume& volume);
-KHR_materials_volume_scatter getVolumeScatter(const tinygltf::Material& tmat);
-void                         setVolumeScatter(tinygltf::Material& tmat, const KHR_materials_volume_scatter& scatter);
-KHR_materials_displacement   getDisplacement(const tinygltf::Material& tmat);
-void                         setDisplacement(tinygltf::Material& tmat, const KHR_materials_displacement& displacement);
+KHR_materials_unlit        getUnlit(const tinygltf::Material& tmat);
+void                       setUnlit(tinygltf::Material& tmat, const KHR_materials_unlit& unlit);
+KHR_materials_specular     getSpecular(const tinygltf::Material& tmat);
+void                       setSpecular(tinygltf::Material& tmat, const KHR_materials_specular& specular);
+KHR_materials_clearcoat    getClearcoat(const tinygltf::Material& tmat);
+void                       setClearcoat(tinygltf::Material& tmat, const KHR_materials_clearcoat& clearcoat);
+KHR_materials_sheen        getSheen(const tinygltf::Material& tmat);
+void                       setSheen(tinygltf::Material& tmat, const KHR_materials_sheen& sheen);
+KHR_materials_transmission getTransmission(const tinygltf::Material& tmat);
+void                       setTransmission(tinygltf::Material& tmat, const KHR_materials_transmission& transmission);
+KHR_materials_anisotropy   getAnisotropy(const tinygltf::Material& tmat);
+void                       setAnisotropy(tinygltf::Material& tmat, const KHR_materials_anisotropy& anisotropy);
+KHR_materials_ior          getIor(const tinygltf::Material& tmat);
+void                       setIor(tinygltf::Material& tmat, const KHR_materials_ior& ior);
+KHR_materials_volume       getVolume(const tinygltf::Material& tmat);
+void                       setVolume(tinygltf::Material& tmat, const KHR_materials_volume& volume);
+KHR_materials_scatter      getScatter(const tinygltf::Material& tmat);
+void                       setScatter(tinygltf::Material& tmat, const KHR_materials_scatter& scatter);
+KHR_materials_displacement getDisplacement(const tinygltf::Material& tmat);
+void                       setDisplacement(tinygltf::Material& tmat, const KHR_materials_displacement& displacement);
 KHR_materials_emissive_strength getEmissiveStrength(const tinygltf::Material& tmat);
 void setEmissiveStrength(tinygltf::Material& tmat, const KHR_materials_emissive_strength& emissiveStrength);
 
@@ -1241,6 +1251,15 @@ inline void removeTextureTransform(T& tinfo)
 > the last listed extension wins (same order as the implementation).
 -------------------------------------------------------------------------------------------------*/
 int getTextureImageIndex(const tinygltf::Texture& texture);
+
+/*-------------------------------------------------------------------------------------------------
+## Function `hasTextureImageSourceOverride`
+> True when `getTextureImageIndex()` would return an extension's `source` rather than the base
+> `texture.source` field (i.e. one of `EXT_texture_webp` / `MSFT_texture_dds` / `KHR_texture_basisu`
+> is present). Editors that write `texture.source` directly should gate on this first -- the write
+> would have no visible effect while an override extension is active.
+-------------------------------------------------------------------------------------------------*/
+bool hasTextureImageSourceOverride(const tinygltf::Texture& texture);
 
 /*-------------------------------------------------------------------------------------------------
 ## Function `getTextureImageSources`

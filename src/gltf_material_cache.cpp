@@ -230,10 +230,13 @@ void populateShaderMaterial(shaderio::GltfShadeMaterial& dstMat, const tinygltf:
   handleTexture(dstMat.retroreflectionTexture, retro.retroreflectionTexture);
 #endif
 
-#if MAT_EXT_VOLUME_SCATTER
-  KHR_materials_volume_scatter volumeScatter = tinygltf::utils::getVolumeScatter(srcMat);
-  dstMat.multiscatterColorFactor             = volumeScatter.multiscatterColorFactor;
-  dstMat.scatterAnisotropy                   = volumeScatter.scatterAnisotropy;
+#if MAT_EXT_SCATTER
+  KHR_materials_scatter scatter  = tinygltf::utils::getScatter(srcMat);
+  dstMat.scatterStrengthFactor   = scatter.scatterStrengthFactor;
+  dstMat.multiscatterColorFactor = scatter.multiscatterColorFactor;
+  dstMat.scatterAnisotropy       = scatter.scatterAnisotropy;
+  handleTexture(dstMat.scatterStrengthTexture, scatter.scatterStrengthTexture);
+  handleTexture(dstMat.multiscatterColorTexture, scatter.multiscatterColorTexture);
 #endif
 }
 

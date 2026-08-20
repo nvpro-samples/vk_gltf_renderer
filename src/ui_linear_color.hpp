@@ -80,10 +80,14 @@ inline bool colorEdit3Linear(const char* label, float col[3], const std::string&
   return nvgui::PropertyEditor::entry(
       label,
       [&] {
+        // PropertyEditor::entry does not scope IDs by the row label, so scope the fixed ##lin/##pick
+        // widget IDs by `label` here; otherwise every color row shares them (ImGui ID conflict).
+        ImGui::PushID(label);
         const float swatchWidth = ImGui::GetFrameHeight() + ImGui::GetStyle().ItemInnerSpacing.x;
         ImGui::SetNextItemWidth(ImGui::GetContentRegionAvail().x - swatchWidth);
         bool changed = ImGui::DragFloat3("##lin", col, 0.01f, 0.0f, 1.0f, "%.3f");
         changed |= linearColorSwatch(col, 3);
+        ImGui::PopID();
         return changed;
       },
       tooltip);
@@ -95,10 +99,12 @@ inline bool colorEdit4Linear(const char* label, float col[4], const std::string&
   return nvgui::PropertyEditor::entry(
       label,
       [&] {
+        ImGui::PushID(label);  // scope ##lin/##pick by the row label (see colorEdit3Linear)
         const float swatchWidth = ImGui::GetFrameHeight() + ImGui::GetStyle().ItemInnerSpacing.x;
         ImGui::SetNextItemWidth(ImGui::GetContentRegionAvail().x - swatchWidth);
         bool changed = ImGui::DragFloat4("##lin", col, 0.01f, 0.0f, 1.0f, "%.3f");
         changed |= linearColorSwatch(col, 4);
+        ImGui::PopID();
         return changed;
       },
       tooltip);

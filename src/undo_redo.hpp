@@ -249,6 +249,41 @@ private:
 };
 
 //--------------------------------------------------------------------------------------------------
+// SetNodeExtensionCommand - Undo/redo for adding or toggling a KHR_node_* boolean extension
+// (visibility / selectability / hoverability) on a node.
+//
+// Generic over the extension key: stores the raw tinygltf::Value before/after (a default-constructed,
+// NULL_TYPE value means "the extension was absent" -> undo erases the key instead of restoring it) and
+// replays either on execute()/undo(). The caller computes both values via the typed getter/setter
+// (tinygltf::utils::setNodeVisibility() etc.) so this command has no per-extension knowledge.
+//--------------------------------------------------------------------------------------------------
+
+class SetNodeExtensionCommand : public ICommand
+{
+public:
+  SetNodeExtensionCommand(nvvkgltf::Scene& scene,
+                          int              nodeIndex,
+                          std::string      extensionName,
+                          tinygltf::Value  oldValue,
+                          tinygltf::Value  newValue,
+                          std::string      description);
+
+  void                      execute() override { apply(m_newValue); }
+  void                      undo() override { apply(m_oldValue); }
+  [[nodiscard]] std::string description() const override { return m_description; }
+
+private:
+  void apply(const tinygltf::Value& value);
+
+  nvvkgltf::Scene& m_scene;
+  int              m_nodeIndex;
+  std::string      m_extensionName;
+  tinygltf::Value  m_oldValue;
+  tinygltf::Value  m_newValue;
+  std::string      m_description;
+};
+
+//--------------------------------------------------------------------------------------------------
 // EditMaterialCommand - Undo/redo for material property changes
 //
 // Uses full tinygltf::Material snapshots (before/after) so a single command
@@ -279,13 +314,53 @@ private:
 };
 
 //--------------------------------------------------------------------------------------------------
+// MaterialLifecycleCommand - Undo/redo for adding, duplicating, or deleting a material.
+//
+// All three reduce to an insert/remove of one material at an index (SceneEditor::insertMaterialAt /
+// removeMaterialAt handle the primitive-reference remap). insertOnExecute distinguishes them:
+//   Add / Duplicate -> insertOnExecute = true  (execute inserts the stored material, undo removes it)
+//   Delete          -> insertOnExecute = false (execute removes it, undo re-inserts the stored copy)
+//
+// m_liveIndex tracks where the material actually lives right now (-1 = not in the model), separately
+// from the caller-requested `index`: insertMaterialAt() clamps its requested index and can return a
+// different one, and removeMaterialAt() can reject an out-of-range index and mutate nothing. insert()/
+// remove() only act (and only update m_liveIndex) when the current state actually calls for it, so a
+// rejected removeMaterialAt() leaves the material "live" and the paired undo a correct no-op instead of
+// operating on a stale/incorrect index.
+//--------------------------------------------------------------------------------------------------
+
+class MaterialLifecycleCommand : public ICommand
+{
+public:
+  MaterialLifecycleCommand(nvvkgltf::Scene& scene, int index, const tinygltf::Material& material, bool insertOnExecute, std::string description);
+  ~MaterialLifecycleCommand() override;
+
+  void                      execute() override;
+  void                      undo() override;
+  [[nodiscard]] std::string description() const override { return m_description; }
+
+private:
+  void insert();
+  void remove();
+
+  nvvkgltf::Scene&                    m_scene;
+  int                                 m_index;      // requested insert index (seed for the first insert() only)
+  int                                 m_liveIndex;  // where the material currently lives, or -1 if absent
+  std::unique_ptr<tinygltf::Material> m_material;
+  bool                                m_insertOnExecute;
+  std::string                         m_description;
+};
+
+//--------------------------------------------------------------------------------------------------
 // ReplaceImageCommand - Undo/redo for replacing an image's pixels in place (SceneEditor::replaceImageFromFile)
 //--------------------------------------------------------------------------------------------------
 
 // Undo/redo for an in-place swap of one element of a model resource vector (image / sampler / texture).
-// All three edits just flag DirtyFlags::texturesChanged; the renderer does the GPU rebuild. GetVec
-// returns the target vector from the model. See the aliases below.
-template <typename T, std::vector<T>& (*GetVec)(tinygltf::Model&)>
+// GetVec returns the target vector from the model; MarkDirty flags the right GPU sync path for that
+// vector's element type (see the aliases below). Image/texture edits are structural enough (source
+// data, source references) that they go through the coarse full rebuild; a sampler's wrap/filter is
+// an in-place property edit that SceneVk can apply to just its VkSampler, so it uses a per-index flag.
+template <typename T, std::vector<T>& (*GetVec)(tinygltf::Model&), void (*MarkDirty)(nvvkgltf::Scene&, int) = nullptr>
 class TextureResourceEditCommand : public ICommand
 {
 public:
@@ -308,8 +383,13 @@ private:
     std::vector<T>& vec = GetVec(m_scene.getModel());
     if(m_index >= 0 && m_index < static_cast<int>(vec.size()))
     {
-      vec[m_index]                            = value;
-      m_scene.getDirtyFlags().texturesChanged = true;
+      vec[m_index] = value;
+      // Compile-time selection of the dirty-flag path for T: a per-index update (e.g. sampler) if
+      // MarkDirty was supplied, else the coarse structural-rebuild flag (image/texture).
+      if constexpr(MarkDirty != nullptr)
+        MarkDirty(m_scene, m_index);
+      else
+        m_scene.getDirtyFlags().texturesChanged = true;
     }
   }
 
@@ -332,10 +412,82 @@ inline std::vector<tinygltf::Texture>& modelTextures(tinygltf::Model& m)
 {
   return m.textures;
 }
+inline void markSamplerDirty(nvvkgltf::Scene& scene, int index)
+{
+  scene.markSamplerDirty(index);
+}
 
-using ReplaceImageCommand = TextureResourceEditCommand<tinygltf::Image, &modelImages>;     // replace an image's pixels
-using EditSamplerCommand = TextureResourceEditCommand<tinygltf::Sampler, &modelSamplers>;  // edit a sampler's wrap/filter
+using ReplaceImageCommand = TextureResourceEditCommand<tinygltf::Image, &modelImages>;  // replace an image's pixels
+// Edit a sampler's wrap/filter: only the VkSampler at this slot is recreated, no image reload.
+using EditSamplerCommand = TextureResourceEditCommand<tinygltf::Sampler, &modelSamplers, &markSamplerDirty>;
 using EditTextureCommand = TextureResourceEditCommand<tinygltf::Texture, &modelTextures>;  // edit a texture's image/sampler ref
+
+//--------------------------------------------------------------------------------------------------
+// RenameResourceCommand - Undo/redo for renaming an indexed glTF resource (any type with a `name`
+// field, addressed through a model vector accessor). GetVec returns the target vector; see the aliases
+// below for the mesh/material/camera/light/texture/image/sampler/animation categories. Nodes have their
+// own RenameNodeCommand (rename there also participates in read-only gating).
+//--------------------------------------------------------------------------------------------------
+
+template <typename T, std::vector<T>& (*GetVec)(tinygltf::Model&)>
+class RenameResourceCommand : public ICommand
+{
+public:
+  RenameResourceCommand(nvvkgltf::Scene& scene, int index, std::string oldName, std::string newName)
+      : m_scene(scene)
+      , m_index(index)
+      , m_oldName(std::move(oldName))
+      , m_newName(std::move(newName))
+  {
+  }
+
+  void                      execute() override { rename(m_newName); }
+  void                      undo() override { rename(m_oldName); }
+  [[nodiscard]] std::string description() const override { return "Rename '" + m_oldName + "'"; }
+
+private:
+  void rename(const std::string& value)
+  {
+    std::vector<T>& vec = GetVec(m_scene.getModel());
+    if(m_index >= 0 && m_index < static_cast<int>(vec.size()))
+      vec[m_index].name = value;
+  }
+
+  nvvkgltf::Scene& m_scene;
+  int              m_index;
+  std::string      m_oldName;
+  std::string      m_newName;
+};
+
+inline std::vector<tinygltf::Mesh>& modelMeshes(tinygltf::Model& m)
+{
+  return m.meshes;
+}
+inline std::vector<tinygltf::Material>& modelMaterials(tinygltf::Model& m)
+{
+  return m.materials;
+}
+inline std::vector<tinygltf::Camera>& modelCameras(tinygltf::Model& m)
+{
+  return m.cameras;
+}
+inline std::vector<tinygltf::Light>& modelLights(tinygltf::Model& m)
+{
+  return m.lights;
+}
+inline std::vector<tinygltf::Animation>& modelAnimations(tinygltf::Model& m)
+{
+  return m.animations;
+}
+
+using RenameMeshCommand      = RenameResourceCommand<tinygltf::Mesh, &modelMeshes>;
+using RenameMaterialCommand  = RenameResourceCommand<tinygltf::Material, &modelMaterials>;
+using RenameCameraCommand    = RenameResourceCommand<tinygltf::Camera, &modelCameras>;
+using RenameLightCommand     = RenameResourceCommand<tinygltf::Light, &modelLights>;
+using RenameTextureCommand   = RenameResourceCommand<tinygltf::Texture, &modelTextures>;
+using RenameImageCommand     = RenameResourceCommand<tinygltf::Image, &modelImages>;
+using RenameSamplerCommand   = RenameResourceCommand<tinygltf::Sampler, &modelSamplers>;
+using RenameAnimationCommand = RenameResourceCommand<tinygltf::Animation, &modelAnimations>;
 
 //--------------------------------------------------------------------------------------------------
 // RemoveImageCommand - Undo/redo for removing an unreferenced image (SceneEditor::removeImageAt)

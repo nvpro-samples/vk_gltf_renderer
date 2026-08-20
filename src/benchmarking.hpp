@@ -50,7 +50,9 @@ struct BenchmarkOptions
   bool                  fitSceneTrigger{false};    // Pulse: fit camera to scene bounds
   bool                  resetFrameTrigger{false};  // Pulse: reset path-tracer accumulation
   bool                  updateDataTrigger{false};  // Pulse: alias of resetFrame after settings change
-  std::filesystem::path screenshotFilename;        // Output path for the next screenshot capture
+  std::filesystem::path screenshotFilename;        // Output path for the next tonemapped-render capture (viewport only)
+  std::filesystem::path uiScreenshotFilename;  // Output path for the next full-window capture (UI panels + viewport)
+  int                   selectNodeIndex{-1};   // Scene-graph node index to select; < 0 or out-of-range clears selection
 };
 
 //--------------------------------------------------------------------------------------------------
@@ -67,10 +69,12 @@ public:
   // Any callback may be left empty; the controller will silently skip it.
   struct Callbacks
   {
-    std::function<void(int)>                          applyGltfCamera;  // Apply glTF camera by index
-    std::function<void()>                             fitScene;         // Fit camera to scene bounds
-    std::function<void()>                             resetFrame;       // Reset path-tracer accumulation
-    std::function<void(const std::filesystem::path&)> saveScreenshot;   // Save tonemapped render
+    std::function<void(int)>                          applyGltfCamera;   // Apply glTF camera by index
+    std::function<void()>                             fitScene;          // Fit camera to scene bounds
+    std::function<void()>                             resetFrame;        // Reset path-tracer accumulation
+    std::function<void(const std::filesystem::path&)> saveScreenshot;    // Save tonemapped render (viewport only)
+    std::function<void(const std::filesystem::path&)> saveUiScreenshot;  // Save full composited window (UI + viewport)
+    std::function<void(int)> selectSceneNode;  // Select a scene-graph node by index (drives Inspector/Scene Browser)
   };
 
   // Snapshot of the headless run configuration, passed to every timing call.

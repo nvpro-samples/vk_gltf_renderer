@@ -216,13 +216,15 @@ The application includes a full **glTF scene asset editor** that allows non-dest
 The **Scene Browser** panel provides two complementary tabs:
 
 - **Scene Graph** — an interactive tree showing the full node graph with children, meshes, primitives, cameras, lights, and skins. Supports selection, expansion, drag-and-drop, and right-click context menus.
-- **Scene List** — collapsible sections listing all Nodes, Meshes, Materials, Cameras, Lights, Textures, Images, and Animations with counts and quick selection.
+- **Elements** — an editor-grade list with one icon tab per glTF collection (Nodes, Meshes, Materials, Cameras, Lights, Textures, Images, Samplers, Animations). Each row shows the element's **glTF index (`#`)**, its name, and a few browse columns that make the list an asset-review tool — mesh **triangles**/**instances**, material **used-by** with a color swatch, image **resolution** and **reference count**, animation **duration**, and so on. Columns are click-to-sort (e.g. heaviest mesh, largest texture), there is a name **filter**, and the footer shows aggregates (total triangles, texture memory). A uniform toolbar provides **Add / Duplicate / Delete / Rename** per category; selecting a row drives the **Inspector**. Nodes also carry an inline visibility (eye) toggle. Selection stays in sync with the Scene Graph tree and the viewport.
+
+![The Elements tab's Nodes list with a node selected, showing the synced Inspector](images/elements_list.png)
 
 Asset-level metadata (glTF asset info, generator, copyright, `KHR_xmp_json_ld`) is shown at the top.
 
 ### Node Operations
 
-Right-click any node in the hierarchy or flat list:
+Right-click any node in the Scene Graph tree, use the Elements tab's Nodes toolbar, or press the shortcuts:
 
 | Operation | Shortcut | Description |
 |---|---|---|
@@ -259,13 +261,26 @@ The undo history uses a linear model: performing a new action after an undo disc
 
 ### Material Editing
 
+![The material Inspector showing PBR fields, texture slots, and the extensions list](images/material_editor.png)
+
 The **Inspector** panel provides full PBR material editing when a material or primitive is selected:
 
 - Base color factor and texture, metallic, roughness, emissive (factor + strength)
 - Normal map scale, occlusion strength, alpha mode and cutoff
 - Double-sided toggle
-- All glTF PBR material extensions: clearcoat, transmission, volume, volume scatter, sheen, specular, IOR, iridescence, anisotropy, diffuse transmission, dispersion, emissive strength, unlit, and specular-glossiness
+- All glTF PBR material extensions: clearcoat, transmission, volume, volume scatter, sheen, specular, IOR, iridescence, anisotropy, diffuse transmission, dispersion, emissive strength, unlit, and retroreflection
 - Material copy/paste via clipboard (right-click on materials)
+
+Each extension gets its own collapsible section at the bottom of the material Inspector. A material that
+doesn't carry the extension shows a single **Add** button, which attaches it with spec-default values and
+expands the section; once present, the section instead shows its fields plus a **Remove** button, which
+detaches the extension (and its data) from the material. Adding or removing an extension is a normal,
+undoable material edit, like any field change above it.
+
+`KHR_materials_pbrSpecularGlossiness` is a read/edit-only exception to this: a material that already
+carries it shows its diffuse/specular/glossiness fields in place of the metallic-roughness ones above, but
+the extension itself has no Add/Remove control — this renderer edits specular-glossiness materials it
+loads, it does not author new ones.
 
 Each texture slot shows a thumbnail of the assigned image — click it to open the full-size **image
 viewer** — and offers **switch** to another existing texture (a filterable, thumbnailed picker), **load
@@ -279,16 +294,16 @@ next to the file on save.
 
 ### Textures, Images, and Samplers
 
-The Scene List's **Textures**, **Images**, and **Samplers** groups mirror the glTF data for developers
-inspecting or editing a scene, with thumbnails alongside the text listing (text stays the fastest way
-to find one in large scenes). Each **Textures** row shows the referenced **image** and **sampler** as
-clickable ID links (jump to that element) and a developer-style popup to edit those indices — matching
-the glTF texture object, which is just `{ source, sampler }`. Wrap and filter modes are edited in the
-**Samplers** group (each row also reports how many textures use it); the per-binding UV transform is edited
-from the material Inspector (above). In the **Images** group each row reports how many textures reference
-the image; clicking a thumbnail opens the **image viewer** (large preview + metadata) where the image can
-be **replaced from file** or **reloaded**. Images that no texture references can be removed from there;
-other unused resources are cleared by **Compact Scene** (`Ctrl+K`).
+The **Elements** tab lists **Textures**, **Images**, and **Samplers** with thumbnails alongside the text
+(text stays the fastest way to find one in large scenes), and selecting a row edits it in the **Inspector**.
+The **Textures** list shows each texture's image resolution and sampler summary; its Inspector edits the
+`{ source, sampler }` indices (matching the glTF texture object) and the referenced sampler's wrap/filter
+inline. The **Samplers** list shows wrap/filter and how many textures use each; its Inspector edits the
+wrap and filter modes. The per-binding UV transform is edited from the material Inspector (above). The
+**Images** list reports each image's resolution and how many textures reference it — sort by resolution to
+find the heaviest textures, and the footer totals the decoded texture memory. The Image Inspector opens the
+full **image viewer** and can **replace from file** or **reload**; an image that no texture references can be
+deleted from the toolbar (refcount-gated). Other unused resources are cleared by **Compact Scene** (`Ctrl+K`).
 
 ### Punctual Lights
 
@@ -298,7 +313,7 @@ The editor supports creating and editing **KHR_lights_punctual** lights — poin
 
 - Right-click any node in the hierarchy and select **Add Child → Light → Point / Directional / Spot Light**
 - Right-click the Scene root and select **Add → Light → Point / Directional / Spot Light**
-- Click the **+** button on the Lights group header in the Scene List
+- Use **Add ▾** on the Elements tab's **Lights** (or **Nodes**) category
 
 Each light is created as a new node in the scene graph. Position and orient the light by editing the node's transform (inspector or gizmo).
 

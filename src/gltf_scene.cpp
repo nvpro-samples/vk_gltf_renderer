@@ -217,6 +217,7 @@ nvvkgltf::Scene::Scene()
       "EXT_mesh_gpu_instancing",
       "EXT_mesh_opacity_micromap",
       "EXT_meshopt_compression",
+      "KHR_accessor_float64",
       "KHR_animation_pointer",
       "KHR_interactivity",
       "KHR_lights_punctual",
@@ -230,6 +231,7 @@ nvvkgltf::Scene::Scene()
       "KHR_materials_iridescence",
       "KHR_materials_pbrSpecularGlossiness",
       "KHR_materials_retroreflection",
+      "KHR_materials_scatter",
       "KHR_materials_sheen",
       "KHR_materials_specular",
       "KHR_materials_transmission",
@@ -243,6 +245,7 @@ nvvkgltf::Scene::Scene()
       "KHR_node_selectability",
       "KHR_node_visibility",
       "KHR_texture_transform",
+      "KHR_xmp_json_ld",
       "MSFT_texture_dds",
       "NV_attributes_iray",
 #ifdef USE_DRACO
@@ -1523,6 +1526,12 @@ void nvvkgltf::Scene::markRenderNodeDirty(int renderNodeIndex, bool forVk, bool 
     if(forRtx)
       m_dirtyFlags.renderNodesRtx.insert(renderNodeIndex);
   }
+}
+
+void nvvkgltf::Scene::markSamplerDirty(int samplerIndex)
+{
+  if(samplerIndex >= 0 && samplerIndex < static_cast<int>(m_model.samplers.size()))
+    m_dirtyFlags.samplers.insert(samplerIndex);
 }
 
 void nvvkgltf::Scene::markNodeDirty(int nodeIndex)

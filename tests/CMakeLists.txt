@@ -41,6 +41,8 @@ set(TEST_SOURCES
     test_compute_animation.cpp
     # Top-level extensionsUsed / extensionsRequired reconciliation on save
     test_extensions_metadata.cpp
+    # KHR_materials_scatter host-side contract (defaults, clamping, legacy alias, round-trip)
+    test_materials_scatter.cpp
     # Procedural primitives (plane/cube/sphere) + new/empty-scene workflow
     test_primitives.cpp
     # Agentic workflow bridge contract

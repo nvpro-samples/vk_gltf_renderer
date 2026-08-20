@@ -213,6 +213,20 @@ GltfRenderer::GltfRenderer(nvutils::ParameterRegistry* paramReg, const nvutils::
                                                    m_resources.gBuffers.getSize(), filename);
                           }
                         },
+                    .saveUiScreenshot =
+                        [this](const std::filesystem::path& filename) {
+                          // Capture the full composited window (ImGui panels + viewport). This reads the swapchain
+                          // PRESENT image, which only exists in a windowed run; headless has no swapchain.
+                          if(m_app && !m_app->isHeadless())
+                          {
+                            m_app->requestScreenShot(filename, 100);
+                          }
+                          else
+                          {
+                            LOGW("--uiScreenshot ignored: requires a windowed run (no swapchain in headless mode)\n");
+                          }
+                        },
+                    .selectSceneNode = [this](int index) { selectSceneNodeFromScript(index); },
                 });
 
   // Initialize camera manipulator
@@ -698,10 +712,34 @@ void GltfRenderer::applyPendingTextureTailSync()
   m_inspector.refreshTextureNames();
 }
 
+// Consume pending sampler edits (DirtyFlags::samplers) at frame top: an Inspector wrap/filter edit
+// changes model.samplers[i] in place. Unlike applyPendingTextureRebuild(), this never touches m_images
+// or m_textures -- only the affected VkSampler is recreated and its single eSamplers descriptor slot
+// rewritten, so image data is never re-read from disk for a sampler-only change.
+void GltfRenderer::applyPendingSamplerUpdate()
+{
+  nvvkgltf::Scene* scene = m_resources.getScene();
+  if(!scene || scene->getDirtyFlags().samplers.empty())
+    return;
+
+  const tinygltf::Model& model = scene->getModel();
+  for(int samplerIndex : scene->getDirtyFlags().samplers)
+  {
+    m_resources.sceneVk.updateSampler(model, samplerIndex);
+    if(!writeTextureDescriptorRange(0, 0, static_cast<uint32_t>(samplerIndex) + 1, 1))
+      return;  // capacity overflow (logged FATAL): leave DirtyFlags::samplers set so the stale eSamplers
+               // slot -- whose old VkSampler is already queued for deferred release -- is not forgotten.
+  }
+  scene->getDirtyFlags().samplers.clear();
+
+  resetFrame();
+}
+
 void GltfRenderer::onUIRender()
 {
   applyPendingTextureRebuild();   // frame-top: full GPU texture rebuild for a prior-frame structural edit (see method)
   applyPendingTextureTailSync();  // frame-top: incremental append/remove for a prior-frame import/undo/redo (see method)
+  applyPendingSamplerUpdate();    // frame-top: in-place VkSampler update for a prior-frame sampler wrap/filter edit
 
   // Advance the thumbnail cache's deferred-free ring before any panel acquires thumbnails this frame.
   m_thumbnailCache.beginFrame(m_app->getFrameCycleSize());
@@ -1555,6 +1593,7 @@ void GltfRenderer::wireSceneToUi()
   m_inspector.setBbox(scene->getSceneBounds());
   m_inspector.setHostServices(host);
   m_inspector.setViewImageCallback([this](int imageIndex) { m_sceneBrowser.openImageViewer(imageIndex); });
+  m_inspector.setImageThumbnailCallback([this](int i) { return thumbnailForImage(i); });
 }
 
 // Push a transient notification (isError = red) to the on-screen toast overlay.
@@ -2189,6 +2228,34 @@ void GltfRenderer::resetFrame()
   m_resources.frameCount = -1;
 }
 
+// Select a scene-graph node by index from a script parameter (--selectNode). The index is a glTF node
+// index, exactly as shown in the Scene Browser tree. This routes through the shared SceneSelection so the
+// Scene Browser highlight, the Inspector contents, and the render-node selection set all update precisely
+// as they would from a click in the tree (selectNode emits NodeSelected, which the UI callback turns into
+// the selectedRenderNodes set). A negative or out-of-range index clears the selection. Used by the
+// windowed scripted-run harness so UI/UX changes to the scene list and inspector can be exercised and
+// captured with --uiScreenshot.
+void GltfRenderer::selectSceneNodeFromScript(int nodeIndex)
+{
+  nvvkgltf::Scene* scene = m_resources.getScene();
+  const int        count = (scene && scene->valid()) ? static_cast<int>(scene->getModel().nodes.size()) : 0;
+  if(nodeIndex >= 0 && nodeIndex < count)
+  {
+    m_sceneSelection.selectNode(nodeIndex);
+  }
+  else
+  {
+    if(nodeIndex >= 0)
+    {
+      LOGW("--selectNode %d ignored: scene has %d node(s)\n", nodeIndex, count);
+    }
+    // clearSelection() does not emit an event, so drop the render-node set explicitly.
+    m_sceneSelection.clearSelection();
+    m_resources.selectedRenderNodes.clear();
+  }
+  resetFrame();
+}
+
 void GltfRenderer::onUndoRedo()
 {
   // Undo/redo may re-introduce geometry (e.g. redo of an added primitive) that has no GPU buffers yet;
@@ -2431,14 +2498,17 @@ bool GltfRenderer::updateAnimation(VkCommandBuffer cmd)
       }
     }
 
-    // Preserve the deferred texture signals across this per-frame flag clear: both are consumed at frame
-    // top (applyPendingTextureRebuild() / applyPendingTextureTailSync()), not here, so a texture/image/
-    // sampler edit or an import/undo made while an animation plays must not be wiped before then.
-    const bool pendingTextures    = scn.getDirtyFlags().texturesChanged;
-    const bool pendingTextureTail = scn.getDirtyFlags().texturesTailChanged;
+    // Preserve the deferred texture/sampler signals across this per-frame flag clear: all three are
+    // consumed at frame top (applyPendingTextureRebuild() / applyPendingTextureTailSync() /
+    // applyPendingSamplerUpdate()), not here, so a texture/image/sampler edit or an import/undo made
+    // while an animation plays must not be wiped before then.
+    const bool              pendingTextures    = scn.getDirtyFlags().texturesChanged;
+    const bool              pendingTextureTail = scn.getDirtyFlags().texturesTailChanged;
+    std::unordered_set<int> pendingSamplers    = std::move(scn.getDirtyFlags().samplers);
     scn.clearDirtyFlags();
     scn.getDirtyFlags().texturesChanged     = pendingTextures;
     scn.getDirtyFlags().texturesTailChanged = pendingTextureTail;
+    scn.getDirtyFlags().samplers            = std::move(pendingSamplers);
     return true;
   }
 
@@ -2523,8 +2593,14 @@ void GltfRenderer::updateSceneChanges_Finalize(VkCommandBuffer cmd, bool changed
   if(changed && !stagingFlushed)
     m_resources.staging.cmdUploadAppended(cmd);
 
-  if(m_resources.getScene())
-    m_resources.getScene()->clearDirtyFlags();
+  // Preserve a pending sampler edit across this clear: it is only consumed at the next frame's top
+  // (applyPendingSamplerUpdate()), not here, so an Inspector edit made this frame must survive until then.
+  if(nvvkgltf::Scene* s = m_resources.getScene())
+  {
+    std::unordered_set<int> pendingSamplers = std::move(s->getDirtyFlags().samplers);
+    s->clearDirtyFlags();
+    s->getDirtyFlags().samplers = std::move(pendingSamplers);
+  }
 
 #ifndef NDEBUG
   if(changed && m_validateGpuSync && scene && !m_skipGpuSyncValidation)

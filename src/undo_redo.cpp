@@ -26,6 +26,7 @@
 #include "undo_redo.hpp"
 #include "gltf_scene_editor.hpp"
 #include "scene_selection.hpp"
+#include "tinygltf_utils.hpp"
 
 #include <cassert>
 
@@ -335,6 +336,40 @@ std::string ReparentNodeCommand::description() const
 }
 
 //--------------------------------------------------------------------------------------------------
+// SetNodeExtensionCommand
+//--------------------------------------------------------------------------------------------------
+
+SetNodeExtensionCommand::SetNodeExtensionCommand(nvvkgltf::Scene& scene,
+                                                 int              nodeIndex,
+                                                 std::string      extensionName,
+                                                 tinygltf::Value  oldValue,
+                                                 tinygltf::Value  newValue,
+                                                 std::string      description)
+    : m_scene(scene)
+    , m_nodeIndex(nodeIndex)
+    , m_extensionName(std::move(extensionName))
+    , m_oldValue(std::move(oldValue))
+    , m_newValue(std::move(newValue))
+    , m_description(std::move(description))
+{
+}
+
+void SetNodeExtensionCommand::apply(const tinygltf::Value& value)
+{
+  tinygltf::Node& node = m_scene.editor().getNodeForEdit(m_nodeIndex);
+  if(value.Type() == tinygltf::NULL_TYPE)
+    node.extensions.erase(m_extensionName);
+  else
+    node.extensions[m_extensionName] = value;
+
+  // Visibility feeds render-node visibility (subtree propagation); selectability/hoverability are pure
+  // node flags with no derived render state to refresh.
+  if(m_extensionName == KHR_NODE_VISIBILITY_EXTENSION_NAME)
+    m_scene.editor().updateVisibility(m_nodeIndex);
+  m_scene.markNodeDirty(m_nodeIndex);
+}
+
+//--------------------------------------------------------------------------------------------------
 // EditMaterialCommand
 //--------------------------------------------------------------------------------------------------
 
@@ -384,6 +419,51 @@ void EditMaterialCommand::mergeWith(const ICommand& other)
 {
   auto& o        = dynamic_cast<const EditMaterialCommand&>(other);
   *m_newMaterial = *o.m_newMaterial;
+}
+
+//--------------------------------------------------------------------------------------------------
+// MaterialLifecycleCommand
+//--------------------------------------------------------------------------------------------------
+
+MaterialLifecycleCommand::MaterialLifecycleCommand(nvvkgltf::Scene&          scene,
+                                                   int                       index,
+                                                   const tinygltf::Material& material,
+                                                   bool                      insertOnExecute,
+                                                   std::string               description)
+    : m_scene(scene)
+    , m_index(index)
+    , m_liveIndex(insertOnExecute ? -1 : index)  // Delete: material already lives at `index`. Add/Duplicate: not yet.
+    , m_material(std::make_unique<tinygltf::Material>(material))
+    , m_insertOnExecute(insertOnExecute)
+    , m_description(std::move(description))
+{
+}
+
+MaterialLifecycleCommand::~MaterialLifecycleCommand() = default;
+
+void MaterialLifecycleCommand::insert()
+{
+  if(m_liveIndex >= 0)
+    return;  // already live -- nothing to do
+  m_liveIndex = m_scene.editor().insertMaterialAt(m_index, *m_material);
+}
+
+void MaterialLifecycleCommand::remove()
+{
+  if(m_liveIndex < 0)
+    return;  // already absent -- nothing to do
+  if(m_scene.editor().removeMaterialAt(m_liveIndex))
+    m_liveIndex = -1;
+}
+
+void MaterialLifecycleCommand::execute()
+{
+  m_insertOnExecute ? insert() : remove();
+}
+
+void MaterialLifecycleCommand::undo()
+{
+  m_insertOnExecute ? remove() : insert();
 }
 
 // ReplaceImageCommand / EditSamplerCommand / EditTextureCommand are header-only aliases of the

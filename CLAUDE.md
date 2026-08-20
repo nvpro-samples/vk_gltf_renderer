@@ -29,6 +29,7 @@ C++20. Host and device share structs via `shaders/shaderio.h`.
 | Runtime behavior, editor workflows, features | [docs/user-guide.md](docs/user-guide.md) |
 | DLSS / OptiX denoising, motion vectors, jitter/reset (incl. why animated meshes ghost) | [docs/denoising.md](docs/denoising.md) |
 | Headless timing / scripted GPU benchmarks | [docs/benchmarking.md](docs/benchmarking.md) |
+| Capture the UI (panels + viewport) or script-drive selection to review UI/UX | [docs/benchmarking.md](docs/benchmarking.md) (§ UI inspection) |
 | Test suite: running (CTest vs. direct), adding tests, benchmarks | [tests/README.md](tests/README.md) |
 | Where scene/model assets come from | [docs/external_assets.md](docs/external_assets.md), [docs/resources.md](docs/resources.md) |
 
@@ -47,6 +48,7 @@ with the code, the code wins (fix the doc — see "Keep the docs true").
 | Visualization / debug modes | `enum Visualization` in `shaders/shaderio.h` |
 | Command-line parameters (names, ranges, defaults) | `parameterRegistry.add(...)` in `src/main.cpp`, `src/renderer*.cpp`, `src/benchmarking.cpp` |
 | Menu labels, keyboard shortcuts, UI panels | menu/UI builders in `src/ui_renderer.cpp` (and other `src/ui_*`) |
+| Elements-list categories, columns, CRUD | `ensureElementRegistry()` (the `ElementTypeDesc` array) in `src/ui_scene_browser_elements.cpp` |
 | Material extension gates | `MAT_EXT_*` in `shaders/gltf_material_config.h`, `GLTF_USE_*` in `shaders/gltf_eval_config.h` |
 | Host/device structs & layout | `shaders/shaderio.h` + the `*_io.h.slang` / `*_shaderio.h.slang` headers |
 | Which files are tests/benchmarks | `tests/CMakeLists.txt` |
@@ -60,7 +62,9 @@ with the code, the code wins (fix the doc — see "Keep the docs true").
 - `src/gltf_scene*.{cpp,hpp}` — scene loading, GPU upload (`SceneVk`),
   acceleration structures (`SceneRtx`), editing, animation, merge, compaction.
 - `src/ui_*` — ImGui panels (inspector, scene browser, animation); viewport and
-  menus live in `ui_renderer.cpp`.
+  menus live in `ui_renderer.cpp`. The Scene Browser's **Elements** tab is
+  data-driven: one `ElementTypeDesc` per glTF collection
+  (`ui_scene_browser_elements.cpp`) feeds a single generic list renderer.
 - `src/dlss*`, `src/optix_denoiser*`, `src/vk_cuda*` — AI denoisers + CUDA interop.
 - `src/gizmo_*` — transform gizmo, grid, overlays.
 - `shaders/*.slang` + `shaders/shaderio.h` — GPU code and host/device structs.

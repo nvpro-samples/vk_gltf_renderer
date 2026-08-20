@@ -224,6 +224,32 @@ void nvvkgltf::SceneVk::destroyImageDeferred(nvvk::Image& image)
   }
 }
 
+//--------------------------------------------------------------------------------------------------
+// Release a VkSampler back to the pool after the current in-flight frames are done. Used by
+// updateSampler(), where the old handle may still be read through the (UPDATE_AFTER_BIND) eSamplers
+// descriptor slot by a frame still executing on the GPU. Mirrors destroyImageDeferred: defers via
+// m_deferredFree, or falls back to a graphics-queue wait. releaseSampler() itself only decrements a
+// refcount and destroys the VkSampler once it hits zero, so a shared (deduped) sampler is unaffected.
+void nvvkgltf::SceneVk::releaseSamplerDeferred(VkSampler sampler)
+{
+  if(sampler == VK_NULL_HANDLE)
+    return;
+
+  nvvk::SamplerPool* pool    = m_samplerPool;
+  auto               cleanup = [=]() { pool->releaseSampler(sampler); };
+
+  if(m_deferredFree)
+  {
+    m_deferredFree(std::move(cleanup));
+  }
+  else
+  {
+    if(m_graphicsQueue)
+      vkQueueWaitIdle(m_graphicsQueue);
+    cleanup();
+  }
+}
+
 void nvvkgltf::SceneVk::deinit()
 {
   if(!m_alloc)
@@ -1288,6 +1314,27 @@ void nvvkgltf::SceneVk::ensureSamplers(const tinygltf::Model& model)
 }
 
 //--------------------------------------------------------------------------------------------------
+// Recreate the VkSampler for model.samplers[samplerIndex] in place (wrap/filter edit from the
+// Inspector). m_samplers[0] is the default slot, so model sampler i lives at slot i+1 -- see
+// ensureSamplers(). Only the sampler pool entry changes; m_images / m_textures are never touched, so
+// this cannot trigger an image reload. The old handle is released via releaseSamplerDeferred() (not
+// releaseSampler() directly): the eSamplers slot is UPDATE_AFTER_BIND, so a frame still in flight may
+// still be reading the old sampler through it, and releaseSampler() would destroy it immediately once
+// its refcount hits zero (ref-counted; a dedup hit elsewhere keeps it alive in the meantime).
+void nvvkgltf::SceneVk::updateSampler(const tinygltf::Model& model, int samplerIndex)
+{
+  const size_t slot = static_cast<size_t>(samplerIndex) + 1;
+  if(samplerIndex < 0 || samplerIndex >= static_cast<int>(model.samplers.size()) || slot >= m_samplers.size())
+    return;
+
+  VkSampler                 newSampler{};
+  const VkSamplerCreateInfo ci = getSampler(model, samplerIndex);
+  NVVK_CHECK(m_samplerPool->acquireSampler(newSampler, ci));
+  releaseSamplerDeferred(m_samplers[slot]);
+  m_samplers[slot] = newSampler;
+}
+
+//--------------------------------------------------------------------------------------------------
 // Create GPU images for all textures referenced by the scene. Loads from disk or embedded data.
 void nvvkgltf::SceneVk::createTextureImages(VkCommandBuffer                           cmd,
                                             nvvk::StagingUploader&                    staging,
@@ -1526,6 +1573,14 @@ void nvvkgltf::SceneVk::findSrgbImages(const tinygltf::Model& model)
 
     // https://github.com/KhronosGroup/glTF/blob/main/extensions/2.0/Khronos/KHR_materials_sheen/README.md#sheen
     addImageFromExtension(mat, "KHR_materials_sheen", "sheenColorTexture");
+
+    // https://github.com/KhronosGroup/glTF/blob/main/extensions/2.0/Khronos/KHR_materials_diffuse_transmission
+    addImageFromExtension(mat, "KHR_materials_diffuse_transmission", "diffuseTransmissionColorTexture");
+
+    // KHR_materials_scatter: multiscatterColorTexture is "stored in the RGB channels and encoded
+    // in sRGB". The legacy KHR_materials_volume_scatter name is still read on load, so flag both.
+    addImageFromExtension(mat, KHR_MATERIALS_SCATTER_EXTENSION_NAME, "multiscatterColorTexture");
+    addImageFromExtension(mat, KHR_MATERIALS_VOLUME_SCATTER_EXTENSION_NAME, "multiscatterColorTexture");
 
     // **Deprecated** but still used with some scenes
     // https://kcoley.github.io/glTF/extensions/2.0/Khronos/KHR_materials_pbrSpecularGlossiness

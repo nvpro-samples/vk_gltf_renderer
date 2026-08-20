@@ -485,11 +485,12 @@ public:
 
   struct DirtyFlags
   {
-    std::unordered_set<int> renderNodesVk;                // RenderNode indices for SceneVk
-    std::unordered_set<int> renderNodesRtx;               // RenderNode indices for SceneRTX
-    std::unordered_set<int> materials;                    // Material indices
-    std::unordered_set<int> lights;                       // Light indices (glTF light array)
-    std::unordered_set<int> nodes;                        // Node indices (for transform updates)
+    std::unordered_set<int> renderNodesVk;   // RenderNode indices for SceneVk
+    std::unordered_set<int> renderNodesRtx;  // RenderNode indices for SceneRTX
+    std::unordered_set<int> materials;       // Material indices
+    std::unordered_set<int> lights;          // Light indices (glTF light array)
+    std::unordered_set<int> nodes;           // Node indices (for transform updates)
+    std::unordered_set<int> samplers;  // glTF sampler indices whose wrap/filter changed in place (no image reload)
     bool                    allRenderNodesDirty = false;  // Full RN upload (count change or massive reorder)
     bool                    primitivesChanged   = false;  // BLAS rebuild needed (primitive set changed)
     bool                    texturesChanged = false;  // Full texture rebuild needed (structural image/texture change)
@@ -504,6 +505,7 @@ public:
       materials.clear();
       lights.clear();
       nodes.clear();
+      samplers.clear();
       allRenderNodesDirty        = false;
       primitivesChanged          = false;
       texturesChanged            = false;
@@ -515,8 +517,8 @@ public:
     [[nodiscard]] bool isEmpty() const
     {
       return renderNodesVk.empty() && renderNodesRtx.empty() && materials.empty() && lights.empty() && nodes.empty()
-             && !allRenderNodesDirty && !primitivesChanged && !texturesChanged && !texturesTailChanged
-             && !tlasVisibilityNeedsCpuSync && !emissiveDirty;
+             && samplers.empty() && !allRenderNodesDirty && !primitivesChanged && !texturesChanged
+             && !texturesTailChanged && !tlasVisibilityNeedsCpuSync && !emissiveDirty;
     }
   };
 
@@ -528,6 +530,7 @@ public:
   void markLightDirty(int lightIndex);
   void markRenderNodeDirty(int renderNodeIndex, bool forVk = true, bool forRtx = true);
   void markNodeDirty(int nodeIndex);
+  void markSamplerDirty(int samplerIndex);  // In-place wrap/filter edit; SceneVk updates the VkSampler only
   void markRenderNodeRtxDirtyForMaterials(const std::unordered_set<int>& materialIds);  // For TLAS instance flags
 
 private:

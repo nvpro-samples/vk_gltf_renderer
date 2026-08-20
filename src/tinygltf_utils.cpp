@@ -149,16 +149,35 @@ void tinygltf::utils::setVolume(tinygltf::Material& tmat, const KHR_materials_vo
   tinygltf::utils::setArrayValue(ext, "attenuationColor", 3, glm::value_ptr(volume.attenuationColor));
 }
 
-KHR_materials_volume_scatter tinygltf::utils::getVolumeScatter(const tinygltf::Material& tmat)
+KHR_materials_scatter tinygltf::utils::getScatter(const tinygltf::Material& tmat)
 {
-  KHR_materials_volume_scatter gmat;
-  if(const auto* ext = tinygltf::utils::findExtension(tmat.extensions, KHR_MATERIALS_VOLUME_SCATTER_EXTENSION_NAME))
+  KHR_materials_scatter gmat;
+  // Prefer the current extension name; fall back to the earlier draft name.
+  const tinygltf::Value* ext    = tinygltf::utils::findExtension(tmat.extensions, KHR_MATERIALS_SCATTER_EXTENSION_NAME);
+  bool                   legacy = false;
+  if(!ext)
   {
+    ext    = tinygltf::utils::findExtension(tmat.extensions, KHR_MATERIALS_VOLUME_SCATTER_EXTENSION_NAME);
+    legacy = (ext != nullptr);
+  }
+  if(ext)
+  {
+    // The earlier KHR_materials_volume_scatter draft had no scatterStrengthFactor: scattering was
+    // always at full strength. Default legacy assets to 1.0 (they still render as authored, e.g.
+    // ScatteringSkull) while new KHR_materials_scatter assets default to 0.0 per spec.
+    gmat.scatterStrengthFactor = legacy ? 1.0f : 0.0f;
+    // ...and its multiscatterColor defaulted to black, which is what turned scattering off there.
+    if(legacy)
+      gmat.multiscatterColorFactor = glm::vec3(0.0f);
+    tinygltf::utils::getValue(*ext, "scatterStrengthFactor", gmat.scatterStrengthFactor);
+    gmat.scatterStrengthFactor = std::clamp(gmat.scatterStrengthFactor, 0.0f, 1.0f);
+    tinygltf::utils::getValue(*ext, "scatterStrengthTexture", gmat.scatterStrengthTexture);
     tinygltf::utils::getArrayValue(*ext, "multiscatterColorFactor", gmat.multiscatterColorFactor);
+    tinygltf::utils::getValue(*ext, "multiscatterColorTexture", gmat.multiscatterColorTexture);
     tinygltf::utils::getValue(*ext, "scatterAnisotropy", gmat.scatterAnisotropy);
     gmat.scatterAnisotropy = std::clamp(gmat.scatterAnisotropy, -0.999f, 0.999f);
 
-    // If multiscatterColor is present (old version), set multiscatterColorFactor to it
+    // Earlier draft used "multiscatterColor" instead of "multiscatterColorFactor".
     if(ext->Has("multiscatterColor"))
     {
       tinygltf::utils::getArrayValue(*ext, "multiscatterColor", gmat.multiscatterColorFactor);
@@ -167,10 +186,25 @@ KHR_materials_volume_scatter tinygltf::utils::getVolumeScatter(const tinygltf::M
   return gmat;
 }
 
-void tinygltf::utils::setVolumeScatter(tinygltf::Material& tmat, const KHR_materials_volume_scatter& scatter)
+void tinygltf::utils::setScatter(tinygltf::Material& tmat, const KHR_materials_scatter& scatter)
 {
-  tinygltf::Value& ext = tinygltf::utils::ensureExtension(tmat.extensions, KHR_MATERIALS_VOLUME_SCATTER_EXTENSION_NAME);
+  // Writing always migrates to the current extension name.
+  tmat.extensions.erase(KHR_MATERIALS_VOLUME_SCATTER_EXTENSION_NAME);
+  tinygltf::Value& ext = tinygltf::utils::ensureExtension(tmat.extensions, KHR_MATERIALS_SCATTER_EXTENSION_NAME);
+
+  // An unassigned texture must not be written as "index": -1; drop the whole property instead, so
+  // clearing a texture slot in the Inspector removes it from the saved asset.
+  auto setOrEraseTexture = [&ext](const char* key, const tinygltf::TextureInfo& info) {
+    if(info.index > -1)
+      tinygltf::utils::setValue(ext, key, info);
+    else
+      ext.Get<tinygltf::Value::Object>().erase(key);
+  };
+
+  tinygltf::utils::setValue(ext, "scatterStrengthFactor", scatter.scatterStrengthFactor);
+  setOrEraseTexture("scatterStrengthTexture", scatter.scatterStrengthTexture);
   tinygltf::utils::setArrayValue(ext, "multiscatterColorFactor", 3, glm::value_ptr(scatter.multiscatterColorFactor));
+  setOrEraseTexture("multiscatterColorTexture", scatter.multiscatterColorTexture);
   tinygltf::utils::setValue(ext, "scatterAnisotropy", scatter.scatterAnisotropy);
 }
 
@@ -740,6 +774,14 @@ int tinygltf::utils::getTextureImageIndex(const tinygltf::Texture& texture)
   }
 
   return source_image;
+}
+
+bool tinygltf::utils::hasTextureImageSourceOverride(const tinygltf::Texture& texture)
+{
+  for(const char* extName : kTextureImageSourceExtensionNames)
+    if(hasElementName(texture.extensions, extName))
+      return true;
+  return false;
 }
 
 std::vector<int> tinygltf::utils::getTextureImageSources(const tinygltf::Texture& texture)

@@ -113,18 +113,6 @@ float3 getTransmissionSample(float2 uv, float roughness, float ior)
   return texturesHdr[HDR_OPAQUE_INDEX].SampleLevel(uv, framebufferLod).rgb;
 }
 
-// Volume scatter (KHR_materials_volume_scatter) approximation: analytic single-fragment estimate
-// of the disk-filter SSS when no scatter pre-pass is available. Mask matches Khronos pbr.frag:355
-// `(1-metallic)(1-iridescence)(1-transmission)`; the clearcoat mask is applied by the caller.
-float3 volumeScatterApprox(PbrMaterial mat, float3 hemisphericalIrradiance)
-{
-  if(max3(mat.scatterCoefficient) <= 0.0)
-    return float3(0.0);
-  float3 scattered = hemisphericalIrradiance * mat.scatterCoefficient * mat.diffuseTransmissionColor;
-  float  mask      = (1.0 - mat.metallic) * (1.0 - mat.iridescence) * (1.0 - mat.transmission);
-  return scattered * mask;
-}
-
 #if GLTF_USE_RETROREFLECTION
 PbrMaterial disableBtdf(PbrMaterial mat)
 {
@@ -459,14 +447,10 @@ PixelOutput fragmentMain(VertexOutput input, uint primitiveID: SV_PrimitiveID, f
                        pushConst.frameInfo.envIntensity, dttThickness, f_specular_transmission, haveTransmissionSample);
 #endif
 
-#if GLTF_USE_VOLUME_SCATTER
-    // KHR_materials_volume_scatter contribution is separate from the IBL composite (matches
-    // `pbr.frag:352-356`). The clearcoat mask `(1 - clearcoat * F_coat)` is angle-dependent.
-    float3 ccFmask   = float3(1.0) - pbrMat.clearcoat * khronosClearcoatFresnel(pbrMat, V);
-    float3 scatterIr = getIBLDiffuse(texturesCube[HDR_DIFFUSE_INDEX], pbrMat.N, pushConst.frameInfo.envRotation,
-                                     pushConst.frameInfo.envIntensity);
-    contribution += volumeScatterApprox(pbrMat, scatterIr) * ccFmask;
-#endif
+    // KHR_materials_scatter needs no separate term here: evaluateMaterial() maps it onto the
+    // diffuse-transmission / diffuse-reflection lobes for the raster pipeline (the spec's
+    // thin-walled approximation of volumetric scattering), so the IBL composite above already
+    // accounts for it.
   }
 
   // Apply ambient occlusion to indirect lighting only (matches Khronos pbr.frag).

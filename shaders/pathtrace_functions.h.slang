@@ -40,9 +40,18 @@ static const float ANTIALIASING_STANDARD_DEVIATION = 0.4246609f;  // Standard de
 static const int   RR_MIN_DEPTH                    = 3;           // Minimum depth for Russian Roulette
 static const float VOLUME_MIN_SCATTER              = 0.001f;      // Minimum scatter for volume rendering
 static const float VOLUME_RAND_FLOOR               = 1.0e-10f;    // Minimum random floor for volume rendering
-static const int   VOLUME_FREE_BUDGET              = 64;          // Maximum free budget for volume rendering
-static const float RR_PCONT_FLOOR                  = 0.001f;      // Minimum probability for Russian Roulette
-static const float RR_PCONT_CAP                    = 0.95f;       // Maximum probability for Russian Roulette
+static const float VOLUME_RAND_CEIL = 1.0f - 1.0e-7f;  // rand() can return exactly 1.0; keep u in the half-open [0,1) the bucket remap assumes
+static const float RR_PCONT_FLOOR = 0.001f;  // Minimum probability for Russian Roulette
+static const float RR_PCONT_CAP   = 0.95f;   // Maximum probability for Russian Roulette
+// In-volume Russian Roulette. Scattering is bounded by an event budget rather than by the surface
+// cap: a dense, high-albedo medium keeps the throughput near 1, so a 0.95 cap culls 5% of the
+// *fully energetic* paths at every scatter event and the medium renders far too dark (56% of the
+// energy lost at g = 0.95 in a medium that cannot absorb at all). Following the throughput instead
+// leaves those paths alone, and the hard stop keeps the cost of a dense medium bounded -- this is
+// an interactive path tracer, and an unbounded walk in a non-absorbing medium does not terminate
+// at all (measured: device loss, not merely a slow frame).
+static const int   VOLUME_FREE_BUDGET  = 64;      // Scatter events before Russian Roulette starts culling a volume path
+static const float RR_PCONT_CAP_VOLUME = 0.999f;  // Maximum Russian Roulette probability inside a volume
 
 //-----------------------------------------------------------------------
 // Denoiser guide buffers (shared by DLSS and OptiX)
@@ -117,28 +126,44 @@ struct RayCone
 // struct, the bounce-loop in-volume tracking, and the corresponding fields on
 // PathTracerState are dropped entirely (reduces per-thread live registers).
 #if GLTF_USE_VOLUME
+// Stored as absorption + scattering rather than extinction + scattering. The two forms are
+// equivalent in exact arithmetic, but a dense, high-albedo medium has sigma_a as a tiny
+// difference of two large numbers (sigma_t = 2712, sigma_s = 2711.6), and recovering it by
+// subtracting stored values destroys it under limited precision. Keeping sigma_a as its own
+// field gives every derived quantity -- sigma_t and, more importantly, the single-scatter
+// albedo -- full precision, with no cancellation. That matters here: a medium authored with
+// multiscatterColor near white has an albedo like 0.9999, and recovering it as sigma_s / sigma_t
+// from two lower-precision values can quantize it straight to 1.0 (originally observed with
+// float16 storage; kept as float32 headroom against the same failure mode at higher albedos).
 struct VolumeMedium
 {
-  float16_t3 extinction;
-  float16_t3 scatterCoefficient;
-  float16_t  scatterAnisotropy;
+  float32_t3 absorption;          // sigma_a
+  float32_t3 scatterCoefficient;  // sigma_s
+  float32_t  scatterAnisotropy;   // g
 };
 
 VolumeMedium makeVolumeMedium(PbrMaterial pbrMat)
 {
+  // sigma_t is the total extinction (KHR_materials_volume) and sigma_s the scattering part of it
+  // (KHR_materials_scatter), so the difference is the absorption. Done in full precision here.
+  float3       sigmaT = volumeExtinctionCoefficient(pbrMat);
+  float3       sigmaS = min(pbrMat.scatterCoefficient, sigmaT);
   VolumeMedium medium;
-  medium.extinction         = float16_t3(volumeExtinctionCoefficient(pbrMat));
-  medium.scatterCoefficient = float16_t3(pbrMat.scatterCoefficient);
-  medium.scatterAnisotropy  = float16_t(pbrMat.scatterAnisotropy);
+  medium.absorption         = float32_t3(sigmaT - sigmaS);
+  medium.scatterCoefficient = float32_t3(sigmaS);
+  medium.scatterAnisotropy  = float32_t(pbrMat.scatterAnisotropy);
   return medium;
+}
+
+float3 volumeExtinction(VolumeMedium medium)
+{
+  return float3(medium.absorption) + float3(medium.scatterCoefficient);
 }
 
 bool hasVolumeMedium(VolumeMedium medium)
 {
-  float3 extinction   = float3(medium.extinction);
-  float3 scatterCoeff = float3(medium.scatterCoefficient);
-  return max(max(extinction.x, extinction.y), extinction.z) > 0.0F
-         || max(max(scatterCoeff.x, scatterCoeff.y), scatterCoeff.z) > 0.0F;
+  float3 extinction = volumeExtinction(medium);
+  return max(max(extinction.x, extinction.y), extinction.z) > 0.0F;
 }
 #endif  // GLTF_USE_VOLUME
 
@@ -209,6 +234,7 @@ float getOpacity(GltfRenderNode renderNode, GltfRenderPrimitive renderPrim, int 
     {
       GltfTextureInfo texInfo = texInfos[mat.pbrDiffuseTexture];
       float2          uv = getInterpolatedVertexTexCoord(renderPrim, texInfo.texCoord, triangleIndex, barycentrics);
+      uv                 = applyTextureTransform(texInfo, uv);
       baseColorAlpha *= allImages[texInfo.index].SampleLevel(allSamplers[texInfo.samplerIndex], uv, 0.0f).a;
     }
   }
@@ -220,6 +246,7 @@ float getOpacity(GltfRenderNode renderNode, GltfRenderPrimitive renderPrim, int 
     {
       GltfTextureInfo texInfo = texInfos[mat.pbrBaseColorTexture];
       float2          uv = getInterpolatedVertexTexCoord(renderPrim, texInfo.texCoord, triangleIndex, barycentrics);
+      uv                 = applyTextureTransform(texInfo, uv);
 
       baseColorAlpha *= allImages[texInfo.index].SampleLevel(allSamplers[texInfo.samplerIndex], uv, 0.0f).a;
     }
@@ -298,8 +325,11 @@ float3 getShadowTransmission(GltfRenderNode      renderNode,
       // Beer-Lambert transmittance through the medium interior. -log(c)/d is the TOTAL
       // extinction sigma_t = sigma_a + sigma_s: the out-scattering portion is already
       // included, so the scatter coefficient must not be added on top (that would
-      // double-count it and over-darken the ray).
-      float3 extinction = -log(max(mat.attenuationColor, float3(0.001))) / max(mat.attenuationDistance, 0.001);
+      // double-count it and over-darken the ray). See volumeExtinctionCoefficient()
+      // in nvpro_core2's bsdf_functions.h.slang. attenuationDistance == 0 means "disabled".
+      float3 extinction = (mat.attenuationDistance == 0.0F) ?
+                              float3(0.0F) :
+                              -log(max(mat.attenuationColor, float3(0.001))) / mat.attenuationDistance;
       currentTransmission *= exp(-hitT * extinction);
     }
     isInside = !isInside;
@@ -314,6 +344,7 @@ float3 getShadowTransmission(GltfRenderNode      renderNode,
     {
       GltfTextureInfo texInfo = texInfos[mat.pbrMetallicRoughnessTexture];
       float2          uv      = getInterpolatedVertexTexCoord(renderPrim, texInfo.texCoord, indices, barycentrics);
+      uv                      = applyTextureTransform(texInfo, uv);
 
       float4 mr_sample = allImages[texInfo.index].SampleLevel(allSamplers[texInfo.samplerIndex], uv, 0.0f);
       roughness *= mr_sample.g;
@@ -509,7 +540,18 @@ float computeEmitterHitMisWeight(float lastSamplePdf, float3 radiance, float3 ge
   return lastSamplePdf / (lastSamplePdf + emitterNeePdf);
 }
 
-void sampleLights(in float3 pos, float3 normal, in float3 worldRayDirection, inout uint seed, out DirectLight directLight, in bool isVolumeSample = false)
+// `normal` is used to reject punctual lights that sit below the surface's hemisphere.
+// `lightsFromBothSides` disables that rejection for shading points that receive light from the
+// back hemisphere as well: volume scattering events, and surfaces with a diffuse transmission
+// lobe (KHR_materials_diffuse_transmission, and the thin-walled mode of KHR_materials_scatter --
+// a backlit leaf or sheet of paper is exactly the case those describe).
+void sampleLights(in float3       pos,
+                  float3          normal,
+                  in float3       worldRayDirection,
+                  inout uint      seed,
+                  out DirectLight directLight,
+                  in bool         isVolumeSample      = false,
+                  in bool         lightsFromBothSides = false)
 {
   float3 radiance             = float3(0.0f);
   directLight.pdf             = 0.0f;
@@ -549,7 +591,14 @@ void sampleLights(in float3 pos, float3 normal, in float3 worldRayDirection, ino
       int       lightIndex   = min(int(rand(seed) * numPunctual), numPunctual - 1);
       GltfLight light        = pushConst.gltfScene.lights[lightIndex];
 
-      float3 cullNormal = (isVolumeSample && light.type == LightType::eLightTypeDirectional) ? -light.direction : normal;
+      // singleLightContribution() drops any punctual light below the hemisphere of the normal it
+      // is given. When the shading point is lit from both sides, hand it a normal pointing at the
+      // light so nothing is rejected; the BSDF (or phase function) decides what the light does.
+      float3 cullNormal = normal;
+      if(isVolumeSample || lightsFromBothSides)
+      {
+        cullNormal = (light.type == LightType::eLightTypeDirectional) ? -light.direction : normalize(light.position - pos);
+      }
       LightContrib contrib = singleLightContribution(light, pos, cullNormal, float2(rand(seed), rand(seed)));
 
       directLight.direction = -contrib.incidentVector;
@@ -758,37 +807,80 @@ bool checkInfinitePlaneIntersection(RayDesc ray, inout HitPayload payload, inout
 
 //-----------------------------------------------------------------------
 // In-volume step: Beer's-law absorption (always when GLTF_USE_VOLUME) +
-// Henyey-Greenstein scatter sampling (only when GLTF_USE_VOLUME_SCATTER).
+// Henyey-Greenstein scatter sampling (only when GLTF_USE_SCATTER).
 //-----------------------------------------------------------------------
 // IMPORTANT: this function exists whenever GLTF_USE_VOLUME is on, NOT only when
-// GLTF_USE_VOLUME_SCATTER is on. KHR_materials_volume by itself (no scatter
+// GLTF_USE_SCATTER is on. KHR_materials_volume by itself (no scatter
 // extension) still needs per-segment Beer's-law absorption applied along the
 // camera ray, which is what makes a glass with attenuationColor="green" look
-// green. Earlier the entire function was gated on GLTF_USE_VOLUME_SCATTER which
+// green. Earlier the entire function was gated on GLTF_USE_SCATTER which
 // silently dropped that absorption pass in optimal mode for any scene that
 // uses volume but not scatter (e.g. CompareVolume.gltf).
 //
-// Returns true only when a real scatter event happened (GLTF_USE_VOLUME_SCATTER
+// Returns true only when a real scatter event happened (GLTF_USE_SCATTER
 // must be on for that to be possible). Returns false when only absorption was
 // applied. The bounce-loop caller uses the return value to decide whether to
 // run scatter-only follow-up work (NEE at the scatter point, scatterBounces++).
 #if GLTF_USE_VOLUME
 bool handleVolumeScatter(VolumeMedium medium, float hitDistance, inout RayDesc ray, inout float3 throughput, inout float lastSamplePdf, inout uint seed)
 {
-  float3 extinction = float3(medium.extinction);
+  float3 extinction = volumeExtinction(medium);
 
-#if GLTF_USE_VOLUME_SCATTER
+#if GLTF_USE_SCATTER
   float3 scatterCoeff = float3(medium.scatterCoefficient);
   float  maxScatter   = max(scatterCoeff.x, max(scatterCoeff.y, scatterCoeff.z));
   if(maxScatter > VOLUME_MIN_SCATTER)
   {
-    float maxExtinction = max(extinction.x, max(extinction.y, extinction.z));
+    // KHR_materials_volume media are homogeneous, so the free-flight distance can be sampled
+    // analytically -- no delta tracking and no majorant. The medium is chromatic (sigma_t and
+    // sigma_s are per-channel), so one channel is picked to sample the distance and the three
+    // per-channel distance pdfs are combined with the balance heuristic (spectral MIS). Every
+    // channel then keeps exactly its own transmittance and its own scattering rate.
+    //
+    // A single-majorant tracker would instead scatter every channel at the majorant's rate:
+    // the low-extinction channels would random-walk far too often, and since their extra
+    // "collisions" are lossless null collisions, their effective per-collision albedo -- which
+    // is what sets the perceived color of a dense medium -- would drift towards 1. That breaks
+    // the multi-scatter albedo mapping the extension is built on (a yellow multiscatterColor
+    // over a slightly red attenuationColor came out pink).
+    float3 channelProb = max(throughput, float3(0.0));
+    float  probSum     = channelProb.x + channelProb.y + channelProb.z;
+    channelProb        = (probSum > 0.0) ? channelProb / probSum : float3(1.0 / 3.0);
 
-    float scatterDist = -log(max(rand(seed), VOLUME_RAND_FLOOR)) / maxExtinction;
+    // Pick the channel whose free-flight distribution is sampled, then draw the distance. The
+    // selection consumes only the bucket it lands in, so rescaling within that bucket recovers a
+    // fresh uniform for the distance -- one rand() per scatter event instead of two, and in a
+    // dense medium there is one of these per event.
+    float u             = min(rand(seed), VOLUME_RAND_CEIL);
+    float sigmaTChannel = extinction.z;
+    if(u < channelProb.x)
+    {
+      sigmaTChannel = extinction.x;
+      u /= channelProb.x;
+    }
+    else if(u < channelProb.x + channelProb.y)
+    {
+      sigmaTChannel = extinction.y;
+      u             = (u - channelProb.x) / channelProb.y;
+    }
+    else
+    {
+      u = (u - channelProb.x - channelProb.y) / channelProb.z;
+    }
+    float scatterDist = (sigmaTChannel > 0.0) ? -log(max(u, VOLUME_RAND_FLOOR)) / sigmaTChannel : hitDistance;
 
     if(scatterDist < hitDistance)
     {
-      throughput *= float3(1.0) - (extinction - scatterCoeff) / maxExtinction;
+      // Scattering event: pdf_i(t) = sigma_t_i * exp(-sigma_t_i * t), combined over the channels.
+      float3 transmittance = exp(-extinction * scatterDist);
+      float  pdf           = dot(channelProb, extinction * transmittance);
+      if(pdf <= 0.0)
+      {
+        // Every channel's transmittance underflowed: the medium is opaque along this segment.
+        throughput = float3(0.0);
+        return false;
+      }
+      throughput *= scatterCoeff * transmittance / pdf;
 
       ray.Origin        = ray.Origin + ray.Direction * scatterDist;
       float3 wi         = ray.Direction;
@@ -800,14 +892,16 @@ bool handleVolumeScatter(VolumeMedium medium, float hitDistance, inout RayDesc r
       return true;  // scatter event
     }
 
-    // No scatter this segment: apply the absorption-only attenuation that the analytical
-    // null-collision tracker leaves behind (extinction - scatterCoeff = pure absorption).
-    throughput *= exp(hitDistance * (float3(maxExtinction) - extinction));
+    // Reached the surface without scattering: the probability of that is exp(-sigma_t_i * d) per
+    // channel, again combined with the balance heuristic.
+    float3 transmittance = exp(-extinction * hitDistance);
+    float  pdf           = dot(channelProb, transmittance);
+    throughput *= (pdf > 0.0) ? transmittance / pdf : float3(0.0);
     return false;
   }
-#endif  // GLTF_USE_VOLUME_SCATTER
+#endif  // GLTF_USE_SCATTER
 
-  // Pure-absorption path (no scatter coefficient, or GLTF_USE_VOLUME_SCATTER disabled):
+  // Pure-absorption path (no scatter coefficient, or GLTF_USE_SCATTER disabled):
   // straight Beer's law applied over the segment length. This is the case for plain
   // KHR_materials_volume materials and is what produces the colored tint of a glass
   // filled with an absorbing medium.
@@ -817,8 +911,8 @@ bool handleVolumeScatter(VolumeMedium medium, float hitDistance, inout RayDesc r
 #endif  // GLTF_USE_VOLUME
 
 // Scatter-only: next-event estimation at the scatter point. Only meaningful when a
-// scatter event can actually happen, so gated on GLTF_USE_VOLUME_SCATTER.
-#if GLTF_USE_VOLUME_SCATTER
+// scatter event can actually happen, so gated on GLTF_USE_SCATTER.
+#if GLTF_USE_SCATTER
 float3 volumeScatterNEE(IRaytracer raytracer, VolumeMedium medium, float3 scatterPos, float3 wiBeforeScatter, float3 throughput, inout uint seed)
 {
   DirectLight directLight;
@@ -841,7 +935,7 @@ float3 volumeScatterNEE(IRaytracer raytracer, VolumeMedium medium, float3 scatte
 
   return throughput * directLight.radianceOverPdf * misWeight * phasePdf * shadowFactor;
 }
-#endif  // GLTF_USE_VOLUME_SCATTER
+#endif  // GLTF_USE_SCATTER
 
 
 //-----------------------------------------------------------------------
@@ -1034,7 +1128,7 @@ struct PathTracerState
 #if GLTF_USE_VOLUME
   VolumeMedium volumeMedium = {};
 #endif
-#if GLTF_USE_VOLUME_SCATTER
+#if GLTF_USE_SCATTER
   int scatterBounces = 0;
 #endif
 #if USE_GUIDE_SHADER
@@ -1077,7 +1171,7 @@ PathStepResult processVolumeSegment(IRaytracer raytracer, float hitDistance, ino
 #if GLTF_USE_VOLUME
   if(pt.isInside && hasVolumeMedium(pt.volumeMedium))
   {
-#if GLTF_USE_VOLUME_SCATTER
+#if GLTF_USE_SCATTER
     // handleVolumeScatter may rotate/translate the ray during a true scatter event.
     // Keep the pre-scatter ray state for HG cosine evaluation and cone travel update.
     const float3 wiBeforeScatter     = ray.Direction;
@@ -1086,7 +1180,7 @@ PathStepResult processVolumeSegment(IRaytracer raytracer, float hitDistance, ino
 
     if(handleVolumeScatter(pt.volumeMedium, hitDistance, ray, pt.throughput, pt.lastSamplePdf, seed))
     {
-#if GLTF_USE_VOLUME_SCATTER
+#if GLTF_USE_SCATTER
       pt.scatterBounces++;
 
       // Scatter events translate the cone through the medium segment (no slant correction).
@@ -1095,13 +1189,13 @@ PathStepResult processVolumeSegment(IRaytracer raytracer, float hitDistance, ino
 
       if(pt.scatterBounces >= VOLUME_FREE_BUDGET)
       {
-        float rrPcont = min(max(pt.throughput.x, max(pt.throughput.y, pt.throughput.z)) + RR_PCONT_FLOOR, RR_PCONT_CAP);
+        float rrPcont = min(max(pt.throughput.x, max(pt.throughput.y, pt.throughput.z)) + RR_PCONT_FLOOR, RR_PCONT_CAP_VOLUME);
         if(rand(seed) >= rrPcont)
           return PathStepResult.eBreak;
         pt.throughput /= rrPcont;
       }
       return PathStepResult.eVolumeContinue;  // skips surface-depth increment in the main loop
-#endif                                        // GLTF_USE_VOLUME_SCATTER
+#endif                                        // GLTF_USE_SCATTER
     }
   }
 #endif  // GLTF_USE_VOLUME

@@ -152,6 +152,32 @@ void BenchmarkController::registerParameters(nvutils::ParameterRegistry* paramet
                                 }
                               }},
                          {".png", ".jpg", ".jpeg"}, &m_options.screenshotFilename);
+
+  parameterRegistry->add({.name = "uiScreenshot",
+                          .help = "Capture the full window (ImGui panels + viewport) to file. Unlike --screenshot "
+                                  "(viewport only), this includes the Scene Browser, Inspector, and other panels. "
+                                  "Windowed scripted runs only; ignored in headless mode (no swapchain).",
+                          .callbackSuccess =
+                              [this](const nvutils::ParameterBase* const) {
+                                if(m_callbacks.saveUiScreenshot && !m_options.uiScreenshotFilename.empty())
+                                {
+                                  m_callbacks.saveUiScreenshot(m_options.uiScreenshotFilename);
+                                }
+                              }},
+                         {".png", ".jpg", ".jpeg"}, &m_options.uiScreenshotFilename);
+
+  parameterRegistry->add({.name = "selectNode",
+                          .help = "Select a scene-graph node by index (as listed in the Scene Browser tree), driving "
+                                  "the Inspector contents and the Scene Browser highlight. A negative or out-of-range "
+                                  "index clears the selection.",
+                          .callbackSuccess =
+                              [this](const nvutils::ParameterBase* const) {
+                                if(m_callbacks.selectSceneNode)
+                                {
+                                  m_callbacks.selectSceneNode(m_options.selectNodeIndex);
+                                }
+                              }},
+                         &m_options.selectNodeIndex);
 }
 
 //--------------------------------------------------------------------------------------------------

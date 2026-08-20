@@ -21,11 +21,13 @@
 
 /*
  * UiSceneBrowser - Tabbed scene browser window
- * 
- * Displays the glTF scene in multiple views:
- * - Asset Info: Version, generator, metadata
+ *
+ * Displays the glTF scene in two views:
  * - Scene Graph: Hierarchical tree view with scene transform
- * - Scene List: Flat grouped view (nodes, meshes, materials, cameras, lights, textures, images, animations)
+ * - Elements:    Data-driven per-category table (one ElementTypeDesc per glTF collection) with browse
+ *                columns, click-to-sort, filter, and an Add/Duplicate/Delete/Rename toolbar. The
+ *                registry and the generic list renderer live in ui_scene_browser_elements.cpp.
+ * Asset-level metadata (version, generator) is shown above the tabs.
  */
 
 #include <functional>
@@ -42,6 +44,7 @@
 #include "scene_selection.hpp"
 #include "gltf_scene_editor.hpp"  // nvvkgltf::PrimitiveKind, PrimitiveParams
 #include "ui_host_services.hpp"
+#include "ui_element_registry.hpp"  // ElementTypeDesc (data-driven Elements tab)
 
 class UndoStack;
 
@@ -62,7 +65,7 @@ public:
   {
     AssetInfo,   // Version, generator, metadata
     SceneGraph,  // Hierarchical tree view with scene transform
-    SceneList,   // Flat list (grouped by type)
+    Elements,    // Data-driven per-category table (registry) - editor-grade list
     Debug        // Debug information and tools
   };
 
@@ -125,7 +128,19 @@ private:
   //==================================================================================================
   void renderAssetInfoTab();
   void renderSceneGraphTab();
-  void renderSceneListTab();
+
+  //==================================================================================================
+  // ELEMENTS TAB (data-driven, registry-backed) - see ui_scene_browser_elements.cpp
+  //==================================================================================================
+  void ensureElementRegistry();                            // build m_elementTypes once (lazy)
+  void renderElementsTab();                                // icon tab bar + toolbar + table
+  void renderElementToolbar(const ElementTypeDesc& desc);  // filter + Add / Duplicate / Delete / Rename
+  void renderElementTable(const ElementTypeDesc& desc);    // clippered columnar table
+  void renderElementRenameDialog();                        // modal rename via desc.rename
+  void buildElementView(const ElementTypeDesc& desc, int tabIndex, int sortCol, bool sortAsc);  // lazy filtered/sorted index list
+  void ensureElementStats();                                        // recompute derived stat tables on revision change
+  int  selectedElementIndex(const ElementTypeDesc& desc) const;     // current selection within this category, or -1
+  void beginElementRename(const ElementTypeDesc& desc, int index);  // seed + open the rename modal
 
   //==================================================================================================
   // TAB RENDERERS
@@ -144,34 +159,14 @@ private:
   void renderPrimitiveInHierarchy(int primIdx, int meshIdx, int nodeIdx);
   void renderLightInHierarchy(int lightIdx);
   void renderCameraInHierarchy(int cameraIdx);
+  void renderImageViewer();  // Modal image viewer (large preview + metadata + replace/reload), opened from the Inspector
 
   //==================================================================================================
-  // SCENE LIST HELPERS (grouped flat lists)
-  //==================================================================================================
-  void renderNodesGroup();
-  void renderMeshesGroup();
-  void renderMaterialsGroup();
-  void renderCamerasGroup();
-  void renderLightsGroup();
-  void renderTexturesGroup();                     // Texture list: thumbnail + clickable image/sampler IDs + edit
-  void renderTextureEditPopup(int textureIndex);  // "textureEdit" popup: image/sampler IDs ({ source, sampler })
-  void renderSamplerEditPopup(int samplerIndex);  // "samplerEdit" popup: wrap/filter for an existing sampler
-  void renderSamplersGroup();                     // Sampler list: wrap/filter + used-by, jump target from textures
-  void renderImagesGroup();                       // Image list with thumbnails, usage counts, view/replace/delete
-  void renderImageViewer();                       // Modal image viewer (large preview + metadata + replace/reload)
-  void renderAnimationsGroup();                   // Display-only (non-selectable)
-
-  // Renders the four wrap/filter combos for `cur`; when a field changes, invokes commit(edited) with a
-  // copy of cur carrying that change. Shared by the texture and sampler edit popups.
-  void renderSamplerFields(const tinygltf::Sampler& cur, const std::function<void(const tinygltf::Sampler&)>& commit);
-
-  //==================================================================================================
-  // CONTEXT MENUS
+  // CONTEXT MENUS (Scene Graph tree)
   //==================================================================================================
   void showNodeContextMenu(int nodeIdx);
   void showMeshContextMenu(int meshIdx);
   void showPrimitiveContextMenu(int primIdx, int meshIdx, int nodeIdx);
-  void showMaterialContextMenu(int matIdx);
 
   // Create-catalog building blocks (all take parentIndex; -1 = scene root):
   void renderAddPrimitiveItems(int parentIndex);  // one item per nvvkgltf::kPrimitiveKinds (Mesh)
@@ -216,12 +211,6 @@ private:
   std::unordered_set<int> m_expandedNodes;     // Only force-open these nodes (from selection)
   bool                    m_doScroll = false;  // Auto-scroll to selection
 
-  // Scene List: jump from a texture row to the Images / Samplers group (scroll to the referenced index)
-  int  m_pendingScrollToImageIndex   = -1;
-  bool m_forceImagesSectionOpen      = false;
-  int  m_pendingScrollToSamplerIndex = -1;
-  bool m_forceSamplersSectionOpen    = false;
-
   // Scene transform state (per scene)
   struct SceneTransformState
   {
@@ -234,9 +223,6 @@ private:
   };
   std::vector<SceneTransformState> m_sceneTransforms;
 
-  // Cached texture display names (for material texture dropdowns)
-  std::vector<std::string> m_textureNames;
-
   // Performance caches: element → first node containing it
   std::unordered_map<int, int> m_meshToNodeMap;
   std::unordered_map<int, int> m_lightToNodeMap;
@@ -244,6 +230,46 @@ private:
   bool                         m_meshToNodeMapDirty   = true;
   bool                         m_lightToNodeMapDirty  = true;
   bool                         m_cameraToNodeMapDirty = true;
+
+  //==================================================================================================
+  // ELEMENTS TAB STATE (registry-backed list) - see ui_scene_browser_elements.cpp
+  //==================================================================================================
+  // Monotonic revision bumped by markCachesDirty() on every structural edit. Drives lazy rebuild of
+  // the filtered/sorted view and the derived-stat tables below - nothing else invalidates them.
+  uint64_t m_revision = 1;
+
+  std::vector<ElementTypeDesc> m_elementTypes;  // built once by ensureElementRegistry()
+  int                          m_activeElementTab   = 0;
+  char                         m_elementFilter[128] = {};
+
+  // Lazy view of the active category: filtered (+ sorted) element indices. Rebuilt only when the
+  // (revision, tab, filter, sort) key changes; empty `rows` means "identity" (iterate 0..count).
+  struct ElementView
+  {
+    uint64_t         builtRevision = 0;
+    int              builtTab      = -1;
+    std::string      builtFilter;
+    int              builtSortCol = -1;
+    bool             builtSortAsc = true;
+    std::vector<int> rows;
+    bool             identity = true;  // true => no filter/sort, iterate 0..count directly
+  };
+  ElementView m_elementView;
+
+  // Derived per-element stat tables, recomputed once per revision by ensureElementStats().
+  uint64_t         m_statsRevision = 0;
+  std::vector<int> m_meshTriangles;     // per mesh: Σ triangles across its primitives
+  std::vector<int> m_meshInstances;     // per mesh: number of nodes referencing it
+  std::vector<int> m_materialRefs;      // per material: instanced primitive usages (the "Used by" column)
+  std::vector<int> m_materialPrimRefs;  // per material: primitive references (0 => safe to delete)
+  std::vector<int> m_imageRefs;         // per image: textures referencing it
+  std::vector<int> m_samplerRefs;       // per sampler: textures referencing it
+
+  // Rename modal state for the Elements list (routes through the active descriptor's rename handler).
+  int  m_elementRenameIndex       = -1;
+  int  m_elementRenameTab         = -1;
+  bool m_openElementRenamePopup   = false;
+  char m_elementRenameBuffer[256] = {};
 
   // Dialog state
   struct RenameState
@@ -269,10 +295,7 @@ private:
   int  m_viewerImageIndex = -1;     // image shown in the viewer (-1 = none)
   bool m_openImageViewer  = false;  // request to open the viewer next frame
 
-  // Deferred image removal: recorded during the (clippered) table loop, applied after it finishes so
-  // the model vector is not mutated mid-iteration.
-  int                       m_pendingDeleteImageIndex = -1;
-  nvvkgltf::PrimitiveKind   m_pendingPrimitiveKind    = nvvkgltf::PrimitiveKind::eCube;
+  nvvkgltf::PrimitiveKind   m_pendingPrimitiveKind = nvvkgltf::PrimitiveKind::eCube;
   nvvkgltf::PrimitiveParams m_pendingPrimitiveParams;
   int                       m_pendingPrimitiveParent         = -1;
   bool                      m_openAddPrimitivePopupNextFrame = false;

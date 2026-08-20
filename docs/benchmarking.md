@@ -1,11 +1,13 @@
 # Benchmarking vk_gltf_renderer
 
-> **For contributors and agents.** How to measure performance — headless timing and the scripted sequencer. The exact flags, log fields, and comparison rules are owned by the code (`src/benchmarking.cpp`, `utils/benchmark/`); this doc explains the workflow.
+> **For contributors and agents.** How to measure performance — GPU timing, headless timing and the scripted sequencer. The exact flags, log fields, and comparison rules are owned by the code (`src/benchmarking.cpp`, `utils/benchmark/`); this doc explains the workflow.
 
-Two workflows:
+Two performance workflows, and they answer different questions:
 
-1. **Headless timing (recommended)** — post-warmup render throughput for N frames at 1 or 5 samples per pixel; compare logs between builds.
-2. **Scripted sequencer** — multi-step `.cfg` matrix with per-stage GPU profiler stats (optional, heavier).
+1. **[GPU time at a fixed sample count](#gpu-time-at-a-fixed-sample-count-recommended-for-renderer-changes)** — the profiler's `Path Trace` GPU timer with the work per frame pinned. Use this to judge a change to the renderer: it is the only one that isolates GPU render cost from shader compilation, denoiser CPU work and the rest of the loop.
+2. **[Headless timing](#headless-timing-simple)** — post-warmup wall-clock throughput for N frames; convenient for a quick end-to-end number or comparing whole builds, but it is CPU wall-clock and will not resolve a small renderer delta.
+
+The GPU workflow drives the scripted sequencer described further down; headless timing runs from plain command-line flags. A third, non-performance workflow reuses the same sequencer to **capture and review the UI** — see [UI inspection](#ui-inspection-windowed-panel-capture) below.
 
 ## Headless timing (simple)
 
@@ -62,6 +64,104 @@ python utils/benchmark/benchmark.py headless-compare \
 ```
 
 (Use one log from build A and one from build B.)
+
+---
+
+## GPU time at a fixed sample count (recommended for renderer changes)
+
+`--headless`'s `ms_per_frame` is **CPU wall-clock around the render loop**. It includes shader
+compilation on the first frame, denoiser CPU work (the OptiX denoiser can cost tens of milliseconds
+of CPU while reporting ~0 GPU), and everything else in the loop. For judging a change to the path
+tracer it is the wrong instrument -- it has been observed to disagree with itself by more than 10%
+and to reverse the sign of a real 12% difference.
+
+Use the profiler instead: run the sequencer at log level `eSTATS` and read the `Path Trace (RQ)` /
+`Path Trace (RTX)` GPU timer, with the sample count pinned so every frame does identical work.
+
+```bash
+./vk_gltf_renderer --benchmark 1 --logLevel 1 --sequencefile gpu.cfg \
+  --size 1280 720 --scenefile scene.gltf --hdrfile std_env.hdr \
+  --optixEnable 0 --optixAutoDenoiseEnabled 0 --dlssEnable 0
+```
+
+The script must do two things. It has to pin the work per frame -- `--ptSamples N`,
+`--ptAdaptiveSampling 0` (adaptive sampling varies the samples per frame, so ms/frame stops being
+comparable), and `--maxFrames` large enough that accumulation never stops mid-sequence (otherwise
+the frame being timed is just the tonemapper). And it has to **open with a throwaway `load`
+sequence**, because scene loading and pipeline creation consume the frames of whichever sequence is
+running at the time -- see the note below.
+
+```text
+SEQUENCE "load"
+--sequenceframes 240
+--renderSystem 0
+--ptSamples 2
+--ptAdaptiveSampling 0
+--maxFrames 1000000
+--ptTechnique 1
+--optimalShader 1
+--ptUseSER 1
+--fitScene
+
+SEQUENCE "warmup"
+--sequenceframes 120
+--sequenceaverages 32
+--updateData
+
+SEQUENCE "measure"
+--sequenceframes 400
+--sequenceaverages 200
+--updateData
+```
+
+The knobs that change path-tracing cost the most, and which therefore have to be stated whenever a
+timing is quoted. The magnitudes below come from the scatter sample scenes, which are volumetric
+and highly divergent; treat them as indicative of that class of content rather than universal:
+
+| Parameter | Effect |
+|---|---|
+| `--ptTechnique` | Ray query (compute) vs the ray tracing pipeline; the pipeline was ~2x faster |
+| `--ptUseSER` | Shader Execution Reordering; ~2.3-2.8x on a divergent scattering workload. Silently ignored when the device does not support it |
+| `--optimalShader` | Recompiles with only the scene's feature gates; 14-20% across the scatter sample scenes with SER on, ~32% with SER off |
+
+Three traps worth knowing, each of which produces confident-looking numbers that mean nothing:
+
+- **A starved first sequence.** Scene load and pipeline creation eat the frames of the sequence
+  that happens to be running, so a script whose first sequence is `measure` can burn all of them
+  before a single frame is path traced. The symptom is an empty profiler block
+  (`ParameterSequence 0 "warmup" = { }`) or a low `samples` count, and a `--screenshot` taken in
+  that window is **solid black** because the framebuffer has not accumulated anything yet. Always
+  check `samples` in the block you quote: it should be close to the `--sequenceaverages` you asked
+  for. This is the same rule the [UI inspection](#ui-inspection-windowed-panel-capture) workflow
+  states, and it applies just as much to timing.
+- **Persisted settings.** `_bin/<config>/vk_gltf_renderer.ini` stores `optimalShader`, `ptTechnique`
+  and `ptAdaptiveSampling` between runs, so a previous session silently changes what you measure.
+  Set every knob that matters explicitly in the script rather than relying on defaults.
+- **Stale shader search paths.** The path tracer compiles Slang at runtime from the directories baked
+  in at build time. If those point somewhere stale, it falls back to the SPIR-V embedded at build
+  time and a shader-swap A/B silently measures nothing. Verify a swap actually took effect (via a
+  change you can see) before trusting it.
+
+---
+
+## UI inspection (windowed panel capture)
+
+The headless workflow captures the **viewport render only** — it never composites the ImGui panels. To review the Scene Browser, Inspector, and other panels (e.g. when iterating on UI/UX), drive the app with a sequencer script **without** `--benchmark`: the side panels stay visible, the sequencer steps the script, and it closes the app when finished.
+
+```bash
+./vk_gltf_renderer --sequencefile utils/benchmark/ui_inspect.cfg \
+  --scenefile shader_ball.gltf --hdrfile std_env.hdr --size 1600 900
+```
+
+Two script parameters support this (registered alongside the other sequencer commands — see `BenchmarkController::registerParameters` in `src/benchmarking.cpp`):
+
+- **`--uiScreenshot <file>`** — capture the full composited window (panels + viewport). This reads the swapchain PRESENT image, so it works only in a windowed run; it is ignored in `--headless` mode (no swapchain). Contrast with `--screenshot`, which saves the viewport render (gbuffer) only.
+- **`--selectNode <index>`** — select a scene-graph node by glTF node index (as listed in the Scene Browser tree), driving the Inspector contents and the Scene Browser highlight, exactly as a click would. A negative or out-of-range index clears the selection.
+
+Two ordering rules matter (both illustrated in [`utils/benchmark/ui_inspect.cfg`](../utils/benchmark/ui_inspect.cfg)):
+
+1. Give the `load` sequence enough frames — scene load and ray-query pipeline creation are asynchronous in a non-benchmark run, and a first-time pipeline build (cache miss) can take several seconds.
+2. Put a UI action (e.g. `--selectNode`) in one `SEQUENCE` and its `--uiScreenshot` in the **next** one. The capture is scheduled a couple of frames after the parameters apply; a separate sequence guarantees the selection has propagated (selection → Scene Browser → Inspector) before the shot is taken.
 
 ---
 

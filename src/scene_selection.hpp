@@ -41,8 +41,11 @@ public:
     eMaterial,   // Material (for editing)
     eMesh,       // Mesh (flat list)
     eCamera,     // Camera
-    eLight       // Light
-    // Note: Animations, Textures, Images are NOT selectable (display-only)
+    eLight,      // Light
+    eTexture,    // Texture (image + sampler reference)
+    eImage,      // Image (pixel source)
+    eSampler,    // Sampler (wrap / filter)
+    eAnimation   // Animation (channels + samplers)
   };
 
   // Complete selection context - contains all relevant indices
@@ -56,6 +59,10 @@ public:
     int           materialIndex   = -1;  // For materials, primitives
     int           cameraIndex     = -1;  // For cameras
     int           lightIndex      = -1;  // For lights
+    int           textureIndex    = -1;  // For textures
+    int           imageIndex      = -1;  // For images
+    int           samplerIndex    = -1;  // For samplers
+    int           animationIndex  = -1;  // For animations
   };
 
   // Event types for external notification (decouples UI from renderer)
@@ -86,6 +93,10 @@ public:
   void selectMesh(int meshIdx);
   void selectCamera(int camIdx);
   void selectLight(int lightIdx);
+  void selectTexture(int textureIdx);
+  void selectImage(int imageIdx);
+  void selectSampler(int samplerIdx);
+  void selectAnimation(int animationIdx);
   void clearSelection();
 
   // Event callback for external systems

@@ -38,3 +38,10 @@ utils/benchmark/output/
 __pycache__/
 _package/
 *.pyc
+
+# =============================================================================
+# Local-only Claude skills (personal workflow tooling, e.g. portfolio-slide) --
+# this repo is mirrored to a public GitHub remote, so nothing under here
+# should ever be tracked/committed.
+# =============================================================================
+.claude/skills/

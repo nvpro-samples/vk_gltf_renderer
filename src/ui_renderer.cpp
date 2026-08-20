@@ -718,7 +718,7 @@ void GltfRenderer::renderUI()
       ImGui::Text("You can undo this with Ctrl+Z.");
       ImGui::Separator();
 
-      if(ImGui::Button(ICON_MS_DELETE " Delete", ImVec2(120, 0)))
+      if(ImGui::Button(ICON_MS_DELETE " Delete###confirmDelete", ImVec2(120, 0)))  // ### id for UI-test scenarios
       {
         auto cmd = std::make_unique<DeleteNodeCommand>(*m_resources.getScene(), m_pendingDeleteNode, &m_sceneSelection);
         m_undoStack.executeCommand(std::move(cmd));

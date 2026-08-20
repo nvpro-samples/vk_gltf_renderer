@@ -628,10 +628,10 @@ Buffer resize is handled automatically by size-mismatch detection in `uploadRend
 #### Texture-set changes
 
 Image/texture edits are consumed at frame top (before any panel records an `ImGui::Image`), not through
-`syncFromScene`, and come in two forms:
+`syncFromScene`, and come in three forms:
 
 - `texturesChanged` — a **structural** change (replace-in-place, reload, remove/insert at an arbitrary
-  index, sampler edit). `GltfRenderer::applyPendingTextureRebuild()` does a full
+  index, or a texture's sampler *reference*). `GltfRenderer::applyPendingTextureRebuild()` does a full
   `rebuildVulkanSceneFull()`: it stalls the queue, frees and recreates every scene image (re-reading them
   from disk) and rebuilds the acceleration structures.
 - `texturesTailChanged` — a **tail-only** change: image(s)/texture(s) were appended to, or removed from,
@@ -642,9 +642,17 @@ Image/texture edits are consumed at frame top (before any panel records an `ImGu
   (`writeTextureDescriptorRange`). No queue stall, no re-read of existing images, no AS work. A first
   import into a scene that has no images/textures falls back to `texturesChanged`, because the empty scene
   carries 1×1 dummy defaults on the GPU that do not match the model sizes.
+- `samplers` — an **in-place property** edit of an existing `model.samplers[i]` (wrap/filter, from the
+  Inspector). Images, texture views and sampler *slot assignments* are untouched, so
+  `GltfRenderer::applyPendingSamplerUpdate()` only recreates that one `VkSampler`
+  (`SceneVk::updateSampler()`) and rewrites its single `eSamplers` descriptor slot. No queue stall, no
+  image touch, no AS work.
 
-Both flags gate the per-frame material sync in `updateSceneChanges()` until the frame-top reconcile has
-run, so the material buffer never references a texture index the descriptor array does not yet contain.
+`texturesChanged` and `texturesTailChanged` gate the per-frame material sync in `updateSceneChanges()`
+until the frame-top reconcile has run, so the material buffer never references a texture index the
+descriptor array does not yet contain. `samplers` needs no such gate — a sampler's slot index never
+changes, only its `VkSampler` properties — but it is likewise preserved across `updateSceneChanges()`'s
+end-of-frame `clearDirtyFlags()` so it survives until `applyPendingSamplerUpdate()` consumes it.
 
 Merging or referencing a scene reuses the same tail idea from the (threaded) rebuild path rather than the
 frame-top flags: because `SceneMerger` only appends (existing image/texture/material indices never move),

@@ -106,6 +106,37 @@ void SceneSelection::selectLight(int lightIdx)
 }
 
 //--------------------------------------------------------------------------------------------------
+// Select a texture / image / sampler / animation (resource pools, internal UI only - no event)
+//
+void SceneSelection::selectTexture(int textureIdx)
+{
+  m_selection              = {};
+  m_selection.type         = SelectionType::eTexture;
+  m_selection.textureIndex = textureIdx;
+}
+
+void SceneSelection::selectImage(int imageIdx)
+{
+  m_selection            = {};
+  m_selection.type       = SelectionType::eImage;
+  m_selection.imageIndex = imageIdx;
+}
+
+void SceneSelection::selectSampler(int samplerIdx)
+{
+  m_selection              = {};
+  m_selection.type         = SelectionType::eSampler;
+  m_selection.samplerIndex = samplerIdx;
+}
+
+void SceneSelection::selectAnimation(int animationIdx)
+{
+  m_selection                = {};
+  m_selection.type           = SelectionType::eAnimation;
+  m_selection.animationIndex = animationIdx;
+}
+
+//--------------------------------------------------------------------------------------------------
 // Clear selection
 //
 void SceneSelection::clearSelection()

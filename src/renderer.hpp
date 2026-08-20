@@ -117,6 +117,7 @@ private:
   void reconcileGeometryIfNeeded();  // Rebuild geometry when GPU buffers are behind the render-primitive count (e.g. added primitive)
   void applyPendingTextureRebuild();  // Consume DirtyFlags::texturesChanged at frame top: full texture rebuild + cache refresh
   void applyPendingTextureTailSync();  // Consume DirtyFlags::texturesTailChanged at frame top: incremental append/remove of tail textures
+  void applyPendingSamplerUpdate();  // Consume DirtyFlags::samplers at frame top: in-place VkSampler update, no image touch
   void refreshCpuSceneGraphFromModel();
   void rebuildVulkanSceneInternal(nvvkgltf::SceneGpu::RebuildMode mode);  // GPU upload + AS; CPU scene must already be parsed
   void compileShaders();
@@ -128,6 +129,7 @@ private:
   void buildAccelerationStructures();                              // Helper for BLAS/TLAS building
   void destroyResources();
   void resetFrame();
+  void selectSceneNodeFromScript(int nodeIndex);  // Script-driven selection (Inspector/Scene Browser)
   void silhouette(VkCommandBuffer cmd);
   void tonemap(VkCommandBuffer cmd);
   void runTonemapPass(VkCommandBuffer cmd, bool skipBeautifiedOverlay);

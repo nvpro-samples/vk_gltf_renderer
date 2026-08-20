@@ -40,7 +40,7 @@ struct FeatureMacro
 constexpr std::array<FeatureMacro, SceneFeatureSet::kExtensionFeatureCount> kPathTracerFeatureMacros{{
     {SceneFeatureSet::eTransmission, "GLTF_USE_TRANSMISSION"},
     {SceneFeatureSet::eVolume, "GLTF_USE_VOLUME"},
-    {SceneFeatureSet::eVolumeScatter, "GLTF_USE_VOLUME_SCATTER"},
+    {SceneFeatureSet::eScatter, "GLTF_USE_SCATTER"},
     {SceneFeatureSet::eClearcoat, "GLTF_USE_CLEARCOAT"},
     {SceneFeatureSet::eIridescence, "GLTF_USE_IRIDESCENCE"},
     {SceneFeatureSet::eAnisotropy, "GLTF_USE_ANISOTROPY"},

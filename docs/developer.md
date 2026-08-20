@@ -138,8 +138,13 @@ src/
 ├── gltf_image_loader.cpp/hpp   # Image decoding (DDS, KTX, STB, WebP)
 ├── gltf_animation_pointer.*    # KHR_animation_pointer support
 │
-├── ui_inspector.cpp/hpp        # Property inspector (materials, transforms, etc.)
-├── ui_scene_browser.cpp/hpp    # Scene graph browser (tree + flat views)
+├── ui_inspector.cpp/hpp        # Property inspector (per selection type: node/primitive/material/
+│                               #   mesh/camera/light/texture/image/sampler/animation)
+├── ui_scene_browser.cpp/hpp    # Scene Browser window: Scene Graph tree + the Elements tab host
+├── ui_scene_browser_elements.cpp # Elements tab: builds the ElementTypeDesc registry and the one
+│                               #   generic list renderer (icon tabs, columns, toolbar, sort, filter)
+├── ui_element_registry.hpp     # ElementTypeDesc / ElementColumn / ElementAddVariant (data-driven list)
+├── ui_gltf_labels.cpp/hpp      # Shared image-name + sampler wrap/filter labels (list + inspector)
 ├── ui_renderer.cpp             # Viewport UI and mouse interaction
 ├── ui_xmp.cpp/hpp              # KHR_xmp_json_ld metadata display
 ├── ui_animation.cpp/hpp        # Animation playback state and viewport animation widget
@@ -248,6 +253,55 @@ are **forked locally** into `shaders/gltf_*.h.slang` rather than using the upstr
   `KHR_materials_retroreflection` on both host and device, with the evaluation living in
   [`gltf_material_eval.h.slang`](../shaders/gltf_material_eval.h.slang). See the
   [KHR_materials_retroreflection](https://github.com/KhronosGroup/glTF/blob/main/extensions/2.0/Khronos/KHR_materials_retroreflection/README.md) specification.
+
+### Worked example: `KHR_materials_scatter` (two modes, one material block)
+
+`KHR_materials_scatter` is the most involved extension in the fork because it changes either the
+surface BSDF or the volume transport, depending on the material. Both branches live in the scatter
+block of [`gltf_material_eval.h.slang`](../shaders/gltf_material_eval.h.slang); the mode is
+selected by `PbrMaterial::thickness` (i.e. by `KHR_materials_volume`), matching the extension spec.
+
+- **Thin-walled** (no volume, or thickness 0). The spec turns the transmissive part of the
+  dielectric base into a blend of the specular BTDF and a Lambertian BSDF that splits its energy
+  between the two hemispheres by the scatter anisotropy. There is no dedicated scatter lobe in
+  `nvpro_core2`'s BSDF, so the block re-expresses that blend with the lobes that already exist. It
+  moves `transmission * scatterStrength` out of the specular BTDF into the diffuse bucket, then
+  splits that bucket with `diffuseTransmissionFactor`. Note what the factor is: the forward share
+  **of the whole diffuse bucket**, not the anisotropy's forward fraction — the bucket also holds
+  the untouched diffuse base, so the fraction has to be normalised by the bucket's own weight.
+  Conflating the two is what makes the mapping wrong for `transmissionFactor < 1`, and it is only
+  by coincidence correct at `transmissionFactor = 1`. Done that way the lobe weights match the
+  spec exactly for any transmission, strength and anisotropy. The spec also gives the residual
+  specular BTDF and the diffuse reflection lobe *different* colors, and `PbrMaterial::baseColor`
+  alone can only carry one — hence `PbrMaterial::transmissionTint` in `nvpro_core2`, a
+  multiplier on the BTDF lobe that is `float3(1)` for every other material.
+- **Volumetric** (thickness > 0). The surface BSDF is untouched; the block only derives
+  `PbrMaterial::scatterCoefficient` (σs) by splitting the `KHR_materials_volume` extinction with
+  the Kulla-Conty single-scatter albedo. The transport that consumes it is
+  `handleVolumeScatter()` in [`pathtrace_functions.h.slang`](../shaders/pathtrace_functions.h.slang).
+
+Two things about the volume transport are worth knowing before touching it:
+
+- glTF media are **homogeneous**, so the free-flight distance is sampled analytically per spectral
+  channel and combined with the balance heuristic — not with delta tracking against a majorant.
+  A single majorant makes the low-extinction channels collide (and therefore random-walk) far too
+  often; because those extra collisions are lossless, their effective per-collision albedo drifts
+  towards 1 and the medium's perceived color shifts away from `multiscatterColor`.
+- `VolumeMedium` stores **absorption**, not extinction, alongside the scattering coefficient. The
+  fields are half floats, and a medium authored near white has σa as a tiny difference of two
+  large numbers — recovering it by subtraction quantizes the albedo straight to 1.
+- In-volume Russian roulette has its **own** probability cap (`RR_PCONT_CAP_VOLUME`). A dense,
+  high-albedo medium keeps the throughput near 1, so the surface cap would cull fully energetic
+  paths at every scatter event and the medium would render far too dark. The cap must stay below
+  1 all the same: without roulette such a path never terminates.
+- Surfaces with a diffuse transmission lobe are lit from **both** hemispheres, so `sampleLights()`
+  takes a flag that disables the punctual-light hemisphere rejection in
+  `singleLightContribution()`. Without it, a light behind a backlit leaf or sheet contributes
+  nothing.
+
+The rasterizer cannot trace inside a medium, so `evaluateMaterial()` compiles only the thin-walled
+branch for `RASTER_PIPELINE` — the approximation the scatter spec explicitly permits for renderers
+without volumetric transport.
 
 ### Adding a new KHR_materials_* extension
 

@@ -255,8 +255,9 @@ struct GltfShadeMaterial
   float retroreflectionFactor = 0;
 #endif
 
-#if MAT_EXT_VOLUME_SCATTER
-  float3 multiscatterColorFactor = float3(0);
+#if MAT_EXT_SCATTER
+  float3 multiscatterColorFactor = float3(1);
+  float  scatterStrengthFactor   = 0;
   float  scatterAnisotropy       = 0;
 #endif
 
@@ -314,6 +315,11 @@ struct GltfShadeMaterial
 
 #if MAT_EXT_RETROREFLECTION
   uint16_t retroreflectionTexture = 0;
+#endif
+
+#if MAT_EXT_SCATTER
+  uint16_t scatterStrengthTexture   = 0;
+  uint16_t multiscatterColorTexture = 0;
 #endif
 
   // Trailing 8-byte explicit pad. Two reasons for uint64_t (rather than just uint32_t):

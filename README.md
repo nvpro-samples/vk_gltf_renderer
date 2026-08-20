@@ -137,7 +137,7 @@ For the architecture, bridge directory layout, and request/response protocol beh
 
 ## glTF Support
 
-**Reference scope:** The list below reflects what this renderer loads and displays. The **path tracer** is the authoritative PBR implementation — especially for ray-traced material evaluation, sampling, and new extensions (e.g. [KHR_materials_retroreflection](https://github.com/mklefrancois/glTF/tree/khr-materials-retroreflection/extensions/2.0/Khronos/KHR_materials_retroreflection/README.md)). The **rasterizer** is a preview path for interaction, not the primary material reference.
+**Reference scope:** The list below reflects what this renderer loads and displays. The **path tracer** is the authoritative PBR implementation — especially for ray-traced material evaluation, sampling, and new extensions (e.g. [KHR_materials_retroreflection](https://github.com/KhronosGroup/glTF/pull/2610)). The **rasterizer** is a preview path for interaction, not the primary material reference.
 
 ### Core
 
@@ -156,39 +156,40 @@ For the architecture, bridge directory layout, and request/response protocol beh
 
 ### Extensions
 
-- ✅ KHR_animation_pointer
-- ✅ KHR_draco_mesh_compression
-- 🚧 KHR_interactivity — behavior graph is parsed and preserved on save; not yet executed
-- ✅ KHR_lights_punctual
-- ✅ KHR_materials_anisotropy
-- ✅ KHR_materials_clearcoat
-- ✅ KHR_materials_diffuse_transmission
-- ✅ KHR_materials_dispersion
-- ✅ KHR_materials_emissive_strength
-- ✅ KHR_materials_ior
-- ✅ KHR_materials_iridescence
-- ✅ KHR_materials_pbrSpecularGlossiness
-- ✅ KHR_materials_retroreflection
-- ✅ KHR_materials_sheen
-- ✅ KHR_materials_specular
-- ✅ KHR_materials_transmission
-- ✅ KHR_materials_unlit
-- ✅ KHR_materials_variants
-- ✅ KHR_materials_volume
-- ✅ KHR_materials_volume_scatter
-- ✅ KHR_mesh_quantization
-- ✅ KHR_meshopt_compression
-- ✅ KHR_node_hoverability
-- ✅ KHR_node_selectability
-- ✅ KHR_node_visibility
-- ✅ KHR_texture_basisu
-- ✅ KHR_texture_transform
-- ✅ KHR_xmp_json_ld
-- ✅ EXT_mesh_gpu_instancing
-- ✅ EXT_mesh_opacity_micromap
-- ✅ EXT_meshopt_compression
-- ✅ EXT_texture_webp
-- ✅ MSFT_texture_dds
+- ✅ [KHR_accessor_float64](https://github.com/KhronosGroup/glTF/tree/main/extensions/2.0/Khronos/KHR_accessor_float64)
+- ✅ [KHR_animation_pointer](https://github.com/KhronosGroup/glTF/tree/main/extensions/2.0/Khronos/KHR_animation_pointer)
+- ✅ [KHR_draco_mesh_compression](https://github.com/KhronosGroup/glTF/tree/main/extensions/2.0/Khronos/KHR_draco_mesh_compression)
+- 🚧 [KHR_interactivity](https://github.com/KhronosGroup/glTF/tree/main/extensions/2.0/Khronos/KHR_interactivity) — behavior graph is parsed and preserved on save; not yet executed
+- ✅ [KHR_lights_punctual](https://github.com/KhronosGroup/glTF/tree/main/extensions/2.0/Khronos/KHR_lights_punctual)
+- ✅ [KHR_materials_anisotropy](https://github.com/KhronosGroup/glTF/tree/main/extensions/2.0/Khronos/KHR_materials_anisotropy)
+- ✅ [KHR_materials_clearcoat](https://github.com/KhronosGroup/glTF/tree/main/extensions/2.0/Khronos/KHR_materials_clearcoat)
+- ✅ [KHR_materials_diffuse_transmission](https://github.com/KhronosGroup/glTF/blob/main/extensions/2.0/Khronos/KHR_materials_diffuse_transmission/README.md)
+- ✅ [KHR_materials_dispersion](https://github.com/KhronosGroup/glTF/tree/main/extensions/2.0/Khronos/KHR_materials_dispersion)
+- ✅ [KHR_materials_emissive_strength](https://github.com/KhronosGroup/glTF/tree/main/extensions/2.0/Khronos/KHR_materials_emissive_strength)
+- ✅ [KHR_materials_ior](https://github.com/KhronosGroup/glTF/tree/main/extensions/2.0/Khronos/KHR_materials_ior)
+- ✅ [KHR_materials_iridescence](https://github.com/KhronosGroup/glTF/tree/main/extensions/2.0/Khronos/KHR_materials_iridescence)
+- ✅ [KHR_materials_pbrSpecularGlossiness](https://github.com/KhronosGroup/glTF/tree/main/extensions/2.0/Archived/KHR_materials_pbrSpecularGlossiness)
+- ✅ [KHR_materials_retroreflection](https://github.com/KhronosGroup/glTF/pull/2610)
+- ✅ [KHR_materials_scatter](https://github.com/KhronosGroup/glTF/pull/2579)
+- ✅ [KHR_materials_sheen](https://github.com/KhronosGroup/glTF/tree/main/extensions/2.0/Khronos/KHR_materials_sheen)
+- ✅ [KHR_materials_specular](https://github.com/KhronosGroup/glTF/tree/main/extensions/2.0/Khronos/KHR_materials_specular)
+- ✅ [KHR_materials_transmission](https://github.com/KhronosGroup/glTF/tree/main/extensions/2.0/Khronos/KHR_materials_transmission)
+- ✅ [KHR_materials_unlit](https://github.com/KhronosGroup/glTF/tree/main/extensions/2.0/Khronos/KHR_materials_unlit)
+- ✅ [KHR_materials_variants](https://github.com/KhronosGroup/glTF/tree/main/extensions/2.0/Khronos/KHR_materials_variants)
+- ✅ [KHR_materials_volume](https://github.com/KhronosGroup/glTF/tree/main/extensions/2.0/Khronos/KHR_materials_volume)
+- ✅ [KHR_mesh_quantization](https://github.com/KhronosGroup/glTF/tree/main/extensions/2.0/Khronos/KHR_mesh_quantization)
+- ✅ [KHR_meshopt_compression](https://github.com/KhronosGroup/glTF/tree/main/extensions/2.0/Khronos/KHR_meshopt_compression)
+- ✅ [KHR_node_hoverability](https://github.com/KhronosGroup/glTF/tree/main/extensions/2.0/Khronos/KHR_node_hoverability)
+- ✅ [KHR_node_selectability](https://github.com/KhronosGroup/glTF/tree/main/extensions/2.0/Khronos/KHR_node_selectability)
+- ✅ [KHR_node_visibility](https://github.com/KhronosGroup/glTF/tree/main/extensions/2.0/Khronos/KHR_node_visibility)
+- ✅ [KHR_texture_basisu](https://github.com/KhronosGroup/glTF/tree/main/extensions/2.0/Khronos/KHR_texture_basisu)
+- ✅ [KHR_texture_transform](https://github.com/KhronosGroup/glTF/tree/main/extensions/2.0/Khronos/KHR_texture_transform)
+- ✅ [KHR_xmp_json_ld](https://github.com/KhronosGroup/glTF/tree/main/extensions/2.0/Khronos/KHR_xmp_json_ld)
+- ✅ [EXT_mesh_gpu_instancing](https://github.com/KhronosGroup/glTF/tree/main/extensions/2.0/Vendor/EXT_mesh_gpu_instancing)
+- ✅ [EXT_mesh_opacity_micromap](https://github.com/pixeljetstream/glTF/tree/EXT_mesh_opacity_micromap/extensions/2.0/Vendor/EXT_mesh_opacity_micromap)
+- ✅ [EXT_meshopt_compression](https://github.com/KhronosGroup/glTF/tree/main/extensions/2.0/Vendor/EXT_meshopt_compression)
+- ✅ [EXT_texture_webp](https://github.com/KhronosGroup/glTF/tree/main/extensions/2.0/Vendor/EXT_texture_webp)
+- ✅ [MSFT_texture_dds](https://github.com/KhronosGroup/glTF/tree/main/extensions/2.0/Vendor/MSFT_texture_dds)
 
 ### glTF 2.1 (Complex Scenes — preview)
 

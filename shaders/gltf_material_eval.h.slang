@@ -73,17 +73,24 @@ struct MeshState
 #define USE_TEXTURES
 #endif
 
+// KHR_texture_transform: map a raw texture coordinate into the material's UV space.
+// Shared by getTexture() (color path) and the direct texture reads in the alpha/shadow
+// paths (pathtrace_functions.h.slang) so both apply the same offset/rotation/scale.
+float2 applyTextureTransform(in GltfTextureInfo textureInfo, float2 tt)
+{
+#if GLTF_USE_TEXTURE_TRANSFORM
+  tt = mul(float3(tt, 1), textureInfo.uvTransform).xy;
+#endif
+  return tt;
+}
+
 float4 getTexture(Texture2D images[], SamplerState samplers[], in GltfTextureInfo textureInfo, in float2 texCoords[2], float texGrad)
 {
 #ifdef USE_TEXTURES
   // Images and samplers are now separate bindless arrays (see GltfTextureInfo.index / samplerIndex).
   Texture2D    tex     = images[textureInfo.index];
   SamplerState sampler = samplers[textureInfo.samplerIndex];
-  float2       tt      = texCoords[textureInfo.texCoord];
-#if GLTF_USE_TEXTURE_TRANSFORM
-  // KHR_texture_transform
-  tt = mul(float3(tt, 1), textureInfo.uvTransform).xy;
-#endif
+  float2       tt      = applyTextureTransform(textureInfo, texCoords[textureInfo.texCoord]);
   if(texGrad > 0.0f)
   {
 #if GLTF_USE_TEXTURE_TRANSFORM
@@ -120,15 +127,21 @@ bool isTexturePresent(uint16_t tinfo)
   return tinfo > 0;
 }
 
-#if GLTF_USE_VOLUME_SCATTER
+// Volumetric scattering is path-tracer only (see the scatter block in evaluateMaterial), so this
+// mapping is not compiled into the raster pipeline.
+#if GLTF_USE_SCATTER && !defined(RASTER_PIPELINE)
 /*-------------------------------------------------------------------------------------------------
- * Convert multi-scatter albedo to single-scatter albedo
- * Formula from KHR_materials_volume_scatter specification
+ * Convert multi-scatter albedo to single-scatter albedo (Kulla-Conty mapping).
+ * Formula from the KHR_materials_scatter specification. The anisotropy g of the
+ * Henyey-Greenstein phase function enters the denominator, so forward/backward
+ * scattering media get the correct single-scatter albedo.
  * -------------------------------------------------------------------------------------------------*/
-float3 multiToSingleScatterAlbedo(float3 rho_ms)
+float3 multiToSingleScatterAlbedo(float3 rho_ms, float g)
 {
-  float3 t = 4.09712 + 4.20863 * rho_ms - sqrt(9.59217 + 41.6808 * rho_ms + 17.7126 * rho_ms * rho_ms);
-  return 1.0 - t * t;
+  float3 s = 4.09712 + 4.20863 * rho_ms - sqrt(9.59217 + 41.6808 * rho_ms + 17.7126 * rho_ms * rho_ms);
+  // g in (-1,1) and s in [0,1] keep the denominator strictly positive. Clamp the
+  // result to [0,1] so scatterCoefficient never exceeds the total extinction.
+  return clamp((1.0 - s * s) / (1.0 - g * s * s), float3(0.0), float3(1.0));
 }
 #endif
 
@@ -314,17 +327,8 @@ PbrMaterial evaluateMaterial(in GltfShadeMaterial material, MeshState state, Tex
   }
 #endif
 
-#if GLTF_USE_VOLUME_SCATTER
-  // KHR_materials_volume_scatter
-  // Compute scattering coefficient from multi-scatter albedo and attenuation
-  if(any(material.multiscatterColorFactor > float3(0.0)))
-  {
-    float3 singleScatterAlbedo = multiToSingleScatterAlbedo(material.multiscatterColorFactor);
-    float3 attenuationCoef = -log(max(pbrMat.attenuationColor, float3(0.001))) / max(pbrMat.attenuationDistance, 0.001);
-    pbrMat.scatterCoefficient = attenuationCoef * singleScatterAlbedo;
-  }
-  pbrMat.scatterAnisotropy = material.scatterAnisotropy;
-#endif
+  // KHR_materials_scatter is applied after KHR_materials_diffuse_transmission below, because the
+  // thin-walled mode repurposes the diffuse-transmission lobes and must not be clobbered by it.
 
 #if GLTF_USE_CLEARCOAT
   // KHR_materials_clearcoat
@@ -449,6 +453,108 @@ PbrMaterial evaluateMaterial(in GltfShadeMaterial material, MeshState state, Tex
   {
     pbrMat.diffuseTransmissionColor *=
         getTexture(images, samplers, texInfos[material.diffuseTransmissionColorTexture], state.tc, state.texGrad).rgb;
+  }
+#endif
+
+#if GLTF_USE_SCATTER
+  // KHR_materials_scatter. Applied after diffuse transmission (the thin-walled mode overrides
+  // those lobes) and after volume/thickness are resolved (they select the mode).
+  // scatterStrength = scatterStrengthFactor * scatterStrengthTexture.a
+  float scatterStrength = material.scatterStrengthFactor;
+  if(isTexturePresent(material.scatterStrengthTexture))
+  {
+    scatterStrength *= getTexture(images, samplers, texInfos[material.scatterStrengthTexture], state.tc, state.texGrad).a;
+  }
+
+  // The extension is a no-op at zero strength (spec default), so only apply it when there is
+  // scattering to do.
+  if(scatterStrength > 0.0)
+  {
+    // multiscatterColor = multiscatterColorFactor * multiscatterColorTexture.rgb
+    float3 multiscatterColor = material.multiscatterColorFactor;
+    if(isTexturePresent(material.multiscatterColorTexture))
+    {
+      multiscatterColor *=
+          getTexture(images, samplers, texInfos[material.multiscatterColorTexture], state.tc, state.texGrad).rgb;
+    }
+
+    float g = material.scatterAnisotropy;
+
+    // Volumetric mode needs to track a path *inside* the medium, which the rasterizer cannot do.
+    // The spec allows a renderer without volumetric transport to approximate it with the
+    // thin-walled behaviour ("for materials with very short scattering distances relative to
+    // their size (dense subsurface), the visual difference is small"), so the raster preview
+    // always takes the thin-walled branch and the volume branch is path-tracer only.
+#ifndef RASTER_PIPELINE
+    if(pbrMat.thickness > 0.0)
+    {
+      // Volumetric mode (KHR_materials_volume, thickness > 0): split the attenuation coefficient
+      // sigma_t into scattering (sigma_s) and absorption via the strength-scaled single-scatter
+      // albedo. sigma_s drives the in-volume Henyey-Greenstein scattering in pathtrace_functions.
+      // The sigma_t expression must stay identical to volumeExtinctionCoefficient() in
+      // nvpro_core2's bsdf_functions.h.slang (not included here), which is what the path tracer
+      // uses for the same medium -- if the two drift, sigma_s no longer belongs to sigma_t.
+      float3 singleScatterAlbedo = multiToSingleScatterAlbedo(scatterStrength * multiscatterColor, g);
+      // attenuationDistance == 0 means "disabled" -- see volumeExtinctionCoefficient().
+      float3 attenuationCoef    = (pbrMat.attenuationDistance == 0.0F) ?
+                                      float3(0.0F) :
+                                      -log(max(pbrMat.attenuationColor, float3(0.001))) / pbrMat.attenuationDistance;
+      pbrMat.scatterCoefficient = attenuationCoef * singleScatterAlbedo;
+      pbrMat.scatterAnisotropy  = g;  // consumed by the phase function; only meaningful with sigma_s
+    }
+    else
+#endif  // !RASTER_PIPELINE
+    {
+      // Thin-walled mode (no volume / thickness = 0). The spec replaces the transmissive part of
+      // the dielectric base with
+      //   mix(specular_btdf * baseColor, scatter_bsdf(multiscatterColor, g), scatterStrength)
+      // where scatter_bsdf is a Lambertian BSDF sending (1+g)/2 of its energy through the surface
+      // and (1-g)/2 back. There is no dedicated scatter lobe in the BSDF, so it is expressed with
+      // the existing diffuse-transmission / diffuse-reflection lobes, whose weights below the
+      // specular layer are `transmission` for the BTDF and `1 - transmission` for the diffuse
+      // bucket (split by diffuseTransmissionFactor). Moving `scatterWeight = transmission *
+      // scatterStrength` from the BTDF into the diffuse bucket reproduces the spec lobe weights
+      // exactly, for any transmission and any g. Note both factors: without transmission the
+      // extension must have no effect at all.
+      float scatterWeight = pbrMat.transmission * scatterStrength;  // energy moved to scatter_bsdf
+      if(scatterWeight > 0.0)
+      {
+        // The diffuse bucket holds four shares: the material's own diffuse reflection and diffuse
+        // transmission (untouched by scatter), plus the two halves of scatter_bsdf.
+        float forwardFraction = 0.5 * (1.0 + g);
+        float baseDiffuse     = 1.0 - pbrMat.transmission;         // base, untouched by scatter
+        float baseDtFactor    = pbrMat.diffuseTransmissionFactor;  // 0 unless KHR_materials_diffuse_transmission
+        float baseTransWeight = baseDiffuse * baseDtFactor;
+        float baseReflWeight  = baseDiffuse * (1.0 - baseDtFactor);
+        float forwardWeight   = scatterWeight * forwardFraction;
+        float backwardWeight  = scatterWeight - forwardWeight;
+        float diffuseWeight   = baseDiffuse + scatterWeight;  // the four shares; >= scatterWeight > 0
+
+        pbrMat.transmission -= scatterWeight;  // = transmission * (1 - scatterStrength)
+
+        // Split the bucket. Note this is the forward share *of the bucket*, not the anisotropy's
+        // forward fraction: the bucket also carries the untouched base, so it has to be normalised
+        // by the bucket's own weight. (Using the bare fraction is only right at transmission = 1.)
+        pbrMat.diffuseTransmissionFactor = (baseTransWeight + forwardWeight) / diffuseWeight;
+
+        // Each of the two diffuse lobes now carries contributions the spec colors differently, so
+        // each takes the energy-weighted average of its own two shares. Both shares of a lobe have
+        // the same Lambertian shape, so averaging their colors is exact, not an approximation.
+        float3 diffuseBaseColor         = pbrMat.baseColor;
+        pbrMat.diffuseTransmissionColor = lerp(pbrMat.diffuseTransmissionColor, multiscatterColor,
+                                               forwardWeight / max(baseTransWeight + forwardWeight, 1e-6));
+        pbrMat.baseColor = lerp(diffuseBaseColor, multiscatterColor, backwardWeight / max(baseReflWeight + backwardWeight, 1e-6));
+
+        // ...but baseColor also tints the residual specular BTDF, which the spec leaves at the
+        // material's baseColor. transmissionTint cancels the blend back out for that lobe alone
+        // (the BSDF tints it by `baseColor * transmissionTint`), and the product is bounded by
+        // baseColor so it can never add energy. It degrades in one corner: at transmission = 1 with
+        // a multiscatterColor channel of exactly 0, the blended color is 0 in that channel and a
+        // multiplier cannot recover baseColor from it, so the residual BTDF loses that channel.
+        pbrMat.transmissionTint =
+            (pbrMat.transmission > 0.0) ? diffuseBaseColor / max(pbrMat.baseColor, float3(1e-4)) : float3(1.0);
+      }
+    }
   }
 #endif
 

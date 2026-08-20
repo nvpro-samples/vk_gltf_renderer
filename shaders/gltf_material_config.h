@@ -44,8 +44,8 @@ otherwise the material buffer layout will disagree.
 #ifndef MAT_EXT_VOLUME
 #define MAT_EXT_VOLUME MAT_EXT_VAL  // KHR_materials_volume (attenuation + thickness)
 #endif
-#ifndef MAT_EXT_VOLUME_SCATTER
-#define MAT_EXT_VOLUME_SCATTER MAT_EXT_VAL  // KHR_materials_volume_scatter
+#ifndef MAT_EXT_SCATTER
+#define MAT_EXT_SCATTER MAT_EXT_VAL  // KHR_materials_scatter
 #endif
 #ifndef MAT_EXT_CLEARCOAT
 #define MAT_EXT_CLEARCOAT MAT_EXT_VAL  // KHR_materials_clearcoat

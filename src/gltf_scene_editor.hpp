@@ -222,8 +222,27 @@ public:
   void insertImageAt(int imageIndex, const tinygltf::Image& image);
 
   // ---------- Material ops ----------
-  void              setPrimitiveMaterial(int meshIndex, int primIndex, int newMaterialID);
-  [[nodiscard]] int duplicateMaterial(int originalIndex);
+  void setPrimitiveMaterial(int meshIndex, int primIndex, int newMaterialID);
+
+  // Per-material count of references: both tinygltf::Primitive::material and any KHR_materials_variants
+  // mapping targeting the material (size == materials.size()); a 0 entry means the material is referenced
+  // by neither and is safe to remove with removeMaterialAt().
+  [[nodiscard]] std::vector<int> computeMaterialRefCounts() const;
+
+  // Insert `material` at `index` (clamped to [0, materials.size()]), shifting higher material indices up
+  // and remapping every primitive's material reference -- and any KHR_materials_variants mapping -- that
+  // pointed at or above the insertion point. Returns the effective (post-clamp) index the material was
+  // inserted at; a caller that stores `index` for undo must use this return value instead, since a
+  // requested index can be clamped. Inverse of removeMaterialAt(); pair them for undo. A tail insert
+  // (index == materials.size()) is a cheap append (no reference remap / reparse).
+  [[nodiscard]] int insertMaterialAt(int index, const tinygltf::Material& material);
+
+  // Remove the material at `index`, shifting higher indices down and remapping primitive references and
+  // KHR_materials_variants mappings accordingly. The caller must ensure the material is unreferenced
+  // (computeMaterialRefCounts()[index] == 0); a tail removal is cheap (no remap / reparse). Returns false
+  // (no mutation) when `index` is out of range, so a caller can tell whether the remove actually happened.
+  // Pair with insertMaterialAt() for undo.
+  bool              removeMaterialAt(int index);
   [[nodiscard]] int duplicateMeshForNode(int meshIndex, int nodeIndex);
   [[nodiscard]] int splitPrimitiveMaterial(int nodeIndex, int primIndex);
   [[nodiscard]] int mergePrimitiveMaterial(int nodeIndex);
