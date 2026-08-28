@@ -55,6 +55,36 @@ struct MaterialUpdateResult
   bool            topologyChanged = false;  // Texture slots added/removed; caller should rebuild cache
 };
 
+// Per-glTF-texture data resolved by SceneVk and baked into each GltfTextureInfo. Both vectors are
+// indexed by glTF texture index and may be shorter than model.textures (or empty), in which case the
+// accessors below fall back to the neutral default.
+struct TextureSlotTable
+{
+  // Resolved GPU sampler slot (SceneVk::samplers(); slot 0 = default). Pure model data, so it is
+  // available before the images are decoded.
+  std::vector<int> samplerSlots;
+
+  // Set when the texture's source image decoded to a format with fewer than three color components
+  // (BC5, R8G8, ...). Only known once the images exist, hence the separate vector.
+  std::vector<uint8_t> twoChannelSource;
+
+  int samplerSlot(int texIndex) const
+  {
+    return (texIndex >= 0 && texIndex < static_cast<int>(samplerSlots.size())) ? samplerSlots[texIndex] : 0;
+  }
+
+  bool isTwoChannelSource(int texIndex) const
+  {
+    return texIndex >= 0 && texIndex < static_cast<int>(twoChannelSource.size()) && twoChannelSource[texIndex] != 0;
+  }
+
+  void clear()
+  {
+    samplerSlots.clear();
+    twoChannelSource.clear();
+  }
+};
+
 /*-------------------------------------------------------------------------------------------------
 # class nvvkgltf::MaterialCache
 
@@ -65,13 +95,13 @@ struct MaterialUpdateResult
 class MaterialCache
 {
 public:
-  // textureSamplerSlots maps each glTF texture index to a resolved GPU sampler slot (SceneVk::samplers();
-  // slot 0 = default). Written into each GltfTextureInfo.samplerIndex.
-  void buildFromMaterials(const std::vector<tinygltf::Material>& materials, const std::vector<int>& textureSamplerSlots);
+  // textureSlots carries the per-texture data baked into each GltfTextureInfo (sampler slot and
+  // source-format flags); see TextureSlotTable.
+  void buildFromMaterials(const std::vector<tinygltf::Material>& materials, const TextureSlotTable& textureSlots);
 
   // Update one cached material in place. Returns span of texture infos and whether
   // texture slot topology changed (if true, caller should rebuild cache).
-  [[nodiscard]] MaterialUpdateResult updateMaterial(int index, const tinygltf::Material& srcMat, const std::vector<int>& textureSamplerSlots);
+  [[nodiscard]] MaterialUpdateResult updateMaterial(int index, const tinygltf::Material& srcMat, const TextureSlotTable& textureSlots);
 
   void clear();
 

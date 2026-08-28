@@ -126,8 +126,6 @@ protected:
   nvvk::Buffer m_tlasScratchBuffer;
   nvvk::Buffer m_instancesBuffer;
 
-  int32_t m_numVisibleElement = 0;  // Keep track of the number of visible elements in the TLAS
-
   std::vector<VkGeometryInstanceFlagsKHR> m_instanceFlagsCache;  // Per-material TLAS instance flags (opaque/double-sided)
 
   DeferredFreeFunc m_deferredFree;   // Optional: schedules deferred GPU resource destruction

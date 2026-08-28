@@ -1,0 +1,133 @@
+# Comprehensive Elements-tab / Inspector editor test.
+#
+# Reference-only: the scripted UI-automation integration this script targeted has been removed from
+# the app (see docs/interactivity.md's Tests section) and is future work to reinstate. This script
+# is kept as a record of the scenario for whenever that integration returns; it is not currently
+# runnable. Historically run against a texture-rich scene, e.g. DamagedHelmet.gltf.
+
+ready
+ref "Scene Browser"
+click "**/Elements"
+yield 3
+
+# ---- every category tab is present ----
+check "**/Nodes"
+check "**/Meshes"
+check "**/Materials"
+check "**/Cameras"
+check "**/Lights"
+check "**/Textures"
+check "**/Images"
+check "**/Samplers"
+check "**/Animations"
+
+# ================= MATERIALS: add / duplicate / rename / delete / undo / redo =================
+click "**/Materials"
+yield 3
+capture 01_materials.png
+click "**/add"
+yield 3
+click "**/dup"
+yield 3
+capture 02_material_add_dup.png
+click "**/ren"
+yield 2
+ref "RenameElement"
+inputs "**/##name" "TestMaterial"
+yield 2
+ref "Scene Browser"
+capture 03_material_renamed.png
+click "**/del"
+yield 3
+capture 04_material_deleted.png
+key "Ctrl+Z"
+yield 2
+key "Ctrl+Z"
+yield 2
+key "Ctrl+Z"
+yield 3
+capture 05_materials_undone.png
+key "Ctrl+Y"
+yield 3
+capture 06_materials_redone.png
+
+# ================= MATERIAL VALUE CHANGE (real edit path) =================
+selectmaterial 0
+yield 2
+material 1 0 0 1
+yield 4
+capture 07_material_red.png
+key "Ctrl+Z"
+yield 3
+
+# ================= NODES: add (popup) / visibility toggle / delete (confirm) =================
+click "**/Nodes"
+yield 3
+click "**/add"
+yield 2
+click "**/Empty Node"
+yield 3
+capture 08_node_added.png
+click "**/vis"
+yield 2
+capture 09_node_visibility.png
+click "**/del"
+yield 2
+ref "DeleteConfirmation"
+click "**/confirmDelete"
+yield 3
+ref "Scene Browser"
+capture 10_node_deleted.png
+
+# ================= SORT + FILTER =================
+click "**/Meshes"
+yield 2
+click "**/Triangles"
+yield 3
+capture 11_meshes_sorted.png
+inputs "**/##elemFilter" "Helmet"
+yield 3
+capture 12_meshes_filtered.png
+inputs "**/##elemFilter" ""
+yield 2
+
+# ================= TEXTURES / SAMPLERS / IMAGES editing =================
+click "**/Textures"
+yield 2
+selecttexture 0
+yield 3
+capture 13_texture_inspector.png
+ref "Inspector"
+combo "**/Wrap S/Clamp to edge"
+yield 3
+ref "Scene Browser"
+capture 14_texture_wrap.png
+click "**/Samplers"
+yield 2
+selectsampler 0
+yield 2
+ref "Inspector"
+combo "**/Wrap T/Mirrored repeat"
+yield 3
+ref "Scene Browser"
+capture 15_sampler_wrap.png
+click "**/Images"
+yield 2
+selectimage 0
+yield 3
+capture 16_image_inspector.png
+
+# ================= PRIMITIVE split / merge (per-instance material) =================
+selectprimitive 0
+yield 3
+capture 17_primitive.png
+ref "Inspector"
+click "**/split"
+yield 4
+capture 18_split.png
+click "**/merge"
+yield 4
+capture 19_merge.png
+ref "Scene Browser"
+
+log "comprehensive editor test complete"

@@ -28,6 +28,7 @@
 #include <span>
 #include <sstream>
 #include <string>
+#include <utility>
 #include <vector>
 
 #include <tinygltf/tiny_gltf.h>
@@ -1260,6 +1261,29 @@ int getTextureImageIndex(const tinygltf::Texture& texture);
 > would have no visible effect while an override extension is active.
 -------------------------------------------------------------------------------------------------*/
 bool hasTextureImageSourceOverride(const tinygltf::Texture& texture);
+
+/*-------------------------------------------------------------------------------------------------
+## Function `parsePointerIndexAndRest`
+> Parses the integer segment starting at `path[start]`, up to the next '/' or the end of the
+> string - the common "/prefix/<index>/rest..." shape JSON-Pointer-based resource addressing uses
+> throughout this codebase (`KHR_animation_pointer`'s `AnimationPointerSystem`,
+> `KHR_interactivity`'s `ScenePointerResolver`). Returns `{-1, {}}` if the segment isn't a valid,
+> fully-consumed (possibly negative) integer. `rest` is the remaining sub-path from the terminating
+> '/' onward (e.g. `"/translation"`), or empty if nothing follows.
+-------------------------------------------------------------------------------------------------*/
+std::pair<int, std::string> parsePointerIndexAndRest(const std::string& path, size_t start);
+
+/*-------------------------------------------------------------------------------------------------
+## Function `isBoolAnimationPointerPath`
+> True for the small set of glTF Object Model pointer paths whose value is boolean but which
+> `AnimationPointerSystem`'s shadow tree otherwise only stores as a plain animatable number
+> (`.../visible` from `KHR_node_visibility`, `.../selectable` from `KHR_node_selectability`,
+> `.../hoverable` from `KHR_node_hoverability`) - callers writing a bool through that shadow tree
+> (`KHR_interactivity`'s `pointer/set`, `KHR_animation_pointer` channels) must special-case these
+> paths to store a JSON boolean rather than a bare 0.0/1.0 number, or the later sync back into the
+> `tinygltf::Model` extension (a `Get<bool>()` read) silently sees the wrong type and reads false.
+-------------------------------------------------------------------------------------------------*/
+bool isBoolAnimationPointerPath(const std::string& path);
 
 /*-------------------------------------------------------------------------------------------------
 ## Function `getTextureImageSources`

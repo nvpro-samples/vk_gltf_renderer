@@ -210,6 +210,16 @@ void PathTracer::onSceneInvalidated(Resources& /*resources*/)
 #endif
 }
 
+void PathTracer::notifyDlssContentReset(Resources& /*resources*/)
+{
+#if defined(USE_DLSS)
+  // Material/light appearance change (e.g. KHR_interactivity texture-transform pointer/set) isn't
+  // describable by motion vectors - discard DLSS's temporal history so the new content doesn't
+  // blend with stale history at the same screen location. See docs/denoising.md.
+  m_dlss->notifyReset();
+#endif
+}
+
 void PathTracer::updateDlssResources(VkCommandBuffer cmd, Resources& resources)
 {
 #if defined(USE_DLSS)

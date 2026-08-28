@@ -49,6 +49,14 @@ set(TEST_SOURCES
     test_agentic_bridge.cpp
     # Geometry compaction preserves EXT_mesh_opacity_micromap payload
     test_opacity_micromap_compaction.cpp
+    # KHR_interactivity behavior-graph engine (parsing, flow scheduling, node evaluation)
+    test_interactivity_engine.cpp
+    # KHR_interactivity Phase C: pointer/get, pointer/set against a real Scene
+    test_interactivity_pointer.cpp
+    # KHR_interactivity Phase E: event/onSelect, event/onHoverIn/onHoverOut bubbling
+    test_interactivity_hover_select.cpp
+    # AnimationPointerSystem: partial texture-extension writes preserve sibling fields
+    test_animation_pointer.cpp
     # Need tinygltf implementation
     ${CMAKE_SOURCE_DIR}/src/tiny_stb_implementation.cpp
     # Optional external generation bridge
@@ -67,6 +75,12 @@ set(TEST_SOURCES
     ${CMAKE_SOURCE_DIR}/src/tinygltf_utils.cpp
     ${CMAKE_SOURCE_DIR}/src/gltf_animation_pointer.cpp
     ${CMAKE_SOURCE_DIR}/src/gltf_create_tangent.cpp
+    ${CMAKE_SOURCE_DIR}/src/gltf_interactivity_graph.cpp
+    ${CMAKE_SOURCE_DIR}/src/gltf_interactivity_instance.cpp
+    ${CMAKE_SOURCE_DIR}/src/gltf_interactivity_eval.cpp
+    ${CMAKE_SOURCE_DIR}/src/gltf_interactivity_pointer.cpp
+    ${CMAKE_SOURCE_DIR}/src/gltf_interactivity_scene_pointer.cpp
+    ${CMAKE_SOURCE_DIR}/src/gltf_interactivity_scene_animation.cpp
     # MikkTSpace for tangent generation
     ${CMAKE_SOURCE_DIR}/third_party/MikkTSpace/mikktspace.c
     # Phase-specific tests added here as we progress
@@ -160,6 +174,12 @@ add_executable(${BENCHMARK_NAME}
     ${CMAKE_SOURCE_DIR}/src/tinygltf_converter.cpp
     ${CMAKE_SOURCE_DIR}/src/tinygltf_utils.cpp
     ${CMAKE_SOURCE_DIR}/src/gltf_create_tangent.cpp
+    ${CMAKE_SOURCE_DIR}/src/gltf_interactivity_graph.cpp
+    ${CMAKE_SOURCE_DIR}/src/gltf_interactivity_instance.cpp
+    ${CMAKE_SOURCE_DIR}/src/gltf_interactivity_eval.cpp
+    ${CMAKE_SOURCE_DIR}/src/gltf_interactivity_pointer.cpp
+    ${CMAKE_SOURCE_DIR}/src/gltf_interactivity_scene_pointer.cpp
+    ${CMAKE_SOURCE_DIR}/src/gltf_interactivity_scene_animation.cpp
     # MikkTSpace for tangent generation
     ${CMAKE_SOURCE_DIR}/third_party/MikkTSpace/mikktspace.c
 )

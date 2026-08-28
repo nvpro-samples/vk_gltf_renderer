@@ -32,19 +32,19 @@
 //--------------------------------------------------------------------------------------------------
 // Select a node in the hierarchy
 //
-void SceneSelection::selectNode(int nodeIdx)
+void SceneSelection::selectNode(int nodeIdx, const glm::vec3& selectionPoint, const glm::vec3& selectionRayOrigin)
 {
   m_selection           = {};  // Clear previous selection
   m_selection.type      = SelectionType::eNode;
   m_selection.nodeIndex = nodeIdx;
 
-  emitEvent({EventType::NodeSelected, nodeIdx, -1});
+  emitEvent({EventType::NodeSelected, nodeIdx, -1, selectionPoint, selectionRayOrigin});
 }
 
 //--------------------------------------------------------------------------------------------------
 // Select a specific primitive instance (from 3D picking or UI)
 //
-void SceneSelection::selectPrimitive(int renderNodeIdx, int nodeIdx, int primIdx, int meshIdx)
+void SceneSelection::selectPrimitive(int renderNodeIdx, int nodeIdx, int primIdx, int meshIdx, const glm::vec3& selectionPoint, const glm::vec3& selectionRayOrigin)
 {
   m_selection                 = {};
   m_selection.type            = SelectionType::ePrimitive;
@@ -53,7 +53,7 @@ void SceneSelection::selectPrimitive(int renderNodeIdx, int nodeIdx, int primIdx
   m_selection.primitiveIndex  = primIdx;
   m_selection.meshIndex       = meshIdx;
 
-  emitEvent({EventType::PrimitiveSelected, nodeIdx, renderNodeIdx});
+  emitEvent({EventType::PrimitiveSelected, nodeIdx, renderNodeIdx, selectionPoint, selectionRayOrigin});
 }
 
 //--------------------------------------------------------------------------------------------------

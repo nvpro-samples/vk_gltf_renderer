@@ -490,6 +490,7 @@ auto main(int argc, char** argv) -> int
   }
 
   app.run();
+
   app.deinit();
 
   // Clear callbacks before scope ends to avoid dangling references
@@ -500,4 +501,6 @@ auto main(int argc, char** argv) -> int
 
   // Deinit Vulkan context
   vkContext.deinit();
+
+  return 0;
 }

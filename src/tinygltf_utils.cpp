@@ -27,6 +27,7 @@
 
 #include "tinygltf_utils.hpp"
 
+#include <charconv>
 #include <cstdlib>
 #include <cstring>
 #include <unordered_set>
@@ -758,6 +759,23 @@ size_t tinygltf::utils::getIndexCount(const tinygltf::Model& model, const tinygl
   }
   // Return the vertex count when no indices are present
   return getVertexCount(model, primitive);
+}
+
+std::pair<int, std::string> tinygltf::utils::parsePointerIndexAndRest(const std::string& path, size_t start)
+{
+  size_t end = path.find('/', start);
+  if(end == std::string::npos)
+    end = path.size();
+  int                    index  = -1;
+  std::from_chars_result result = std::from_chars(path.data() + start, path.data() + end, index);
+  if(result.ec != std::errc{} || result.ptr != path.data() + end)
+    return {-1, {}};
+  return {index, path.substr(end)};
+}
+
+bool tinygltf::utils::isBoolAnimationPointerPath(const std::string& path)
+{
+  return path.ends_with("/visible") || path.ends_with("/selectable") || path.ends_with("/hoverable");
 }
 
 int tinygltf::utils::getTextureImageIndex(const tinygltf::Texture& texture)

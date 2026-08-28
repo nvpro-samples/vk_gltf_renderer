@@ -24,7 +24,6 @@
 // at runtime. Handles both standard and extension properties.
 //
 
-#include <charconv>
 #include <string_view>
 
 #include <nvutils/logger.hpp>
@@ -97,8 +96,9 @@ AnimationPointerSystem::CachedPathInfo& AnimationPointerSystem::getOrCreateCache
 }
 
 //--------------------------------------------------------------------------------------------------
-// Parse resource type and index from path (done once per unique path)
-// Uses std::from_chars for zero-allocation integer parsing
+// Parse resource type and index from path (done once per unique path). Index parsing itself is
+// tinygltf::utils::parsePointerIndexAndRest() - shared with KHR_interactivity's
+// ScenePointerResolver::get(), which addresses the same glTF resource prefixes for reads.
 //--------------------------------------------------------------------------------------------------
 void AnimationPointerSystem::parseResourceInfo(const std::string& path, CachedPathInfo& cached)
 {
@@ -120,19 +120,9 @@ void AnimationPointerSystem::parseResourceInfo(const std::string& path, CachedPa
   {
     if(path.rfind(prefix, 0) == 0)
     {
-      // Parse index after prefix using std::from_chars (zero allocations)
-      size_t startIdx = prefix.size();
-      size_t endIdx   = path.find('/', startIdx);
-      if(endIdx == std::string::npos)
-        endIdx = path.size();
-
-      int                    index  = 0;
-      const char*            first  = path.data() + startIdx;
-      const char*            last   = path.data() + endIdx;
-      std::from_chars_result result = std::from_chars(first, last, index);
-
+      // Shared with ScenePointerResolver::get()'s own "/prefix/<index>/rest..." parsing (KHR_interactivity).
       cached.resourceType  = type;
-      cached.resourceIndex = (result.ec == std::errc{} && result.ptr == last) ? index : -1;
+      cached.resourceIndex = tinygltf::utils::parsePointerIndexAndRest(path, prefix.size()).first;
       return;
     }
   }
@@ -152,7 +142,7 @@ bool AnimationPointerSystem::applyValue(const std::string& jsonPointerPath, floa
 
     // Special handling: Some properties are boolean in glTF spec but animated as floats
     // Convert float to boolean for known boolean properties (e.g., KHR_node_visibility/visible)
-    if(jsonPointerPath.ends_with("/visible"))
+    if(tinygltf::utils::isBoolAnimationPointerPath(jsonPointerPath))
     {
       m_jsonModel[cached.ptr] = (value != 0.0f);
     }
@@ -387,8 +377,29 @@ void AnimationPointerSystem::syncNode(int nodeIndex)
       }
     }
 
-    // Could also handle other node properties if needed:
-    // rotation, scale, translation, matrix, weights, etc.
+    // TRS + weights (spec Object Model properties commonly targeted by KHR_animation_pointer
+    // and KHR_interactivity's pointer/set alike - a node using `matrix` instead of TRS is left
+    // alone here; the spec's own worked examples target TRS components, never a whole matrix).
+    auto readVec = [&](const char* key, size_t count) -> std::vector<double> {
+      if(!nodeJson.contains(key) || !nodeJson[key].is_array() || nodeJson[key].size() < count)
+        return {};
+      std::vector<double> out(count);
+      for(size_t i = 0; i < count; ++i)
+        out[i] = nodeJson[key][i].get<double>();
+      return out;
+    };
+    if(std::vector<double> t = readVec("translation", 3); !t.empty())
+      node.translation = std::move(t);
+    if(std::vector<double> r = readVec("rotation", 4); !r.empty())
+      node.rotation = std::move(r);
+    if(std::vector<double> s = readVec("scale", 3); !s.empty())
+      node.scale = std::move(s);
+    if(nodeJson.contains("weights") && nodeJson["weights"].is_array())
+    {
+      node.weights.clear();
+      for(const auto& w : nodeJson["weights"])
+        node.weights.push_back(w.get<double>());
+    }
   }
   catch(const nlohmann::json::exception& e)
   {
@@ -473,13 +484,21 @@ void AnimationPointerSystem::reset()
 // This handles any property at any depth: colors, factors, textures, extensions, nested extensions, etc.
 void AnimationPointerSystem::mergeJsonIntoMaterial(const nlohmann::json& json, tinygltf::Material& mat)
 {
-  // Helper lambda: Merge JSON extensions into any object with extensions field
+  // Helper lambda: Merge JSON extensions into any object with extensions field. MERGE instead of
+  // REPLACE (same as the material-level extensions merge below) - a pointer/set writing just one
+  // field (e.g. KHR_texture_transform/offset) must not drop sibling fields (scale, texCoord) that
+  // came from the original glTF and were never themselves written.
   auto mergeExtensions = [this](const nlohmann::json& json, auto& target) {
     if(json.contains("extensions") && json["extensions"].is_object())
     {
       for(auto& [extName, extValue] : json["extensions"].items())
       {
-        target.extensions[extName] = jsonToTinyGltfValue(extValue);
+        tinygltf::Value newExtValue = jsonToTinyGltfValue(extValue);
+        auto            it          = target.extensions.find(extName);
+        if(it != target.extensions.end())
+          mergeValue(it->second, newExtValue);
+        else
+          target.extensions[extName] = newExtValue;
       }
     }
   };

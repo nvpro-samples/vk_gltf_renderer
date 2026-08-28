@@ -287,14 +287,13 @@ void nvvkgltf::SceneVk::create(VkCommandBuffer        cmd,
 
   std::vector<std::filesystem::path> imageSearchPaths = resolveImageSearchPaths(scn);
 
-  // Resolve per-texture sampler slots first: uploadMaterials() bakes them into GltfTextureInfo.samplerIndex,
-  // so they must exist before it runs (createTextureImages, which creates the VkSamplers, comes later).
-  buildTextureSamplerSlots(scn.getModel());
+  // Textures come first: uploadMaterials() bakes the per-texture sampler slots and source-format
+  // flags into GltfTextureInfo, and the format flags are only known once the images are decoded.
+  createTextureImages(cmd, staging, scn, imageSearchPaths);
 
   uploadMaterials(staging, scn);
   uploadRenderNodes(staging, scn);
   createVertexBuffers(cmd, staging, scn);
-  createTextureImages(cmd, staging, scn, imageSearchPaths);
   uploadLights(staging, scn);
   uploadEmissiveTriangles(staging, scn);
 
@@ -482,7 +481,7 @@ void nvvkgltf::SceneVk::uploadMaterials(nvvk::StagingUploader& staging, const nv
   // Rebuild all materials and texture infos into cache
   if(doFullUpdate)
   {
-    m_materialCache.buildFromMaterials(materials, m_textureSamplerSlots);
+    m_materialCache.buildFromMaterials(materials, m_textureSlots);
   }
 
   const bool buffersResized = ensureMaterialBuffers();
@@ -516,7 +515,7 @@ void nvvkgltf::SceneVk::uploadMaterials(nvvk::StagingUploader& staging, const nv
     if(idx < 0 || idx >= static_cast<int>(materials.size()) || idx >= static_cast<int>(shadeMaterials.size()))
       continue;
 
-    MaterialUpdateResult update = m_materialCache.updateMaterial(idx, materials[idx], m_textureSamplerSlots);
+    MaterialUpdateResult update = m_materialCache.updateMaterial(idx, materials[idx], m_textureSlots);
     if(update.topologyChanged)
     {
       topologyChanged = true;
@@ -527,7 +526,7 @@ void nvvkgltf::SceneVk::uploadMaterials(nvvk::StagingUploader& staging, const nv
 
   if(topologyChanged)
   {
-    m_materialCache.buildFromMaterials(materials, m_textureSamplerSlots);
+    m_materialCache.buildFromMaterials(materials, m_textureSlots);
     const bool resized = ensureMaterialBuffers();
     if(resized)
       m_sceneDescDirty = true;
@@ -1418,13 +1417,13 @@ void nvvkgltf::SceneVk::createTextureImages(VkCommandBuffer                     
   if(model.textures.empty())
     pushDefaultTextureView();
 
-  // Build the separate sampler array (slot 0 = default, slots 1..N = model.samplers) plus the
-  // per-texture sampler-slot table consumed by MaterialCache -> GltfTextureInfo.samplerIndex.
+  // Build the separate sampler array (slot 0 = default, slots 1..N = model.samplers).
   ensureSamplers(model);
 
-  // The per-texture slot table was already built in create() (before uploadMaterials); keep it in sync
-  // here in case createTextureImages is ever driven independently.
+  // Per-texture tables consumed by MaterialCache -> GltfTextureInfo. Both are built here, after the
+  // images exist, because the format flags depend on the decoded m_images[].format.
   buildTextureSamplerSlots(model);
+  buildTextureFormatFlags(model);
 }
 
 //--------------------------------------------------------------------------------------------------
@@ -1482,9 +1481,10 @@ void nvvkgltf::SceneVk::syncTextureTail(VkCommandBuffer cmd, nvvk::StagingUpload
       appendTextureView(model, t);
   }
 
-  // Refresh the per-texture sampler-slot table (cheap, CPU only) so uploadMaterials bakes the correct
-  // samplerIndex for any new textures.
+  // Refresh the per-texture tables (cheap, CPU only) so uploadMaterials bakes the correct samplerIndex
+  // and source-format flags for any new textures.
   buildTextureSamplerSlots(model);
+  buildTextureFormatFlags(model);
 
   // Flush pending appends (default images from failed loads). No-op when createImage already flushed.
   staging.cmdUploadAppended(cmd);
@@ -1503,14 +1503,13 @@ void nvvkgltf::SceneVk::recreatePreservingTextures(VkCommandBuffer cmd, nvvk::St
   destroyGeometry();        // frees vertex/index/renderPrim/sceneDesc buffers only -- textures/materials survive
   m_sceneDescDirty = true;  // sceneDesc buffer was freed above; force flushSceneDescIfDirty to recreate it
 
-  // Resolve per-texture sampler slots before uploadMaterials bakes them into GltfTextureInfo.samplerIndex
-  // (the new textures must be covered). Pure model data, so it runs before the samplers themselves exist.
-  buildTextureSamplerSlots(model);
+  // Reconcile textures first so the new tail's sampler slots and source-format flags are resolved
+  // before uploadMaterials bakes them into GltfTextureInfo.
+  syncTextureTail(cmd, staging, scn);  // preserve existing images/textures; load + append only the new tail
 
   uploadMaterials(staging, scn);  // empty dirty set -> full material-cache rebuild + buffer grow/upload
   uploadRenderNodes(staging, scn);
   createVertexBuffers(cmd, staging, scn);
-  syncTextureTail(cmd, staging, scn);  // preserve existing images/textures; load + append only the new tail
   uploadLights(staging, scn);
 
   (void)flushSceneDescIfDirty(staging, scn);
@@ -1521,11 +1520,72 @@ void nvvkgltf::SceneVk::recreatePreservingTextures(VkCommandBuffer cmd, nvvk::St
 
 void nvvkgltf::SceneVk::buildTextureSamplerSlots(const tinygltf::Model& model)
 {
-  m_textureSamplerSlots.resize(model.textures.size());
+  m_textureSlots.samplerSlots.resize(model.textures.size());
   for(size_t i = 0; i < model.textures.size(); ++i)
   {
-    const int s              = model.textures[i].sampler;
-    m_textureSamplerSlots[i] = (s >= 0 && s < static_cast<int>(model.samplers.size())) ? (s + 1) : 0;
+    const int s                    = model.textures[i].sampler;
+    m_textureSlots.samplerSlots[i] = (s >= 0 && s < static_cast<int>(model.samplers.size())) ? (s + 1) : 0;
+  }
+}
+
+//--------------------------------------------------------------------------------------------------
+// Number of color components a sampled VkFormat actually carries. Vulkan synthesizes the missing
+// ones (0 for G/B, 1 for A), so a consumer that needs a component the format does not store must
+// know. Only the formats our image loaders can produce are listed; anything else falls back to 4,
+// which disables the special-casing rather than guessing wrong.
+static uint32_t vkFormatColorComponentCount(VkFormat format)
+{
+  switch(format)
+  {
+    case VK_FORMAT_R8_UNORM:
+    case VK_FORMAT_R8_SNORM:
+    case VK_FORMAT_R8_SRGB:
+    case VK_FORMAT_R16_UNORM:
+    case VK_FORMAT_R16_SNORM:
+    case VK_FORMAT_R16_SFLOAT:
+    case VK_FORMAT_R32_SFLOAT:
+    case VK_FORMAT_BC4_UNORM_BLOCK:
+    case VK_FORMAT_BC4_SNORM_BLOCK:
+    case VK_FORMAT_EAC_R11_UNORM_BLOCK:
+    case VK_FORMAT_EAC_R11_SNORM_BLOCK:
+      return 1;
+    case VK_FORMAT_R8G8_UNORM:
+    case VK_FORMAT_R8G8_SNORM:
+    case VK_FORMAT_R8G8_SRGB:
+    case VK_FORMAT_R16G16_UNORM:
+    case VK_FORMAT_R16G16_SNORM:
+    case VK_FORMAT_R16G16_SFLOAT:
+    case VK_FORMAT_R32G32_SFLOAT:
+    case VK_FORMAT_BC5_UNORM_BLOCK:
+    case VK_FORMAT_BC5_SNORM_BLOCK:
+    case VK_FORMAT_EAC_R11G11_UNORM_BLOCK:
+    case VK_FORMAT_EAC_R11G11_SNORM_BLOCK:
+      return 2;
+    default:
+      return 4;
+  }
+}
+
+//--------------------------------------------------------------------------------------------------
+// Flag textures whose source image decoded to an exactly two-channel format. Such a texture samples
+// real X and Y with a synthetic 0 for blue, which is what a tangent-space normal map needs to rebuild
+// Z from instead of decoding that 0 to -1 (BC5 / R8G8 normal maps store only X and Y).
+//
+// Single-channel formats are deliberately excluded: their green channel is synthetic too, so there is
+// no second axis to reconstruct from -- and the loader already expands one-channel images to RRR1
+// (see gltf_image_loader.cpp), which means their blue channel is not a synthetic 0 in the first place.
+void nvvkgltf::SceneVk::buildTextureFormatFlags(const tinygltf::Model& model)
+{
+  m_textureSlots.twoChannelSource.assign(model.textures.size(), 0);
+  for(size_t i = 0; i < model.textures.size(); ++i)
+  {
+    const int sourceImage = tinygltf::utils::getTextureImageIndex(model.textures[i]);
+    if(sourceImage < 0 || sourceImage >= static_cast<int>(m_images.size()))
+      continue;
+
+    // m_images[].format is the decoded source format; it stays VK_FORMAT_UNDEFINED for images that
+    // failed to load (a 4-channel magenta default is substituted), which maps to 4 components below.
+    m_textureSlots.twoChannelSource[i] = vkFormatColorComponentCount(m_images[sourceImage].format) == 2 ? 1 : 0;
   }
 }
 
@@ -1961,7 +2021,7 @@ void nvvkgltf::SceneVk::destroy()
   m_images.clear();
   m_textures.clear();
   m_samplers.clear();
-  m_textureSamplerSlots.clear();
+  m_textureSlots.clear();
 
   m_sRgbImages.clear();
 

@@ -1,0 +1,19 @@
+# KHR_interactivity event/onSelect ray-info regression test.
+# `pickrendernode` (unlike `selectnode`) simulates a real 3D-viewport ray-pick click, supplying
+# finite selectionPoint/selectionRayOrigin - verifies the fix where a real click's RayPicker hit
+# data was computed but never threaded through to Scene::notifyNodeSelected(), so onSelect's
+# selectionRayOrigin output socket was always NaN even for genuine clicks.
+#
+# Reference-only: the scripted UI-automation integration this script targeted has been removed from
+# the app (see docs/interactivity.md's Tests section) and is future work to reinstate. This script
+# is kept as a record of the scenario for whenever that integration returns; it is not currently
+# runnable. Historically run against the official Khronos conformance scene:
+#   scenefile <glTF-Test-Assets-Interactivity>/Tests/Interactivity/UserInteractions/eventOnSelect/glTF-Binary/eventOnSelect.glb
+
+ready
+yield 5
+pickrendernode 3
+yield 20
+capture 01_after_select.png
+
+log "select ray-info test complete"

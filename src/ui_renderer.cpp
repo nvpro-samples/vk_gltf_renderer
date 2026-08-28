@@ -27,6 +27,7 @@
 #include <algorithm>
 #include <cfloat>
 #include <filesystem>
+#include <limits>
 #include <fmt/format.h>
 #include <GLFW/glfw3.h>
 #include <glm/gtc/type_ptr.hpp>
@@ -50,6 +51,7 @@
 #include "scoped_banner.hpp"
 #include "tinygltf_utils.hpp"
 #include "ui_animation.hpp"
+#include "ui_interactivity.hpp"
 #include "ui_linear_color.hpp"
 #include "ui_mouse_state.hpp"
 #include "version.hpp"
@@ -104,65 +106,118 @@ void GltfRenderer::mouseClickedInViewport()
 
   // If double-clicking in the "Viewport", shoot a ray to the scene under the mouse.
   // If the ray hit something, set the camera center to the hit position.
-  if(s_mouseClickState.isMouseClicked(ImGuiMouseButton_Left))
+  //
+  // The actual ray-pick GPU work is deferred (see m_pendingClickPick's comment in renderer.hpp) -
+  // this just captures everything it needs at the moment of the click (camera state included, so
+  // a camera move between now and when onRender() records the pick doesn't skew the ray) and hands
+  // it off. No GPU work, no wait - this function is now as cheap as updateHoverCursorPosition().
+  //
+  // Two ways a click can be recognized:
+  //  - Normal editing: s_mouseClickState's single/double-click debounce (waits io.MouseDoubleClickTime,
+  //    ImGui's default 0.3s, to see if a second click follows) so a double-click can mean "recenter
+  //    camera" instead of "select".
+  //  - While a KHR_interactivity graph is playing: double-click-to-recenter isn't something a
+  //    click-driven graph needs, and that debounce is exactly the "still feels laggy" delay users
+  //    notice even after the GPU wait was removed - so skip it entirely and react on the release
+  //    itself (isMouseReleasedNoDrag still correctly excludes camera-orbit drags).
+  const bool interactivityPlaying = isInteractivityPlaying();
+  const bool clicked = interactivityPlaying ? s_mouseClickState.isMouseReleasedNoDrag(ImGuiMouseButton_Left) :
+                                              s_mouseClickState.isMouseClicked(ImGuiMouseButton_Left);
+  if(clicked)
   {
-    nvutils::ScopedTimer st("RayPicker");
-    VkCommandBuffer      cmd = m_app->createTempCmdBuffer();
     // Convert screen coordinates to normalized viewport coordinates [0,1]
     ImVec2 mousePos      = ImGui::GetMousePos();
     ImVec2 cursorPos     = ImGui::GetCursorScreenPos();
     ImVec2 avail         = ImGui::GetContentRegionAvail();
     ImVec2 localMousePos = ImVec2((mousePos.x - cursorPos.x) / avail.x, (mousePos.y - cursorPos.y) / avail.y);
 
-    m_rayPicker.run(cmd, {.modelViewInv   = glm::inverse(m_cameraManip->getViewMatrix()),
-                          .perspectiveInv = glm::inverse(m_cameraManip->getPerspectiveMatrix()),
-                          .isOrthographic = (m_cameraManip->getProjectionType() == nvutils::CameraManipulator::Orthographic) ? 1 : 0,
-                          .pickPos = {localMousePos.x, localMousePos.y},
-                          .tlas    = m_resources.sceneRtx.topLevelAS()});
-    m_app->submitAndWaitTempCmdBuffer(cmd);
-    nvvk::RayPicker::PickResult pickResult = m_rayPicker.getResult();
+    m_pendingClickPick = PendingClickPick{
+        .modelViewInv   = glm::inverse(m_cameraManip->getViewMatrix()),
+        .perspectiveInv = glm::inverse(m_cameraManip->getPerspectiveMatrix()),
+        .isOrthographic = (m_cameraManip->getProjectionType() == nvutils::CameraManipulator::Orthographic) ? 1 : 0,
+        .pickPos        = {localMousePos.x, localMousePos.y},
+        .isDoubleClick  = !interactivityPlaying && s_mouseClickState.isMouseDoubleClicked(ImGuiMouseButton_Left),
+    };
+  }
+}
 
-    // Set or de-select the selected object (primitive-level selection)
-    // pickResult.instanceID is the TLAS instance index = render node index
-    if(s_mouseClickState.isMouseSingleClicked(ImGuiMouseButton_Left))
+// Applies a completed async ray-pick result (see m_pendingClickPick's comment in renderer.hpp for
+// the full pipeline) - selection, and on a double click, camera recenter. Exactly the logic that
+// used to run inline in mouseClickedInViewport() right after its now-removed blocking GPU wait.
+void GltfRenderer::applyClickPickResult(const nvvk::RayPicker::PickResult& pickResult, bool isDoubleClick)
+{
+  // Environment was picked (no hit)
+  const bool hasHit = pickResult.instanceID >= 0;
+  // KHR_interactivity event/onSelect's selectionPoint/selectionRayOrigin - real ray-pick hit
+  // point/origin (global space) when this click actually hit something, so a bound onSelect
+  // handler sees finite values instead of the "no ray info" NaN fallback (KHR_node_selectability
+  // README ~110 spec-sanctions NaN when there's no ray, but this IS a ray, so it must be used).
+  glm::vec3 worldPos = hasHit ? pickResult.worldRayOrigin + pickResult.worldRayDirection * pickResult.hitT : glm::vec3(0);
+
+  // Set or de-select the selected object (primitive-level selection)
+  // pickResult.instanceID is the TLAS instance index = render node index
+  if(!isDoubleClick)
+  {
+    updateSelectionFromPick(pickResult.instanceID, worldPos, pickResult.worldRayOrigin);
+  }
+
+  if(!hasHit)
+    return;
+  if(isDoubleClick)
+  {
+    // Set the camera CENTER to the hit position
+    glm::dvec3 eye, center, up;
+    m_cameraManip->getLookat(eye, center, up);
+    m_cameraManip->setLookat(eye, worldPos, up, false);  // Nice with CameraManip.updateAnim();
+    m_cameraManip->setSpeed(pickResult.hitT);            // Re-adjust speed based on the new distance
+  }
+
+  {
+    const int        renderNodeIdx = pickResult.instanceID;
+    nvvkgltf::Scene* scene         = m_resources.getScene();
+    const auto&      renderNodes   = scene->getRenderNodes();
+    if(renderNodeIdx >= 0 && renderNodeIdx < static_cast<int>(renderNodes.size()))
     {
-      updateSelectionFromPick(pickResult.instanceID);
-    }
-
-    // Environment was picked (no hit)
-    if(pickResult.instanceID < 0)
-      return;
-
-    glm::vec3 worldPos = pickResult.worldRayOrigin + pickResult.worldRayDirection * pickResult.hitT;
-    if(s_mouseClickState.isMouseDoubleClicked(ImGuiMouseButton_Left))
-    {
-      // Set the camera CENTER to the hit position
-      glm::dvec3 eye, center, up;
-      m_cameraManip->getLookat(eye, center, up);
-      m_cameraManip->setLookat(eye, worldPos, up, false);  // Nice with CameraManip.updateAnim();
-      m_cameraManip->setSpeed(pickResult.hitT);            // Re-adjust speed based on the new distance
-    }
-
-    {
-      const int        renderNodeIdx = pickResult.instanceID;
-      nvvkgltf::Scene* scene         = m_resources.getScene();
-      const auto&      renderNodes   = scene->getRenderNodes();
-      if(renderNodeIdx >= 0 && renderNodeIdx < static_cast<int>(renderNodes.size()))
-      {
-        const nvvkgltf::RenderNode& renderNode = renderNodes[renderNodeIdx];
-        const tinygltf::Node&       node       = scene->getModel().nodes[renderNode.refNodeID];
-        LOGI("Node Name: %s\n", node.name.c_str());
-        LOGI(" - GLTF: NodeID: %d, MeshID: %d, TriangleId: %d\n", renderNode.refNodeID, node.mesh, pickResult.primitiveID);
-        LOGI(" - Render: renderNode: %d, RenderPrim: %d\n", renderNodeIdx, pickResult.instanceCustomIndex);
-        LOGI("{%3.2f, %3.2f, %3.2f}, Dist: %3.2f\n", worldPos.x, worldPos.y, worldPos.z, pickResult.hitT);
-      }
+      const nvvkgltf::RenderNode& renderNode = renderNodes[renderNodeIdx];
+      const tinygltf::Node&       node       = scene->getModel().nodes[renderNode.refNodeID];
+      LOGI("Node Name: %s\n", node.name.c_str());
+      LOGI(" - GLTF: NodeID: %d, MeshID: %d, TriangleId: %d\n", renderNode.refNodeID, node.mesh, pickResult.primitiveID);
+      LOGI(" - Render: renderNode: %d, RenderPrim: %d\n", renderNodeIdx, pickResult.instanceCustomIndex);
+      LOGI("{%3.2f, %3.2f, %3.2f}, Dist: %3.2f\n", worldPos.x, worldPos.y, worldPos.z, pickResult.hitT);
     }
   }
 }
 
+// Captures whether the cursor is currently over the 3D viewport and, if so, its pixel position in
+// render-target space - consumed by onRender()'s updateHoverState()/HoverPicker later this same
+// frame (docs/interactivity.md Phase E). Must be called from the viewport window's ImGui code,
+// right where mouseClickedInViewport() computes the equivalent position for click-picking.
+void GltfRenderer::updateHoverCursorPosition()
+{
+  m_hoverCursorInViewport = ImGui::IsWindowHovered(ImGuiFocusedFlags_RootWindow) && m_resources.getScene()
+                            && m_resources.getScene()->valid() && !m_busy.isBusy();
+  if(!m_hoverCursorInViewport)
+    return;
+
+  const ImVec2     mousePos  = ImGui::GetMousePos();
+  const ImVec2     cursorPos = ImGui::GetCursorScreenPos();
+  const ImVec2     avail     = ImGui::GetContentRegionAvail();
+  const VkExtent2D imgSize   = m_resources.gBuffers.getSize();
+  m_hoverCursorPixel = {static_cast<int>((mousePos.x - cursorPos.x) / avail.x * static_cast<float>(imgSize.width)),
+                        static_cast<int>((mousePos.y - cursorPos.y) / avail.y * static_cast<float>(imgSize.height))};
+}
+
+bool GltfRenderer::isInteractivityPlaying() const
+{
+  const nvvkgltf::Scene* scene = m_resources.getScene();
+  return scene && !scene->getInteractivityGraphs().empty() && m_resources.interactivityControl.play;
+}
+
 // Update the current selection from a ray-pick result. `renderNodeIdx` is the TLAS instance index
-// (== render node index), or < 0 when the environment/nothing was hit.
-void GltfRenderer::updateSelectionFromPick(int renderNodeIdx)
+// (== render node index), or < 0 when the environment/nothing was hit. `selectionPoint`/
+// `selectionRayOrigin` (global space) are threaded through to SceneSelection::selectPrimitive() for
+// KHR_interactivity event/onSelect; default NaN for callers with no real ray (e.g. script-driven tests).
+void GltfRenderer::updateSelectionFromPick(int renderNodeIdx, const glm::vec3& selectionPoint, const glm::vec3& selectionRayOrigin)
 {
   const auto clearSelection = [&]() {
     m_resources.selectedRenderNodes.clear();
@@ -179,8 +234,13 @@ void GltfRenderer::updateSelectionFromPick(int renderNodeIdx)
     return;
   }
 
-  // Clicking the currently selected primitive again de-selects it.
-  if(m_resources.selectedRenderNodes.size() == 1 && m_resources.selectedRenderNodes.count(renderNodeIdx))
+  // Clicking the currently selected primitive again de-selects it - standard editor behavior, but
+  // actively harmful while a KHR_interactivity graph is playing: every other click on the same node
+  // (e.g. re-clicking a lever/button several times in a row) would silently eat the click as a
+  // deselect instead of re-firing event/onSelect, making the graph feel like it needs "two clicks"
+  // to react. Skip the toggle while a graph is actually running, so every click re-selects and
+  // re-fires the event; click-to-deselect still works normally once the graph is paused/absent.
+  if(!isInteractivityPlaying() && m_resources.selectedRenderNodes.size() == 1 && m_resources.selectedRenderNodes.count(renderNodeIdx))
   {
     clearSelection();
     return;
@@ -193,7 +253,7 @@ void GltfRenderer::updateSelectionFromPick(int renderNodeIdx)
     int selectableNodeID = scene->nearestSelectableAncestor(renderNodes[renderNodeIdx].refNodeID);
     if(selectableNodeID >= 0)
     {
-      m_sceneSelection.selectNode(selectableNodeID);
+      m_sceneSelection.selectNode(selectableNodeID, selectionPoint, selectionRayOrigin);
       m_sceneBrowser.focusOnSelection();
     }
     else
@@ -213,7 +273,7 @@ void GltfRenderer::updateSelectionFromPick(int renderNodeIdx)
 
     if(editableNodeID >= 0)
     {
-      m_sceneSelection.selectNode(editableNodeID);
+      m_sceneSelection.selectNode(editableNodeID, selectionPoint, selectionRayOrigin);
       m_sceneBrowser.focusOnSelection();
     }
     else
@@ -230,7 +290,7 @@ void GltfRenderer::updateSelectionFromPick(int renderNodeIdx)
   int         meshID     = scene->getModel().nodes[nodeID].mesh;
 
   m_resources.selectedRenderNodes = {renderNodeIdx};
-  m_sceneSelection.selectPrimitive(renderNodeIdx, nodeID, primIndex, meshID);
+  m_sceneSelection.selectPrimitive(renderNodeIdx, nodeID, primIndex, meshID, selectionPoint, selectionRayOrigin);
   m_sceneBrowser.focusOnSelection();
 }
 
@@ -415,6 +475,12 @@ void GltfRenderer::renderUI()
       ImGui::End();  // End Camera
     }
 
+    // KHR_interactivity Graphs window: closed by default, opt-in via the View menu or toolbar
+    // indicator. renderWindow() itself handles the ImGui::Begin/End pair and every no-op case
+    // (no scene, no graph, window closed) - this is the whole call site.
+    ui::interactivity::renderWindow(m_resources.getScene(), m_resources.interactivityControl,
+                                    &m_resources.settings.showInteractivityWindow);
+
     // Scene Browser system: translate selection events into Resources for silhouette and fit-object
     {
       m_sceneSelection.setEventCallback([&](const SceneSelection::Event& event) {
@@ -442,12 +508,27 @@ void GltfRenderer::renderUI()
                   renderNodeIDs);
               for(int id : renderNodeIDs)
                 m_resources.selectedRenderNodes.insert(id);
+              // KHR_interactivity event/onSelect: real ray-pick hit point/origin when this selection
+              // was redirected here from an actual 3D-viewport click (e.g. KHR_node_selectability's
+              // nearest-selectable-ancestor fallback in updateSelectionFromPick()) - NaN (the
+              // spec-sanctioned "no ray info" fallback) otherwise (Scene Browser click, script-driven
+              // `selectnode`, ...; SceneSelection::selectNode's default parameters already are NaN).
+              scn->notifyNodeSelected(nodeIdx, event.selectionPoint, event.selectionRayOrigin);
             }
             break;
           }
-          case SceneSelection::EventType::PrimitiveSelected:
+          case SceneSelection::EventType::PrimitiveSelected: {
             m_resources.selectedRenderNodes = {event.renderNodeIndex};
+            nvvkgltf::Scene* scn            = m_resources.getScene();
+            if(scn && scn->valid())
+            {
+              // KHR_interactivity event/onSelect: real ray-pick hit point/origin when this came from
+              // an actual 3D-viewport click (SceneSelection::selectPrimitive's default parameters
+              // are already the spec-sanctioned NaN fallback for callers with no ray - e.g. tests).
+              scn->notifyNodeSelected(event.data, event.selectionPoint, event.selectionRayOrigin);
+            }
             break;
+          }
           case SceneSelection::EventType::MaterialSelected:
             // Material selection event
             break;
@@ -570,6 +651,12 @@ void GltfRenderer::renderUI()
 
     // Handle mouse clicks and gizmo interaction in the viewport
     GltfRenderer::mouseClickedInViewport();
+
+    // Capture the cursor's viewport pixel position for KHR_interactivity hover detection
+    // (docs/interactivity.md Phase E). ImGui state (IsWindowHovered/GetCursorScreenPos) is only
+    // valid here, in the UI-render phase - onRender()'s later Vulkan-recording pass can't query
+    // it directly, so it's stashed on GltfRenderer for updateHoverState() to consume this frame.
+    GltfRenderer::updateHoverCursorPosition();
 
     // Viewport-scoped keyboard shortcuts (only when hovered or focused)
     if(ImGui::IsWindowHovered(ImGuiHoveredFlags_RootWindow) || ImGui::IsWindowFocused())
@@ -898,13 +985,14 @@ void GltfRenderer::renderWindowsMenu()
     const char* shortcut;
     bool*       visible;
   };
-  static const std::array<WindowToggleInfo, 6 + kAgenticToggleCount> toggles = {{
+  static const std::array<WindowToggleInfo, 7 + kAgenticToggleCount> toggles = {{
       {ICON_MS_PHOTO_CAMERA, "Camera", "F1", &m_resources.settings.showCameraWindow},
       {ICON_MS_ACCOUNT_TREE, "Scene Browser", "F2", &m_resources.settings.showSceneBrowserWindow},
       {ICON_MS_SETTINGS, "Settings", "F3", &m_resources.settings.showSettingsWindow},
       {ICON_MS_LIST_ALT, "Inspector", "F4", &m_resources.settings.showInspectorWindow},
       {ICON_MS_PUBLIC, "Environment", "F5", &m_resources.settings.showEnvironmentWindow},
       {ICON_MS_TONALITY, "Tonemapper", "F6", &m_resources.settings.showTonemapperWindow},
+      {ICON_MS_EXTENSION, "Interactivity", "F8", &m_resources.settings.showInteractivityWindow},
 #ifdef USE_AGENTIC
       {ICON_MS_AUTO_AWESOME, "Agentic", "F7", &m_resources.settings.showAgenticWindow},
 #endif
@@ -1055,6 +1143,16 @@ void GltfRenderer::renderMenuToolbarAndGizmos()
     if(i < std::size(gizmoToggles) - 1)
       ImGui::SameLine(0, 0);
   }
+
+  // KHR_interactivity Play/Pause indicator - only drawn when the loaded scene actually has a graph
+  // (unlike the toggles above, which are always present). Toggles InteractivityControl::play
+  // directly; does not open the Interactivity window (View > Windows > Interactivity, or F8).
+  if(ui::interactivity::hasGraph(m_resources.getScene()))
+  {
+    ImGui::SameLine(0, 0);
+    ui::interactivity::renderToolbarIndicator(m_resources.getScene(), m_resources.interactivityControl);
+  }
+
   ImGui::SameLine();
   ImGui::SeparatorEx(ImGuiSeparatorFlags_Vertical);
 }
@@ -1072,13 +1170,14 @@ void GltfRenderer::renderMenu()
     bool*       visible;
     const char* tooltip;
   };
-  static const std::array<WindowToggleInfo, 6 + kAgenticToggleCount> windowToggles = {{
+  static const std::array<WindowToggleInfo, 7 + kAgenticToggleCount> windowToggles = {{
       {ICON_MS_PHOTO_CAMERA, "Camera", "F1", ImGuiKey_F1, false, &m_resources.settings.showCameraWindow, "Camera"},
       {ICON_MS_ACCOUNT_TREE, "Scene Browser", "F2", ImGuiKey_F2, false, &m_resources.settings.showSceneBrowserWindow, "Scene Browser"},
       {ICON_MS_SETTINGS, "Settings", "F3", ImGuiKey_F3, false, &m_resources.settings.showSettingsWindow, "Settings"},
       {ICON_MS_LIST_ALT, "Inspector", "F4", ImGuiKey_F4, false, &m_resources.settings.showInspectorWindow, "Inspector"},
       {ICON_MS_PUBLIC, "Environment", "F5", ImGuiKey_F5, false, &m_resources.settings.showEnvironmentWindow, "Environment"},
       {ICON_MS_TONALITY, "Tonemapper", "F6", ImGuiKey_F6, false, &m_resources.settings.showTonemapperWindow, "Tonemapper"},
+      {ICON_MS_EXTENSION, "Interactivity", "F8", ImGuiKey_F8, false, &m_resources.settings.showInteractivityWindow, "Interactivity"},
 #ifdef USE_AGENTIC
       {ICON_MS_AUTO_AWESOME, "Agentic", "F7", ImGuiKey_F7, false, &m_resources.settings.showAgenticWindow, "Agentic"},
 #endif

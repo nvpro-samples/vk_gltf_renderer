@@ -1,0 +1,23 @@
+# KHR_interactivity Calculator.glb regression test - clicking a digit button must both fire its
+# event/onSelect and correctly re-render its digit-strip display. Regression coverage for a bug
+# where pointer/set writing a single field of a texture-info extension (KHR_texture_transform's
+# "offset") dropped sibling fields (scale, texCoord) baked into the original glTF, because the
+# texture-slot extension merge replaced the whole entry instead of merging into it - the digit
+# atlas's UV sub-region collapsed to the full texture, so the button visibly did nothing.
+#
+# Reference-only: the scripted UI-automation integration this script targeted has been removed from
+# the app (see docs/interactivity.md's Tests section) and is future work to reinstate. This script
+# is kept as a record of the scenario for whenever that integration returns; it is not currently
+# runnable. Historically run against the official Khronos conformance scene:
+#   scenefile <glTF-Test-Assets-Interactivity>/Models/Calculator/glTF-Binary/Calculator.glb
+
+ready
+yield 20
+capture 00_initial.png
+
+# Node 5 = "Button 1" (a digit key with a bound event/onSelect).
+pickrendernode 5
+yield 20
+capture 01_after_click.png
+
+log "calculator test complete"

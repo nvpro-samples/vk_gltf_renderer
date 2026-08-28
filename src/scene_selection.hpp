@@ -28,6 +28,9 @@
  */
 
 #include <functional>
+#include <limits>
+
+#include <glm/glm.hpp>
 
 class SceneSelection
 {
@@ -80,6 +83,12 @@ public:
     EventType type;
     int       data;             // nodeIndex, materialIndex, cameraIndex, etc.
     int       renderNodeIndex;  // For PrimitiveSelected
+    // KHR_interactivity event/onSelect's selectionPoint/selectionRayOrigin (global-space hit point
+    // and ray origin). Only ever set for PrimitiveSelected coming from a real 3D-viewport ray pick;
+    // NaN (the spec-sanctioned "no ray info" fallback - KHR_node_selectability README ~110) for
+    // everything else (Scene Browser tree clicks, script-driven `selectnode`), since there is no ray.
+    glm::vec3 selectionPoint     = glm::vec3(std::numeric_limits<float>::quiet_NaN());
+    glm::vec3 selectionRayOrigin = glm::vec3(std::numeric_limits<float>::quiet_NaN());
   };
 
   using EventCallback = std::function<void(const Event&)>;
@@ -87,8 +96,20 @@ public:
   SceneSelection() = default;
 
   // Selection API
-  void selectNode(int nodeIdx);
-  void selectPrimitive(int renderNodeIdx, int nodeIdx, int primIdx, int meshIdx);
+  // `selectionPoint`/`selectionRayOrigin` are the real 3D-viewport ray-pick hit point/origin when
+  // known (global space); default NaN when selection didn't come from a ray (see Event's doc
+  // comment). A viewport ray-pick that gets redirected to a different node (e.g.
+  // KHR_node_selectability's nearest-selectable-ancestor fallback) still passes the original hit's
+  // ray data through here, since the pick itself was real even though the selected node moved.
+  void selectNode(int              nodeIdx,
+                  const glm::vec3& selectionPoint     = glm::vec3(std::numeric_limits<float>::quiet_NaN()),
+                  const glm::vec3& selectionRayOrigin = glm::vec3(std::numeric_limits<float>::quiet_NaN()));
+  void selectPrimitive(int              renderNodeIdx,
+                       int              nodeIdx,
+                       int              primIdx,
+                       int              meshIdx,
+                       const glm::vec3& selectionPoint     = glm::vec3(std::numeric_limits<float>::quiet_NaN()),
+                       const glm::vec3& selectionRayOrigin = glm::vec3(std::numeric_limits<float>::quiet_NaN()));
   void selectMaterial(int matIdx, int nodeContext = -1);
   void selectMesh(int meshIdx);
   void selectCamera(int camIdx);

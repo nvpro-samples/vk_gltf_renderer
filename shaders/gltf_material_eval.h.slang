@@ -127,6 +127,24 @@ bool isTexturePresent(uint16_t tinfo)
   return tinfo > 0;
 }
 
+/*-------------------------------------------------------------------------------------------------
+ * Finish decoding a tangent-space normal that has already been mapped from [0,1] to [-1,1].
+ *
+ * Two-channel formats (BC5, R8G8, EAC_R11G11) are the standard way to ship normal maps: only X and
+ * Y are stored and Z is implied. Vulkan samples their missing blue channel as 0, which decodes to
+ * Z = -1 and flips the normal into the surface, so it has to be rebuilt from the unit-length
+ * assumption. SceneVk marks those textures with eTexInfoTwoChannelSource; three-channel maps carry
+ * an authored Z and are returned untouched.
+ * -------------------------------------------------------------------------------------------------*/
+float3 decodeTangentSpaceNormal(float3 normal_vector, in GltfTextureInfo textureInfo)
+{
+  if((textureInfo.flags & TextureInfoFlagBits::eTexInfoTwoChannelSource) != 0)
+  {
+    normal_vector.z = sqrt(saturate(1.0F - dot(normal_vector.xy, normal_vector.xy)));
+  }
+  return normal_vector;
+}
+
 // Volumetric scattering is path-tracer only (see the scatter block in evaluateMaterial), so this
 // mapping is not compiled into the raster pipeline.
 #if GLTF_USE_SCATTER && !defined(RASTER_PIPELINE)
@@ -253,8 +271,10 @@ PbrMaterial evaluateMaterial(in GltfShadeMaterial material, MeshState state, Tex
 
   if(isTexturePresent(material.normalTexture))
   {
-    float3 normal_vector = getTexture(images, samplers, texInfos[material.normalTexture], state.tc, state.texGrad).xyz;
-    normal_vector        = normal_vector * 2.0F - 1.0F;
+    GltfTextureInfo normalTexInfo  = texInfos[material.normalTexture];
+    float3          normal_vector  = getTexture(images, samplers, normalTexInfo, state.tc, state.texGrad).xyz;
+    normal_vector                  = normal_vector * 2.0F - 1.0F;
+    normal_vector                  = decodeTangentSpaceNormal(normal_vector, normalTexInfo);
     normal_vector *= float3(material.normalTextureScale, material.normalTextureScale, 1.0F);
     float3x3 tbn       = float3x3(state.T, state.B, state.N);
     pbrMat.N           = normalize(mul(normal_vector, tbn));
@@ -346,11 +366,12 @@ PbrMaterial evaluateMaterial(in GltfShadeMaterial material, MeshState state, Tex
   }
   if(isTexturePresent(material.clearcoatNormalTexture))
   {
-    float3x3 tbn = float3x3(pbrMat.T, pbrMat.B, pbrMat.Nc);
-    float3   normal_vector =
-        getTexture(images, samplers, texInfos[material.clearcoatNormalTexture], state.tc, state.texGrad).xyz;
-    normal_vector = normal_vector * 2.0F - 1.0F;
-    pbrMat.Nc     = normalize(mul(normal_vector, tbn));
+    float3x3        tbn           = float3x3(pbrMat.T, pbrMat.B, pbrMat.Nc);
+    GltfTextureInfo normalTexInfo = texInfos[material.clearcoatNormalTexture];
+    float3          normal_vector = getTexture(images, samplers, normalTexInfo, state.tc, state.texGrad).xyz;
+    normal_vector                 = normal_vector * 2.0F - 1.0F;
+    normal_vector                 = decodeTangentSpaceNormal(normal_vector, normalTexInfo);
+    pbrMat.Nc                     = normalize(mul(normal_vector, tbn));
   }
   pbrMat.clearcoatRoughness = max(pbrMat.clearcoatRoughness, 0.001F);
 #endif

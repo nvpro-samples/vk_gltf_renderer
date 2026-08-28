@@ -40,28 +40,28 @@ namespace nvvkgltf {
 
 namespace {
 
-VkComponentSwizzle ktxSwizzleToVk(nv_ktx::KTX_SWIZZLE swizzle)
+VkComponentSwizzle ktxSwizzleToVk(nv_ktx::Swizzle swizzle)
 {
   switch(swizzle)
   {
-    case nv_ktx::KTX_SWIZZLE::ZERO:
+    case nv_ktx::Swizzle::ZERO:
       return VK_COMPONENT_SWIZZLE_ZERO;
-    case nv_ktx::KTX_SWIZZLE::ONE:
+    case nv_ktx::Swizzle::ONE:
       return VK_COMPONENT_SWIZZLE_ONE;
-    case nv_ktx::KTX_SWIZZLE::R:
+    case nv_ktx::Swizzle::R:
       return VK_COMPONENT_SWIZZLE_R;
-    case nv_ktx::KTX_SWIZZLE::G:
+    case nv_ktx::Swizzle::G:
       return VK_COMPONENT_SWIZZLE_G;
-    case nv_ktx::KTX_SWIZZLE::B:
+    case nv_ktx::Swizzle::B:
       return VK_COMPONENT_SWIZZLE_B;
-    case nv_ktx::KTX_SWIZZLE::A:
+    case nv_ktx::Swizzle::A:
       return VK_COMPONENT_SWIZZLE_A;
     default:
       return VK_COMPONENT_SWIZZLE_IDENTITY;
   }
 }
 
-VkComponentMapping ktxSwizzleToVkComponentMapping(const std::array<nv_ktx::KTX_SWIZZLE, 4>& swizzle)
+VkComponentMapping ktxSwizzleToVkComponentMapping(const std::array<nv_ktx::Swizzle, 4>& swizzle)
 {
   return {ktxSwizzleToVk(swizzle[0]), ktxSwizzleToVk(swizzle[1]), ktxSwizzleToVk(swizzle[2]), ktxSwizzleToVk(swizzle[3])};
 }
@@ -121,7 +121,7 @@ bool loadKtx(LoadedImageData& out, const void* data, size_t byteLength, bool srg
   if(byteLength < sizeof(ktxIdentifier) || memcmp(data, ktxIdentifier, sizeof(ktxIdentifier)) != 0)
     return false;
 
-  nv_ktx::KTXImage           ktxImage;
+  nv_ktx::Image              ktxImage;
   const nv_ktx::ReadSettings ktxReadSettings;
   const nv_ktx::ErrorWithText maybeError = ktxImage.readFromMemory(reinterpret_cast<const char*>(data), byteLength, ktxReadSettings);
   if(maybeError.has_value())
@@ -130,29 +130,29 @@ bool loadKtx(LoadedImageData& out, const void* data, size_t byteLength, bool srg
     return false;
   }
 
-  out.size.width  = ktxImage.mip_0_width;
-  out.size.height = ktxImage.mip_0_height;
-  if(ktxImage.mip_0_depth > 1)
+  out.size.width  = ktxImage.mip0Width;
+  out.size.height = ktxImage.mip0Height;
+  if(ktxImage.mip0Depth > 1)
   {
     LOGW("KTX image %" PRIu64 " had a depth of %u, but loadFromMemory() cannot handle volume textures.\n",
-         imageIDForLog, ktxImage.mip_0_depth);
+         imageIDForLog, ktxImage.mip0Depth);
     return false;
   }
-  if(ktxImage.num_faces > 1)
+  if(ktxImage.numFaces > 1)
   {
-    LOGW("KTX image %" PRIu64 " had %u faces, but loadFromMemory() cannot handle cubemaps.\n", imageIDForLog, ktxImage.num_faces);
+    LOGW("KTX image %" PRIu64 " had %u faces, but loadFromMemory() cannot handle cubemaps.\n", imageIDForLog, ktxImage.numFaces);
     return false;
   }
-  if(ktxImage.num_layers_possibly_0 > 1)
+  if(ktxImage.numLayersPossibly0 > 1)
   {
     LOGW("KTX image %" PRIu64 " had %u array elements, but loadFromMemory() cannot handle array textures.\n",
-         imageIDForLog, ktxImage.num_layers_possibly_0);
+         imageIDForLog, ktxImage.numLayersPossibly0);
     return false;
   }
   out.format           = texture_formats::tryForceVkFormatTransferFunction(ktxImage.format, srgb);
   out.componentMapping = ktxSwizzleToVkComponentMapping(ktxImage.swizzle);
 
-  for(uint32_t i = 0; i < ktxImage.num_mips; i++)
+  for(uint32_t i = 0; i < ktxImage.numMips; i++)
   {
     std::vector<char>& mip = ktxImage.subresource(i, 0, 0);
     out.mipData.push_back(std::move(mip));

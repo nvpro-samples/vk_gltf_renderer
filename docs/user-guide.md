@@ -370,7 +370,23 @@ Both flags cascade to the whole subtree (a `false` on an ancestor disables its d
 
 ### Interactivity
 
-Assets that carry a `KHR_interactivity` behavior graph show a read-only **Interactivity** section in the Scene Browser (graph and node counts). The graph is parsed and preserved on save, but this viewer does not execute behavior graphs yet.
+Assets that carry a `KHR_interactivity` behavior graph run it automatically once the scene loads (lifecycle events, flow control, variables, math, `pointer/get`/`set` scene writes, and hover/select events — see [docs/interactivity.md](interactivity.md) for exact coverage). A small Play/Pause indicator appears in the viewport toolbar whenever the loaded scene actually has a graph — it's your at-a-glance sign that "this scene is interactive," and clicking it toggles the graph directly, no window required.
+
+For live stats, variables, and a debug/log surface, open **View → Windows → Interactivity** (or press **F8**). This window is closed by default — most viewing doesn't need it — and gives you direct control over the graph:
+
+- **Play / Pause** — stop or resume ticking the graph.
+- **Reset** — discard all runtime state (variables, timers, pending delays) and restart it from scratch on the next tick.
+- **Live stats** — node/variable/event counts, started/ticked state, and elapsed time.
+- **Variables** — the current value of every graph variable, by index (the spec doesn't name them).
+- **Send Event** — pick one of the graph's declared custom events and fire it manually, the same delivery path `event/send` nodes use internally.
+- **Log** — the running history of `debug/log` output from the graph, useful for debugging authored content without a console.
+
+Node support, including `animation/start`/`stop`/`stopAt` clip playback, is broad but not exhaustive; there is no visual node/wire graph debugger — see [docs/interactivity.md](interactivity.md) for the current coverage table. Loading a scene with a behavior graph disables the Animation Strip's autoplay by default (per spec, the graph is assumed to control all animations), though you can still scrub manually.
+
+
+While the graph is playing, clicking a node in the viewport always re-selects it and re-fires `event/onSelect`, even if it was already selected — unlike normal editing, where clicking the selected node again deselects it. This makes click-driven behavior (a lever, a button) respond to every click instead of every other one. Clicks also register instantly while playing, skipping the brief single/double-click debounce normal editing uses to distinguish a click from a double-click-to-recenter-camera. Pause the graph to get ordinary click-to-deselect/double-click-recenter editing back.
+
+Don't have a `KHR_interactivity` scene handy? [glTF-Test-Assets-Interactivity](https://github.com/KhronosGroup/glTF-Test-Assets-Interactivity) has the official Khronos conformance and showcase scenes, and the [Needle glTF Interactivity Editor](https://gltf-interactivity.needle.tools/) is a browser-based visual editor for authoring your own behavior graph and exporting it as glTF — see [docs/resources.md](resources.md) for both.
 
 ---
 

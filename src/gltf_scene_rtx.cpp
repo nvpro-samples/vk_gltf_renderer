@@ -313,14 +313,11 @@ void nvvkgltf::SceneRtx::cmdCreateBuildTopLevelAccelerationStructure(VkCommandBu
 
   m_tlasInstances.clear();
   m_tlasInstances.reserve(instanceCount);
-  m_numVisibleElement = 0;
   for(const auto& object : drawObjects)
   {
     VkDeviceAddress blasAddress = m_blasAccel[object.renderPrimID].address;
     if(!object.visible)
       blasAddress = 0;
-
-    m_numVisibleElement += object.visible ? 1 : 0;
 
     VkAccelerationStructureInstanceKHR asInstance{};
     asInstance.transform                              = nvvk::toTransformMatrixKHR(object.worldMatrix);
@@ -420,7 +417,15 @@ void nvvkgltf::SceneRtx::rebuildTopLevelAS(VkCommandBuffer                cmd,
 {
   const auto& drawObjects = scene.getRenderNodes();
 
-  int32_t numVisibleElement = dirtyRenderNodes.empty() ? 0 : m_numVisibleElement;
+  // True the moment any single instance's active status (accelerationStructureReference zero vs.
+  // non-zero) flips - not just when the net visible *count* changes. Two instances can trade
+  // places in the same sync (one hides while a different one shows) with the total unchanged;
+  // the newly-active one still needs a fresh BUILD, since it was never an active leaf in the
+  // TLAS's current structure - an in-place UPDATE only refits already-active instances' transforms,
+  // it cannot bring a previously-inactive instance's geometry into the traversable structure. See
+  // this function's later comment (docs/interactivity.md has the full investigation) for why the
+  // old net-count check missed exactly this case.
+  bool anyActiveStateChanged = false;
 
   // If the number of render nodes changed, we need to recreate the TLAS from scratch,
   // as well as the instance buffer.
@@ -433,7 +438,8 @@ void nvvkgltf::SceneRtx::rebuildTopLevelAS(VkCommandBuffer                cmd,
     return;
   }
 
-  // Lambda to update a single instance in the TLAS instance array and return its previous and current visibility.
+  // Lambda to update a single instance in the TLAS instance array. Returns true if this instance's
+  // active status (accelerationStructureReference zero vs. non-zero) changed.
   auto updateInstance = [&](int idx) {
     const auto&     object      = drawObjects[idx];
     VkDeviceAddress blasAddress = m_blasAccel[object.renderPrimID].address;
@@ -445,16 +451,13 @@ void nvvkgltf::SceneRtx::rebuildTopLevelAS(VkCommandBuffer                cmd,
     m_tlasInstances[idx].accelerationStructureReference = isVisible ? blasAddress : 0;
     m_tlasInstances[idx].instanceCustomIndex            = object.renderPrimID;
 
-    return std::pair<bool, bool>{wasVisible, isVisible};
+    return wasVisible != isVisible;
   };
 
   if(dirtyRenderNodes.empty())
   {
     for(size_t i = 0; i < drawObjects.size(); i++)
-    {
-      auto visibility = updateInstance(static_cast<int>(i));
-      numVisibleElement += visibility.second ? 1 : 0;
-    }
+      anyActiveStateChanged |= updateInstance(static_cast<int>(i));
     staging.appendBuffer(m_instancesBuffer, 0, std::span(m_tlasInstances));
   }
   else
@@ -463,16 +466,12 @@ void nvvkgltf::SceneRtx::rebuildTopLevelAS(VkCommandBuffer                cmd,
     {
       if(idx < 0 || idx >= static_cast<int>(drawObjects.size()))
         continue;
-      auto visibility = updateInstance(idx);
-      if(visibility.first != visibility.second)
-        numVisibleElement += visibility.second ? 1 : -1;
+      anyActiveStateChanged |= updateInstance(idx);
 
       const VkDeviceSize offset = static_cast<VkDeviceSize>(idx) * sizeof(VkAccelerationStructureInstanceKHR);
       staging.appendBuffer(m_instancesBuffer, offset, std::span(&m_tlasInstances[idx], 1));
     }
   }
-
-  assert(numVisibleElement >= 0 && numVisibleElement <= static_cast<int32_t>(drawObjects.size()));
 
   staging.cmdUploadAppended(cmd);
 
@@ -487,7 +486,11 @@ void nvvkgltf::SceneRtx::rebuildTopLevelAS(VkCommandBuffer                cmd,
     m_memoryTracker.track(kMemCategoryScratch, m_tlasScratchBuffer.allocation);
   }
 
-  if(m_numVisibleElement != numVisibleElement)
+  // A fresh BUILD is required whenever any instance's active status changed (see
+  // anyActiveStateChanged's doc comment above for why a net-count check isn't enough) - otherwise
+  // an in-place UPDATE is sufficient (and cheaper) for pure transform/flags changes on already-
+  // active instances.
+  if(anyActiveStateChanged)
   {
     m_tlasBuildData.cmdBuildAccelerationStructure(cmd, m_tlasAccel.accel, m_tlasScratchBuffer.address);
   }
@@ -495,8 +498,6 @@ void nvvkgltf::SceneRtx::rebuildTopLevelAS(VkCommandBuffer                cmd,
   {
     m_tlasBuildData.cmdUpdateAccelerationStructure(cmd, m_tlasAccel.accel, m_tlasScratchBuffer.address);
   }
-
-  m_numVisibleElement = numVisibleElement;
 
   nvvk::accelerationStructureBarrier(cmd, VK_ACCESS_ACCELERATION_STRUCTURE_WRITE_BIT_KHR, VK_ACCESS_ACCELERATION_STRUCTURE_READ_BIT_KHR);
 }

@@ -49,6 +49,7 @@
 #include "gltf_scene.hpp"
 #include "gltf_scene_gpu.hpp"
 #include "ui_animation.hpp"
+#include "ui_interactivity.hpp"
 #include "gltf_scene_transform_vk.hpp"
 #include "gpu_memory_tracker.hpp"
 #include "scene_feature_detection.hpp"
@@ -101,23 +102,24 @@ struct Settings
   bool                    showStatisticsWindow   = false;  // Show Statistics window
   bool                    showSceneBrowserWindow = true;   // Show Scene Browser window
   bool                    showInspectorWindow    = true;   // Show Inspector window
-  bool                    showAgenticWindow      = false;  // Show Agentic bridge window
-  bool                    showGridSettingsWindow = false;  // Show Grid & Snap settings window
-  float                   hdrEnvIntensity        = 1.0f;   // Intensity of the environment (HDR)
-  float                   hdrEnvRotation         = 0.0f;   // Rotation of the environment (HDR)
-  float                   hdrBlur                = 0.0f;   // Blur of the environment (HDR)
-  glm::vec3               silhouetteColor        = {0.933f, 0.580f, 0.180f};  // Color of the silhouette
-  bool                    useSolidBackground     = false;                     // Use solid background color
-  glm::vec3               solidBackgroundColor   = {0.0f, 0.0f, 0.0f};        // Solid background color
-  int                     maxFrames              = {500};                     // Maximum number of frames to render
-  bool                    useInfinitePlane       = false;                     // Use infinite plane
-  bool                    isShadowCatcher        = true;                      // Infinite place only catch shadow
-  float                   infinitePlaneDistance  = 0;                         // Distance/height of the infinite plane
-  glm::vec3               infinitePlaneBaseColor = glm::vec3(0.5, 0.5, 0.5);  // Default gray color
-  float                   infinitePlaneMetallic  = 0.0;                       // Default non-metallic
-  float                   infinitePlaneRoughness = 0.5;                       // Default medium roughness
-  float                   shadowCatcherDarkness  = 0.0f;                      // Non-physical shadow darkening
-  bool dlssRrHardwareAvailable = false;  // DLSS Ray Reconstruction hardware/extensions available (set at startup)
+  bool      showInteractivityWindow = false;  // Show KHR_interactivity Graphs window (opt-in, unlike the above)
+  bool      showAgenticWindow       = false;  // Show Agentic bridge window
+  bool      showGridSettingsWindow  = false;  // Show Grid & Snap settings window
+  float     hdrEnvIntensity         = 1.0f;   // Intensity of the environment (HDR)
+  float     hdrEnvRotation          = 0.0f;   // Rotation of the environment (HDR)
+  float     hdrBlur                 = 0.0f;   // Blur of the environment (HDR)
+  glm::vec3 silhouetteColor         = {0.933f, 0.580f, 0.180f};  // Color of the silhouette
+  bool      useSolidBackground      = false;                     // Use solid background color
+  glm::vec3 solidBackgroundColor    = {0.0f, 0.0f, 0.0f};        // Solid background color
+  int       maxFrames               = {500};                     // Maximum number of frames to render
+  bool      useInfinitePlane        = false;                     // Use infinite plane
+  bool      isShadowCatcher         = true;                      // Infinite place only catch shadow
+  float     infinitePlaneDistance   = 0;                         // Distance/height of the infinite plane
+  glm::vec3 infinitePlaneBaseColor  = glm::vec3(0.5, 0.5, 0.5);  // Default gray color
+  float     infinitePlaneMetallic   = 0.0;                       // Default non-metallic
+  float     infinitePlaneRoughness  = 0.5;                       // Default medium roughness
+  float     shadowCatcherDarkness   = 0.0f;                      // Non-physical shadow darkening
+  bool      dlssRrHardwareAvailable = false;  // DLSS Ray Reconstruction hardware/extensions available (set at startup)
   bool dlssSrHardwareAvailable = false;  // DLSS Super Resolution / DLAA hardware/extensions available (set at startup)
   bool opacityMicromapSupported = false;  // VK_EXT_opacity_micromap available (set at startup); gates EXT_mesh_opacity_micromap
   DisplayBuffer displayBuffer = DisplayBuffer::eRendered;  // Which buffer to display in viewport
@@ -224,7 +226,18 @@ struct Resources
   // Animation playback state
   AnimationControl animationControl{};
 
+  // KHR_interactivity Graphs panel playback state
+  InteractivityControl interactivityControl{};
+
   int frameCount{0};
+
+  // Monotonic count of completed onRender() calls since the app started - unlike frameCount above
+  // (which resets to -1 on every dirty-flag/camera-move reset, by design, to avoid ghosting), this
+  // never resets. A KHR_interactivity graph that writes a pointer every tick (e.g. a permanent idle
+  // animation via event/onTick) resets frameCount every single frame, so it can never reach >= 1 -
+  // callers that just need "has at least one frame actually rendered" (e.g. a UI scenario script's
+  // ready gate) should use this instead.
+  uint64_t renderPassCount{0};
 
   // #DLSS: True if any node transforms changed this frame (for DLSS per-instance motion).
   bool dlssInstanceMotionActive{false};

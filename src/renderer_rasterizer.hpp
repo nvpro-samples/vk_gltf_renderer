@@ -48,6 +48,7 @@ public:
   bool onUIRender(Resources& resources) override;
   void onRender(VkCommandBuffer cmd, Resources& resources) override;
   void onSceneInvalidated(Resources& resources) override;
+  void notifyDlssContentReset(Resources& resources) override;
 
   void compileShader(Resources& resources, bool fromFile = true) override;
   void createPipeline(Resources& resources) override;

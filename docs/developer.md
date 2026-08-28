@@ -119,6 +119,7 @@ src/
 ├── renderer_pathtracer.cpp/hpp # Monte Carlo path tracer (Vulkan ray tracing + ray query)
 ├── renderer_rasterizer.cpp/hpp # Forward PBR rasterizer
 ├── renderer_silhouette.cpp/hpp # Selection highlight (compute shader)
+├── hover_picker.cpp/hpp        # Async G-buffer readback for KHR_interactivity hover detection
 ├── resources.hpp               # Shared Vulkan resources and settings
 │
 ├── gltf_scene.cpp/hpp          # Core scene loading and management
@@ -253,6 +254,31 @@ are **forked locally** into `shaders/gltf_*.h.slang` rather than using the upstr
   `KHR_materials_retroreflection` on both host and device, with the evaluation living in
   [`gltf_material_eval.h.slang`](../shaders/gltf_material_eval.h.slang). See the
   [KHR_materials_retroreflection](https://github.com/KhronosGroup/glTF/blob/main/extensions/2.0/Khronos/KHR_materials_retroreflection/README.md) specification.
+
+### Texture channels: KTX2 swizzle and two-channel sources
+
+Container formats can store fewer channels than the shader expects, in two different ways, and the
+renderer resolves both on the host so the shader stays simple.
+
+- **Authored swizzle.** A KTX2 file may carry a `KTXswizzle` key (e.g. a BC5 metallic-roughness map
+  that declares `1rg1`). `nv_ktx` parses it into `KTXImage::swizzle`;
+  [`gltf_image_loader.cpp`](../src/gltf_image_loader.cpp) converts it to a `VkComponentMapping`, and
+  `SceneVk::createImage()` applies it to the `VkImageView` — so the swizzle costs nothing at sample
+  time and both render paths see the remapped channels. The same field is used to expand
+  single-channel `stb_image` results to grayscale.
+- **Missing channels.** A two-channel format (BC5, `R8G8`, EAC_R11G11) has no third channel to
+  swizzle from; Vulkan samples blue as a synthetic `0`. That is fine for data that only occupies two
+  channels, but it breaks tangent-space normal maps, whose Z is implied rather than stored — decoding
+  the synthetic `0` to `-1` flips the normal into the surface and the surface renders black.
+  `SceneVk::buildTextureFormatFlags()` infers the component count from the decoded `VkFormat` and
+  marks the **exactly two-channel** ones in `GltfTextureInfo::flags`; `decodeTangentSpaceNormal()` in
+  [`gltf_material_eval.h.slang`](../shaders/gltf_material_eval.h.slang) rebuilds Z from the
+  unit-length assumption. Three-channel maps keep their authored Z, and single-channel formats are
+  excluded — their green is synthetic too, so there is no second axis to reconstruct from.
+
+Because the flag depends on the decoded image format, texture creation runs **before**
+`uploadMaterials()` in `SceneVk::create()` and `recreatePreservingTextures()` — the material cache
+bakes the per-texture sampler slot and format flags (`TextureSlotTable`) into `GltfTextureInfo`.
 
 ### Worked example: `KHR_materials_scatter` (two modes, one material block)
 

@@ -96,6 +96,7 @@ public:
   [[nodiscard]] int                       getNumAnimations() const { return static_cast<int>(m_animations.size()); }
   [[nodiscard]] bool                      hasAnimation() const { return !m_animations.empty(); }
   nvvkgltf::AnimationInfo&                getAnimationInfo(int index) { return m_animations[index].info; }
+  const nvvkgltf::AnimationInfo&          getAnimationInfo(int index) const { return m_animations[index].info; }
   nvvkgltf::AnimationPointerSystem&       getAnimationPointer() { return m_animationPointer; }
   const nvvkgltf::AnimationPointerSystem& getAnimationPointer() const { return m_animationPointer; }
   const std::vector<uint32_t>&            getMorphPrimitives() const { return m_morphPrimitives; }

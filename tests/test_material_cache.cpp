@@ -104,8 +104,9 @@ TEST(MaterialCache, BuildResolvesSamplerIndexFromSlots)
 
   std::vector<tinygltf::Material> materials = {mat};
   // Per-texture sampler slots: texture 0 -> default (0), texture 1 -> a non-default sampler (3).
-  const std::vector<int> textureSamplerSlots = {0, 3};
-  cache.buildFromMaterials(materials, textureSamplerSlots);
+  nvvkgltf::TextureSlotTable textureSlots;
+  textureSlots.samplerSlots = {0, 3};
+  cache.buildFromMaterials(materials, textureSlots);
 
   ASSERT_EQ(cache.getShadeMaterials().size(), 1u);
   const uint32_t infoSlot = cache.getShadeMaterials()[0].pbrBaseColorTexture;
@@ -113,7 +114,7 @@ TEST(MaterialCache, BuildResolvesSamplerIndexFromSlots)
   ASSERT_LT(infoSlot, cache.getTextureInfos().size());
   const auto& info = cache.getTextureInfos()[infoSlot];
   EXPECT_EQ(info.index, 1);
-  EXPECT_EQ(static_cast<int>(info.samplerIndex), 3);  // propagated from textureSamplerSlots[1]
+  EXPECT_EQ(static_cast<int>(info.samplerIndex), 3);  // propagated from textureSlots.samplerSlots[1]
 }
 
 TEST(MaterialCache, UpdateMaterialInPlace)

@@ -46,6 +46,8 @@
 #include "gltf_scene_validator.hpp"
 #include "gltf_compact_model.hpp"
 #include "gltf_animation_pointer.hpp"
+#include "gltf_interactivity_scene_animation.hpp"
+#include "gltf_interactivity_scene_pointer.hpp"
 #include "gltf_scene_merger.hpp"
 #include "gltf_compact_model.hpp"
 #include "version.hpp"
@@ -869,6 +871,37 @@ int nvvkgltf::Scene::nearestSelectableAncestor(int nodeIndex) const
   return (highestBlocker < static_cast<int>(m_nodeParents.size())) ? m_nodeParents[highestBlocker] : -1;
 }
 
+bool nvvkgltf::Scene::isNodeHoverable(int nodeIndex) const
+{
+  return nodeIndex >= 0 && nearestHoverableAncestor(nodeIndex) == nodeIndex;
+}
+
+int nvvkgltf::Scene::nearestHoverableAncestor(int nodeIndex) const
+{
+  const int nodeCount = static_cast<int>(m_model.nodes.size());
+  if(nodeIndex < 0 || nodeIndex >= nodeCount)
+    return -1;
+
+  // Fast path: if the asset never uses KHR_node_hoverability, no node can opt out, so skip the walk.
+  if(std::find(m_model.extensionsUsed.begin(), m_model.extensionsUsed.end(), KHR_NODE_HOVERABILITY_EXTENSION_NAME)
+     == m_model.extensionsUsed.end())
+    return nodeIndex;
+
+  // Same single upward pass as nearestSelectableAncestor - see its comment for the algorithm.
+  int highestBlocker = -1;
+  int current        = nodeIndex;
+  while(current >= 0 && current < nodeCount)
+  {
+    if(!tinygltf::utils::getNodeHoverability(m_model.nodes[current]).hoverable)
+      highestBlocker = current;
+    current = (current < static_cast<int>(m_nodeParents.size())) ? m_nodeParents[current] : -1;
+  }
+
+  if(highestBlocker < 0)
+    return nodeIndex;
+  return (highestBlocker < static_cast<int>(m_nodeParents.size())) ? m_nodeParents[highestBlocker] : -1;
+}
+
 //--------------------------------------------------------------------------------------------------
 // glTF 2.1: recursively merge (in place) every external asset referenced by `model`, so it becomes
 // self-contained before being merged into the scene. Applies file aliases (inner-URI redirection)
@@ -1431,6 +1464,7 @@ void nvvkgltf::Scene::parseScene()
 
   // Parse various scene components
   parseVariants();
+  parseInteractivityGraphs();
   animation().parseAnimations();
 
   // We are updating the scene to the first state, animation, skinning, morph, ..
@@ -2150,6 +2184,9 @@ void nvvkgltf::Scene::clearParsedData()
   m_renderPrimitives.clear();
   m_renderPrimCenterObj.clear();
   m_variants.clear();
+  m_interactivityGraphs.clear();
+  m_interactivityInstances.clear();
+  m_defaultInteractivityGraph = 0;
   m_nodeParents.clear();
   m_nodesLocalMatrices.clear();
   m_gpuInstanceLocalMatrices.clear();
@@ -2809,6 +2846,148 @@ void nvvkgltf::Scene::parseVariants()
         std::string name = variants.Get(int(i)).Get("name").Get<std::string>();
         m_variants.emplace_back(name);
       }
+    }
+  }
+}
+
+void nvvkgltf::Scene::parseInteractivityGraphs()
+{
+  m_interactivityGraphs = nvvkgltf::parseInteractivityGraphs(m_model);
+  m_interactivityInstances.clear();
+  m_interactivityInstances.reserve(m_interactivityGraphs.size());
+  if(!m_interactivityPointerResolver)
+    m_interactivityPointerResolver = std::make_unique<ScenePointerResolver>(*this);
+  if(!m_interactivityAnimationResolver)
+    m_interactivityAnimationResolver = std::make_unique<SceneAnimationResolver>(*this);
+  for(const InteractivityGraph& graph : m_interactivityGraphs)
+  {
+    auto instance = std::make_unique<InteractivityGraphInstance>(graph);
+    instance->setPointerResolver(m_interactivityPointerResolver.get());
+    instance->setAnimationResolver(m_interactivityAnimationResolver.get());
+    m_interactivityInstances.push_back(std::move(instance));
+  }
+
+  m_defaultInteractivityGraph = 0;
+  auto it                     = m_model.extensions.find(KHR_INTERACTIVITY_EXTENSION_NAME);
+  if(it != m_model.extensions.end() && it->second.Has("graph") && it->second.Get("graph").IsInt())
+    m_defaultInteractivityGraph = it->second.Get("graph").GetNumberAsInt();
+  if(m_defaultInteractivityGraph < 0 || m_defaultInteractivityGraph >= static_cast<int>(m_interactivityGraphs.size()))
+    m_defaultInteractivityGraph = m_interactivityGraphs.empty() ? -1 : 0;
+}
+
+nvvkgltf::InteractivityGraphInstance* nvvkgltf::Scene::getInteractivityInstance(int graphIndex)
+{
+  if(graphIndex < 0 || graphIndex >= static_cast<int>(m_interactivityInstances.size()))
+    return nullptr;
+  return m_interactivityInstances[graphIndex].get();
+}
+
+bool nvvkgltf::Scene::tickInteractivityGraphs(float deltaSeconds)
+{
+  InteractivityGraphInstance* instance = getInteractivityInstance(m_defaultInteractivityGraph);
+  if(!instance)
+    return false;
+  instance->tick(deltaSeconds);
+  return true;
+}
+
+void nvvkgltf::Scene::notifyNodeSelected(int nodeIndex, const glm::vec3& selectionPoint, const glm::vec3& selectionRayOrigin)
+{
+  InteractivityGraphInstance* instance  = getInteractivityInstance(m_defaultInteractivityGraph);
+  const int                   nodeCount = static_cast<int>(m_model.nodes.size());
+  if(!instance || nodeIndex < 0 || nodeIndex >= nodeCount)
+    return;
+
+  const std::unordered_map<int, std::vector<int>>& handlers = instance->graph().selectHandlers();
+
+  // One shared occurrence ref for the whole bubble walk (not one per ancestor) - so
+  // event/stopPropagation, fired from a handler at any ancestor, can recognize "the rest of this
+  // same bubble" and cancel it (spec 4492-4530).
+  const InteractivityRef occurrenceRef = instance->allocateEventRef();
+
+  // Spec (KHR_node_selectability README:104): "the event bubbles up the tree ... the
+  // interactivity node is activated and the propagation continues" - every bound ancestor fires
+  // (inclusive of nodeIndex itself), all the way to the root, not just the nearest one - unless
+  // event/stopPropagation cancels the rest of the bubble partway through.
+  for(int current = nodeIndex; current >= 0 && current < nodeCount;
+      current     = (current < static_cast<int>(m_nodeParents.size())) ? m_nodeParents[current] : -1)
+  {
+    std::unordered_map<std::string, InteractivityValue> values = {
+        {"selectedNode", InteractivityRef{nodeIndex, "nodes"}},
+        {"controllerIndex", int32_t(0)},  // Single-controller system (desktop mouse) - spec mandates 0.
+        {"selectionPoint", selectionPoint},
+        {"selectionRayOrigin", selectionRayOrigin},
+    };
+    instance->activateBoundHandlers(handlers, current, std::move(values), occurrenceRef);
+    if(instance->isTransitivePropagationStopped(occurrenceRef))
+      break;
+  }
+}
+
+void nvvkgltf::Scene::notifyNodeHoverChanged(int previousNodeIndex, int newNodeIndex)
+{
+  InteractivityGraphInstance* instance = getInteractivityInstance(m_defaultInteractivityGraph);
+  if(!instance || previousNodeIndex == newNodeIndex)
+    return;
+
+  const int nodeCount = static_cast<int>(m_model.nodes.size());
+
+  // Find the lowest common ancestor of previousNodeIndex and newNodeIndex: both bubbling walks
+  // below stop at (exclude) it, per spec's "until the currently processed glTF node's subtree
+  // includes both the prior and the current hover targets" rule - a node whose subtree already
+  // contained the hover before AND still does now must not refire (e.g. moving the hover between
+  // two children of the same parent must not re-trigger the parent's own handler). If either side
+  // is out of range (no previous/new target - first-ever hover, or hovering nothing), there's no
+  // such node to reconcile against and both walks simply go all the way to the root.
+  int stopAncestor = -1;
+  if(previousNodeIndex >= 0 && previousNodeIndex < nodeCount && newNodeIndex >= 0 && newNodeIndex < nodeCount)
+  {
+    std::unordered_set<int> previousAncestors;
+    for(int n = previousNodeIndex; n >= 0 && n < nodeCount;
+        n     = (n < static_cast<int>(m_nodeParents.size())) ? m_nodeParents[n] : -1)
+      previousAncestors.insert(n);
+    for(int n = newNodeIndex; n >= 0 && n < nodeCount; n = (n < static_cast<int>(m_nodeParents.size())) ? m_nodeParents[n] : -1)
+    {
+      if(previousAncestors.count(n))
+      {
+        stopAncestor = n;
+        break;
+      }
+    }
+  }
+
+  // "Leave before enter" - the spec doesn't order onHoverOut relative to onHoverIn for a single
+  // transition, so this follows the DOM's mouseout-before-mouseover convention.
+  if(previousNodeIndex >= 0 && previousNodeIndex < nodeCount)
+  {
+    const std::unordered_map<int, std::vector<int>>& hoverOutHandlers = instance->graph().hoverOutHandlers();
+    const InteractivityRef                           occurrenceRef    = instance->allocateEventRef();
+    for(int n = previousNodeIndex; n >= 0 && n != stopAncestor;
+        n     = (n < static_cast<int>(m_nodeParents.size())) ? m_nodeParents[n] : -1)
+    {
+      std::unordered_map<std::string, InteractivityValue> values = {
+          {"hoveredNode", InteractivityRef{previousNodeIndex, "nodes"}},
+          {"controllerIndex", int32_t(0)},
+      };
+      instance->activateBoundHandlers(hoverOutHandlers, n, std::move(values), occurrenceRef);
+      if(instance->isTransitivePropagationStopped(occurrenceRef))
+        break;
+    }
+  }
+  if(newNodeIndex >= 0 && newNodeIndex < nodeCount)
+  {
+    const std::unordered_map<int, std::vector<int>>& hoverInHandlers = instance->graph().hoverInHandlers();
+    const InteractivityRef                           occurrenceRef   = instance->allocateEventRef();
+    for(int n = newNodeIndex; n >= 0 && n != stopAncestor;
+        n     = (n < static_cast<int>(m_nodeParents.size())) ? m_nodeParents[n] : -1)
+    {
+      std::unordered_map<std::string, InteractivityValue> values = {
+          {"hoveredNode", InteractivityRef{newNodeIndex, "nodes"}},
+          {"controllerIndex", int32_t(0)},
+      };
+      instance->activateBoundHandlers(hoverInHandlers, n, std::move(values), occurrenceRef);
+      if(instance->isTransitivePropagationStopped(occurrenceRef))
+        break;
     }
   }
 }

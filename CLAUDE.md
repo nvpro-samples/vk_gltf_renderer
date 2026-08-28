@@ -26,6 +26,7 @@ C++20. Host and device share structs via `shaders/shaderio.h`.
 | Understand overall architecture, app lifecycle, source map | [docs/developer.md](docs/developer.md) |
 | Scene data flow: Model → RenderNodes → GPU SSBO / BLAS / TLAS | [docs/RENDERING_ARCHITECTURE.md](docs/RENDERING_ARCHITECTURE.md) |
 | glTF 2.1 multi-file scenes, read-only flagging, re-externalize on save | [docs/external_assets.md](docs/external_assets.md) |
+| KHR_interactivity behavior graphs: node execution, event wiring, coverage status | [docs/interactivity.md](docs/interactivity.md) |
 | Runtime behavior, editor workflows, features | [docs/user-guide.md](docs/user-guide.md) |
 | DLSS / OptiX denoising, motion vectors, jitter/reset (incl. why animated meshes ghost) | [docs/denoising.md](docs/denoising.md) |
 | Headless timing / scripted GPU benchmarks | [docs/benchmarking.md](docs/benchmarking.md) |
@@ -151,6 +152,7 @@ you are expected to keep them that way:
 | A user-facing feature, menu, or shortcut | [docs/user-guide.md](docs/user-guide.md) |
 | DLSS/OptiX, motion-vector / jitter / reset behavior | [docs/denoising.md](docs/denoising.md) |
 | glTF 2.1 external-asset load/save/edit behavior | [docs/external_assets.md](docs/external_assets.md) |
+| KHR_interactivity node coverage, execution model, event wiring | [docs/interactivity.md](docs/interactivity.md) |
 | Headless/benchmark flags or output format | [docs/benchmarking.md](docs/benchmarking.md), `utils/benchmark/README.md` |
 | Added a glTF material extension | path tracer eval first, then README extension list + developer.md checklist |
 

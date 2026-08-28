@@ -1,0 +1,34 @@
+# KHR_interactivity BowShooting.glb regression test - aim, draw, and release the bow via three
+# clicks on the same handle node (angle -> force -> shoot), verifying the arrow actually launches.
+# Regression coverage for two real bugs found via this scene:
+#  - pointer/set writing a bool to any Object Model path other than one ending in "/visible" (here,
+#    KHR_node_selectability's "/selectable") silently failed and killed the rest of the shoot chain.
+#  - the 'ready' gate used to hang forever on a scene with a permanent idle event/onTick animation,
+#    since it gated on the accumulation frame counter (which such a graph resets every tick) instead
+#    of a monotonic render-pass count.
+#
+# Reference-only: the scripted UI-automation integration this script targeted has been removed from
+# the app (see docs/interactivity.md's Tests section) and is future work to reinstate. This script
+# is kept as a record of the scenario for whenever that integration returns; it is not currently
+# runnable. Historically run against the official Khronos conformance scene:
+#   scenefile <glTF-Test-Assets-Interactivity>/Models/BowShooting/glTF-Binary/BowShooting.glb
+# Exits 0 if every step passed.
+
+ready
+yield 10
+
+# Click 1: lock in the aim angle (the handle's idle sway stops changing rotation).
+pickrendernode 3
+yield 60
+
+# Click 2: lock in the draw force (the handle's sway stops changing scale).
+pickrendernode 3
+yield 60
+
+# Click 3: release - the arrow's fly state activates and its translation starts advancing under
+# the graph's own gravity integration each tick.
+pickrendernode 3
+yield 90
+capture 01_after_shoot.png
+
+log "bow shooting test complete"

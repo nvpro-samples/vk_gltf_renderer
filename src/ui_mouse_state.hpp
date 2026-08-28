@@ -51,6 +51,14 @@ struct UiMouseState
   bool isMouseSingleClicked(ImGuiMouseButton button) const { return singleClicked[button]; }
   bool isMouseDoubleClicked(ImGuiMouseButton button) const { return doubleClicked[button]; }
   bool isMouseDragging(ImGuiMouseButton button) const { return state[button] == State::DRAG; }
+  // True exactly on the frame the button is released without having dragged - i.e. the moment this
+  // state machine would normally start the single/double-click debounce (IDLE -> SINGLE_PENDING),
+  // without waiting out io.MouseDoubleClickTime (ImGui's default 0.3s) to see if a second click
+  // follows. Still correctly excludes drags (that transition goes IDLE -> DRAG instead, never
+  // setting this). For callers that don't need single-vs-double disambiguation and want every click
+  // to register immediately (e.g. KHR_interactivity click-driven graphs - see
+  // GltfRenderer::isInteractivityPlaying()).
+  bool isMouseReleasedNoDrag(ImGuiMouseButton button) const { return justEnteredSinglePending[button]; }
 
   void update()
   {
@@ -60,8 +68,9 @@ struct UiMouseState
     for(int i = 0; i < IM_ARRAYSIZE(io.MouseDown); i++)
     {
       // Reset outputs at start of frame
-      singleClicked[i] = false;
-      doubleClicked[i] = false;
+      singleClicked[i]            = false;
+      doubleClicked[i]            = false;
+      justEnteredSinglePending[i] = false;
 
       switch(state[i])
       {
@@ -72,7 +81,8 @@ struct UiMouseState
           }
           else if(ImGui::IsMouseReleased(i))
           {
-            state[i] = State::SINGLE_PENDING;
+            state[i]                    = State::SINGLE_PENDING;
+            justEnteredSinglePending[i] = true;
           }
           break;
 
@@ -111,7 +121,8 @@ private:
     DRAG
   };
 
-  std::array<State, 5> state         = {};
-  std::array<bool, 5>  singleClicked = {};  // Output: Single click confirmed
-  std::array<bool, 5>  doubleClicked = {};  // Output: Double click detected
+  std::array<State, 5> state                    = {};
+  std::array<bool, 5>  singleClicked            = {};  // Output: Single click confirmed
+  std::array<bool, 5>  doubleClicked            = {};  // Output: Double click detected
+  std::array<bool, 5>  justEnteredSinglePending = {};  // Output: released without dragging, this frame
 };

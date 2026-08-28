@@ -131,6 +131,16 @@ enum PbrModel
   ePbrModelSpecularGlossiness,
 };
 
+// GltfTextureInfo::flags bits.
+enum TextureInfoFlagBits
+{
+  // The source image format carries exactly two color components (BC5, R8G8, EAC_R11G11, ...), so
+  // red and green are authored data but the sampled blue channel is a synthetic 0. Set by SceneVk
+  // from the decoded VkFormat. Consumers that need the third channel must reconstruct it from the
+  // first two -- see the normal map handling in gltf_material_eval.h.slang.
+  eTexInfoTwoChannelSource = 1 << 0,
+};
+
 // Texture info
 // Total 32 bytes with MAT_EXT_TEXTURE_TRANSFORM = 1, 8 bytes when off.
 struct GltfTextureInfo
@@ -139,8 +149,9 @@ struct GltfTextureInfo
   float3x2 uvTransform = float3x2(1);  // KHR_texture_transform (24 bytes, 3x2 matrix)
 #endif
   int     index        = -1;  // 4 bytes  glTF texture index -> images[] (eTextures)
-  int16_t texCoord     = 0;   // 2 bytes  texcoord set: 0 or 1
   int16_t samplerIndex = 0;   // 2 bytes  resolved GPU sampler slot -> samplers[] (eSamplers); 0 = default sampler
+  int8_t  texCoord     = 0;   // 1 byte   texcoord set: 0 or 1
+  uint8_t flags        = 0;   // 1 byte   TextureInfoFlagBits
 };
 
 /*-------------------------------------------------------------------------------------------------

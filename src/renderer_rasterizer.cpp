@@ -1204,3 +1204,13 @@ void Rasterizer::onSceneInvalidated(Resources& resources)
   m_dlss->notifyReset();
 #endif
 }
+
+void Rasterizer::notifyDlssContentReset(Resources& /*resources*/)
+{
+#if defined(USE_DLSS)
+  // Material/light appearance change (e.g. KHR_interactivity texture-transform pointer/set) isn't
+  // describable by motion vectors - discard DLSS-SR/DLAA temporal history so the new content
+  // doesn't blend with stale history at the same screen location. See docs/denoising.md.
+  m_dlss->notifyReset();
+#endif
+}

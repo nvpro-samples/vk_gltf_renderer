@@ -155,8 +155,8 @@ public:
   // sampler; slots 1..N mirror model.samplers. GltfTextureInfo.samplerIndex indexes into this.
   const std::vector<VkSampler>& samplers() const { return m_samplers; }
   [[nodiscard]] uint32_t        samplerCount() const { return static_cast<uint32_t>(m_samplers.size()); }
-  // Maps each glTF texture index to its resolved sampler slot (0 = default). Fed to MaterialCache.
-  const std::vector<int>& textureSamplerSlots() const { return m_textureSamplerSlots; }
+  // Per-texture data baked into GltfTextureInfo (sampler slot, source-format flags). Fed to MaterialCache.
+  const TextureSlotTable& textureSlots() const { return m_textureSlots; }
 
   // GPU image view for a glTF texture / image index, or VK_NULL_HANDLE when out of range or not
   // resident (e.g. an unused image that was not uploaded). Used by the UI to build thumbnails.
@@ -239,9 +239,14 @@ protected:
   // Release a VkSampler via the deferred-free callback (or a queue wait fallback). Mirrors destroyImageDeferred.
   void releaseSamplerDeferred(VkSampler sampler);
 
-  // Fill m_textureSamplerSlots (glTF texture index -> sampler slot) from the model. Pure model data, so
-  // it must run before uploadMaterials(), which bakes the slots into GltfTextureInfo.samplerIndex.
+  // Fill m_textureSlots.samplerSlots (glTF texture index -> sampler slot) from the model. Pure model
+  // data, so it must run before uploadMaterials(), which bakes the slots into GltfTextureInfo.samplerIndex.
   void buildTextureSamplerSlots(const tinygltf::Model& model);
+
+  // Fill m_textureSlots.twoChannelSource from the decoded image formats (see TextureSlotTable). Needs
+  // m_images populated, so it must run after createTextureImages() / syncTextureTail() and before
+  // uploadMaterials(), which bakes the flag into GltfTextureInfo.flags.
+  void buildTextureFormatFlags(const tinygltf::Model& model);
 
   void findSrgbImages(const tinygltf::Model& model);
 
@@ -278,7 +283,7 @@ protected:
   std::vector<SceneImage>    m_images;
   std::vector<nvvk::Image>   m_textures;  // One per glTF texture; bound as a SAMPLED_IMAGE array (image views only)
   std::vector<VkSampler> m_samplers;  // Deduplicated samplers; slot 0 = default, 1..N = model.samplers (SAMPLER array)
-  std::vector<int>       m_textureSamplerSlots;  // glTF texture index -> sampler slot in m_samplers (0 = default)
+  TextureSlotTable       m_textureSlots;  // Per-glTF-texture sampler slot + source-format flags (fed to MaterialCache)
 
   // All images the glTF specification implies should be forced to use the sRGB
   // transfer function. This is used to fix cases where an image is loaded as

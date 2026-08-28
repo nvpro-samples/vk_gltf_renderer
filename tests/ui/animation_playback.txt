@@ -1,0 +1,46 @@
+# KHR_interactivity animation/start|stop|stopAt end-to-end test.
+# Loads an official Khronos animation-control conformance scene, lets the graph's own
+# self-verifying debug/log checks run to completion, and exercises the Graphs panel's
+# Play/Pause/Reset against a live animation/start-driven playback.
+#
+# Reference-only: the scripted UI-automation integration this script targeted has been removed from
+# the app (see docs/interactivity.md's Tests section) and is future work to reinstate. This script
+# is kept as a record of the scenario for whenever that integration returns; it is not currently
+# runnable. Historically run against any of the three animation conformance scenes, e.g.
+# scenefile <glTF-Test-Assets-Interactivity>/Tests/Interactivity/animation/start/glTF-Binary/start.glb
+
+ready
+
+# The window is closed by default (a real user opens it via View > Windows > Interactivity, or
+# F8) - 'showinteractivitywindow' opens it directly and deterministically, sidestepping an
+# unproven menu-bar-click chain.
+showinteractivitywindow 1
+yield 3
+ref "Interactivity"
+check "**/Pause"
+check "**/Reset"
+capture 01_interactivity_open.png
+
+# Let the graph run: its onStart entry points are gated by flow/setDelay (staggered a few seconds
+# apart - see the scene's own .md), driving animation/start/stop/stopAt and self-checking via
+# debug/log. Long enough for every sub-test's delay to elapse.
+yield 400
+capture 02_after_playback.png
+
+# Pause: the graph (and therefore any in-flight animation/start playback) stops ticking.
+click "**/Pause"
+yield 3
+check "**/Play"
+capture 03_paused.png
+
+# Reset restarts the graph from scratch - the animation state array is cleared with it, so a
+# paused-then-reset graph has no stale animation/start entries left over.
+click "**/Reset"
+yield 3
+capture 04_after_reset.png
+
+click "**/Play"
+yield 3
+check "**/Pause"
+
+log "animation playback test complete"

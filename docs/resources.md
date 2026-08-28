@@ -7,6 +7,7 @@
 
 * **Models downloadable from CMake's "Configure" action** : Look into `CMakeLists.txt`, in the "*Adding download resources*" section : you can uncomment models we provided for our samples. They will be downloaded into the *_downloaded_resources* folder.
 * [glTF Sample Assets](https://github.com/KhronosGroup/glTF-Sample-Assets) : glTF V2.0 Sample Assets
+* [glTF-Test-Assets-Interactivity](https://github.com/KhronosGroup/glTF-Test-Assets-Interactivity) : Official `KHR_interactivity` conformance and showcase scenes (BowShooting, MagicBall, Calculator, and more) — see [docs/interactivity.md](interactivity.md) for how this renderer's behavior-graph engine is verified against them
 * [Sketchfab](https://sketchfab.com/3d-models?features=downloadable&sort_by=-likeCount) : A huge collection of downloadable models.
 * [Polycam](https://poly.cam/3d-models/gltf-models) : GLTF 3D Models
 * [Smithsonian](https://3d.si.edu/) : 3D scanned glTF
@@ -27,3 +28,4 @@
 ## Tools
 * [glTF-Transform](https://github.com/donmccurdy/glTF-Transform) : glTF Transform supports reading, editing, and writing 3D models in glTF 2.0 format
 * [glTF-Validator](https://github.com/KhronosGroup/glTF-Validator) : Tool to validate glTF assets
+* [Needle glTF Interactivity Editor](https://gltf-interactivity.needle.tools/) : Browser-based visual editor for authoring `KHR_interactivity` behavior graphs, exportable as glTF for use with this renderer's Interactivity window (see [docs/interactivity.md](interactivity.md))

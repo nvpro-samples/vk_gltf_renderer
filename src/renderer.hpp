@@ -19,7 +19,9 @@
 
 #pragma once
 
+#include <limits>
 #include <memory>
+#include <optional>
 #include <string>
 #include <vector>
 
@@ -35,6 +37,7 @@
 #include <nvvk/hdr_ibl.hpp>
 #include <nvvk/ray_picker.hpp>
 #include <nvvk/resource_allocator.hpp>
+#include <nvvk/semaphore.hpp>
 #include "gltf_scene.hpp"
 #include "gltf_scene_rtx.hpp"
 #include "gltf_scene_vk.hpp"
@@ -51,6 +54,7 @@
 #include "renderer_rasterizer.hpp"
 #include "resources.hpp"
 #include "renderer_silhouette.hpp"
+#include "hover_picker.hpp"
 #include "ui_busy_window.hpp"
 #include "ui_scene_browser.hpp"
 #include "ui_inspector.hpp"
@@ -130,6 +134,12 @@ private:
   void destroyResources();
   void resetFrame();
   void selectSceneNodeFromScript(int nodeIndex);  // Script-driven selection (Inspector/Scene Browser)
+  // Script-driven *ray-pick* selection (`pickrendernode`): selects the given glTF node's
+  // first render primitive the same way a real 3D-viewport click would - unlike
+  // selectSceneNodeFromScript() above, this supplies finite (camera-eye/node-position) selectionPoint/
+  // selectionRayOrigin values, so KHR_interactivity event/onSelect's ray-info output sockets can be
+  // exercised end-to-end without an actual mouse click.
+  void pickSceneNodeFromScript(int nodeIndex);
   void silhouette(VkCommandBuffer cmd);
   void tonemap(VkCommandBuffer cmd);
   void runTonemapPass(VkCommandBuffer cmd, bool skipBeautifiedOverlay);
@@ -149,6 +159,33 @@ private:
 
   bool updateSceneChanges(VkCommandBuffer cmd);
   bool updateAnimation(VkCommandBuffer cmd);
+  // Shared downstream GPU reconciliation after CPU-side animation-channel evaluation dirtied the
+  // model (world matrices, GPU sync, morph/skin compute, BLAS/TLAS update, dirty-flag clear) - the
+  // common tail of updateAnimation() (UI-driven single clip) and updateInteractivityGraphs()
+  // (KHR_interactivity-driven, possibly several clips at once via animation/start).
+  void reconcileAnimationGpuState(VkCommandBuffer cmd);
+  // KHR_interactivity: ticks the scene's default behavior graph instance, then applies any
+  // animation/start-driven pose changes it computed this tick (via reconcileAnimationGpuState()).
+  // pointer/set's glTF-model writes flow through Scene::markNodeDirty/markMaterialDirty and are
+  // picked up by the dirty-flags path in updateSceneChanges() right after this call, same as before.
+  bool updateInteractivityGraphs(VkCommandBuffer cmd);
+  // Polls m_hoverPicker for a completed G-buffer readback and, on a change, notifies the scene's
+  // interactivity graph (Scene::notifyNodeHoverChanged) - called once per frame, before
+  // updateInteractivityGraphs() so a hover transition this frame feeds this same frame's tick.
+  void updateHoverState();
+  // Script-driven hover for UI scenario tests: calls the exact same notification path
+  // updateHoverState() uses for real cursor input, bypassing the async GPU readback for determinism.
+  void hoverSceneNodeFromScript(int nodeIndex);
+  // UI-phase capture of cursor-over-viewport state; see the member fields' comments.
+  void updateHoverCursorPosition();
+
+  // Polls m_pendingClickResult's frame semaphore and, once signaled, calls m_rayPicker.getResult()
+  // and applies it via applyClickPickResult() - called once per frame, next to updateHoverState().
+  void updateClickPickState();
+  // Applies a completed ray-pick result: selection (and, on a double click, camera recenter) -
+  // the exact logic mouseClickedInViewport() used to run inline, now one to two frames removed
+  // from the click itself (see m_pendingClickPick's comment for why).
+  void applyClickPickResult(const nvvk::RayPicker::PickResult& pickResult, bool isDoubleClick);
 
   // Headless / scripted benchmark (shared automation paths)
   [[nodiscard]] bool                             isBenchmarkMode() const;
@@ -168,39 +205,49 @@ private:
   void     updateSceneChanges_Finalize(VkCommandBuffer cmd, bool changed, bool stagingFlushed, nvvkgltf::Scene* scene);
 
   // UI
-  void          renderUI();
-  void          renderBenchmarkViewport();  // Minimal fullscreen image (benchmark mode)
-  void          renderMenu();
-  void          renderFileMenu(bool                   validScene,
-                               bool&                  newScene,
-                               bool&                  openFile,
-                               bool&                  mergeFile,
-                               bool&                  loadHdrFile,
-                               bool&                  saveFile,
-                               bool&                  saveAsFile,
-                               bool&                  saveSelfContainedAsFile,
-                               bool&                  saveScreenFile,
-                               bool&                  saveImageFile,
-                               bool&                  referenceFile,
-                               bool&                  closeApp,
-                               std::filesystem::path& sceneToLoadFilename,
-                               std::filesystem::path& sceneToMergeFilename);
-  void          renderViewMenu(bool validScene, bool& fitScene, bool& fitObject, bool& toggleVsync);
-  void          renderWindowsMenu();
-  void          renderEditMenu(bool validScene);
-  void          renderCreateMenu();  // "Create" menu: add procedural primitives (enabled whenever a scene exists)
-  void          renderToolsMenu(bool validScene, bool& reloadShader, bool& compactScene);
-  void          renderDebugMenu();
-  void          onUndoRedo();
-  void          renderMenuToolbarAndGizmos();
-  void          renderMemoryStatistics();
-  void          renderEnvironmentWindow();
-  void          renderTonemapperWindow();
-  void          renderStatisticsWindow();
-  void          addToRecentFiles(const std::filesystem::path& filePath, int historySize = 20);
-  void          removeFromRecentFiles(const std::filesystem::path& filePath);
-  void          mouseClickedInViewport();
-  void          updateSelectionFromPick(int renderNodeIdx);
+  void renderUI();
+  void renderBenchmarkViewport();  // Minimal fullscreen image (benchmark mode)
+  void renderMenu();
+  void renderFileMenu(bool                   validScene,
+                      bool&                  newScene,
+                      bool&                  openFile,
+                      bool&                  mergeFile,
+                      bool&                  loadHdrFile,
+                      bool&                  saveFile,
+                      bool&                  saveAsFile,
+                      bool&                  saveSelfContainedAsFile,
+                      bool&                  saveScreenFile,
+                      bool&                  saveImageFile,
+                      bool&                  referenceFile,
+                      bool&                  closeApp,
+                      std::filesystem::path& sceneToLoadFilename,
+                      std::filesystem::path& sceneToMergeFilename);
+  void renderViewMenu(bool validScene, bool& fitScene, bool& fitObject, bool& toggleVsync);
+  void renderWindowsMenu();
+  void renderEditMenu(bool validScene);
+  void renderCreateMenu();  // "Create" menu: add procedural primitives (enabled whenever a scene exists)
+  void renderToolsMenu(bool validScene, bool& reloadShader, bool& compactScene);
+  void renderDebugMenu();
+  void onUndoRedo();
+  void renderMenuToolbarAndGizmos();
+  void renderMemoryStatistics();
+  void renderEnvironmentWindow();
+  void renderTonemapperWindow();
+  void renderStatisticsWindow();
+  void addToRecentFiles(const std::filesystem::path& filePath, int historySize = 20);
+  void removeFromRecentFiles(const std::filesystem::path& filePath);
+  void mouseClickedInViewport();
+  // True when the current scene has a KHR_interactivity graph and it's actively ticking - the
+  // shared gate for every place viewport click behavior changes while a graph is playing (see
+  // docs/interactivity.md's design notes): skipping the click-to-deselect toggle
+  // (updateSelectionFromPick) and skipping the single/double-click debounce (mouseClickedInViewport).
+  bool isInteractivityPlaying() const;
+  // `selectionPoint`/`selectionRayOrigin` (global space) are the real ray-pick hit point/origin -
+  // default NaN for callers with no ray (e.g. script-driven test commands), matching the
+  // spec-sanctioned "no ray info" fallback (see SceneSelection::Event's doc comment).
+  void          updateSelectionFromPick(int              renderNodeIdx,
+                                        const glm::vec3& selectionPoint = glm::vec3(std::numeric_limits<float>::quiet_NaN()),
+                                        const glm::vec3& selectionRayOrigin = glm::vec3(std::numeric_limits<float>::quiet_NaN()));
   nvutils::Bbox getRenderNodeBbox(int renderNodeIndex);
   nvutils::Bbox getRenderNodesBbox(const std::unordered_set<int>& renderNodeIndices);
   void          windowTitle();
@@ -272,6 +319,7 @@ private:
   BusyWindow     m_busy;
   Silhouette     m_silhouette;     // Silhouette renderer
   VisualHelpers  m_visualHelpers;  // Grid + transform gizmo overlay
+  HoverPicker    m_hoverPicker;    // KHR_interactivity hover detection (docs/interactivity.md Phase E)
 
   // Undo/Redo
   UndoStack m_undoStack;
@@ -291,6 +339,42 @@ private:
   glm::vec3 m_gizmoSnapshotT{0.f};
   glm::quat m_gizmoSnapshotR{1, 0, 0, 0};
   glm::vec3 m_gizmoSnapshotS{1.f};
+
+  // KHR_interactivity hover state: the glTF node currently under the cursor, -1 for none. Driven
+  // by m_hoverPicker's async G-buffer readback (see updateHoverState()); also settable directly
+  // by the `hovernode`/`clearhover` script commands for deterministic testing.
+  int m_hoveredNodeIndex = -1;
+  // Cursor position captured during the UI phase (updateHoverCursorPosition(), ui_renderer.cpp)
+  // for onRender()'s later use - ImGui hover/cursor queries aren't valid from onRender() itself.
+  glm::ivec2 m_hoverCursorPixel{-1, -1};
+  bool       m_hoverCursorInViewport = false;
+
+  // Async click ray-pick (avoids the ~300ms stall of the old synchronous submitAndWaitTempCmdBuffer
+  // path - see docs/interactivity.md's design note). A click captured during the UI phase
+  // (mouseClickedInViewport(), ui_renderer.cpp) becomes a PendingClickPick with everything the pick
+  // needs baked in *at click time* (camera state, normalized cursor position, single/double-click
+  // classification) - no GPU work yet. onRender(cmd) then records m_rayPicker.run(cmd, ...) into the
+  // frame's own command buffer (next to m_hoverPicker.requestReadback - the TLAS is already proven
+  // valid there) and moves it into a PendingClickResult carrying just the frame semaphore to poll.
+  // updateClickPickState() (called next to updateHoverState()) polls that semaphore non-blocking and,
+  // once signaled, reads m_rayPicker.getResult() and applies it via applyClickPickResult(). A newer
+  // click simply overwrites whichever of these is pending - nvvk::RayPicker has one internal result
+  // buffer, so only the most recent run() before a getResult() call is ever meaningful anyway.
+  struct PendingClickPick
+  {
+    glm::mat4 modelViewInv;
+    glm::mat4 perspectiveInv;
+    int       isOrthographic;
+    glm::vec2 pickPos;
+    bool      isDoubleClick;
+  };
+  std::optional<PendingClickPick> m_pendingClickPick;
+  struct PendingClickResult
+  {
+    nvvk::SemaphoreState semaphoreState;
+    bool                 isDoubleClick;
+  };
+  std::optional<PendingClickResult> m_pendingClickResult;
 
   // Non-blocking GPU loading pipeline (see timeline_pipeline.hpp for details).
   // Worker threads enqueue command buffers; the main thread calls poll() each frame.

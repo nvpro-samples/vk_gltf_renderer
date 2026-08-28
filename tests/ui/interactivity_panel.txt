@@ -1,0 +1,62 @@
+# KHR_interactivity Graphs window end-to-end test.
+# Exercises Play/Pause/Reset, the Variables/Send Event/Log sub-sections, and confirms Reset
+# actually restarts the graph (event/onStart's debug/log lines re-print).
+#
+# Reference-only: the scripted UI-automation integration this script targeted has been removed from
+# the app (see docs/interactivity.md's Tests section) and is future work to reinstate. This script
+# is kept as a record of the scenario for whenever that integration returns; it is not currently
+# runnable. Historically run against a scene with a KHR_interactivity graph that has
+# event/send + debug/log nodes, e.g. the official Khronos conformance scene used to develop this panel:
+#   scenefile <glTF-Test-Assets-Interactivity>/Tests/Interactivity/event/send_and_receive/glTF-Binary/send_and_receive.glb
+
+ready
+
+# The window is closed by default (a real user opens it via View > Windows > Interactivity, or
+# F8) - 'showinteractivitywindow' opens it directly and deterministically, sidestepping an
+# unproven menu-bar-click chain.
+showinteractivitywindow 1
+yield 3
+ref "Interactivity"
+
+# ---- transport controls + live stats present ----
+check "**/Pause"
+check "**/Reset"
+capture 01_interactivity_open.png
+
+# ---- Pause / Play toggle ----
+click "**/Pause"
+yield 2
+check "**/Play"
+capture 02_paused.png
+click "**/Play"
+yield 2
+check "**/Pause"
+
+# ---- Variables sub-section (present whenever the graph declares any) ----
+open "**/Variables"
+yield 2
+capture 03_variables.png
+close "**/Variables"
+
+# ---- Send Event sub-section: pick the first event, fire it ----
+open "**/Send Event"
+yield 2
+capture 04_send_event.png
+click "**/Send"
+yield 3
+close "**/Send Event"
+
+# ---- Log sub-section: debug/log history from the graph ----
+open "**/Log"
+yield 2
+capture 05_log.png
+
+# ---- Reset restarts the graph: event/onStart's debug/log lines fire again ----
+click "**/Reset"
+yield 3
+capture 06_after_reset.png
+click "**/Clear"
+yield 2
+capture 07_log_cleared.png
+
+log "interactivity panel test complete"

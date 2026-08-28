@@ -51,6 +51,45 @@ _bin/Release/vk_gltf_renderer_tests.exe --gtest_filter=BasicTests.RoundTrip
 _bin/Release/vk_gltf_renderer_tests.exe --gtest_color=yes --gtest_print_time=1
 ```
 
+### Interactivity Tests
+
+`KHR_interactivity` behavior-graph engine tests (graph parsing/validation, flow scheduling,
+node evaluation — see [docs/interactivity.md](../docs/interactivity.md)) are self-contained:
+they build graphs directly as `tinygltf::Value` trees in-process, no GPU or scene file needed.
+
+```bash
+# Via ctest
+ctest -C Release -R Interactivity --output-on-failure
+
+# Directly
+_bin/Release/vk_gltf_renderer_tests.exe --gtest_filter="Interactivity*"
+```
+
+The `ready` gate waits for a render pass to actually complete (`Resources::renderPassCount`, a
+monotonic counter unaffected by dirty-flag resets) rather than the accumulation frame counter -
+a scene whose graph writes a pointer every tick (e.g. `BowShooting.glb`'s permanent idle sway
+animation) resets the accumulation counter every single frame, which used to make `ready` hang
+forever.
+
+### UI Scenario Scripts (`tests/ui/`) — currently dormant
+
+Hover/select/UI interaction used to be scriptable end-to-end via a scripted UI-automation
+integration, driving real ImGui widgets with `click`/`open`/`close`/`check`/`visible` and
+screenshot capture. That integration has been pulled out of the app for now — the glue code and
+its CLI parameters are gone — and is tracked as future work to reinstate. The scenario scripts
+below remain in `tests/ui/` as reference for what the coverage was and should be again; they are
+not runnable against the current build.
+
+| Script | Verifies | Scene |
+|---|---|---|
+| `interactivity_panel.txt` | KHR_interactivity Interactivity window: Play/Pause/Reset, Variables/Send Event/Log sub-sections, Reset actually restarting the graph | `Tests/Interactivity/event/send_and_receive/glTF-Binary/send_and_receive.glb` (Khronos `glTF-Test-Assets-Interactivity`) |
+| `animation_playback.txt` | `animation/start`/`stop`/`stopAt` clip playback driven end-to-end (real conformance scene's self-verifying `debug/log` checks), combined with the Interactivity window's Play/Pause/Reset | `Tests/Interactivity/animation/{start,stop,stopAt}/glTF-Binary/*.glb` (Khronos `glTF-Test-Assets-Interactivity`) |
+| `select_ray_info.txt` | `event/onSelect`'s `selectionPoint`/`selectionRayOrigin` output sockets via a simulated ray-pick click (`pickrendernode`) - regression test for the fix where a real click's ray data never reached `notifyNodeSelected()` | `Tests/Interactivity/UserInteractions/eventOnSelect/glTF-Binary/eventOnSelect.glb` (Khronos `glTF-Test-Assets-Interactivity`) |
+| `calculator.txt` | Clicking a digit button fires `event/onSelect` and correctly re-renders its digit-strip display - regression test for the fix where a `pointer/set`-only write to a texture-transform's `offset` dropped the baked-in `scale` | `Models/Calculator/glTF-Binary/Calculator.glb` (Khronos `glTF-Test-Assets-Interactivity`) |
+| `bow_shooting.txt` | Aim -> draw -> release via three clicks on the same handle node, verifying the arrow actually launches - regression test for the fix where `pointer/set` writing a bool to any non-`/visible` path (e.g. `KHR_node_selectability/selectable`) silently failed and killed the whole shoot chain | `Models/BowShooting/glTF-Binary/BowShooting.glb` (Khronos `glTF-Test-Assets-Interactivity`) |
+| `reclick_selection_during_play.txt` | Three consecutive clicks on the same node all re-fire `event/onSelect` while a graph is playing, instead of every other click being absorbed as a deselect - regression test for the editor's normal click-to-deselect toggle making click-driven interactivity feel like it needs "two clicks" | `Models/BowShooting/glTF-Binary/BowShooting.glb` (Khronos `glTF-Test-Assets-Interactivity`) |
+| `editor_operations.txt` | Scene Browser Elements tab + Inspector: category tabs, Materials add/duplicate/rename/delete/undo/redo, material value edits, Nodes add/visibility/delete, sort/filter, Textures/Samplers/Images editing, primitive split/merge | A texture-rich scene, e.g. `DamagedHelmet.gltf` |
+
 ## Running Benchmarks
 
 ```bash
@@ -87,6 +126,7 @@ tests/
 ├── test_material_cache.cpp     # Material cache
 ├── test_extensions_metadata.cpp # Extension metadata
 ├── test_primitives.cpp         # Procedural primitives
+├── test_interactivity_engine.cpp # KHR_interactivity graph parsing, flow scheduling, node eval
 └── common/
     ├── test_utils.hpp          # Test utilities header
     └── test_utils.cpp          # Test utilities implementation

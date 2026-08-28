@@ -43,6 +43,13 @@ public:
   virtual void onUIMenu() {};
   virtual void onSceneInvalidated(Resources& resources) {};
 
+  // A scene edit changed appearance in a way motion vectors can't describe (material/light
+  // property write - e.g. a KHR_interactivity pointer/set on a texture-transform offset, or an
+  // Inspector material edit). Unlike onSceneInvalidated() (whole-scene swap: frees GPU resources,
+  // drops sort/record state), this is a lightweight per-edit DLSS temporal-history discard only -
+  // see docs/denoising.md.
+  virtual void notifyDlssContentReset(Resources& resources) {};
+
   [[nodiscard]] virtual bool onUIRender(Resources&) { return false; }
 
   //---

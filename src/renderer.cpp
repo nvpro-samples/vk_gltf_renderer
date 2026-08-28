@@ -264,6 +264,7 @@ void GltfRenderer::onAttach(nvapp::Application* app)
   m_settingsHandler.setSetting("showStatisticsWindow", &m_resources.settings.showStatisticsWindow);
   m_settingsHandler.setSetting("showSceneBrowserWindow", &m_resources.settings.showSceneBrowserWindow);
   m_settingsHandler.setSetting("showInspectorWindow", &m_resources.settings.showInspectorWindow);
+  m_settingsHandler.setSetting("showInteractivityWindow", &m_resources.settings.showInteractivityWindow);
   m_settingsHandler.setSetting("showAgenticWindow", &m_resources.settings.showAgenticWindow);
   m_settingsHandler.setSetting("envSystem", (int*)&m_resources.settings.envSystem);
   m_settingsHandler.setSetting("renderSystem", (int*)&m_resources.settings.renderSystem);
@@ -352,6 +353,9 @@ void GltfRenderer::onAttach(nvapp::Application* app)
 
   // Silhouette renderer
   m_silhouette.init(m_resources);
+
+  // Async G-buffer readback for KHR_interactivity hover detection (docs/interactivity.md Phase E)
+  m_hoverPicker.init(m_resources);
 
   // ===== Scene & Acceleration Structure =====
   m_resources.sceneGpu.init(&m_resources.allocator, &m_resources.samplerPool, m_app->getQueue(0).queue,
@@ -815,23 +819,49 @@ void GltfRenderer::onRender(VkCommandBuffer cmd)
   // Start the profiler section for the GPU timer
   auto timerSection = m_profilerGpuTimer.cmdFrameSection(cmd, __FUNCTION__);
 
+  // KHR_interactivity: tick the graph (pointer/set writes, via Scene::markNodeDirty) BEFORE the DLSS
+  // instance-motion snapshot decision below - that decision reads DirtyFlags::nodes to know whether
+  // anything moved *this* frame, and a graph-driven move (e.g. a per-tick pointer/set slerp, as in the
+  // official PlaceOnClickPuzzle.glb) only populates that flag here. Running this after the snapshot
+  // decision (as it used to) meant a moving piece's dirty flag wasn't visible yet when the check ran,
+  // so dlssInstanceMotionActive stayed false and the shader fell back to camera-only motion vectors
+  // for that instance every single tick of the move - not just the first frame, since the same
+  // one-frame-late pattern repeats on every subsequent tick too. The result was a persistent
+  // trailing/ghosting artifact on the moving piece for its entire flight, visible only with DLSS on
+  // (this is instance-motion-vector territory - see docs/denoising.md). Hover/click are ticked in the
+  // same block since they already had to run before the graph tick (a same-frame hover/select feeds
+  // this tick), and moving them doesn't change their own correctness.
+  updateHoverState();      // KHR_interactivity: poll HoverPicker, notify onHoverIn/onHoverOut before this tick
+  updateClickPickState();  // Poll the previous click's async ray-pick, apply it once ready (see m_pendingClickPick)
+  // KHR_interactivity: pointer/set writes flow into `changed` via the dirty-flags path below
+  // (Scene::markNodeDirty etc.), but an animation/start-driven pose (applied synchronously inside
+  // this call via reconcileAnimationGpuState()) clears those same dirty flags before that path ever
+  // sees them - so it must feed `changed` directly via this return value instead, or the path
+  // tracer's progressive accumulation never restarts and the animated frames blend together.
+  const bool interactivityAnimationApplied = updateInteractivityGraphs(cmd);
+
   // #DLSS instance motion vectors: snapshot the previous-frame render-node transforms BEFORE any
   // animation / gizmo edit rewrites them this frame. The previous transforms feed per-instance motion
   // vectors in the path tracer (camera + object motion combined). This is only meaningful when node
-  // transforms are actually changing this frame -- animation advancing, or a pending gizmo/editor
-  // edit (markNodeDirty populates DirtyFlags::nodes during UI, before onRender). When nothing moves,
-  // prev == curr, so we skip both the snapshot pass and the per-instance reprojection and let the
-  // path tracer produce exact camera-only motion (prevRenderNodeObjectToWorld stays unbound). The
-  // snapshot reads the live render-node buffer each frame independently, so skipping static frames is
-  // safe with no trailing-frame artifact. Gated on DLSS specifically (not dlssGuideRequired(), which
-  // also covers OptiX) since only the DLSS path consumes these vectors. See gltf_pathtrace.slang.
+  // transforms are actually changing this frame -- animation advancing, or a pending gizmo/editor/
+  // interactivity edit (markNodeDirty populates DirtyFlags::nodes during UI or the graph tick above,
+  // both before this check). When nothing moves, prev == curr, so we skip both the snapshot pass and
+  // the per-instance reprojection and let the path tracer produce exact camera-only motion
+  // (prevRenderNodeObjectToWorld stays unbound). The snapshot reads the live render-node buffer each
+  // frame independently, so skipping static frames is safe with no trailing-frame artifact. Gated on
+  // DLSS specifically (not dlssGuideRequired(), which also covers OptiX) since only the DLSS path
+  // consumes these vectors. See gltf_pathtrace.slang.
   m_resources.dlssInstanceMotionActive = false;
   if(m_resources.settings.renderSystem == RenderingMode::ePathtracer && m_pathTracer.isDlssEnabled())
   {
     nvvkgltf::Scene*                   scn = m_resources.getScene();
     const nvvkgltf::Scene::DirtyFlags& df  = scn->getDirtyFlags();
     const bool animActive = ui::animation::hasPlayableAnimation(scn) && m_resources.animationControl.doAnimation();
-    const bool nodesDirty = !df.nodes.empty() || df.allRenderNodesDirty;
+    // reconcileAnimationGpuState() (called from updateInteractivityGraphs() above whenever it applied
+    // an animation/start-driven pose this tick) already cleared DirtyFlags::nodes as its own tail, so
+    // `df.nodes`/`allRenderNodesDirty` can't see that motion here - interactivityAnimationApplied
+    // carries it through explicitly, the same way it's OR'd into `changed` below.
+    const bool nodesDirty                = !df.nodes.empty() || df.allRenderNodesDirty || interactivityAnimationApplied;
     m_resources.dlssInstanceMotionActive = animActive || nodesDirty;
 
     if(m_resources.dlssInstanceMotionActive)
@@ -843,6 +873,7 @@ void GltfRenderer::onRender(VkCommandBuffer cmd)
 
   // Check for changes
   bool changed{false};
+  changed |= interactivityAnimationApplied;
   changed |= updateAnimation(cmd);  // Update the animation
   changed |= updateSceneChanges(cmd);
   if(changed)
@@ -922,6 +953,26 @@ void GltfRenderer::onRender(VkCommandBuffer cmd)
   // Apply the post-processing effects
   tonemap(cmd);
   silhouette(cmd);
+  // KHR_interactivity hover detection: record this frame's cursor readback after silhouette's own
+  // read of eImgSelection (see HoverPicker::requestReadback's comment for why that ordering avoids
+  // any extra synchronization). Skipped entirely when the cursor isn't over the viewport.
+  if(m_hoverCursorInViewport)
+    m_hoverPicker.requestReadback(cmd, m_resources, m_hoverCursorPixel);
+  // Async click ray-pick: record the pick dispatch on this frame's own command buffer - the TLAS is
+  // already proven valid here (the path tracer/rasterizer just used it above) - then hand off a
+  // frame-semaphore to poll instead of blocking. See m_pendingClickPick's comment (renderer.hpp).
+  if(m_pendingClickPick)
+  {
+    m_rayPicker.run(cmd, {.modelViewInv   = m_pendingClickPick->modelViewInv,
+                          .perspectiveInv = m_pendingClickPick->perspectiveInv,
+                          .isOrthographic = m_pendingClickPick->isOrthographic,
+                          .pickPos        = m_pendingClickPick->pickPos,
+                          .tlas           = m_resources.sceneRtx.topLevelAS()});
+    m_pendingClickResult =
+        PendingClickResult{.semaphoreState = nvvk::SemaphoreState::makeFixed(m_app->getFrameSignalSemaphore()),
+                           .isDoubleClick  = m_pendingClickPick->isDoubleClick};
+    m_pendingClickPick.reset();
+  }
   if(!isAutomatedRun())
   {
     renderVisualHelpers(cmd);
@@ -1525,6 +1576,11 @@ void GltfRenderer::finalizeSceneSetup(const std::filesystem::path& filename)
   createVulkanScene();
   if(ui::animation::hasPlayableAnimation(m_resources.getScene()))
     m_resources.animationControl.showStrip = true;
+  // Spec: "When a glTF asset contains a behavior graph, all glTF animations are assumed to be
+  // controlled by the graph so they MUST NOT play automatically." Only gates the default - manual
+  // scrubbing via the Animation Strip is still available.
+  if(!m_resources.getScene()->getInteractivityGraphs().empty())
+    m_resources.animationControl.play = false;
 
   // Detect which KHR_materials_* the loaded scene actually uses so the path tracer
   // can specialize its shader when settings.optimalShader is on. Safe to call always:
@@ -1679,6 +1735,9 @@ void GltfRenderer::createSceneFromDescriptor(const std::filesystem::path& descri
   createVulkanScene();
   if(ui::animation::hasPlayableAnimation(scene))
     m_resources.animationControl.showStrip = true;
+  // Spec: KHR_interactivity disables animation autoplay (see finalizeSceneSetup()'s matching comment).
+  if(!scene->getInteractivityGraphs().empty())
+    m_resources.animationControl.play = false;
 
   // Detect which KHR_materials_* the loaded scene actually uses so the path tracer
   // can specialize its shader when settings.optimalShader is on.
@@ -1723,7 +1782,15 @@ void GltfRenderer::cleanupScene()
   m_inspector.setScene(nullptr);
   m_sceneSelection.clearSelection();  // Clear selection in new UI system
   m_resources.selectedRenderNodes.clear();
-  m_resources.animationControl = AnimationControl{};
+  m_resources.animationControl     = AnimationControl{};
+  m_resources.interactivityControl = InteractivityControl{};
+
+  // Drop async pick/hover state tied to the outgoing scene - a pending click ray-pick or a
+  // cached hover node index would otherwise be consumed by the newly loaded scene once its
+  // semaphore/readback settles, applying a pick result to the wrong node indices.
+  m_pendingClickPick.reset();
+  m_pendingClickResult.reset();
+  m_hoveredNodeIndex = -1;
 
   // Reset memory statistics for the new scene
   // Keeps lifetime allocation/deallocation counts but resets current and peak values
@@ -1809,6 +1876,9 @@ void GltfRenderer::rebuildVulkanSceneInternal(nvvkgltf::SceneGpu::RebuildMode mo
     }
     if(ui::animation::hasPlayableAnimation(scene))
       animCtrl.showStrip = true;
+    // Spec: KHR_interactivity disables animation autoplay (see finalizeSceneSetup()'s matching comment).
+    if(!scene->getInteractivityGraphs().empty())
+      animCtrl.play = false;
   }
 
   // Update textures if images were (re)loaded. eFull rewrites the whole array; eMergeAppend rewrites it
@@ -2256,6 +2326,52 @@ void GltfRenderer::selectSceneNodeFromScript(int nodeIndex)
   resetFrame();
 }
 
+void GltfRenderer::pickSceneNodeFromScript(int nodeIndex)
+{
+  nvvkgltf::Scene* scene = m_resources.getScene();
+  if(!scene || !scene->valid())
+    return;
+
+  const int nodeCount = static_cast<int>(scene->getModel().nodes.size());
+  if(nodeIndex < 0 || nodeIndex >= nodeCount)
+  {
+    updateSelectionFromPick(-1);
+    resetFrame();
+    return;
+  }
+
+  // Find a render node for this glTF node (first primitive) - same "which render node represents
+  // this glTF node" question a real click's TLAS instance ID answers implicitly.
+  const auto& renderNodes   = scene->getRenderNodes();
+  int         renderNodeIdx = -1;
+  for(size_t i = 0; i < renderNodes.size(); ++i)
+  {
+    if(renderNodes[i].refNodeID == nodeIndex)
+    {
+      renderNodeIdx = static_cast<int>(i);
+      break;
+    }
+  }
+  if(renderNodeIdx < 0)
+  {
+    LOGW("pickrendernode %d ignored: glTF node has no render primitive (not a mesh node?)\n", nodeIndex);
+    updateSelectionFromPick(-1);
+    resetFrame();
+    return;
+  }
+
+  // Synthetic but finite ray data (no real cursor/GPU raycast in a scripted run): the current camera
+  // eye as the ray origin, the node's own world-space position as the hit point - enough to exercise
+  // KHR_interactivity event/onSelect's selectionPoint/selectionRayOrigin end-to-end.
+  glm::dvec3 eye, center, up;
+  m_cameraManip->getLookat(eye, center, up);
+  const auto&     worldMatrices = scene->getNodesWorldMatrices();
+  const glm::vec3 worldPos =
+      nodeIndex < static_cast<int>(worldMatrices.size()) ? glm::vec3(worldMatrices[nodeIndex][3]) : glm::vec3(0);
+  updateSelectionFromPick(renderNodeIdx, worldPos, glm::vec3(eye));
+  resetFrame();
+}
+
 void GltfRenderer::onUndoRedo()
 {
   // Undo/redo may re-introduce geometry (e.g. redo of an added primitive) that has no GPU buffers yet;
@@ -2274,6 +2390,8 @@ void GltfRenderer::onUndoRedo()
 // Returns true if the frame counter is less than the maximum number of frames
 bool GltfRenderer::updateFrameCounter()
 {
+  ++m_resources.renderPassCount;  // monotonic - never reset by resetFrame(), see its doc comment
+
   static nvutils::CameraManipulator::Camera ref_camera{};
 
   const auto currentCamera = m_cameraManip->getCamera();
@@ -2372,6 +2490,7 @@ void GltfRenderer::destroyResources()
   m_profilerGpuTimer.deinit();
   g_profilerManager.destroyTimeline(m_profilerTimeline);
   m_silhouette.deinit(m_resources);
+  m_hoverPicker.deinit(m_resources);
 
   m_resources.tonemapper.deinit();
   m_resources.appMemoryTracker.untrack("GBuffers", m_resources.gBuffers, Resources::eImgCount);
@@ -2412,10 +2531,7 @@ bool GltfRenderer::updateAnimation(VkCommandBuffer cmd)
       animCtrl.currentAnimation = 0;
 
     auto timerSection = m_profilerGpuTimer.cmdFrameSection(cmd, "Update animation");
-
     NVVK_DBG_SCOPE(cmd);
-    nvvkgltf::SceneVk&  scnVk  = m_resources.sceneVk;
-    nvvkgltf::SceneRtx& scnRtx = m_resources.sceneRtx;
 
     float                    deltaTime = animCtrl.deltaTime();
     nvvkgltf::AnimationInfo& animInfo  = scn.animation().getAnimationInfo(animCtrl.currentAnimation);
@@ -2433,86 +2549,223 @@ bool GltfRenderer::updateAnimation(VkCommandBuffer cmd)
     }
 
     animCtrl.clearStates();
-
-    // Recompute world matrices for dirty nodes and expand dirty flags to all affected
-    // render nodes (including descendants needed for transform-only animated nodes).
-    {
-      auto t = m_profilerGpuTimer.cmdFrameSection(cmd, "World matrices + dirty");
-      scn.updateNodeWorldMatrices();
-    }
-
-    scnRtx.updateInstanceFlagsCache(scn);
-
-    const bool gpuTransform = m_resources.sceneGpu.shouldUseGpuTransform(scn);
-
-    {
-      auto t = m_profilerGpuTimer.cmdFrameSection(cmd, "Sync to GPU");
-      if(gpuTransform)
-      {
-        // Animated emitters are handled upstream: updateNodeWorldMatrices() (called above) refreshes
-        // the render-node world matrices and latches DirtyFlags::emissiveDirty when an emissive node
-        // moves, so syncFromScene rebuilds the emitter list even though this restricted mask omits
-        // render-node sync.
-        (void)scnVk.syncFromScene(m_resources.staging, scn, nvvkgltf::SceneVk::eSyncMaterials | nvvkgltf::SceneVk::eSyncLights);
-        (void)scnVk.flushSceneDescIfDirty(m_resources.staging, scn);
-      }
-      else
-      {
-        // A prior GPU transform frame may have moved nodes on-device only; reconcile just those before
-        // the CPU sync sources render-node / TLAS transforms from the CPU mirror.
-        if(scn.mergeGpuStaleNodesIntoDirty())
-          scn.updateNodeWorldMatrices();
-        m_resources.transformCompute.markGpuStale();
-        (void)scnVk.syncFromScene(m_resources.staging, scn);
-      }
-    }
-
-    bool hasMorphOrSkin = scn.animation().hasMorphTargets() || scn.animation().hasSkinning();
-    if(hasMorphOrSkin)
-    {
-      auto timerSectionMorph = m_profilerGpuTimer.cmdFrameSection(cmd, "Morph or Skin");
-      m_resources.sceneGpu.applyAnimation(cmd, scn);
-    }
-
-    {
-      auto t = m_profilerGpuTimer.cmdFrameSection(cmd, "Staging flush");
-      m_resources.staging.cmdUploadAppended(cmd);
-      nvvk::cmdMemoryBarrier(cmd, VK_PIPELINE_STAGE_2_COPY_BIT | VK_PIPELINE_STAGE_2_COMPUTE_SHADER_BIT,
-                             VK_PIPELINE_STAGE_2_VERTEX_INPUT_BIT | VK_PIPELINE_STAGE_2_ACCELERATION_STRUCTURE_BUILD_BIT_KHR,
-                             VK_ACCESS_2_TRANSFER_WRITE_BIT | VK_ACCESS_2_SHADER_WRITE_BIT,
-                             VK_ACCESS_2_VERTEX_ATTRIBUTE_READ_BIT | VK_ACCESS_2_SHADER_READ_BIT
-                                 | VK_ACCESS_2_ACCELERATION_STRUCTURE_READ_BIT_KHR);
-    }
-
-    {
-      auto timerSectionAS = m_profilerGpuTimer.cmdFrameSection(cmd, "AS update");
-      if(hasMorphOrSkin)
-        scnRtx.updateBottomLevelAS(cmd, scn);
-      if(gpuTransform)
-      {
-        m_resources.transformCompute.dispatchTransformUpdate(cmd, m_resources.staging, scn, scnVk, scnRtx);
-      }
-      else
-      {
-        (void)scnRtx.syncTopLevelAS(cmd, m_resources.staging, scn);
-      }
-    }
-
-    // Preserve the deferred texture/sampler signals across this per-frame flag clear: all three are
-    // consumed at frame top (applyPendingTextureRebuild() / applyPendingTextureTailSync() /
-    // applyPendingSamplerUpdate()), not here, so a texture/image/sampler edit or an import/undo made
-    // while an animation plays must not be wiped before then.
-    const bool              pendingTextures    = scn.getDirtyFlags().texturesChanged;
-    const bool              pendingTextureTail = scn.getDirtyFlags().texturesTailChanged;
-    std::unordered_set<int> pendingSamplers    = std::move(scn.getDirtyFlags().samplers);
-    scn.clearDirtyFlags();
-    scn.getDirtyFlags().texturesChanged     = pendingTextures;
-    scn.getDirtyFlags().texturesTailChanged = pendingTextureTail;
-    scn.getDirtyFlags().samplers            = std::move(pendingSamplers);
+    reconcileAnimationGpuState(cmd);
     return true;
   }
 
   return false;
+}
+
+void GltfRenderer::reconcileAnimationGpuState(VkCommandBuffer cmd)
+{
+  nvvkgltf::Scene&    scn    = *m_resources.getScene();
+  nvvkgltf::SceneVk&  scnVk  = m_resources.sceneVk;
+  nvvkgltf::SceneRtx& scnRtx = m_resources.sceneRtx;
+
+  // Recompute world matrices for dirty nodes and expand dirty flags to all affected
+  // render nodes (including descendants needed for transform-only animated nodes).
+  {
+    auto t = m_profilerGpuTimer.cmdFrameSection(cmd, "World matrices + dirty");
+    scn.updateNodeWorldMatrices();
+  }
+
+  scnRtx.updateInstanceFlagsCache(scn);
+
+  const bool gpuTransform = m_resources.sceneGpu.shouldUseGpuTransform(scn);
+
+  {
+    auto t = m_profilerGpuTimer.cmdFrameSection(cmd, "Sync to GPU");
+    if(gpuTransform)
+    {
+      // Animated emitters are handled upstream: updateNodeWorldMatrices() (called above) refreshes
+      // the render-node world matrices and latches DirtyFlags::emissiveDirty when an emissive node
+      // moves, so syncFromScene rebuilds the emitter list even though this restricted mask omits
+      // render-node sync.
+      (void)scnVk.syncFromScene(m_resources.staging, scn, nvvkgltf::SceneVk::eSyncMaterials | nvvkgltf::SceneVk::eSyncLights);
+      (void)scnVk.flushSceneDescIfDirty(m_resources.staging, scn);
+    }
+    else
+    {
+      // A prior GPU transform frame may have moved nodes on-device only; reconcile just those before
+      // the CPU sync sources render-node / TLAS transforms from the CPU mirror.
+      if(scn.mergeGpuStaleNodesIntoDirty())
+        scn.updateNodeWorldMatrices();
+      m_resources.transformCompute.markGpuStale();
+      (void)scnVk.syncFromScene(m_resources.staging, scn);
+    }
+  }
+
+  bool hasMorphOrSkin = scn.animation().hasMorphTargets() || scn.animation().hasSkinning();
+  if(hasMorphOrSkin)
+  {
+    auto timerSectionMorph = m_profilerGpuTimer.cmdFrameSection(cmd, "Morph or Skin");
+    m_resources.sceneGpu.applyAnimation(cmd, scn);
+  }
+
+  {
+    auto t = m_profilerGpuTimer.cmdFrameSection(cmd, "Staging flush");
+    m_resources.staging.cmdUploadAppended(cmd);
+    nvvk::cmdMemoryBarrier(cmd, VK_PIPELINE_STAGE_2_COPY_BIT | VK_PIPELINE_STAGE_2_COMPUTE_SHADER_BIT,
+                           VK_PIPELINE_STAGE_2_VERTEX_INPUT_BIT | VK_PIPELINE_STAGE_2_ACCELERATION_STRUCTURE_BUILD_BIT_KHR,
+                           VK_ACCESS_2_TRANSFER_WRITE_BIT | VK_ACCESS_2_SHADER_WRITE_BIT,
+                           VK_ACCESS_2_VERTEX_ATTRIBUTE_READ_BIT | VK_ACCESS_2_SHADER_READ_BIT
+                               | VK_ACCESS_2_ACCELERATION_STRUCTURE_READ_BIT_KHR);
+  }
+
+  {
+    auto timerSectionAS = m_profilerGpuTimer.cmdFrameSection(cmd, "AS update");
+    if(hasMorphOrSkin)
+      scnRtx.updateBottomLevelAS(cmd, scn);
+    if(gpuTransform)
+    {
+      m_resources.transformCompute.dispatchTransformUpdate(cmd, m_resources.staging, scn, scnVk, scnRtx);
+    }
+    else
+    {
+      (void)scnRtx.syncTopLevelAS(cmd, m_resources.staging, scn);
+    }
+  }
+
+  // Preserve the deferred texture/sampler signals across this per-frame flag clear: all three are
+  // consumed at frame top (applyPendingTextureRebuild() / applyPendingTextureTailSync() /
+  // applyPendingSamplerUpdate()), not here, so a texture/image/sampler edit or an import/undo made
+  // while an animation plays must not be wiped before then.
+  // materials/lights are also preserved: an animation channel that targets a material/light property
+  // (KHR_animation_pointer, or an interactivity animation/start clip driving one) marks them dirty
+  // inside scn.animation().updateAnimation() above, but this function's own GPU sync already
+  // consumed that write - clearing them here (instead of after updateSceneChanges() sees them) would
+  // silently skip notifyDlssContentReset()'s appearance-discontinuity check for an animation-driven
+  // material/light change, the same DLSS temporal-history bug already fixed for pointer/set writes.
+  const bool              pendingTextures    = scn.getDirtyFlags().texturesChanged;
+  const bool              pendingTextureTail = scn.getDirtyFlags().texturesTailChanged;
+  std::unordered_set<int> pendingSamplers    = std::move(scn.getDirtyFlags().samplers);
+  std::unordered_set<int> pendingMaterials   = std::move(scn.getDirtyFlags().materials);
+  std::unordered_set<int> pendingLights      = std::move(scn.getDirtyFlags().lights);
+  scn.clearDirtyFlags();
+  scn.getDirtyFlags().texturesChanged     = pendingTextures;
+  scn.getDirtyFlags().texturesTailChanged = pendingTextureTail;
+  scn.getDirtyFlags().samplers            = std::move(pendingSamplers);
+  scn.getDirtyFlags().materials           = std::move(pendingMaterials);
+  scn.getDirtyFlags().lights              = std::move(pendingLights);
+}
+
+//--------------------------------------------------------------------------------------------------
+// KHR_interactivity: ticks the scene's default behavior graph instance once per frame. Returns true
+// only when an animation/start-driven pose was applied this tick (see below) - a graph merely
+// *existing* (or ticking with no writes) never resets progressive accumulation. pointer/set-driven
+// glTF-model writes (Phase C) also reset it, but via the normal Scene::markNodeDirty/
+// markMaterialDirty -> updateSceneChanges() dirty-flags path right after this call, not through this
+// function's own return value - reconcileAnimationGpuState() below clears those same dirty flags
+// before updateSceneChanges() ever sees them, so an animation/start pose has no other way to reach
+// `changed` in onRender() and must be signaled explicitly. `cmd` is used directly for the animation
+// GPU-reconcile path below, unlike the rest of this function.
+//--------------------------------------------------------------------------------------------------
+bool GltfRenderer::updateInteractivityGraphs(VkCommandBuffer cmd)
+{
+  nvvkgltf::Scene* scnPtr = m_resources.getScene();
+  if(!scnPtr || scnPtr->getInteractivityGraphs().empty())
+    return false;
+
+  InteractivityControl& ctrl = m_resources.interactivityControl;
+  nvvkgltf::InteractivityGraphInstance* instance = scnPtr->getInteractivityInstance(scnPtr->getDefaultInteractivityGraph());
+  if(ctrl.resetRequested)
+  {
+    if(instance)
+      instance->reset();
+    ctrl.clearResetRequest();
+  }
+  if(!ctrl.play)
+    return false;
+
+  // Ticking already applies any animation/start-driven poses synchronously, CPU-side, via
+  // InteractivityAnimationResolver::applyPose() (called from InteractivityGraphInstance::
+  // advanceAnimations() - see gltf_interactivity_animation.hpp for why that has to happen
+  // before `tick()` returns, not after: the spec applies the pose to the asset before firing
+  // `done`, so a pointer/get reached from that same `done` activation must already see it).
+  scnPtr->tickInteractivityGraphs(ImGui::GetIO().DeltaTime);
+
+  // Only the heavier GPU-side reconciliation (world matrices, GPU sync, BLAS update) still needs
+  // to happen here, once, after however many animation/start entries applyPose() touched this tick.
+  const bool animationApplied = instance && !instance->pendingAnimationApplies().empty();
+  if(animationApplied)
+    reconcileAnimationGpuState(cmd);
+
+  return animationApplied;
+}
+
+//--------------------------------------------------------------------------------------------------
+// KHR_interactivity hover detection (docs/interactivity.md Phase E). Called once per frame, before
+// updateInteractivityGraphs() so a transition detected this frame feeds this same frame's tick.
+//
+// If the cursor isn't over the viewport, clears hover synchronously (no GPU round-trip needed - we
+// already know nothing is hovered). Otherwise polls m_hoverPicker non-blocking; on a genuinely new
+// result, maps the render-node index to a glTF node (same renderNode.refNodeID mapping click-
+// selection uses) and redirects to the nearest KHR_node_hoverability-hoverable ancestor, mirroring
+// how click-selection redirects for KHR_node_selectability - see docs/interactivity.md for why this
+// is a documented approximation of the spec's "skip non-hoverable geometry" ray-termination
+// semantics, which a single G-buffer sample can't express.
+//--------------------------------------------------------------------------------------------------
+void GltfRenderer::updateHoverState()
+{
+  nvvkgltf::Scene* scene = m_resources.getScene();
+  if(!scene || !scene->valid())
+    return;
+
+  if(!m_hoverCursorInViewport)
+  {
+    m_hoverPicker.pollResult(m_device);  // drain any in-flight readback so its slot isn't leaked
+    if(m_hoveredNodeIndex != -1)
+    {
+      scene->notifyNodeHoverChanged(m_hoveredNodeIndex, -1);
+      m_hoveredNodeIndex = -1;
+    }
+    return;
+  }
+
+  std::optional<int32_t> renderNodeResult = m_hoverPicker.pollResult(m_device);
+  if(!renderNodeResult.has_value())
+    return;  // nothing new completed since the last poll
+
+  int           newGltfNode   = -1;
+  const int32_t renderNodeIdx = *renderNodeResult;
+  const auto&   renderNodes   = scene->getRenderNodes();
+  if(renderNodeIdx >= 0 && renderNodeIdx < static_cast<int>(renderNodes.size()))
+    newGltfNode = scene->nearestHoverableAncestor(renderNodes[renderNodeIdx].refNodeID);
+
+  if(newGltfNode == m_hoveredNodeIndex)
+    return;
+
+  scene->notifyNodeHoverChanged(m_hoveredNodeIndex, newGltfNode);
+  m_hoveredNodeIndex = newGltfNode;
+}
+
+//--------------------------------------------------------------------------------------------------
+// Non-blocking poll of the async click ray-pick (see m_pendingClickPick's comment in renderer.hpp).
+// Once the frame that recorded the pick has signaled, nvvk::RayPicker::getResult() is a plain
+// host-mapped-buffer read (confirmed in nvvk/ray_picker.cpp - no internal wait of its own), so this
+// is a cheap poll-then-memcpy, exactly like m_hoverPicker.pollResult()'s pattern.
+//--------------------------------------------------------------------------------------------------
+void GltfRenderer::updateClickPickState()
+{
+  if(!m_pendingClickResult || !m_pendingClickResult->semaphoreState.testSignaled(m_device))
+    return;
+
+  const bool isDoubleClick = m_pendingClickResult->isDoubleClick;
+  m_pendingClickResult.reset();
+  applyClickPickResult(m_rayPicker.getResult(), isDoubleClick);
+}
+
+// Script-driven hover for UI scenario tests (`hovernode <id>` / `clearhover` -> nodeIndex -1) -
+// calls the exact same notification path updateHoverState() uses for real cursor input.
+void GltfRenderer::hoverSceneNodeFromScript(int nodeIndex)
+{
+  nvvkgltf::Scene* scene = m_resources.getScene();
+  if(!scene || !scene->valid() || nodeIndex == m_hoveredNodeIndex)
+    return;
+  if(nodeIndex != -1 && (nodeIndex < 0 || nodeIndex >= static_cast<int>(scene->getModel().nodes.size())))
+    return;
+  scene->notifyNodeHoverChanged(m_hoveredNodeIndex, nodeIndex);
+  m_hoveredNodeIndex = nodeIndex;
 }
 
 //--------------------------------------------------------------------------------------------------
@@ -2649,6 +2902,26 @@ bool GltfRenderer::updateSceneChanges(VkCommandBuffer cmd)
   // a few maps per material); only runs when materials are actually dirty.
   if(!df.materials.empty())
     m_resources.recomputeSceneFeatures(dlssGuideRequired());
+
+  // A material/light property changed (e.g. a KHR_interactivity pointer/set writing a
+  // texture-transform offset, or a live Inspector edit) - this is an appearance discontinuity
+  // motion vectors can't describe (nothing moved; the surface's content just changed), so DLSS's
+  // temporal history would blend old and new content at the same screen location. Drop it via the
+  // active renderer's own DLSS instance, same as a resize/quality-change discontinuity. Node
+  // transform changes alone don't need this - they're already correctly handled by instance
+  // motion vectors (see the ordering comment in onRender() above / docs/denoising.md).
+  if(!df.materials.empty() || !df.lights.empty())
+  {
+    switch(m_resources.settings.renderSystem)
+    {
+      case RenderingMode::ePathtracer:
+        m_pathTracer.notifyDlssContentReset(m_resources);
+        break;
+      case RenderingMode::eRasterizer:
+        m_rasterizer.notifyDlssContentReset(m_resources);
+        break;
+    }
+  }
 
   updateSceneChanges_BlasRebuild(df);
   m_resources.sceneRtx.updateInstanceFlagsCache(*scene);

@@ -170,39 +170,6 @@ void UiSceneBrowser::render(bool* show, bool isBusy)
       }
     }
 
-    // KHR_interactivity: the behavior graph is parsed and preserved on save, but not executed by
-    // this viewer. Surface it read-only so authors can see it survived the round-trip.
-    if(const tinygltf::Value* interactivity =
-           tinygltf::utils::findExtension(m_scene->getModel().extensions, KHR_INTERACTIVITY_EXTENSION_NAME))
-    {
-      if(ImGui::CollapsingHeader("Interactivity"))
-      {
-        int graphCount = 0;
-        int nodeCount  = 0;
-        if(interactivity->Has("graphs") && interactivity->Get("graphs").IsArray())
-        {
-          const tinygltf::Value& graphs = interactivity->Get("graphs");
-          graphCount                    = static_cast<int>(graphs.ArrayLen());
-          for(size_t i = 0; i < graphs.ArrayLen(); ++i)
-          {
-            const tinygltf::Value& g = graphs.Get(static_cast<int>(i));
-            if(g.Has("nodes") && g.Get("nodes").IsArray())
-              nodeCount += static_cast<int>(g.Get("nodes").ArrayLen());
-          }
-        }
-        else if(interactivity->Has("nodes") && interactivity->Get("nodes").IsArray())
-        {
-          graphCount = 1;  // Single-graph layout.
-          nodeCount  = static_cast<int>(interactivity->Get("nodes").ArrayLen());
-        }
-
-        ImGui::TextWrapped("KHR_interactivity behavior graph detected.");
-        ImGui::BulletText("Graphs: %d", graphCount);
-        ImGui::BulletText("Nodes: %d", nodeCount);
-        ImGui::TextDisabled("Parsed and preserved on save; execution is not yet supported.");
-      }
-    }
-
     // Tab bar
     if(ImGui::BeginTabBar("SceneBrowserTabs"))
     {

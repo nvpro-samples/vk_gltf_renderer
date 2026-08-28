@@ -50,7 +50,11 @@ combined:
 - **Instance (node) motion** — previous render-node transforms snapshotted by
   `snapshot_prev_transforms.comp.slang` (host: `TransformComputeVk::cmdSnapshotPrevObjectToWorld`)
   and applied via `prevRenderNodeObjectToWorld` in `shaders/gltf_pathtrace.slang`. Gated by
-  `Resources::dlssInstanceMotionActive` (bound only on frames where transforms actually change).
+  `Resources::dlssInstanceMotionActive` (bound only on frames where transforms actually change) -
+  this gate must see `Scene::DirtyFlags::nodes` as populated by *this* frame's transform writes,
+  which is why the gate check in `GltfRenderer::onRender()` runs after `updateInteractivityGraphs()`
+  (see [docs/interactivity.md](interactivity.md) for a real bug this ordering fixed - a graph-driven
+  per-tick move ghosted for its entire duration when the check ran before the tick instead of after).
 
 **Not captured: per-vertex skin/morph deformation.** Skinning/morph overwrite the position buffer
 in place each frame (`SceneVk::uploadPrimitives`, `src/gltf_scene_vk.cpp`) with no previous-frame
@@ -72,9 +76,15 @@ rotation moves the environment. See the `calculateMotionVector` overload comment
   never baked into `viewProjMatrix` / `prevMVP`; NGX de-jitters via `InJitterOffset` (negated in
   `src/dlss_wrapper.cpp`).
 - Temporal history is **intentionally not reset on camera motion.** `InReset` is only for
-  discontinuities (resize, preset/quality change, re-enable) via `Dlss::notifyReset` /
+  discontinuities (resize, preset/quality change, re-enable, and — since the fix documented in
+  [docs/interactivity.md](interactivity.md) — a material/light property write via
+  `BaseRenderer::notifyDlssContentReset()`, called from `GltfRenderer::updateSceneChanges()`
+  whenever `Scene::DirtyFlags::materials`/`lights` is non-empty) via `Dlss::notifyReset` /
   `m_forceResetUntilFrame`. Do not reset on dolly/pan — it discards accumulation and adds noise
-  without fixing MV correctness.
+  without fixing MV correctness. Node-transform-only changes are deliberately excluded from this
+  reset — those are already correctly handled by instance motion vectors (see "Instance (node)
+  motion" above); only *appearance* discontinuities (texture/material content changing at a
+  stationary surface, which motion vectors can't describe) need a full history discard.
 
 ## Debugging motion vectors
 

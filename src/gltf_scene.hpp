@@ -38,6 +38,8 @@
 
 #include "tinygltf_utils.hpp"
 #include "gltf_animation_pointer.hpp"
+#include "gltf_interactivity_graph.hpp"
+#include "gltf_interactivity_instance.hpp"
 
 
 namespace nvvkgltf {
@@ -339,6 +341,10 @@ public:
   [[nodiscard]] bool isNodeSelectable(int nodeIndex) const;
   // Returns `nodeIndex` if it is selectable, otherwise the closest selectable ancestor, or -1 if none.
   [[nodiscard]] int nearestSelectableAncestor(int nodeIndex) const;
+  // KHR_node_hoverability: same cascading-opt-out shape as selectability, gating hover instead.
+  [[nodiscard]] bool isNodeHoverable(int nodeIndex) const;
+  // Returns `nodeIndex` if it is hoverable, otherwise the closest hoverable ancestor, or -1 if none.
+  [[nodiscard]] int nearestHoverableAncestor(int nodeIndex) const;
   // True if the node is an external-asset instance node (carries an `externalAsset` link). These
   // nodes stay editable; "Make Editable" (SceneEditor::makeExternalAssetEditable) breaks the link.
   [[nodiscard]] bool isExternalAssetInstance(int nodeIndex) const
@@ -391,6 +397,43 @@ public:
   const std::vector<std::string>& getVariants() const { return m_variants; }
   [[nodiscard]] int               getCurrentVariant() const { return m_currentVariant; }
   [[nodiscard]] std::unordered_set<int> getMaterialRenderNodes(const std::unordered_set<int>& materialVariantNodeIDs) const;
+
+  //--------------------------------------------------------------------------------------------------
+  // KHR_interactivity Management
+  //
+  // m_interactivityGraphs is the compiled (parsed-once, immutable) form; m_interactivityInstances
+  // holds one runtime InteractivityGraphInstance per graph, index-aligned. Only the default graph
+  // (KHR_interactivity.graph, default 0) auto-runs each frame via tickInteractivityGraphs(); the
+  // others exist so a future UI can preview/switch between them. See docs/interactivity.md.
+  //--------------------------------------------------------------------------------------------------
+
+  [[nodiscard]] const std::vector<InteractivityGraph>& getInteractivityGraphs() const { return m_interactivityGraphs; }
+  [[nodiscard]] int                         getDefaultInteractivityGraph() const { return m_defaultInteractivityGraph; }
+  [[nodiscard]] InteractivityGraphInstance* getInteractivityInstance(int graphIndex);
+
+  // (Re-)builds m_interactivityGraphs + fresh m_interactivityInstances from the current
+  // model.extensions["KHR_interactivity"]. Called automatically at the end of load(); public so
+  // callers that mutate getModel().extensions directly (e.g. tests building a graph on top of an
+  // already-loaded scene) can pick the change up without a full reload.
+  void parseInteractivityGraphs();
+
+  // Ticks the default graph's instance (starts it on first call) by deltaSeconds. No-op if the
+  // model has no KHR_interactivity graphs. Returns true if anything about the graph's runtime
+  // state changed (currently: any successful tick - see docs/interactivity.md's Phase A caveat
+  // that variable/pointer writes are not yet GPU-visible).
+  bool tickInteractivityGraphs(float deltaSeconds);
+
+  // Fires event/onSelect (KHR_node_selectability) handlers bound anywhere on nodeIndex's ancestor
+  // chain (inclusive), spec-mandated bubbling - every bound ancestor fires, not just the nearest.
+  // controllerIndex is always 0 (this app has one interaction source: the desktop mouse).
+  void notifyNodeSelected(int nodeIndex, const glm::vec3& selectionPoint, const glm::vec3& selectionRayOrigin);
+
+  // Fires event/onHoverIn (for newNodeIndex's ancestor chain) and event/onHoverOut (for
+  // previousNodeIndex's ancestor chain) handlers, bubbling up to but excluding their lowest common
+  // ancestor (spec: a node only receives a new hover transition when the hover action actually
+  // enters/exits its whole subtree, not on a transition between its own descendants). Pass -1 for
+  // "nothing was/is hovered" (first hover, or the cursor left the viewport/all geometry).
+  void notifyNodeHoverChanged(int previousNodeIndex, int newNodeIndex);
 
   //--------------------------------------------------------------------------------------------------
   // Camera Management
@@ -697,6 +740,21 @@ private:
 
   std::vector<std::string> m_variants;  // KHR_materials_variants
   int                      m_currentVariant = 0;
+
+  //--------------------------------------------------------------------------------------------------
+  // Data Members: KHR_interactivity
+  //--------------------------------------------------------------------------------------------------
+
+  std::vector<InteractivityGraph> m_interactivityGraphs;
+  std::vector<std::unique_ptr<InteractivityGraphInstance>> m_interactivityInstances;  // index-aligned with m_interactivityGraphs
+  int m_defaultInteractivityGraph = 0;
+  // Attached to every InteractivityGraphInstance in m_interactivityInstances (see .cpp) so
+  // pointer/get and pointer/set can read/write this Scene's model. Concrete type is
+  // ScenePointerResolver (gltf_interactivity_scene_pointer.hpp) - only .cpp needs that header.
+  std::unique_ptr<InteractivityPointerResolver> m_interactivityPointerResolver;
+  // Same idea, for animation/start's validity/duration queries. Concrete type is
+  // SceneAnimationResolver (gltf_interactivity_scene_animation.hpp) - only .cpp needs that header.
+  std::unique_ptr<InteractivityAnimationResolver> m_interactivityAnimationResolver;
 
   //--------------------------------------------------------------------------------------------------
   // Data Members: Scene State
