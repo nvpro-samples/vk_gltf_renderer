@@ -1270,9 +1270,22 @@ void GltfRenderer::renderMenu()
   renderDebugMenu();
   renderMenuToolbarAndGizmos();
 
-  auto getSaveImage = [this]() {
-    return nvgui::windowSaveFileDialog(m_app->getWindowHandle(), "Save Image",
-                                       "Image Files|*.png;*.jpg;*.hdr|PNG Files|*.png|JPG Files|*.jpg|HDR Files|*.hdr");
+  // Shared "Save As"-style dialog wrapper: opens with defaultPath pre-filled and, if given a
+  // remember-slot, updates it with the user's choice so later saves keep offering that name.
+  auto saveFileDialog = [this](const char* title, const char* filter, const std::filesystem::path& defaultPath,
+                               std::filesystem::path* rememberInto = nullptr) {
+    std::filesystem::path filename = nvgui::windowSaveFileDialog(m_app->getWindowHandle(), title, filter, defaultPath);
+    if(!filename.empty() && rememberInto)
+      *rememberInto = filename;
+    return filename;
+  };
+  auto isGltfExt = [](const std::filesystem::path& p) {
+    return nvutils::extensionMatches(p, ".gltf") || nvutils::extensionMatches(p, ".glb");
+  };
+
+  auto getSaveImage = [this, &saveFileDialog]() {
+    return saveFileDialog("Save Image", "Image Files|*.png;*.jpg;*.hdr|PNG Files|*.png|JPG Files|*.jpg|HDR Files|*.hdr",
+                          m_imageSaveFilename, &m_imageSaveFilename);
   };
 
   if(newScene)
@@ -1281,6 +1294,7 @@ void GltfRenderer::renderMenu()
     vkQueueWaitIdle(m_app->getQueue(0).queue);
     cleanupScene();
     m_sceneSelection.clearSelection();
+    m_imageSaveFilename.clear();
   }
 
   if(reloadShader)
@@ -1334,18 +1348,24 @@ void GltfRenderer::renderMenu()
     // "Save": write directly to the current scene file when it is a glTF/glb we can overwrite.
     // Otherwise (no path yet, or a non-glTF source like .obj/.scene.json) fall back to "Save As".
     const std::filesystem::path& currentFilename = m_resources.getScene()->getFilename();
-    const bool isGltf = nvutils::extensionMatches(currentFilename, ".gltf") || nvutils::extensionMatches(currentFilename, ".glb");
-    if(!currentFilename.empty() && isGltf)
+    if(!currentFilename.empty() && isGltfExt(currentFilename))
       save(currentFilename);
     else
       saveAsFile = true;
   }
 
+  // Default filename offered by the "Save As" dialogs: the current scene file when it's already a
+  // glTF/glb we can round-trip, otherwise the loaded file's stem with a .gltf extension (e.g. after
+  // loading an .obj) — matches getSaveImage()'s "default name follows the loaded scene" behavior.
+  auto getSceneDefaultFilename = [this, &isGltfExt]() {
+    const std::filesystem::path& currentFilename = m_resources.getScene()->getFilename();
+    return isGltfExt(currentFilename) ? currentFilename : std::filesystem::path(currentFilename.stem()).replace_extension(".gltf");
+  };
+  static constexpr const char* kGltfFilter = "glTF Files|*.gltf;*.glb|glTF Text|*.gltf|glTF Binary|*.glb";
+
   if(saveAsFile && validScene)
   {
-    std::filesystem::path filename = nvgui::windowSaveFileDialog(m_app->getWindowHandle(), "Save glTF",
-                                                                 "glTF Files|*.gltf;*.glb|glTF Text|*.gltf|glTF Binary|*.glb",
-                                                                 m_resources.getScene()->getFilename());
+    std::filesystem::path filename = saveFileDialog("Save glTF", kGltfFilter, getSceneDefaultFilename());
     if(!filename.empty())
       save(filename);
   }
@@ -1353,9 +1373,7 @@ void GltfRenderer::renderMenu()
   if(saveSelfContainedAsFile && validScene)
   {
     // glTF 2.1: write a portable copy with external assets baked inline (no external references).
-    std::filesystem::path filename = nvgui::windowSaveFileDialog(m_app->getWindowHandle(), "Save Self-Contained glTF",
-                                                                 "glTF Files|*.gltf;*.glb|glTF Text|*.gltf|glTF Binary|*.glb",
-                                                                 m_resources.getScene()->getFilename());
+    std::filesystem::path filename = saveFileDialog("Save Self-Contained glTF", kGltfFilter, getSceneDefaultFilename());
     if(!filename.empty())
       save(filename, /*selfContained=*/true);
   }

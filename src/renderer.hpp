@@ -284,6 +284,9 @@ private:
   std::filesystem::path m_lastSceneDirectory;
   std::filesystem::path m_lastHdrDirectory;
   std::filesystem::path m_lastImageDirectory;
+  // Default filename offered by the Save Image / Save Screen Image dialogs: the loaded scene's
+  // name (.jpg) until the user saves under a different name, reset on New Scene / new scene load.
+  std::filesystem::path m_imageSaveFilename;
 
   //--------------------------------------------------------------------------------------------------
   //

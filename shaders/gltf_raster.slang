@@ -114,10 +114,17 @@ float3 getTransmissionSample(float2 uv, float roughness, float ior)
 }
 
 #if GLTF_USE_RETROREFLECTION
-PbrMaterial disableBtdf(PbrMaterial mat)
+// KHR_materials_retroreflection excludes additional lobes -- transmission, clearcoat, and sheen --
+// from the mirrored-V blend: they see the real V and are added back untouched (see the
+// `cf - cfBrdf` isolation below). Anisotropy and iridescence stay in, since they're direction-
+// dependent modifiers of the base metal/dielectric lobe and must see the same (mirrored) V that
+// lobe uses (per Khronos spec author confirmation, github.com/KhronosGroup/glTF/pull/2610).
+PbrMaterial disableExcludedRetroLobes(PbrMaterial mat)
 {
   mat.transmission              = 0.0f;
   mat.diffuseTransmissionFactor = 0.0f;
+  mat.clearcoat                 = 0.0f;
+  mat.sheenColor                = float3(0.0f);
   return mat;
 }
 
@@ -128,7 +135,7 @@ float3 bsdfEvalPunctualKhronosMRM(PbrMaterial mat, float3 V, float3 pointToLight
   if(mat.retroreflection <= 0.0f)
     return cf;
 
-  PbrMaterial matBrdf = disableBtdf(mat);
+  PbrMaterial matBrdf = disableExcludedRetroLobes(mat);
   float3 cfBrdf = bsdfEvaluatePunctualKhronos(matBrdf, V, pointToLight, lightIntensity, transmissionRay, dttThickness, sheenLUT);
 
   // V is outgoing (toward camera); MRM uses the incident view ray: reflect(-V, N).
@@ -154,7 +161,7 @@ float3 evalKhronosIBLMRM(PbrMaterial mat,
   if(mat.retroreflection <= 0.0f)
     return cf;
 
-  PbrMaterial matBrdf = disableBtdf(mat);
+  PbrMaterial matBrdf = disableExcludedRetroLobes(mat);
   float3      cfBrdf  = evalKhronosIBL(matBrdf, V, diffuseCube, glossyCube, lut, sheenLUT, envRotation, envIntensity,
                                        dttThickness, float3(0.0f), false);
 

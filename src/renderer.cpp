@@ -1102,6 +1102,7 @@ void GltfRenderer::onFileDrop(const std::filesystem::path& filename)
     cleanupScene();  // also frees rasterizer record cmd + clears sort state via onSceneInvalidated()
 
     m_busy.start("Loading Descriptor");
+    m_imageSaveFilename = std::filesystem::path(filename.stem()).replace_extension(".jpg");
     std::thread([=, this]() {
       m_lastSceneDirectory = filename.parent_path();
       createSceneFromDescriptor(filename);
@@ -1143,6 +1144,7 @@ void GltfRenderer::onFileDrop(const std::filesystem::path& filename)
 
       // Set busy BEFORE starting the worker thread to prevent re-entrant drops
       m_busy.start("Loading");
+      m_imageSaveFilename = std::filesystem::path(filename.stem()).replace_extension(".jpg");
 
       std::thread([=, this]() {
         m_lastSceneDirectory = filename.parent_path();
