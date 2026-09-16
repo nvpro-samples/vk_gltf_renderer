@@ -562,6 +562,22 @@ Both are also available from **File > Save Image** and **File > Save Screen Imag
 
 Open via **Windows > Memory Usage**. Displays GPU memory allocation broken down by category (textures, buffers, acceleration structures, etc.). Useful for tracking memory consumption on large scenes.
 
+### Resetting the UI and Settings
+
+Two entries at the bottom of the **Windows** menu put the application back to a known state without
+having to quit and delete the `.ini`:
+
+- **Reset UI Layout** — re-docks every panel where a fresh run puts it, leaving all settings alone.
+  Use it after a panel has been dragged somewhere unhelpful or ended up floating off-screen.
+- **Reset All to Default** — asks for confirmation, then returns every setting to its built-in
+  default *and* restores the default layout: the state of a first launch with no `.ini`. The loaded
+  scene, its edits, and the loaded environment image stay as they are -- but every *setting* resets,
+  including the ones that drive the environment (sky vs. HDR, lighting, background), so the image
+  can visibly change. This is not undoable with `Ctrl+Z`.
+
+Both are also reachable from a script, a benchmark sequence, or MCP as `--resetUiLayout` and
+`--resetAllToDefault`, which is how the behavior is exercised in a scripted UI run.
+
 ---
 
 ## Configuration
@@ -577,7 +593,9 @@ The application creates a `vk_gltf_renderer.ini` file next to the executable, wh
 - DLSS settings (enable, size mode)
 - Last used environment and rendering options
 
-If you encounter UI issues or want to reset all settings to defaults, delete this file. It will be recreated with default values on the next launch.
+If you encounter UI issues or want to reset all settings to defaults, use **Windows > Reset All to
+Default** (see above), or quit and delete this file — it is recreated with default values on the
+next launch.
 
 ### Command-Line Reference
 
@@ -608,6 +626,8 @@ All settings can be overridden from the command line using `--paramName value` s
 | `--device <index>` | Force a specific Vulkan GPU by device index |
 | `--vsyncOffMode <0-3>` | VSync-off present mode: Immediate (0), Mailbox (1), FIFO (2), FIFO Relaxed (3) |
 | `--floatingWindows` | Allow dock windows to be separate OS windows |
+| `--mcp` | Serve the shader-timing tools over MCP on `http://127.0.0.1:7671/mcp` (see [MCP shader timing](mcp.md)) |
+| `--mcpPort <N>` | Port for the `--mcp` endpoint |
 
 The bridge is also driven from the **Agentic** window (press F7, or open it from the Windows menu). From there, queue an HDRI prompt job or export the current render for image-to-image enhancement through an external adapter such as ComfyUI. See [ComfyUI Agentic Setup](comfyui-agentic-setup.md).
 

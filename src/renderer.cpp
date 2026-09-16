@@ -310,6 +310,20 @@ GltfRenderer::GltfRenderer(nvutils::ParameterRegistry* paramReg, const nvutils::
   m_settings.add({"uiSnapRotation", "Rotation snap increment (degrees)"}, &m_resources.settings.snapRotation, Persist::eYes);
   m_settings.add({"uiSnapScale", "Scale snap increment"}, &m_resources.settings.snapScale, Persist::eYes);
 
+  // The two Windows-menu resets, also reachable from a script, a benchmark sequence and MCP. Both
+  // only raise the pending flag that applyPendingResets() consumes at the top of the next UI pass,
+  // so they are safe to fire from any of those paths. onUIRender() runs in headless and benchmark
+  // runs too, so the settings reset lands there as well; the layout reset is the part that
+  // self-skips, since those runs never build a dockspace. "Reset all" implies the layout too: it
+  // is the no-ini start-up state.
+  m_settings.addAction({"resetUiLayout", "Restore the default docking layout (Windows > Reset UI Layout)"},
+                       [this]() { m_pendingResetLayout = true; });
+  m_settings.addAction({"resetAllToDefault", "Restore every setting and the layout to their defaults (Windows > Reset All to Default)"},
+                       [this]() {
+                         m_pendingResetSettings = true;
+                         m_pendingResetLayout   = true;
+                       });
+
   // Register PathTracer-specific command line parameters
   m_pathTracer.registerParameters(&m_settings);
   m_rasterizer.registerParameters(&m_settings);
@@ -858,6 +872,12 @@ void GltfRenderer::onUIRender()
 
   // Advance the thumbnail cache's deferred-free ring before any panel acquires thumbnails this frame.
   m_thumbnailCache.beginFrame(m_app->getFrameCycleSize());
+
+  // Windows > Reset UI Layout / Reset All to Default, before any panel is submitted. This sits
+  // ahead of the benchmark branch because the two resets are also scriptable actions: a benchmark
+  // sequence that issues --resetAllToDefault expects the settings to be back at their defaults for
+  // the measurements that follow, and benchmark mode never reaches renderUI().
+  applyPendingResets();
 
   if(isBenchmarkMode())
   {
@@ -2336,8 +2356,9 @@ void GltfRenderer::createDescriptorSets()
 // Load an environment map / scene by path.
 //
 // These back the --hdrfile / --scenefile parameters, which carry a callbackSuccess so that setting
-// them does the load -- from the command line or a benchmark sequence alike. Before that, writing
-// either was accepted and did nothing, because both were only read once during start-up.
+// them does the load -- from the command line, a benchmark sequence, or nvpro_set_parameters alike
+// (nvmcp invokes the callback on the application thread). Before that, writing either was accepted
+// and did nothing, because both were only read once during start-up.
 //
 // Path resolution is delegated to createHDR / createScene: both call nvutils::findFile against
 // nvsamples::getResourcesDirs() so bare resource-relative inputs (e.g. `--hdrfile studio.hdr`
@@ -2411,26 +2432,24 @@ void GltfRenderer::syncSunAngles()
 //--------------------------------------------------------------------------------------------------
 // Recompile the active renderer's shaders and show the result.
 // SYNC NOTE: the recompile destroys live pipelines, so the queue must be drained first.
-void GltfRenderer::reloadShaders()
+bool GltfRenderer::reloadShaders()
 {
   vkQueueWaitIdle(m_app->getQueue(0).queue);
-  compileShaders();
+  const bool compiled = compileShaders();
   resetFrame();
+  return compiled;
 }
 
 //--------------------------------------------------------------------------------------------------
 // Recompile the shaders of the current renderer. See onUIMenu() for the key binding
-void GltfRenderer::compileShaders()
+bool GltfRenderer::compileShaders()
 {
   nvutils::ScopedTimer st(__FUNCTION__);
   if(m_resources.settings.renderSystem == RenderingMode::ePathtracer)
   {
-    m_pathTracer.reloadShader(m_resources);
+    return m_pathTracer.reloadShader(m_resources);
   }
-  else
-  {
-    m_rasterizer.compileShader(m_resources, true);
-  }
+  return m_rasterizer.compileShader(m_resources, true);
 }
 
 //--------------------------------------------------------------------------------------------------
@@ -2722,7 +2741,15 @@ void GltfRenderer::destroyResources()
   vkDestroyCommandPool(m_device, m_transientCmdPool, nullptr);
 
   m_profilerGpuTimer.deinit();
-  g_profilerManager.destroyTimeline(m_profilerTimeline);
+  {
+#ifdef USE_NVMCP
+    // Automation (MCP) reads the timeline from a worker thread under this same lock, so take it
+    // here: the release only happens once no read is in flight, and every later read sees nullptr.
+    const std::lock_guard<std::mutex> lock(m_profilerTimelineMutex);
+#endif
+    g_profilerManager.destroyTimeline(m_profilerTimeline);
+    m_profilerTimeline = nullptr;
+  }
   m_silhouette.deinit(m_resources);
   m_hoverPicker.deinit(m_resources);
 

@@ -51,6 +51,7 @@
 #include "scoped_banner.hpp"
 #include "tinygltf_utils.hpp"
 #include "ui_animation.hpp"
+#include "ui_dock_layout.hpp"
 #include "ui_interactivity.hpp"
 #include "ui_linear_color.hpp"
 #include "ui_mouse_state.hpp"
@@ -833,6 +834,31 @@ void GltfRenderer::renderUI()
     }
     ImGui::EndPopup();
   }
+
+  // Windows > Reset All to Default: not undoable, so confirm before discarding the user's tuning.
+  if(m_openResetAllPopupNextFrame)
+  {
+    ImGui::OpenPopup("ResetAllConfirmation");
+    m_openResetAllPopupNextFrame = false;
+  }
+  if(ImGui::BeginPopupModal("ResetAllConfirmation", nullptr, ImGuiWindowFlags_AlwaysAutoResize))
+  {
+    ImGui::Text("Reset every setting to its default value and restore the default panel layout?");
+    ImGui::Text("The loaded scene and environment image stay loaded, but the settings that drive them");
+    ImGui::Text("-- including the sky/HDR choice, lighting and background -- go back to their defaults.");
+    ImGui::TextDisabled("This cannot be undone with Ctrl+Z.");
+    ImGui::Separator();
+    if(ImGui::Button(ICON_MS_SETTINGS_BACKUP_RESTORE " Reset###confirmResetAll", ImVec2(120, 0)))
+    {
+      m_pendingResetSettings = true;
+      m_pendingResetLayout   = true;
+      ImGui::CloseCurrentPopup();
+    }
+    ImGui::SameLine();
+    if(ImGui::Button(ICON_MS_CANCEL " Cancel", ImVec2(120, 0)))
+      ImGui::CloseCurrentPopup();
+    ImGui::EndPopup();
+  }
 }
 
 void GltfRenderer::renderFileMenu(bool                   validScene,
@@ -1009,7 +1035,43 @@ void GltfRenderer::renderWindowsMenu()
   ImGui::MenuItem(ICON_MS_GRID_VIEW " Grid & Snap", nullptr, &m_resources.settings.showGridSettingsWindow);
   ImGui::Separator();
   ImGui::MenuItem(ICON_MS_MONITORING " Memory Usage", nullptr, &m_resources.settings.showMemStats);
+  ImGui::Separator();
+  if(ImGui::MenuItem(ICON_MS_DASHBOARD " Reset UI Layout"))
+    m_pendingResetLayout = true;
+  ImGui::SetItemTooltip("Dock every panel back where a fresh run puts it. Settings are left alone.");
+  if(ImGui::MenuItem(ICON_MS_SETTINGS_BACKUP_RESTORE " Reset All to Default"))
+    m_openResetAllPopupNextFrame = true;
+  ImGui::SetItemTooltip(
+      "Put the application back in its out-of-the-box state: every setting at its default and the "
+      "default panel layout, as if starting with no ImGui.ini. The loaded scene and environment "
+      "image stay loaded, but the settings that drive them reset too.");
   ImGui::EndMenu();
+}
+
+// Consume the deferred Windows > Reset requests. Called at the top of the UI pass, so the docking
+// tree is rebuilt (and the settings are back at their defaults) before any panel is submitted this
+// frame.
+//
+// Resetting the settings writes storage directly, exactly as an ImGui.ini restore does, so the
+// same follow-up applies: replay the post-restore hooks for derived state (see settings_registry.hpp)
+// and restart accumulation. Everything else the renderers read per frame -- active renderer,
+// visualization mode, shader specialization -- is sampled from the settings each frame, so there is
+// nothing further to invalidate.
+void GltfRenderer::applyPendingResets()
+{
+  if(m_pendingResetSettings)
+  {
+    m_pendingResetSettings = false;
+    m_settings.resetToDefaults();
+    m_settings.runPostRestoreHooks();
+    resetFrame();
+    notify("Settings reset to default", false);
+  }
+  if(m_pendingResetLayout)
+  {
+    m_pendingResetLayout = false;
+    ui::resetDockLayout();
+  }
 }
 
 // (The Agentic feature has no top-level menu; its window is toggled from the

@@ -1204,6 +1204,51 @@ void nvvkgltf::SceneVk::uploadVertexBuffers(nvvk::CmdUploaderInterface& staging,
 
 
 //--------------------------------------------------------------------------------------------------------------
+// glTF filter/wrap enums -> Vulkan. Unknown values fall back to the glTF default instead of
+// throwing (std::map::at) -- a malformed asset should degrade, not abort the load.
+
+static VkFilter toVkFilter(int gltfFilter)
+{
+  switch(gltfFilter)
+  {
+    case TINYGLTF_TEXTURE_FILTER_NEAREST:
+    case TINYGLTF_TEXTURE_FILTER_NEAREST_MIPMAP_NEAREST:
+    case TINYGLTF_TEXTURE_FILTER_NEAREST_MIPMAP_LINEAR:
+      return VK_FILTER_NEAREST;
+    default:
+      return VK_FILTER_LINEAR;
+  }
+}
+
+// Only minFilter carries mip behaviour in glTF: magFilter is NEAREST or LINEAR and says nothing
+// about mips. The two non-mipmapped minFilters (NEAREST / LINEAR) leave mip selection undefined,
+// so keep trilinear -- the mip chain exists and using it is what avoids minification aliasing.
+static VkSamplerMipmapMode toVkMipmapMode(int gltfMinFilter)
+{
+  switch(gltfMinFilter)
+  {
+    case TINYGLTF_TEXTURE_FILTER_NEAREST_MIPMAP_NEAREST:
+    case TINYGLTF_TEXTURE_FILTER_LINEAR_MIPMAP_NEAREST:
+      return VK_SAMPLER_MIPMAP_MODE_NEAREST;
+    default:
+      return VK_SAMPLER_MIPMAP_MODE_LINEAR;
+  }
+}
+
+static VkSamplerAddressMode toVkAddressMode(int gltfWrap)
+{
+  switch(gltfWrap)
+  {
+    case TINYGLTF_TEXTURE_WRAP_CLAMP_TO_EDGE:
+      return VK_SAMPLER_ADDRESS_MODE_CLAMP_TO_EDGE;
+    case TINYGLTF_TEXTURE_WRAP_MIRRORED_REPEAT:
+      return VK_SAMPLER_ADDRESS_MODE_MIRRORED_REPEAT;
+    default:
+      return VK_SAMPLER_ADDRESS_MODE_REPEAT;
+  }
+}
+
+//--------------------------------------------------------------------------------------------------------------
 // Returning the Vulkan sampler information from the information in the tinygltf
 //
 static VkSamplerCreateInfo getSampler(const tinygltf::Model& model, int index)
@@ -1214,34 +1259,21 @@ static VkSamplerCreateInfo getSampler(const tinygltf::Model& model, int index)
   samplerInfo.mipmapMode = VK_SAMPLER_MIPMAP_MODE_LINEAR;
   samplerInfo.maxLod     = VK_LOD_CLAMP_NONE;
 
-  if(index < 0)
+  if(index < 0 || static_cast<size_t>(index) >= model.samplers.size())
     return samplerInfo;
 
   const auto& sampler = model.samplers[index];
 
-  const std::map<int, VkFilter> filters = {{9728, VK_FILTER_NEAREST}, {9729, VK_FILTER_LINEAR},
-                                           {9984, VK_FILTER_NEAREST}, {9985, VK_FILTER_LINEAR},
-                                           {9986, VK_FILTER_NEAREST}, {9987, VK_FILTER_LINEAR}};
-
-  const std::map<int, VkSamplerMipmapMode> mipmapModes = {
-      {9728, VK_SAMPLER_MIPMAP_MODE_NEAREST}, {9729, VK_SAMPLER_MIPMAP_MODE_LINEAR},
-      {9984, VK_SAMPLER_MIPMAP_MODE_NEAREST}, {9985, VK_SAMPLER_MIPMAP_MODE_LINEAR},
-      {9986, VK_SAMPLER_MIPMAP_MODE_NEAREST}, {9987, VK_SAMPLER_MIPMAP_MODE_LINEAR}};
-
-  const std::map<int, VkSamplerAddressMode> wrapModes = {
-      {TINYGLTF_TEXTURE_WRAP_REPEAT, VK_SAMPLER_ADDRESS_MODE_REPEAT},
-      {TINYGLTF_TEXTURE_WRAP_CLAMP_TO_EDGE, VK_SAMPLER_ADDRESS_MODE_CLAMP_TO_EDGE},
-      {TINYGLTF_TEXTURE_WRAP_MIRRORED_REPEAT, VK_SAMPLER_ADDRESS_MODE_MIRRORED_REPEAT}};
-
   if(sampler.minFilter > -1)
-    samplerInfo.minFilter = filters.at(sampler.minFilter);
-  if(sampler.magFilter > -1)
   {
-    samplerInfo.magFilter  = filters.at(sampler.magFilter);
-    samplerInfo.mipmapMode = mipmapModes.at(sampler.magFilter);
+    samplerInfo.minFilter  = toVkFilter(sampler.minFilter);
+    samplerInfo.mipmapMode = toVkMipmapMode(sampler.minFilter);
   }
-  samplerInfo.addressModeU = wrapModes.at(sampler.wrapS);
-  samplerInfo.addressModeV = wrapModes.at(sampler.wrapT);
+  if(sampler.magFilter > -1)
+    samplerInfo.magFilter = toVkFilter(sampler.magFilter);
+
+  samplerInfo.addressModeU = toVkAddressMode(sampler.wrapS);
+  samplerInfo.addressModeV = toVkAddressMode(sampler.wrapT);
 
   return samplerInfo;
 }
@@ -1422,7 +1454,12 @@ void nvvkgltf::SceneVk::ensureSamplers(const tinygltf::Model& model)
   if(m_samplers.empty())
   {
     VkSampler defaultSampler{};
-    NVVK_CHECK(m_samplerPool->acquireSampler(defaultSampler));  // slot 0
+    // Slot 0 must be the glTF default sampler, not the pool's: acquireSampler()'s own default
+    // create info leaves maxLod at 0, which clamps every fetch to mip 0. A texture with no
+    // "sampler" property (the common case -- an exporter that writes none) would then never
+    // mipmap, no matter what LOD the shader asks for. getSampler(model, -1) returns the spec
+    // default: LINEAR/LINEAR, MIPMAP_LINEAR, REPEAT, maxLod unclamped.
+    NVVK_CHECK(m_samplerPool->acquireSampler(defaultSampler, getSampler(model, -1)));  // slot 0
     m_samplers.push_back(defaultSampler);
   }
   // m_samplers[0] is the default; m_samplers[1..] mirror model.samplers[0..]. Acquire only the new tail.

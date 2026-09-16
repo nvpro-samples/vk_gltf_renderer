@@ -53,7 +53,10 @@ public:
   [[nodiscard]] virtual bool onUIRender(Resources&) { return false; }
 
   //---
-  virtual void compileShader(Resources& resources, bool fromFile = true) {};
+  // Returns false only when a from-file compile was requested and the Slang compile failed. The
+  // renderer then runs the build-time embedded SPIR-V: the previously active shader does not
+  // survive a failed reload, so callers that report success must report this.
+  virtual bool compileShader(Resources& resources, bool fromFile = true) { return true; };
   virtual void createPipeline(Resources& resources) {};
   virtual void freeRecordCommandBuffer(Resources& resources) {};
 

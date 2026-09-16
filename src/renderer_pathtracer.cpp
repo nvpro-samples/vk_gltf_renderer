@@ -1082,7 +1082,7 @@ void PathTracer::createRtxPipeline(Resources& resources)
 
 //--------------------------------------------------------------------------------------------------
 // Compile the shader
-void PathTracer::reloadShader(Resources& resources)
+bool PathTracer::reloadShader(Resources& resources)
 {
   if(m_compileThread.joinable())
     m_compileThread.join();
@@ -1091,14 +1091,15 @@ void PathTracer::reloadShader(Resources& resources)
   // recent variant switch; live handles are destroyed in compileShader() below.
   NVVK_CHECK(vkQueueWaitIdle(resources.app->getQueue(0).queue));
   destroyVariantCache(resources);
-  m_skipVariantCache = true;
-  compileShader(resources, true);
-  m_skipVariantCache = false;
+  m_skipVariantCache      = true;
+  const bool compiledFile = compileShader(resources, true);
+  m_skipVariantCache      = false;
+  return compiledFile;
 }
 
 //--------------------------------------------------------------------------------------------------
 // Compile the shader
-void PathTracer::compileShader(Resources& resources, bool fromFile)
+bool PathTracer::compileShader(Resources& resources, bool fromFile)
 {
   SCOPED_TIMER(__FUNCTION__);
   // Variant cache: try to find a previously-compiled shader + pipelines for the variant the
@@ -1124,7 +1125,7 @@ void PathTracer::compileShader(Resources& resources, bool fromFile)
     if(swapVariant(resources, targetKey))
     {
       LOGI("[PathTracer] Variant cache hit.\n");
-      return;
+      return true;
     }
     // Cache miss: handles were cleared; will rebuild below.
   }
@@ -1239,6 +1240,8 @@ void PathTracer::compileShader(Resources& resources, bool fromFile)
     // Destroy pipeline since there is a new shader
     destroyPipelinesLocked();
   }
+
+  return !fromFile || compiledFromFile;
 }
 
 void PathTracer::destroyPipelinesLocked()

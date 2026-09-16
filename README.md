@@ -106,6 +106,9 @@ For a **full walkthrough** of rendering modes, editor workflows, and feature scr
 
 For **headless timing** and optional scripted GPU benchmarks, see [Benchmarking](docs/benchmarking.md) (`utils/benchmark/`).
 
+To let an AI agent measure a shader change against the running renderer, launch with `--mcp` and
+see [MCP shader timing](docs/mcp.md).
+
 ## Agentic — AI-Assisted Generation
 
 Drive local generative AI from inside the renderer through an optional **[ComfyUI](https://www.comfy.org/)** bridge. Two tools are wired into the in-app **Agentic** window (press **F7**):

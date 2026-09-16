@@ -43,6 +43,8 @@
 #include <nvvk/validation_settings.hpp>
 
 #include "renderer.hpp"
+#include "ui_dock_layout.hpp"
+#include "mcp_timing.hpp"
 #ifdef USE_AGENTIC
 #include "agentic_bridge.hpp"
 #endif
@@ -105,14 +107,15 @@ auto main(int argc, char** argv) -> int
   // Command line parameters registration.
   //
   // scenefile/hdrfile load on change, so they work identically from the command line, a benchmark
-  // sequence, and nvpro_set_parameters. The callback no-ops during this start-up parse (the
-  // renderer is not attached yet) and the explicit load further down handles that case.
-  GltfRenderer* renderer = nullptr;  // assigned once the element exists, below
+  // sequence, and nvpro_set_parameters. `renderer` stays null until after the start-up parse, so
+  // the callbacks no-op there (the renderer has no Vulkan device yet, and a load attempt would
+  // only report the start-up file as broken); the explicit load further down handles that case.
+  GltfRenderer* renderer = nullptr;  // assigned after the start-up parse, below
   parameterRegistry.add({.name = "scenefile",
                          .help = "Input scene filename (loads immediately when set at runtime)",
                          .callbackSuccess =
                              [&renderer, &sceneFilename](const nvutils::ParameterBase* const) {
-                               // Warn if scene load fails so caller knows old scene is still active.                       
+                               // Warn if scene load fails so caller knows old scene is still active.
                                if(renderer && !renderer->loadSceneFile(sceneFilename))
                                {
                                  LOGW("scenefile '%s' did not load; previous scene (if any) is still active.\n",
@@ -141,6 +144,12 @@ auto main(int argc, char** argv) -> int
   parameterRegistry.add({"headless"}, &appInfo.headless, true);
   parameterRegistry.add({"frames", "Number of frames to run in headless mode"}, &appInfo.headlessFrameCount);
   parameterRegistry.add({"vsync"}, &appInfo.vSync);
+#ifdef USE_NVMCP
+  bool     enableMcp = false;
+  uint32_t mcpPort   = 7671;
+  parameterRegistry.add({"mcp", "Serve the shader-timing tools over MCP (see src/mcp_timing.cpp)"}, &enableMcp, true);
+  parameterRegistry.add({"mcpPort", "Port for the --mcp endpoint (1-65535)"}, &mcpPort);
+#endif
   parameterRegistry.add({"benchmark", "Enable benchmarking: scripted sequences, no vsync, minimal UI"},
                         &benchmarkOptions.enabled);
   parameterRegistry.add({"vvl", "Activate Vulkan Validation Layer"}, &vkSetup.enableValidationLayers);
@@ -159,7 +168,6 @@ auto main(int argc, char** argv) -> int
 
   // Create renderer early so it can register CLI/benchmark parameters
   auto elemGltfRenderer = std::make_shared<GltfRenderer>(&parameterRegistry, &cli, benchmarkOptions);
-  renderer              = elemGltfRenderer.get();  // now the scenefile/hdrfile callbacks can act
 
   sequencerInfo.registerScriptParameters(parameterRegistry, cli);
   sequencerInfo.postCallbacks.emplace_back(
@@ -168,6 +176,10 @@ auto main(int argc, char** argv) -> int
   // Adding the parameter registry to the command line parser and parsing arguments
   cli.add(parameterRegistry);
   cli.parse(argc, argv);
+  // Only now may the scenefile/hdrfile callbacks act: during the parse above the renderer has no
+  // device yet, so a load would fail and report the start-up file as broken. The explicit load
+  // further down is what handles the command-line case.
+  renderer = elemGltfRenderer.get();
   cli.setVerbose(benchmarkOptions.enabled);
 
 #ifdef USE_AGENTIC
@@ -429,35 +441,9 @@ auto main(int argc, char** argv) -> int
   // it to leave ample headroom above the viewport/denoiser images the app already registers.
   appInfo.texturePoolSize = 1024U;
 
-  // Setting up the layout of the application
-  appInfo.dockSetup = [](ImGuiID viewportID) {
-    // Left side panel container
-    ImGuiID settingID = ImGui::DockBuilderSplitNode(viewportID, ImGuiDir_Left, 0.25F, nullptr, &viewportID);
-    ImGui::DockBuilderDockWindow("Camera", settingID);
-    ImGui::DockBuilderDockWindow("Settings", settingID);
-
-    // Under Setting
-    ImGuiID tonemapID = ImGui::DockBuilderSplitNode(settingID, ImGuiDir_Down, 0.35F, nullptr, &settingID);
-    ImGui::DockBuilderDockWindow("Tonemapper", tonemapID);
-    ImGui::DockBuilderDockWindow("Environment", tonemapID);
-
-    // Right side: Scene Browser, Inspector (bottom)
-    ImGuiID sceneBrowserID = ImGui::DockBuilderSplitNode(viewportID, ImGuiDir_Right, 0.25F, nullptr, &viewportID);
-    ImGui::DockBuilderDockWindow("Scene Browser", sceneBrowserID);
-    ImGuiID inspectorID = ImGui::DockBuilderSplitNode(sceneBrowserID, ImGuiDir_Down, 0.35F, nullptr, &sceneBrowserID);
-    ImGui::DockBuilderDockWindow("Inspector", inspectorID);
-
-    // bottom panel container
-    ImGuiID logID = ImGui::DockBuilderSplitNode(viewportID, ImGuiDir_Down, 0.35F, nullptr, &viewportID);
-    ImGui::DockBuilderDockWindow("Log", logID);
-    ImGuiID monitorID = ImGui::DockBuilderSplitNode(logID, ImGuiDir_Right, 0.35F, nullptr, &logID);
-    ImGui::DockBuilderDockWindow("NVML Monitor", monitorID);
-    ImGuiID profilerID = ImGui::DockBuilderSplitNode(logID, ImGuiDir_Right, 0.33F, nullptr, &logID);
-    ImGui::DockBuilderDockWindow("Profiler", profilerID);
-    ImGuiID memStatsID = ImGui::DockBuilderSplitNode(logID, ImGuiDir_Right, 0.33F, nullptr, &logID);
-    ImGui::DockBuilderDockWindow("Memory Statistics", memStatsID);
-    ImGui::DockBuilderDockWindow("Statistics", memStatsID);
-  };
+  // Setting up the layout of the application. The same function backs Windows > Reset UI Layout,
+  // so the two can never drift (src/ui_dock_layout.cpp).
+  appInfo.dockSetup = &ui::buildDefaultDockLayout;
 
   // Create the application
   nvapp::Application app;
@@ -476,6 +462,21 @@ auto main(int argc, char** argv) -> int
     app.addElement(elemSequencer);
   }
   app.addElement(elemGltfRenderer);
+#ifdef USE_NVMCP
+  if(enableMcp && (mcpPort == 0 || mcpPort > 65535))
+  {
+    // Narrowing a bad value would silently bind a different port than the client was told to use.
+    LOGE("--mcpPort %u is not a valid TCP port (1-65535); the MCP endpoint is disabled.\n", unsigned(mcpPort));
+    enableMcp = false;
+  }
+  if(enableMcp)
+  {
+    if(auto elemMcp = createTimingMcpServer({.port = uint16_t(mcpPort)}, elemGltfRenderer))
+    {
+      app.addElement(elemMcp);
+    }
+  }
+#endif
   if(!benchmarkOptions.enabled)
   {
     app.addElement(elemLogger);

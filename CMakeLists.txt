@@ -74,6 +74,13 @@ option(REQUIRE_NVML_MONITOR   "Fail configure if NVML support is unavailable in 
 option(NVPRO2_ENABLE_nvgl     "Build the OpenGL helpers in nvpro_core2 (unused here)."           OFF)
 option(NVPRO2_ENABLE_nvvkgltf "Build the nvvkgltf helper in nvpro_core2 (we ship a local copy)." OFF)
 option(NVPRO2_ENABLE_nvvkglsl "Build the nvvkglsl helper in nvpro_core2 (Slang replaces GLSL)."  OFF)
+# Optional MCP endpoint for agent-driven shader timing (--mcp, see src/mcp_timing.cpp). Enabling
+# this makes nvpro_core2 fetch its pinned cpp-mcp dependency during configure.
+option(NVPRO2_ENABLE_nvmcp    "Build the nvmcp MCP endpoint in nvpro_core2 (--mcp enables it)."  ON)
+# Expose every registered command-line parameter through nvmcp's parameter tools, instead of
+# curating an allowlist here. One place to add a parameter -- the registry -- and the agent sees it.
+option(NVPRO2_ENABLE_MCP_AUTO_PARAMETER_REGISTRY
+       "Expose all registered parameters over MCP (nvpro_core2 option; declared here to default it ON)." ON)
 
 # ---- SDK versions and local overrides ----------------------------------------------
 # These are downloaded automatically on first configure. Point *_ROOT_OVERRIDE
@@ -222,6 +229,11 @@ if(NOT USE_AGENTIC)
   list(FILTER EXE_SOURCES EXCLUDE REGEX "agentic")
 endif()
 
+# main.cpp guards its integration points on USE_NVMCP, so the renderer builds unchanged without it.
+if(NOT NVPRO2_ENABLE_nvmcp)
+  list(FILTER EXE_SOURCES EXCLUDE REGEX "src/mcp_")
+endif()
+
 add_executable(${PROJECT_NAME} ${EXE_SOURCES})
 
 target_link_libraries(${PROJECT_NAME} PRIVATE
@@ -242,6 +254,16 @@ target_link_libraries(${PROJECT_NAME} PRIVATE
   tinyobjloader
   meshoptimizer
 )
+
+# nvmcp is an opt-in nvpro_core2 module; fail loudly rather than silently dropping the tools.
+if(NVPRO2_ENABLE_nvmcp)
+  if(NOT TARGET nvpro2::nvmcp)
+    message(FATAL_ERROR "NVPRO2_ENABLE_nvmcp is ON, but the nvpro2::nvmcp target is not available. "
+                        "Update nvpro_core2, or configure with -DNVPRO2_ENABLE_nvmcp=OFF.")
+  endif()
+  target_link_libraries(${PROJECT_NAME} PRIVATE nvpro2::nvmcp)
+  target_compile_definitions(${PROJECT_NAME} PRIVATE USE_NVMCP)
+endif()
 
 add_project_definitions(${PROJECT_NAME})
 

@@ -22,15 +22,15 @@
 /*
  * One declaration per user-settable value.
  *
- * A setting has to reach three consumers: the command line, benchmark parameter sequences, and the
- * ImGui.ini that remembers it between runs. The first two read nvutils::ParameterRegistry; the last
- * reads nvgui::SettingsHandler.
+ * A setting has to reach four consumers: the command line, benchmark parameter sequences, the
+ * optional MCP endpoint (docs/mcp.md), and the ImGui.ini that remembers it between runs. The first
+ * three all read nvutils::ParameterRegistry; the last reads nvgui::SettingsHandler.
  *
  * Those used to be two hand-maintained lists, registered at two different points in the lifecycle
  * -- parameters in the constructor, settings in onAttach -- so no single place showed both and they
  * drifted badly (the tonemapper persisted its method but not its exposure; ptTechnique persisted
- * but ptUseSER did not). Declaring through this registry makes that impossible: one call feeds them
- * all, and Persist is a decision you have to state rather than forget.
+ * but ptUseSER did not). Declaring through this registry makes that impossible: one call feeds all
+ * four, and Persist is a decision you have to state rather than forget.
  *
  * Because the settings handler only exists later, persisted declarations are recorded here and
  * replayed by applyPersistence() once it does.
@@ -78,6 +78,7 @@ public:
   void add(const nvutils::ParameterBase::Info& info, T* storage, Persist persist, Rest&&... rest)
   {
     m_registry->add(info, storage, std::forward<Rest>(rest)...);
+    rememberDefault(storage);
     if(persist == Persist::eYes)
       remember(info.name, storage);
   }
@@ -87,13 +88,14 @@ public:
   void addVector(const nvutils::ParameterBase::Info& info, GLMVEC* storage, Persist persist)
   {
     m_registry->addVector(info, storage);
+    rememberDefault(storage);
     if(persist == Persist::eYes)
       remember(info.name, storage);
   }
 
-  // An action: no storage, just a callback. Runs from the command line and a benchmark sequence
-  // alike. callbackSuccess fires on the application thread, so the callback may touch scene and
-  // Vulkan state. Never persisted.
+  // An action: no storage, just a callback. Runs from the command line, a benchmark sequence, and
+  // nvpro_set_parameters alike -- nvmcp invokes callbackSuccess on the application thread, so the
+  // callback may touch scene and Vulkan state. Never persisted.
   void addAction(nvutils::ParameterBase::Info info, std::function<void()> action)
   {
     info.callbackSuccess = [action = std::move(action)](const nvutils::ParameterBase* const) { action(); };
@@ -130,9 +132,31 @@ public:
       m_postRestoreHooks[i]();
   }
 
+  // Restore every declared value to the default it held when it was declared -- i.e. the state of a
+  // run with no ImGui.ini and no command line (Windows > Reset All to Default). Declarations happen
+  // in the GltfRenderer constructor, before the ini is read and before the command line is applied,
+  // so the value captured there *is* the built-in default.
+  //
+  // This writes storage directly, exactly like ImGui.ini restore does, and for the same reason: the
+  // per-setting callbackSuccess describes a single CLI/UI edit, not a wholesale restore. Callers
+  // must therefore follow it with runPostRestoreHooks() to refresh derived state -- the same
+  // contract the ini path already obeys.
+  void resetToDefaults() const
+  {
+    for(size_t i = 0; i < m_defaults.size(); i++)
+      m_defaults[i]();
+  }
+
   [[nodiscard]] const std::vector<std::string>& persistedNames() const { return m_persistedNames; }
 
 private:
+  // Capture the declaration-time value so resetToDefaults() can put it back.
+  template <class T>
+  void rememberDefault(T* storage)
+  {
+    m_defaults.push_back([storage, value = *storage]() { *storage = value; });
+  }
+
   template <class T>
   void remember(const std::string& name, T* storage)
   {
@@ -144,6 +168,7 @@ private:
   std::vector<std::function<void(nvgui::SettingsHandler&)>> m_persisted;
   std::vector<std::string>                                  m_persistedNames;
   std::vector<std::function<void()>>                        m_postRestoreHooks;
+  std::vector<std::function<void()>>                        m_defaults;
   // Flag parameters need somewhere to write; an action only cares that the callback fired.
   std::vector<std::unique_ptr<bool>> m_actionStorage;
 };

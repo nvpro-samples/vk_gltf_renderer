@@ -21,6 +21,7 @@
 
 #include <limits>
 #include <memory>
+#include <mutex>
 #include <optional>
 #include <string>
 #include <vector>
@@ -69,6 +70,24 @@
 #include "agentic.hpp"
 #endif
 
+#ifdef USE_NVMCP
+/// A clean timing series for one GPU profiler timer, gathered over a controlled window.
+/// Times are milliseconds. Compare runs on `median`; see src/mcp_timing.cpp.
+struct TimerMeasurement
+{
+  std::string timer{};
+  size_t      samples{0};
+  double      mean{0.0};
+  double      median{0.0};
+  double      standardDeviation{0.0};
+  double      minimum{0.0};
+  double      maximum{0.0};
+  std::string error{};
+
+  [[nodiscard]] static TimerMeasurement failure(std::string message) { return {.error = std::move(message)}; }
+};
+#endif
+
 class GltfRenderer : public nvapp::IAppElement
 {
 public:
@@ -111,7 +130,7 @@ public:
 
   /// Drain the queue, recompile the active renderer's shaders, and reset accumulation.
   /// Application thread only: it destroys and recreates live pipelines.
-  void reloadShaders();
+  bool reloadShaders();  // false: the from-file compile failed and the embedded SPIR-V is now running
 
   /// Mirror skyParams.sunDirection back into skySunAzimuth/skySunElevation after the sky UI moves it.
   void syncSunAngles();
@@ -122,6 +141,14 @@ public:
   [[nodiscard]] bool loadHdrEnvironment(const std::filesystem::path& filename);
   [[nodiscard]] bool loadSceneFile(const std::filesystem::path& filename);
 
+#ifdef USE_NVMCP
+  /// Automation surface for the optional MCP endpoint (src/mcp_timing.cpp), which is where both
+  /// of these are defined. Thread-safe: they only read the profiler's mutex-guarded snapshots.
+  [[nodiscard]] std::vector<std::string> profilerTimerNames() const;
+  /// Blocks for `warmup + frames` rendered frames, so it must be called off the application
+  /// thread -- that is the thread producing the frames it waits on.
+  [[nodiscard]] TimerMeasurement measureTimer(const std::string& name, int warmup, int frames) const;
+#endif
 
 private:
   void onAttach(nvapp::Application* app) override;
@@ -146,7 +173,7 @@ private:
   void applyPendingSamplerUpdate();  // Consume DirtyFlags::samplers at frame top: in-place VkSampler update, no image touch
   void refreshCpuSceneGraphFromModel();
   void rebuildVulkanSceneInternal(nvvkgltf::SceneGpu::RebuildMode mode);  // GPU upload + AS; CPU scene must already be parsed
-  void compileShaders();
+  bool compileShaders();
   void createDescriptorSets();
   void createResourceBuffers();
   void createVulkanScene();
@@ -247,6 +274,10 @@ private:
                       std::filesystem::path& sceneToMergeFilename);
   void renderViewMenu(bool validScene, bool& fitScene, bool& fitObject, bool& toggleVsync);
   void renderWindowsMenu();
+  // Windows > Reset UI Layout / Reset All to Default. Both are deferred to the top of the next UI
+  // pass (m_pendingResetLayout / m_pendingResetSettings) so the rebuild does not run while the menu
+  // bar is mid-submission, and so the panels pick the new state up before they are submitted.
+  void applyPendingResets();
   void renderEditMenu(bool validScene);
   void renderCreateMenu();  // "Create" menu: add procedural primitives (enabled whenever a scene exists)
   void renderToolsMenu(bool validScene, bool& reloadShader, bool& compactScene);
@@ -314,10 +345,17 @@ private:
   //--------------------------------------------------------------------------------------------------
   //
   //
-  nvapp::Application*                         m_app{};               // Application pointer
-  VkDevice                                    m_device{};            // Convenient
-  nvvk::RayPicker                             m_rayPicker{};         // Ray picker
-  nvutils::ProfilerTimeline*                  m_profilerTimeline{};  // Timeline profiler
+  nvapp::Application*        m_app{};               // Application pointer
+  VkDevice                   m_device{};            // Convenient
+  nvvk::RayPicker            m_rayPicker{};         // Ray picker
+  nvutils::ProfilerTimeline* m_profilerTimeline{};  // Timeline profiler
+#ifdef USE_NVMCP
+  // Guards the *lifetime* of m_profilerTimeline (not its contents, which are already mutex-guarded
+  // inside the profiler). Elements detach in registration order, so this renderer destroys the
+  // timeline while the MCP element is still serving: a worker thread can be inside a profiler read
+  // at that moment. Held for one profiler call at a time, never across a wait for a frame.
+  mutable std::mutex m_profilerTimelineMutex;
+#endif
   nvvk::ProfilerGpuTimer                      m_profilerGpuTimer{};  // GPU profiler
   std::shared_ptr<nvutils::CameraManipulator> m_cameraManip;         // Camera manipulator
 
@@ -418,6 +456,11 @@ private:
   // first frame to refresh derived state (e.g. skyParams.sunDirection from the restored
   // skySunAzimuth/Elevation).
   bool m_pendingRestoreCallbacks{true};
+
+  // Requested from the Windows menu, consumed by applyPendingResets() at the top of the UI pass.
+  bool m_pendingResetLayout{false};
+  bool m_pendingResetSettings{false};
+  bool m_openResetAllPopupNextFrame{false};
 
   BenchmarkController m_benchmark;
 };

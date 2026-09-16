@@ -118,9 +118,10 @@ void Rasterizer::registerParameters(SettingsRegistry* settings)
   // the deferred free. Without this, onRender() would replay a stale secondary command buffer
   // (baked viewport / pipelines / draw order) when m_useRecordedCmd is on and twoPass is false.
   //
-  // NOTE: ImGui.ini restore does not fire ParameterBase::callbackSuccess -- it writes storage
-  // directly (see settings_registry.hpp). Any invalidation that must also cover ini restore
-  // needs a shadow-state check in onRender() (see m_lastWireframe for the existing idiom).
+  // NOTE: ImGui.ini restore and Windows > Reset All to Default do not fire
+  // ParameterBase::callbackSuccess -- they write storage directly (see settings_registry.hpp).
+  // Any invalidation that must also cover those needs a shadow-state check in onRender(): see
+  // m_lastWireframe, and m_recordedSceneExtent for the DLSS-driven extent change.
   const auto invalidateRecordedCmd = [this]() { m_recordedSceneCmdDirty = true; };
   settings->add(
       {.name            = "rasterUseRecordedCmd",
@@ -488,6 +489,17 @@ void Rasterizer::onRender(VkCommandBuffer cmd, Resources& resources)
   renderingInfo.pColorAttachments    = attachments.data();
   renderingInfo.pDepthAttachment     = &depthAttachment;
 
+  // The recording bakes viewport/scissor from the extent it was made at, so a change of active
+  // extent invalidates it. The callbacks in registerParameters() cover registry-driven edits, but
+  // not the paths that write setting storage directly -- ImGui.ini restore and Windows > Reset All
+  // to Default -- and those can turn DLSS-SR off under a live recording, moving rendering from the
+  // inner extent back to the outer one. Comparing against the recorded extent catches all of them.
+  if(m_recordedSceneCmd != VK_NULL_HANDLE
+     && (m_recordedSceneExtent.width != targets.extent.width || m_recordedSceneExtent.height != targets.extent.height))
+  {
+    freeRecordCommandBuffer(resources);
+  }
+
   if(recordedThisFrame && m_recordedSceneCmd == VK_NULL_HANDLE)
   {
     recordRasterScene(resources, targets.extent);
@@ -693,7 +705,7 @@ void Rasterizer::createPipeline(Resources& resources)
 //--------------------------------------------------------------------------------------------------
 // Compile the rasterizer's shaders
 // Creates vertex, fragment, and wireframe shaders from the gltf_raster.slang source
-void Rasterizer::compileShader(Resources& resources, bool fromFile)
+bool Rasterizer::compileShader(Resources& resources, bool fromFile)
 {
   SCOPED_TIMER(__FUNCTION__);
 
@@ -725,6 +737,9 @@ void Rasterizer::compileShader(Resources& resources, bool fromFile)
       .pPushConstantRanges    = &pushConstantRange,
   };
 
+  // On a compile error we fall through to the embedded SPIR-V below -- the shader handles are
+  // destroyed and recreated either way, so the previous shader does not survive the failure.
+  bool compiledFromFile = false;
   if(fromFile)
   {
     resources.slangCompiler.clearMacros();
@@ -734,6 +749,7 @@ void Rasterizer::compileShader(Resources& resources, bool fromFile)
     {
       shaderInfo.codeSize = resources.slangCompiler.getSpirvSize();
       shaderInfo.pCode    = resources.slangCompiler.getSpirv();
+      compiledFromFile    = true;
     }
     else
     {
@@ -758,6 +774,8 @@ void Rasterizer::compileShader(Resources& resources, bool fromFile)
   shaderInfo.stage = VK_SHADER_STAGE_FRAGMENT_BIT;
   NVVK_CHECK(vkCreateShadersEXT(device, 1U, &shaderInfo, nullptr, &m_wireframeShader));
   NVVK_DBG_NAME(m_wireframeShader);
+
+  return !fromFile || compiledFromFile;
 }
 
 //--------------------------------------------------------------------------------------------------
@@ -798,6 +816,7 @@ void Rasterizer::recordRasterScene(Resources& resources, VkExtent2D renderExtent
   NVVK_CHECK(vkBeginCommandBuffer(m_recordedSceneCmd, &beginInfo));
   renderRasterScene(m_recordedSceneCmd, resources, renderExtent);
   NVVK_CHECK(vkEndCommandBuffer(m_recordedSceneCmd));
+  m_recordedSceneExtent = renderExtent;
 }
 
 //--------------------------------------------------------------------------------------------------
@@ -932,9 +951,18 @@ void Rasterizer::createOpaqueColorImage(Resources& resources)
   NVVK_CHECK(resources.allocator.createImage(m_opaqueColorImage, imageInfo, viewInfo));
   NVVK_DBG_NAME(m_opaqueColorImage.image);
 
-  // Use the existing global linear sampler for the descriptor.
-  VkSampler linearSampler{};
-  NVVK_CHECK(resources.samplerPool.acquireSampler(linearSampler));
+  // Mip-aware linear sampler: getTransmissionSample() in gltf_raster.slang selects a mip level
+  // from the material roughness, and the pool's default create info leaves maxLod at 0 -- which
+  // would clamp every fetch to mip 0 and silently make rough transmission mirror-sharp.
+  VkSampler                 linearSampler{};
+  const VkSamplerCreateInfo linearInfo{
+      .sType     = VK_STRUCTURE_TYPE_SAMPLER_CREATE_INFO,
+      .magFilter = VK_FILTER_LINEAR,
+      .minFilter = VK_FILTER_LINEAR,
+      .mipmapMode = VK_SAMPLER_MIPMAP_MODE_LINEAR,
+      .maxLod    = VK_LOD_CLAMP_NONE,
+  };
+  NVVK_CHECK(resources.samplerPool.acquireSampler(linearSampler, linearInfo));
   m_opaqueColorImage.descriptor.sampler = linearSampler;
 
   // Initial transition: UNDEFINED -> SHADER_READ_ONLY so it's safe to sample even before the

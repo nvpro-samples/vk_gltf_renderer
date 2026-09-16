@@ -56,14 +56,14 @@ static ImGuiTreeNodeFlags s_treeNodeFlags = ImGuiTreeNodeFlags_SpanAllColumns | 
 // HELPER FUNCTIONS
 //==================================================================================================
 
-// Above this many root nodes the scene-graph root list is virtualized with ImGuiListClipper (see
-// renderSceneGraphTab). Below it we render the whole graph every frame, which is what makes
-// scrolling and arbitrarily deep expansion "just work" -- the clipper cannot, because it models the
-// scroll extent as (root count x row height) and so ignores the height of expanded subtrees. That
-// undercount is harmless only when there are enough roots that a scroll region exists regardless
-// (millions of shallow trees, the case this threshold targets); for ordinary scenes we must render
-// fully or the scroll bar collapses. The full walk is trivial at this size and only runs while the
-// Scene Graph tab is open.
+// Above this many siblings a scene-graph level -- the scene's root list or one node's children --
+// is virtualized with ImGuiListClipper (see walkSiblingRows). Below it we render the level in full
+// every frame, which is what makes scrolling and arbitrarily deep expansion "just work" -- the
+// clipper cannot, because it models the scroll extent as (sibling count x row height) and so
+// ignores the height of expanded subtrees. That undercount is harmless only when there are enough
+// siblings that a scroll region exists regardless (the huge-flat-list case this threshold targets);
+// for ordinary levels we must render fully or the scroll bar collapses. The full walk is trivial at
+// this size and only runs while the Scene Graph tab is open.
 static constexpr size_t kSceneGraphVirtualizeThreshold = 200;
 
 // Uniform height, in pixels, of a single scene-graph table row.
@@ -80,6 +80,42 @@ static float sceneGraphRowHeight()
 {
   const ImGuiStyle& style = ImGui::GetStyle();
   return std::max(ImGui::GetTextLineHeightWithSpacing(), ImGui::GetTextLineHeight() + style.CellPadding.y * 2.0f);
+}
+
+// Emits one level of sibling rows, calling render(index, rowHeight) per row that must be built.
+// When `virtualize` is set only the rows inside the scroll region are built, keeping the per-frame
+// cost O(visible rows) instead of O(siblings) -- the difference between a responsive and an
+// unusable Scene Graph on a city-scale scene, where a single node can own hundreds of thousands of
+// children. The fixed row height lets the clipper skip measuring item 0, which is required because
+// an expanded sibling emits several rows and would otherwise trip the clipper's one-row-per-item
+// assert inside a table (ImGuiListClipper_StepInternal, table branch).
+//
+// TODO: known limitation of the uniform-height model. An expanded sibling still renders its whole
+// subtree, but the clipper keeps modelling it as one row, so the scroll extent is short by those
+// extra rows and the rows it positions from that model can shift or overlap near an expanded
+// sibling while scrolling. It is bounded by the height of what is expanded and only shows up past
+// the threshold; fixing it properly means clipping a flattened list of visible rows rather than a
+// sibling list, which is a restructure of the whole hierarchy walk. Do not "fix" it by declining to
+// virtualize a list that contains an open node: focusOnSelection() opens the selected node, so
+// every viewport pick would drop a huge list straight back to the full walk this exists to avoid.
+template <class RenderRow>
+static void walkSiblingRows(size_t count, bool virtualize, RenderRow&& render)
+{
+  if(!virtualize)
+  {
+    for(size_t i = 0; i < count; ++i)
+      render(i, 0.0f);
+    return;
+  }
+
+  const float      rowHeight = sceneGraphRowHeight();
+  ImGuiListClipper clipper;
+  clipper.Begin(static_cast<int>(count), rowHeight);
+  while(clipper.Step())
+  {
+    for(int i = clipper.DisplayStart; i < clipper.DisplayEnd; ++i)
+      render(static_cast<size_t>(i), rowHeight);
+  }
 }
 
 //==================================================================================================
@@ -100,7 +136,16 @@ void UiSceneBrowser::setScene(nvvkgltf::Scene* scene)
   m_scene = scene;
 
   if(!scene)
+  {
+    // Unload: the authoritative invalidation point (GltfRenderer::cleanupScene always passes
+    // through here before the next scene is handed over). Retire the id the tree rows are scoped
+    // under, so the incoming scene starts collapsed instead of inheriting this one's expansion.
+    // A merge keeps the same Scene and never unloads, so it keeps the tree the user had open.
+    ++m_treeStateGeneration;
+    m_expandedNodes.clear();
+    m_doScroll = false;
     return;
+  }
 
   // Mark caches as dirty
   m_meshToNodeMapDirty   = true;
@@ -410,6 +455,13 @@ void UiSceneBrowser::renderSceneGraphTab()
     ImGui::TableSetupColumn(" ", ImGuiTableColumnFlags_NoHide | ImGuiTableColumnFlags_WidthFixed, textBaseWidth * 2.3f);
     ImGui::TableHeadersRow();
 
+    // Scope every row under the current load id. ImGui keeps tree open/closed state in per-window
+    // storage keyed by the id we hand TreeNodeEx -- the node index -- so without this a freshly
+    // loaded scene inherits the previous one's expansion ("node 0 was open, so node 0 is open").
+    // Bumping the id on unload (see setScene) gives each loaded scene a collapsed tree. It sits
+    // inside BeginTable so the table keeps its own identity, and therefore its column widths.
+    ImGui::PushID(m_treeStateGeneration);
+
     const ImGuiTreeNodeFlags sceneTreeFlags =
         ImGuiTreeNodeFlags_SpanTextWidth | ImGuiTreeNodeFlags_OpenOnArrow | ImGuiTreeNodeFlags_DefaultOpen;
 
@@ -420,6 +472,12 @@ void UiSceneBrowser::renderSceneGraphTab()
       ImGui::PushID(static_cast<int>(sceneID));
       ImGui::TableNextRow();
       ImGui::TableNextColumn();
+
+      // A focus request lives for exactly this frame (it is consumed at the end of the pass, see
+      // below), so it has to be able to reach its row now. A collapsed scene row would swallow it
+      // and the selection would never be revealed -- open the scene rows for that one frame.
+      if(m_doScroll)
+        ImGui::SetNextItemOpen(true);
 
       if(ImGui::TreeNodeEx("Scene", sceneTreeFlags, "%s", scene.name.c_str()))
       {
@@ -472,36 +530,29 @@ void UiSceneBrowser::renderSceneGraphTab()
         // and deep expansion stay correct -- the clipper models scroll extent as (root count x row
         // height) and would collapse the scroll bar for an expanded ordinary scene.
         const bool virtualizeRoots = !m_doScroll && nodesToRender.size() > kSceneGraphVirtualizeThreshold;
-        if(!virtualizeRoots)
-        {
-          for(int nodeId : nodesToRender)
-            renderNodeHierarchy(nodeId);
-        }
-        else
-        {
-          // Only build the rows currently visible in the scroll region, keeping per-frame cost at
-          // O(visible rows) instead of O(roots). The fixed row height lets the clipper skip measuring
-          // item 0 (required because an expanded root emits multiple rows, which would trip the
-          // clipper's one-row-per-item assert inside a table). An expanded root still renders its
-          // subtree; the clipper models it as one row, so the scroll extent is short by the few extra
-          // rows of currently-expanded roots -- negligible against a virtualized million-root list.
-          ImGuiListClipper clipper;
-          clipper.Begin(static_cast<int>(nodesToRender.size()), sceneGraphRowHeight());
-          while(clipper.Step())
-          {
-            for(int i = clipper.DisplayStart; i < clipper.DisplayEnd; ++i)
-              renderNodeHierarchy(nodesToRender[i], sceneGraphRowHeight());
-          }
-        }
+        walkSiblingRows(nodesToRender.size(), virtualizeRoots, [&](size_t i, float rowHeight) {
+          renderNodeHierarchy(nodesToRender[i], rowHeight, /*canVirtualizeChildren=*/!virtualizeRoots);
+        });
 
         ImGui::TreePop();
-        m_expandedNodes.clear();
       }
       ImGui::PopID();
     }
 
+    ImGui::PopID();  // m_treeStateGeneration
     ImGui::EndTable();
   }
+
+  // Both are one-shot requests from focusOnSelection(), consumed by the walk above: the force-open
+  // set has done its job once the parent chain is open (ImGui remembers the open state from there),
+  // and the scroll has fired on the selected row. Clearing them here rather than at the row that
+  // consumed them is what guarantees they cannot get stuck: a selection that never reaches a row --
+  // cleared again before this frame, or pointing at a node the model no longer has -- would
+  // otherwise leave m_doScroll set forever, permanently disabling virtualization. The walk above
+  // force-opens the scene rows while the request is live, so a collapsed scene cannot be the reason
+  // a row goes unvisited.
+  m_expandedNodes.clear();
+  m_doScroll = false;
 }
 
 //==================================================================================================
@@ -672,9 +723,11 @@ void UiSceneBrowser::applySceneTransform(size_t sceneID)
 // NODE HIERARCHY RENDERING
 //==================================================================================================
 
-// rowHeight > 0 pins this node's table row to a fixed height (used only when the root list is
+// rowHeight > 0 pins this node's table row to a fixed height (used only when this level is
 // virtualized with ImGuiListClipper, which needs a constant row height); 0 = natural height.
-void UiSceneBrowser::renderNodeHierarchy(int nodeIdx, float rowHeight)
+// canVirtualizeChildren is false when this row was emitted from inside a clipper, so the child list
+// below does not open a second clipper nested inside it.
+void UiSceneBrowser::renderNodeHierarchy(int nodeIdx, float rowHeight, bool canVirtualizeChildren)
 {
   if(!m_scene || nodeIdx < 0)
     return;
@@ -807,11 +860,18 @@ void UiSceneBrowser::renderNodeHierarchy(int nodeIdx, float rowHeight)
       renderCameraInHierarchy(node.camera);
     }
 
-    // Render children
-    for(int child : node.children)
-    {
-      renderNodeHierarchy(child);
-    }
+    // Render children, virtualizing long sibling lists the same way the root list is (a single
+    // node holding a whole city's worth of children is common in exported scenes). The child list
+    // is re-read from the model on every row because a row can edit it inline (context-menu
+    // Duplicate / Add, drag-drop reparent), which reallocates model.nodes and would dangle a
+    // reference taken before the loop.
+    const bool virtualizeChildren =
+        canVirtualizeChildren && !m_doScroll && node.children.size() > kSceneGraphVirtualizeThreshold;
+    walkSiblingRows(node.children.size(), virtualizeChildren, [&](size_t i, float childRowHeight) {
+      const std::vector<int>& children = m_scene->getModel().nodes[nodeIdx].children;
+      if(i < children.size())
+        renderNodeHierarchy(children[i], childRowHeight, canVirtualizeChildren && !virtualizeChildren);
+    });
 
     ImGui::TreePop();
   }

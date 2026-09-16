@@ -118,13 +118,45 @@ def texture_sources(texture):
     return sources
 
 
-def texture_uses_normal_map(gltf):
+def classify_texture_images(gltf):
+    """Return (normal_image_indices, linear_image_indices).
+
+    ``normal_image_indices`` are images used as tangent-space normal maps. They get
+    nvcompress ``-normal``, and their encoder format comes from ``encoder_format()``,
+    which keeps an already-two-channel source two-channel.
+
+    ``linear_image_indices`` are images that carry non-color data per the glTF
+    2.0 spec and its official Khronos material extensions — normal, occlusion,
+    metallic-roughness, transmission, thickness, sheen roughness, clearcoat,
+    clearcoat roughness, iridescence, iridescence thickness, anisotropy, and
+    the scalar specular / diffuse-transmission channels. These must be tagged
+    with a linear transfer function in the KTX2 output; otherwise Vulkan will
+    apply sRGB→linear on sample and crush the data (a normal-map (128,128,255)
+    becomes near-zero, roughness values shift, etc.). ``normal_image_indices``
+    is a subset of ``linear_image_indices``.
+
+    Color textures (baseColor, emissive, sheen color, specular color,
+    diffuse-transmission color) are intentionally left off — the encoder's
+    default sRGB tag is correct for them.
+    """
     normal_texture_indices = set()
+    linear_texture_indices = set()
+
+    def add_linear(tex_ref):
+        if isinstance(tex_ref, dict) and isinstance(tex_ref.get("index"), int):
+            linear_texture_indices.add(tex_ref["index"])
+
+    def add_normal(tex_ref):
+        if isinstance(tex_ref, dict) and isinstance(tex_ref.get("index"), int):
+            normal_texture_indices.add(tex_ref["index"])
+            linear_texture_indices.add(tex_ref["index"])
 
     for material in get_list(gltf, "materials"):
-        normal = material.get("normalTexture")
-        if isinstance(normal, dict) and isinstance(normal.get("index"), int):
-            normal_texture_indices.add(normal["index"])
+        add_normal(material.get("normalTexture"))
+        add_linear(material.get("occlusionTexture"))
+        pbr = material.get("pbrMetallicRoughness")
+        if isinstance(pbr, dict):
+            add_linear(pbr.get("metallicRoughnessTexture"))
 
         extensions = material.get("extensions", {})
         if not isinstance(extensions, dict):
@@ -132,18 +164,53 @@ def texture_uses_normal_map(gltf):
 
         clearcoat = extensions.get("KHR_materials_clearcoat")
         if isinstance(clearcoat, dict):
-            clearcoat_normal = clearcoat.get("clearcoatNormalTexture")
-            if isinstance(clearcoat_normal, dict) and isinstance(clearcoat_normal.get("index"), int):
-                normal_texture_indices.add(clearcoat_normal["index"])
+            add_normal(clearcoat.get("clearcoatNormalTexture"))
+            add_linear(clearcoat.get("clearcoatTexture"))
+            add_linear(clearcoat.get("clearcoatRoughnessTexture"))
 
-    normal_image_indices = set()
+        transmission = extensions.get("KHR_materials_transmission")
+        if isinstance(transmission, dict):
+            add_linear(transmission.get("transmissionTexture"))
+
+        volume = extensions.get("KHR_materials_volume")
+        if isinstance(volume, dict):
+            add_linear(volume.get("thicknessTexture"))
+
+        specular = extensions.get("KHR_materials_specular")
+        if isinstance(specular, dict):
+            add_linear(specular.get("specularTexture"))
+
+        sheen = extensions.get("KHR_materials_sheen")
+        if isinstance(sheen, dict):
+            add_linear(sheen.get("sheenRoughnessTexture"))
+
+        iridescence = extensions.get("KHR_materials_iridescence")
+        if isinstance(iridescence, dict):
+            add_linear(iridescence.get("iridescenceTexture"))
+            add_linear(iridescence.get("iridescenceThicknessTexture"))
+
+        anisotropy = extensions.get("KHR_materials_anisotropy")
+        if isinstance(anisotropy, dict):
+            add_linear(anisotropy.get("anisotropyTexture"))
+
+        diffuse_transmission = extensions.get("KHR_materials_diffuse_transmission")
+        if isinstance(diffuse_transmission, dict):
+            add_linear(diffuse_transmission.get("diffuseTransmissionTexture"))
+
     textures = get_list(gltf, "textures")
-    for texture_index in normal_texture_indices:
-        if not 0 <= texture_index < len(textures):
-            continue
-        for _, image_index in texture_sources(textures[texture_index]):
-            normal_image_indices.add(image_index)
-    return normal_image_indices
+
+    def texture_indices_to_image_indices(texture_indices):
+        image_indices = set()
+        for texture_index in texture_indices:
+            if not 0 <= texture_index < len(textures):
+                continue
+            for _, image_index in texture_sources(textures[texture_index]):
+                image_indices.add(image_index)
+        return image_indices
+
+    normal_image_indices = texture_indices_to_image_indices(normal_texture_indices)
+    linear_image_indices = texture_indices_to_image_indices(linear_texture_indices)
+    return normal_image_indices, linear_image_indices
 
 
 def discover_windows_nvtt_tools():
@@ -242,12 +309,84 @@ def print_discovered_tools():
             print(f"{tool}: {found or '(not found)'}")
 
 
-def build_command(args, tool_path, input_path, output_path, is_normal_map):
+# VkFormat / DXGI_FORMAT values that store exactly two channels. Mirrors the two-channel arm of
+# vkFormatColorComponentCount() in src/gltf_scene_vk.cpp -- that function is what decides whether the
+# renderer rebuilds a normal map's Z, so the two lists have to agree.
+_TWO_CHANNEL_VK_FORMATS = frozenset(
+    {
+        16, 17, 22,  # R8G8 UNORM / SNORM / SRGB
+        77, 78, 83,  # R16G16 UNORM / SNORM / SFLOAT
+        103,  # R32G32_SFLOAT
+        141, 142,  # BC5 UNORM / SNORM
+        155, 156,  # EAC_R11G11 UNORM / SNORM
+    }
+)
+_TWO_CHANNEL_DXGI_FORMATS = frozenset(
+    {
+        15, 16, 17, 18,  # R32G32 typeless / float / uint / sint
+        33, 34, 35, 36, 37, 38,  # R16G16 family
+        48, 49, 50, 51, 52,  # R8G8 family
+        82, 83, 84,  # BC5 typeless / UNORM / SNORM
+    }
+)
+# Pre-DX10 FourCC codes for BC5. ATI2 is the original 3Dc name; nvidia tools also emit BC5U/BC5S.
+_TWO_CHANNEL_FOURCC = frozenset({b"ATI2", b"BC5U", b"BC5S", b"A2XY"})
+
+
+def source_is_two_channel(path):
+    """True when ``path`` is an image whose pixel format stores exactly two channels.
+
+    Only DDS and KTX2 can be two-channel in practice; PNG and JPEG always decode to grayscale or
+    RGB(A), so they return False and keep the regular --format. Anything unreadable or unrecognized
+    also returns False, which leaves the existing behaviour untouched rather than guessing.
+    """
+    try:
+        with path.open("rb") as stream:
+            header = stream.read(152)
+    except OSError:
+        return False
+
+    if header.startswith(DDS_MAGIC) and len(header) >= 128:
+        fourcc = header[84:88]
+        if fourcc == b"DX10":
+            if len(header) < 132:
+                return False
+            return int.from_bytes(header[128:132], "little") in _TWO_CHANNEL_DXGI_FORMATS
+        return fourcc in _TWO_CHANNEL_FOURCC
+
+    if header.startswith(KTX2_MAGIC) and len(header) >= 16:
+        return int.from_bytes(header[12:16], "little") in _TWO_CHANNEL_VK_FORMATS
+
+    return False
+
+
+def encoder_format(args, input_path, is_normal_map):
+    """Pick the encoder format for one image.
+
+    A tangent-space normal map whose source is already two-channel (a BC5 / RG DDS or KTX2) must stay
+    two-channel. Such a source has no blue channel; expanding it to a three-channel format like BC7
+    makes the encoder bake the synthetic blue -- a real 0 -- into the data, which decodes to Z = -1
+    and renders black. BC5 keeps it two-channel, and the renderer rebuilds Z from X/Y.
+
+    Normal maps that already carry a real blue channel (PNG, JPEG, an RGB DDS) are left on --format;
+    BC7 handles them correctly. An explicit --normal-format overrides both cases.
+    """
+    if not is_normal_map:
+        return args.format
+    if args.normal_format:
+        return args.normal_format
+    if source_is_two_channel(input_path):
+        logging.info("%s is a two-channel normal map; encoding as bc5 to keep Z reconstructable", input_path)
+        return "bc5"
+    return args.format
+
+
+def build_command(args, tool_path, input_path, output_path, is_normal_map, is_linear_data):
     if args.tool == "custom":
         values = {
             "input": str(input_path),
             "output": str(output_path),
-            "format": args.normal_format if is_normal_map and args.normal_format else args.format,
+            "format": encoder_format(args, input_path, is_normal_map),
         }
         try:
             command = args.command_template.format(**values)
@@ -258,7 +397,7 @@ def build_command(args, tool_path, input_path, output_path, is_normal_map):
         return shlex.split(command)
 
     if args.tool == "nvcompress":
-        fmt = args.normal_format if is_normal_map and args.normal_format else args.format
+        fmt = encoder_format(args, input_path, is_normal_map)
         command = [str(tool_path), "-silent"]
         nvcompress_quality = "fast" if args.quality == "fastest" else args.quality
         if nvcompress_quality in ("fast", "production", "highest"):
@@ -271,7 +410,7 @@ def build_command(args, tool_path, input_path, output_path, is_normal_map):
         command.extend([f"-{fmt}", str(input_path), str(output_path)])
         return command
 
-    fmt = args.normal_format if is_normal_map and args.normal_format else args.format
+    fmt = encoder_format(args, input_path, is_normal_map)
     nvtt_quality = "fastest" if args.quality == "fast" else args.quality
     command = [
         str(tool_path),
@@ -288,6 +427,13 @@ def build_command(args, tool_path, input_path, output_path, is_normal_map):
         command.extend(["--zcmp", str(args.zcmp)])
     if args.no_cuda:
         command.append("--no-cuda")
+    # Force a linear transfer function for non-color data (normal, occlusion,
+    # metallic-roughness, transmission, thickness, etc.). Without this, nvtt_export
+    # tags BC7/BC1/BC3 output as *_SRGB, Vulkan applies sRGB→linear on sample,
+    # and normal / roughness / metallic values are silently crushed. Color
+    # textures (baseColor, emissive, ...) keep the default (sRGB) tag.
+    if is_linear_data:
+        command.extend(["--export-transfer-function", "linear"])
     command.extend(args.encoder_arg)
     command.extend(["--output-file", str(output_path), str(input_path)])
     return command
@@ -302,8 +448,8 @@ def apply_fast_preset(args):
         args.zcmp = None
 
 
-def run_encoder(args, tool_path, input_path, output_path, is_normal_map):
-    command = build_command(args, tool_path, input_path, output_path, is_normal_map)
+def run_encoder(args, tool_path, input_path, output_path, is_normal_map, is_linear_data):
+    command = build_command(args, tool_path, input_path, output_path, is_normal_map, is_linear_data)
     logging.info("Encoding %s -> %s", input_path, output_path)
     logging.debug("Command: %s", format_command(command))
     if args.dry_run:
@@ -398,7 +544,7 @@ def convert_gltf(args):
 
     input_gltf_dir = input_gltf.parent
     output_gltf_dir = output_gltf.parent
-    normal_images = texture_uses_normal_map(gltf)
+    normal_images, linear_images = classify_texture_images(gltf)
     converted_indices = set()
     used_output_paths = set()
     conversion_records = []
@@ -433,6 +579,7 @@ def convert_gltf(args):
                     "source_path": source_path,
                     "output_path": output_path,
                     "is_normal_map": image_index in normal_images,
+                    "is_linear_data": image_index in linear_images,
                 }
             )
 
@@ -480,13 +627,28 @@ def run_encoder_jobs(args, tool_path, records):
 
     if args.jobs <= 1 or args.dry_run:
         for record in records:
-            run_encoder(args, tool_path, record["source_path"], record["output_path"], record["is_normal_map"])
+            run_encoder(
+                args,
+                tool_path,
+                record["source_path"],
+                record["output_path"],
+                record["is_normal_map"],
+                record["is_linear_data"],
+            )
         return
 
     logging.info("Encoding %d image(s) with %d parallel job(s).", len(records), args.jobs)
     executor = concurrent.futures.ThreadPoolExecutor(max_workers=args.jobs)
     futures = [
-        executor.submit(run_encoder, args, tool_path, record["source_path"], record["output_path"], record["is_normal_map"])
+        executor.submit(
+            run_encoder,
+            args,
+            tool_path,
+            record["source_path"],
+            record["output_path"],
+            record["is_normal_map"],
+            record["is_linear_data"],
+        )
         for record in records
     ]
     try:
@@ -567,7 +729,12 @@ def parse_args(argv):
         help="Additional argument passed to the encoder. Repeat for multiple arguments.",
     )
     parser.add_argument("--format", default="bc7", help="Encoder format. For KTX2, nvtt_export supports uastc/etc1s-rgb/etc1s-rgba.")
-    parser.add_argument("--normal-format", help="Optional encoder format for normal-map images.")
+    parser.add_argument(
+        "--normal-format",
+        help="Encoder format for tangent-space normal-map images. Defaults to --format, except for "
+             "a source that is already two-channel (a BC5 / RG DDS or KTX2), which is encoded as bc5 "
+             "so it stays two-channel. Setting this overrides both.",
+    )
     parser.add_argument("--quality", choices=("fastest", "fast", "normal", "production", "highest"), default="normal")
     parser.add_argument("--zcmp", type=int, default=5, help="KTX2 Zstandard supercompression level for nvtt_export.")
     parser.add_argument("--no-zcmp", dest="zcmp", action="store_const", const=None, help="Skip KTX2 Zstandard supercompression.")

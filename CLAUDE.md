@@ -27,6 +27,7 @@ C++20. Host and device share structs via `shaders/shaderio.h`.
 | Scene data flow: Model → RenderNodes → GPU SSBO / BLAS / TLAS | [docs/RENDERING_ARCHITECTURE.md](docs/RENDERING_ARCHITECTURE.md) |
 | glTF 2.1 multi-file scenes, read-only flagging, re-externalize on save | [docs/external_assets.md](docs/external_assets.md) |
 | KHR_interactivity behavior graphs: node execution, event wiring, coverage status | [docs/interactivity.md](docs/interactivity.md) |
+| MCP shader timing: enabling `--mcp`, the tool surface, measuring a change | [docs/mcp.md](docs/mcp.md) |
 | Runtime behavior, editor workflows, features | [docs/user-guide.md](docs/user-guide.md) |
 | DLSS / OptiX denoising, motion vectors, jitter/reset (incl. why animated meshes ghost) | [docs/denoising.md](docs/denoising.md) |
 | Headless timing / scripted GPU benchmarks | [docs/benchmarking.md](docs/benchmarking.md) |
@@ -47,12 +48,13 @@ with the code, the code wins (fix the doc — see "Keep the docs true").
 |---|---|
 | Supported glTF extensions | `m_supportedExtensions` in `src/gltf_scene.cpp` |
 | Visualization / debug modes | `enum Visualization` in `shaders/shaderio.h` |
-| Command-line / persisted settings (names, defaults, whether they persist) | `m_settings.add(...)` in `src/renderer*.cpp`, plus `parameterRegistry.add(...)` in `src/main.cpp` and `src/benchmarking.cpp` |
+| Command-line / MCP / persisted settings (names, defaults, whether they persist) | `m_settings.add(...)` in `src/renderer*.cpp`, plus `parameterRegistry.add(...)` in `src/main.cpp` and `src/benchmarking.cpp` |
 | Menu labels, keyboard shortcuts, UI panels | menu/UI builders in `src/ui_renderer.cpp` (and other `src/ui_*`) |
 | Elements-list categories, columns, CRUD | `ensureElementRegistry()` (the `ElementTypeDesc` array) in `src/ui_scene_browser_elements.cpp` |
 | Material extension gates | `MAT_EXT_*` in `shaders/gltf_material_config.h`, `GLTF_USE_*` in `shaders/gltf_eval_config.h` |
 | Host/device structs & layout | `shaders/shaderio.h` + the `*_io.h.slang` / `*_shaderio.h.slang` headers |
 | Which files are tests/benchmarks | `tests/CMakeLists.txt` |
+| MCP tool names, schemas, and annotations | `registerTool(...)` in `src/mcp_timing.cpp` |
 | CMake options & defaults | root `CMakeLists.txt` |
 
 ## Source layout (one line each; full map in developer.md)
@@ -66,6 +68,10 @@ with the code, the code wins (fix the doc — see "Keep the docs true").
   menus live in `ui_renderer.cpp`. The Scene Browser's **Elements** tab is
   data-driven: one `ElementTypeDesc` per glTF collection
   (`ui_scene_browser_elements.cpp`) feeds a single generic list renderer.
+- `src/mcp_timing.{cpp,hpp}` — the optional MCP endpoint (`--mcp`): recompile
+  shaders and time a GPU pass, so an agent can measure a shader change. Loading
+  and every other setting go through the parameter registry instead. Built only
+  when `NVPRO2_ENABLE_nvmcp` is on. See [docs/mcp.md](docs/mcp.md).
 - `src/dlss*`, `src/optix_denoiser*`, `src/vk_cuda*` — AI denoisers + CUDA interop.
 - `src/gizmo_*` — transform gizmo, grid, overlays.
 - `shaders/*.slang` + `shaders/shaderio.h` — GPU code and host/device structs.
@@ -89,11 +95,16 @@ with the code, the code wins (fix the doc — see "Keep the docs true").
   GPU layouts drift.
 - **Every user-settable value is declared once**, through `SettingsRegistry`
   (`src/settings_registry.hpp`). One call feeds the command line, benchmark
-  sequences, and the persisted `.ini`; `Persist` says whether it survives a
+  sequences, MCP, and the persisted `.ini`; `Persist` says whether it survives a
   restart. Never register a setting in two places again — that is what let the
   two old lists drift.
 - **Scene editing is non-destructive** and fully undoable — route mutations
   through the editor + `undo_redo` system, not ad-hoc.
+- **Scene, model, and Vulkan state is application-thread-owned.** An MCP tool
+  that touches them sets `runOnApplicationThread` and stays short. A tool that
+  waits on rendered frames must not, since the application thread is the one
+  producing them — `GltfRenderer::measureTimer` is the deliberate exception and
+  reads only the profiler's mutex-guarded snapshots, never the scene.
 
 ## Fix what you find — auto-fix on discovery
 
@@ -158,6 +169,7 @@ you are expected to keep them that way:
 | DLSS/OptiX, motion-vector / jitter / reset behavior | [docs/denoising.md](docs/denoising.md) |
 | glTF 2.1 external-asset load/save/edit behavior | [docs/external_assets.md](docs/external_assets.md) |
 | KHR_interactivity node coverage, execution model, event wiring | [docs/interactivity.md](docs/interactivity.md) |
+| MCP tools or the timing measurement | [docs/mcp.md](docs/mcp.md) |
 | Headless/benchmark flags or output format | [docs/benchmarking.md](docs/benchmarking.md), `utils/benchmark/README.md` |
 | Added a glTF material extension | path tracer eval first, then README extension list + developer.md checklist |
 
@@ -188,7 +200,9 @@ cmake --build build
 ./_bin/Release/vk_gltf_renderer
 ```
 
-Key CMake options: `USE_DLSS`, `USE_OPTIX_DENOISER`, `USE_DRACO` (all `ON`),
+Key CMake options: `USE_DLSS`, `USE_OPTIX_DENOISER`, `USE_DRACO`,
+`NVPRO2_ENABLE_nvmcp` (all `ON`; the last one adds the `--mcp` endpoint and fetches
+cpp-mcp at configure time — see [docs/mcp.md](docs/mcp.md)),
 `BUILD_TESTING` (`OFF` — turn on to build unit tests + benchmarks; `ctest` runs the
 unit tests, run the benchmark executable directly). See `tests/README.md` and
 `docs/benchmarking.md`.

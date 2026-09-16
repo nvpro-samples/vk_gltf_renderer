@@ -119,8 +119,11 @@ src/
 ├── renderer_pathtracer.cpp/hpp # Monte Carlo path tracer (Vulkan ray tracing + ray query)
 ├── renderer_rasterizer.cpp/hpp # Forward PBR rasterizer
 ├── renderer_silhouette.cpp/hpp # Selection highlight (compute shader)
+├── mcp_timing.cpp/hpp          # Optional MCP endpoint (--mcp): recompile shaders, time a
+│                               #   GPU pass over a window (docs/mcp.md)
 ├── hover_picker.cpp/hpp        # Async G-buffer readback for KHR_interactivity hover detection
-├── settings_registry.hpp       # One declaration per setting -> CLI + benchmark sequences + ImGui.ini
+├── settings_registry.hpp       # One declaration per setting -> CLI + benchmark sequences + ImGui.ini;
+│                               #   also captures each declaration-time default (Reset All to Default)
 ├── resources.hpp               # Shared Vulkan resources and settings (`nvvk::FrameUploader` staging)
 │
 ├── gltf_scene.cpp/hpp          # Core scene loading and management
@@ -149,6 +152,8 @@ src/
 ├── ui_element_registry.hpp     # ElementTypeDesc / ElementColumn / ElementAddVariant (data-driven list)
 ├── ui_gltf_labels.cpp/hpp      # Shared image-name + sampler wrap/filter labels (list + inspector)
 ├── ui_renderer.cpp             # Viewport UI and mouse interaction
+├── ui_dock_layout.cpp/hpp      # Default docking arrangement, shared by start-up (main.cpp's
+│                               #   dockSetup) and Windows > Reset UI Layout
 ├── ui_xmp.cpp/hpp              # KHR_xmp_json_ld metadata display
 ├── ui_animation.cpp/hpp        # Animation playback state and viewport animation widget
 ├── ui_mouse_state.hpp          # Mouse state tracking for viewport

@@ -52,7 +52,7 @@ public:
   void onSceneInvalidated(Resources& resources) override;
   void notifyDlssContentReset(Resources& resources) override;
 
-  void compileShader(Resources& resources, bool fromFile = true) override;
+  bool compileShader(Resources& resources, bool fromFile = true) override;
   void createPipeline(Resources& resources) override;
   void freeRecordCommandBuffer(Resources& resources);
 
@@ -121,6 +121,11 @@ private:
   // and consumed at the top of onRender() to invalidate m_recordedSceneCmd. The UI paths still
   // call freeRecordCommandBuffer() inline; this flag closes the gap for non-UI setters.
   bool m_recordedSceneCmdDirty = false;
+  // Extent the recorded cmd baked its viewport/scissor from. Compared in onRender() so any change
+  // of active extent re-records, including the ones no callback sees: ImGui.ini restore and
+  // Windows > Reset All to Default write setting storage directly (see settings_registry.hpp) and
+  // can flip DLSS-SR between its inner and the outer extent under a live recording.
+  VkExtent2D m_recordedSceneExtent{};
 
   // ---- DLSS-SR (DLAA / Quality / Balanced / Performance / Ultra) ----
 #if defined(USE_DLSS)

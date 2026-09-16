@@ -154,7 +154,10 @@ private:
   void rebuildSceneTransformNodes(size_t sceneID);  // Rebuild node list from current scene (handles dynamic changes)
   void markSceneTransformsDirty();           // Mark all scene transforms for rebuild (call after hierarchy changes)
   void applySceneTransform(size_t sceneID);  // Apply transform to root nodes
-  void renderNodeHierarchy(int nodeIdx, float rowHeight = 0.0f);
+  // rowHeight > 0 pins the node's row to a fixed height (required of rows emitted from inside an
+  // ImGuiListClipper); canVirtualizeChildren = false when this row is itself clipped, so a child
+  // list never opens a second clipper nested inside the parent's.
+  void renderNodeHierarchy(int nodeIdx, float rowHeight = 0.0f, bool canVirtualizeChildren = true);
   void renderMeshInHierarchy(int meshIdx, int nodeIdx);
   void renderPrimitiveInHierarchy(int primIdx, int meshIdx, int nodeIdx);
   void renderLightInHierarchy(int lightIdx);
@@ -210,6 +213,9 @@ private:
   // UI state
   std::unordered_set<int> m_expandedNodes;     // Only force-open these nodes (from selection)
   bool                    m_doScroll = false;  // Auto-scroll to selection
+  // ImGui id the scene-graph rows are scoped under. Bumped on unload so a new scene cannot inherit
+  // the previous one's tree expansion, which is keyed by node index and would otherwise persist.
+  int m_treeStateGeneration = 0;
 
   // Scene transform state (per scene)
   struct SceneTransformState
