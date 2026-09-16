@@ -17,6 +17,13 @@
  * SPDX-License-Identifier: Apache-2.0
  */
 
+//
+// Minimal transient notification overlay for surfacing UI actions (mostly errors) that would
+// otherwise only reach the log. push() a message; render() draws the unexpired ones stacked in the
+// lower-right of the main viewport and drops them after a few seconds, timed off ImGui::GetTime()
+// (no separate ticker needed).
+//
+
 #include <algorithm>
 #include <cstdio>
 

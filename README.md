@@ -5,7 +5,7 @@
 [![C++](https://img.shields.io/badge/C%2B%2B-20-orange.svg)](#build-and-run)
 [![Vulkan](https://img.shields.io/badge/Vulkan-1.4%2B-red.svg)](#requirements)
 
-> Open-source **Vulkan RTX path tracer** and **PBR material reference** for **glTF 2.0** — with a built-in **glTF scene editor** for non-destructive hierarchy manipulation, material authoring, and save-back to glTF; AI denoising, and support for 34+ glTF extensions.
+> Open-source **Vulkan RTX path tracer** and **PBR material reference** for **glTF 2.0** — with a built-in **glTF scene editor** for non-destructive hierarchy manipulation, material authoring, and save-back to glTF; AI denoising, and support for 36+ glTF extensions.
 
 | Vulkan RTX Path Tracer & glTF Scene Editor |
 |---|
@@ -19,7 +19,7 @@ Built in C++ on [nvpro_core2](https://github.com/nvpro-samples/nvpro_core2) with
 
 - **glTF scene editor** — Non-destructive scene authoring: hierarchy manipulation, transform gizmo, node/material/light editing, undo/redo, and save back to glTF without touching the original assets.
 - **glTF PBR material reference** — Monte Carlo path tracer with NEE, MIS, and adaptive sampling for physically accurate glTF PBR material evaluation.
-- **34 glTF extensions** — Anisotropy, clearcoat, transmission, volume, sheen, iridescence, dispersion, retroreflection, Draco, interactivity, opacity micromaps, and more.
+- **35 glTF extensions** — Anisotropy, clearcoat, transmission, volume, sheen, iridescence, dispersion, retroreflection, Draco, interactivity, opacity micromaps, IES light profiles, and more.
 - **glTF 2.1 complex scenes (preview)** — Compose multi-file scenes with External Assets: reference glTF/GLB files as instances that share geometry, with nested references, cycle detection, and file aliases — re-externalized on save.
 - **AI denoising** — DLSS Ray Reconstruction and OptiX AI Denoiser produce clean images at interactive rates.
 - **Agentic AI generation (optional)** — Local **ComfyUI** bridge that *beautifies* the current render or *generates an HDRI* environment from a text prompt.
@@ -87,7 +87,7 @@ cmake --build build
 - Rasterizer fallback for fast scene interaction and editing.
 - A scene asset editor with hierarchy operations, a transform gizmo, material editing, merging, and saving back to glTF (non-destructive).
 - glTF 2.1 complex-scene composition (preview): reference external glTF/GLB assets, instance them (shared geometry), resolve nested references with cycle detection, and re-externalize on save.
-- Support for 34 glTF extensions, including anisotropy, clearcoat, transmission, volume, sheen, iridescence, dispersion, diffuse transmission, retroreflection, opacity micromaps, material variant, scattering, and interactivity (behavior graphs).
+- Support for 36 glTF extensions, including anisotropy, clearcoat, transmission, volume, sheen, iridescence, dispersion, diffuse transmission, retroreflection, opacity micromaps, material variant, scattering, IES light profiles, and interactivity (behavior graphs).
 - HDR environments, a physical sun and sky model, depth of field, and multiple tone mappers.
 - Animation support includes skeletal, morph targets, and KHR_animation_pointer.
 - GPU compute accelerates both skinning/morphing and per-level world-matrix propagation.
@@ -159,7 +159,7 @@ For the architecture, bridge directory layout, and request/response protocol beh
 - ✅ [KHR_accessor_float64](https://github.com/KhronosGroup/glTF/tree/main/extensions/2.0/Khronos/KHR_accessor_float64)
 - ✅ [KHR_animation_pointer](https://github.com/KhronosGroup/glTF/tree/main/extensions/2.0/Khronos/KHR_animation_pointer)
 - ✅ [KHR_draco_mesh_compression](https://github.com/KhronosGroup/glTF/tree/main/extensions/2.0/Khronos/KHR_draco_mesh_compression)
-- ✅ [KHR_interactivity](https://github.com/KhronosGroup/glTF/tree/main/extensions/2.0/Khronos/KHR_interactivity) — executes behavior graphs: event/flow/math/type/variable operations, scene data binding via `pointer`/`variable` get/set/interpolate, animation clip playback, and hover/select event wiring, with a standalone Interactivity window for inspecting and controlling a running graph. See [docs/interactivity.md](docs/interactivity.md) for the current coverage table
+- ✅ [KHR_interactivity](https://github.com/KhronosGroup/glTF/tree/main/extensions/2.0/Khronos/KHR_interactivity)
 - ✅ [KHR_lights_punctual](https://github.com/KhronosGroup/glTF/tree/main/extensions/2.0/Khronos/KHR_lights_punctual)
 - ✅ [KHR_materials_anisotropy](https://github.com/KhronosGroup/glTF/tree/main/extensions/2.0/Khronos/KHR_materials_anisotropy)
 - ✅ [KHR_materials_clearcoat](https://github.com/KhronosGroup/glTF/tree/main/extensions/2.0/Khronos/KHR_materials_clearcoat)
@@ -185,6 +185,7 @@ For the architecture, bridge directory layout, and request/response protocol beh
 - ✅ [KHR_texture_basisu](https://github.com/KhronosGroup/glTF/tree/main/extensions/2.0/Khronos/KHR_texture_basisu)
 - ✅ [KHR_texture_transform](https://github.com/KhronosGroup/glTF/tree/main/extensions/2.0/Khronos/KHR_texture_transform)
 - ✅ [KHR_xmp_json_ld](https://github.com/KhronosGroup/glTF/tree/main/extensions/2.0/Khronos/KHR_xmp_json_ld)
+- ✅ [EXT_lights_ies](https://github.com/KhronosGroup/glTF/tree/main/extensions/2.0/Vendor/EXT_lights_ies)
 - ✅ [EXT_mesh_gpu_instancing](https://github.com/KhronosGroup/glTF/tree/main/extensions/2.0/Vendor/EXT_mesh_gpu_instancing)
 - ✅ [EXT_mesh_opacity_micromap](https://github.com/pixeljetstream/glTF/tree/EXT_mesh_opacity_micromap/extensions/2.0/Vendor/EXT_mesh_opacity_micromap)
 - ✅ [EXT_meshopt_compression](https://github.com/KhronosGroup/glTF/tree/main/extensions/2.0/Vendor/EXT_meshopt_compression)

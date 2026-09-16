@@ -17,6 +17,13 @@
  * SPDX-License-Identifier: Apache-2.0
  */
 
+//
+// Scene-backed InteractivityAnimationResolver: answers animation/start's validity/duration queries
+// and applies the CPU-side pose (AnimationSystem::updateAnimation()) against the live Scene. The
+// heavier GPU-side reconciliation (world matrices, GPU sync, BLAS update) still happens once per
+// frame in GltfRenderer, driven by InteractivityGraphInstance::pendingAnimationApplies().
+//
+
 #include "gltf_interactivity_scene_animation.hpp"
 
 #include "gltf_scene_animation.hpp"

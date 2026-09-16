@@ -33,6 +33,8 @@
 
 #include "nvutils/logger.hpp"
 #include "nvutils/parameter_registry.hpp"
+#include <nvgui/fonts.hpp>
+#include <nvgui/property_editor.hpp>
 #include "nvvk/commands.hpp"
 #include "nvvk/descriptors.hpp"
 #include "nvvk/resource_allocator.hpp"
@@ -46,6 +48,8 @@
 #include "nvvk/compute_pipeline.hpp"
 #include "nvvk/default_structs.hpp"
 #include <nvvk/debug_util.hpp>
+
+#include "ui_denoiser_controls.hpp"
 
 // OptiX error checking macro
 #define OPTIX_CHECK(call)                                                                                              \
@@ -126,6 +130,9 @@ void OptiXDenoiser::init(Resources& resources)
   // Initialize OptiX
   if(!initOptiX(resources))
     return;
+
+  if(resources.app && !resources.app->isHeadless())
+    m_denoisedUi.init({.device = m_device, .colorFormats = {resources.app->getSwapchainFormat()}});
 
   m_availability = Availability::eAvailable;
 }
@@ -311,7 +318,6 @@ void OptiXDenoiser::updateSize(VkCommandBuffer cmd, VkExtent2D size)
     NVVK_DBG_NAME_STR(m_denoiserTarget.getColorImage(), "Optix::m_outputImage");
     if(m_appMemoryTracker)
       m_appMemoryTracker->track("OptiX/GBuffers", m_denoiserTarget, 2);
-    m_denoisedUi.update(m_denoiserTarget.getUiImageView(eGBufferDenoised));
   }
 
   // Compute input (render) resolution based on model kind
@@ -732,21 +738,19 @@ void OptiXDenoiser::cleanupBuffers()
   m_scratchBuffer.free();
 }
 
-void OptiXDenoiser::registerParameters(nvutils::ParameterRegistry* paramReg)
+void OptiXDenoiser::registerParameters(SettingsRegistry* settings)
 {
-  paramReg->add({"optixEnable", "OptiX Denoiser: Enable OptiX denoiser"}, &m_settings.enable);
-  paramReg->add({"optixAutoDenoiseEnabled", "OptiX Denoiser: Auto-denoise every N frames"}, &m_settings.autoDenoiseEnabled);
-  paramReg->add({"optixAutoDenoiseInterval", "OptiX Denoiser: Auto-denoise interval (frames)"}, &m_settings.autoDenoiseInterval);
-  paramReg->add({"optixModelKind", "OptiX Denoiser: Model [AOV:0, Upscale2X:1]"}, (int*)&m_settings.modelKind);
+  settings->add({"optixEnable", "OptiX Denoiser: Enable OptiX denoiser"}, &m_settings.enable, Persist::eYes);
+  settings->add({"optixAutoDenoiseEnabled", "OptiX Denoiser: Auto-denoise every N frames"},
+                &m_settings.autoDenoiseEnabled, Persist::eYes);
+  // Bounds mirror the UI (Slider 1..500 in showUI, Combo indices 0..1 for {AOV, Upscale2X}) so
+  // CLI, benchmark sequences, and ImGui.ini restore cannot set values the UI would reject.
+  settings->add({"optixAutoDenoiseInterval", "OptiX Denoiser: Auto-denoise interval (frames)"},
+                &m_settings.autoDenoiseInterval, Persist::eYes, 1, 500);
+  settings->add({"optixModelKind", "OptiX Denoiser: Model [AOV:0, Upscale2X:1]"}, (int*)&m_settings.modelKind,
+                Persist::eYes, 0, 1);
 }
 
-void OptiXDenoiser::setSettingsHandler(nvgui::SettingsHandler* settingsHandler)
-{
-  settingsHandler->setSetting("optixEnable", &m_settings.enable);
-  settingsHandler->setSetting("optixAutoDenoiseEnabled", &m_settings.autoDenoiseEnabled);
-  settingsHandler->setSetting("optixAutoDenoiseInterval", &m_settings.autoDenoiseInterval);
-  settingsHandler->setSetting("optixModelKind", (int*)&m_settings.modelKind);
-}
 
 void OptiXDenoiser::updateDenoiser(Resources& resources)
 {
@@ -807,119 +811,175 @@ void OptiXDenoiser::updateDenoiser(Resources& resources)
 
 bool OptiXDenoiser::onUi(Resources& resources)
 {
-  bool changed = false;
+  bool changed = onUiActivation(resources);
+  changed |= onUiSettings(resources);
+  changed |= onUiPreview(resources);
+  return changed;
+}
 
-  // Check if init failed (e.g. because hardware is missing)
-  if(Availability::eUnavailable == m_availability)
+bool OptiXDenoiser::onUiActivation(Resources& resources)
+{
+  bool       changed = false;
+  const bool avail   = m_availability != Availability::eUnavailable;
+
+  bool        optixEnabled = m_settings.enable;
+  const char* state        = "Off";
+  ImVec4      color        = nvsamples::denoiserui::mutedColor();
+  if(!avail)
   {
-    ImGui::BeginDisabled();
-    bool dummyEnable = false;
-    ImGui::Checkbox("OptiX Denoiser", &dummyEnable);
-    ImGui::EndDisabled();
-    ImGui::SameLine();
-
-    ImGui::TextDisabled("(OptiX initialization failed; is hardware available?)");
-    return changed;
+    state = "Unavailable";
+    color = nvsamples::denoiserui::unavailableColor();
+  }
+  else if(m_settings.enable)
+  {
+    state = "On";
+    color = nvsamples::denoiserui::readyColor();
   }
 
+  const bool wasEnabled = m_settings.enable;
+  if(nvsamples::denoiserui::featureRow("optix", "OptiX AI Denoiser", &optixEnabled, avail, state, color, &m_settingsOpen,
+                                       avail ? "Enable the OptiX denoiser." : "OptiX initialization failed; check CUDA/OptiX hardware support.",
+                                       "Show OptiX denoiser settings."))
   {
-    bool wasEnabled = m_settings.enable;
-    ImGui::Checkbox("OptiX Denoiser", &m_settings.enable);
-
-    // When enabling the denoiser, ensure buffers are properly sized
+    m_settings.enable = optixEnabled;
     if(m_settings.enable && !wasEnabled)
     {
       VkCommandBuffer cmd = resources.app->createTempCmdBuffer();
       updateSize(cmd, resources.gBuffers.getSize());
       resources.app->submitAndWaitTempCmdBuffer(cmd);
     }
-
-    // If the denoiser is disabled switch the display to the standard rendered output.
     if(!m_settings.enable && (resources.settings.displayBuffer == DisplayBuffer::eOptixDenoised))
-    {
       resources.settings.displayBuffer = DisplayBuffer::eRendered;
-    }
+    changed = true;
+  }
+  return changed;
+}
 
-    if(m_settings.enable)
+bool OptiXDenoiser::onUiSettings(Resources& resources)
+{
+  if(!m_settingsOpen)
+    return false;
+
+  bool       changed = false;
+  const bool avail   = m_availability != Availability::eUnavailable;
+
+  ImGui::Indent();
+  ImGui::PushID("optix_settings");
+
+  if(!avail)
+  {
+    ImGui::TextDisabled("OptiX is unavailable; check CUDA/OptiX hardware support.");
+    ImGui::PopID();
+    ImGui::Unindent();
+    return false;
+  }
+
+  ImGui::TextDisabled("OptiX AI Denoiser settings");
+
+  // Settings body — greyed when disabled
+  if(!m_settings.enable)
+    ImGui::BeginDisabled();
+
+  // Manual denoise button
+  if(ImGui::Button(ICON_MS_AUTO_FIX_HIGH " Denoise Now"))
+  {
+    if(denoiseOneShot(resources))
+      resources.settings.displayBuffer = DisplayBuffer::eOptixDenoised;
+    else
+      LOGE("OptiX denoising failed\n");
+  }
+  nvsamples::denoiserui::tooltip("Denoise the current accumulation and show the result.");
+
+  namespace PE = nvgui::PropertyEditor;
+  PE::begin(__FUNCTION__);
+
+  // Model selection
+  {
+    static const char* s_modelNames[] = {"Denoise (AOV)", "Denoise + Upscale 2X"};
+    int                currentModel   = static_cast<int>(m_settings.modelKind);
+    if(PE::Combo("Model", &currentModel, s_modelNames, IM_ARRAYSIZE(s_modelNames)))
     {
-      // Manual denoise button
-      ImGui::SameLine();
-      if(ImGui::Button("Denoise"))
-      {
-        if(denoiseOneShot(resources))
-        {
-          resources.settings.displayBuffer = DisplayBuffer::eOptixDenoised;
-        }
-        else
-        {
-          LOGE("OptiX denoising failed\n");
-        }
-      }
+      m_settings.modelKind = static_cast<ModelKind>(currentModel);
+      m_needModelRecreate  = true;
+      m_needRebuildBuffers = true;
+      m_hasValidOutput     = false;
 
-      namespace PE = nvgui::PropertyEditor;
-      PE::begin(__FUNCTION__);
-
-      // Model selection
-      {
-        static const char* s_modelNames[] = {"Denoise (AOV)", "Denoise + Upscale 2X"};
-        int                currentModel   = static_cast<int>(m_settings.modelKind);
-        if(PE::Combo("Model", &currentModel, s_modelNames, IM_ARRAYSIZE(s_modelNames)))
-        {
-          m_settings.modelKind = static_cast<ModelKind>(currentModel);
-          m_needModelRecreate  = true;
-          m_needRebuildBuffers = true;
-          m_hasValidOutput     = false;
-
-          // Force size update to recompute input/output sizes
-          VkCommandBuffer cmd = resources.app->createTempCmdBuffer();
-          updateSize(cmd, resources.gBuffers.getSize());
-          resources.app->submitAndWaitTempCmdBuffer(cmd);
-        }
-      }
-
-      PE::Checkbox("Auto-Denoise", &m_settings.autoDenoiseEnabled);
-      if(m_settings.autoDenoiseEnabled)
-      {
-        PE::SliderInt("Interval (frames)", &m_settings.autoDenoiseInterval, 1, 500);
-        if(m_settings.autoDenoiseInterval > 1)
-        {
-          ImGui::Text("Next denoise at frame: %llu",
-                      ((resources.frameCount / m_settings.autoDenoiseInterval) + 1) * m_settings.autoDenoiseInterval);
-        }
-      }
-      PE::end();
-
-      if(m_hasValidOutput && ImGui::CollapsingHeader("Denoised Output"))
-      {
-        ImGui::TextWrapped("Click on the thumbnail to view it in the viewport. Click again to toggle back to rendered image.");
-        ImGui::Spacing();
-
-        float  aspectRatio   = m_outputSize.width > 0 ? float(m_outputSize.width) / float(m_outputSize.height) : 1.0f;
-        ImVec2 thumbnailSize = {100.0f * aspectRatio, 100.0f};
-
-        DisplayBuffer bufferType = DisplayBuffer::eOptixDenoised;
-        bool          isActive   = (resources.settings.displayBuffer == bufferType);
-
-        if(isActive)
-        {
-          ImGui::PushStyleColor(ImGuiCol_Border, ImVec4(0.0f, 1.0f, 0.0f, 1.0f));
-          ImGui::PushStyleVar(ImGuiStyleVar_FrameBorderSize, 3.0f);
-        }
-
-        ImGui::Text("Denoised Result%s", isActive ? " (Active)" : "");
-        if(ImGui::ImageButton("OptiXDenoised", m_denoisedUi, thumbnailSize))
-        {
-          resources.settings.displayBuffer = isActive ? DisplayBuffer::eRendered : DisplayBuffer::eOptixDenoised;
-        }
-
-        if(isActive)
-        {
-          ImGui::PopStyleVar();
-          ImGui::PopStyleColor();
-        }
-      }
+      VkCommandBuffer cmd = resources.app->createTempCmdBuffer();
+      updateSize(cmd, resources.gBuffers.getSize());
+      resources.app->submitAndWaitTempCmdBuffer(cmd);
     }
   }
 
+  PE::Checkbox("Auto", &m_settings.autoDenoiseEnabled);
+  if(m_settings.autoDenoiseEnabled)
+  {
+    PE::SliderInt("Interval", &m_settings.autoDenoiseInterval, 1, 500, "%d frames");
+    if(m_settings.autoDenoiseInterval > 1)
+      ImGui::TextDisabled("Next: frame %llu",
+                          ((resources.frameCount / m_settings.autoDenoiseInterval) + 1) * m_settings.autoDenoiseInterval);
+  }
+  PE::end();
+
+  if(!m_settings.enable)
+    ImGui::EndDisabled();
+
+  ImGui::PopID();
+  ImGui::Unindent();
   return changed;
+}
+
+bool OptiXDenoiser::onUiPreview(Resources& resources)
+{
+  if(!m_hasValidOutput || !m_settings.enable)
+    return false;
+
+  if(!ImGui::TreeNodeEx("OptiX Output Preview"))
+    return false;
+
+  const float aspectRatio = m_outputSize.width > 0 ? float(m_outputSize.width) / float(m_outputSize.height) : 1.0f;
+  float       thumbW      = std::min(ImGui::GetContentRegionAvail().x, 160.0f);
+  float       thumbH      = thumbW / std::max(0.1f, aspectRatio);
+  if(thumbH > 100.0f)
+  {
+    thumbH = 100.0f;
+    thumbW = thumbH * aspectRatio;
+  }
+  ImVec2 thumbnailSize = {thumbW, thumbH};
+
+  DisplayBuffer bufferType = DisplayBuffer::eOptixDenoised;
+  bool          isActive   = (resources.settings.displayBuffer == bufferType);
+
+  // Apply linear-to-sRGB gamma so the linear denoised buffer looks correct in the ImGui panel.
+  const nvapp::ImTextureVisualizer::Settings linearToSrgb{.pow = glm::vec4(1.0f / 2.2f, 1.0f / 2.2f, 1.0f / 2.2f, 1.0f)};
+
+  ImGui::AlignTextToFramePadding();
+  ImGui::TextDisabled("Viewport");
+  ImGui::SameLine();
+  if(nvsamples::denoiserui::activeButton("Rendered", !isActive))
+    resources.settings.displayBuffer = DisplayBuffer::eRendered;
+  nvsamples::denoiserui::tooltip("Show the main rendered image.");
+  ImGui::SameLine();
+  if(nvsamples::denoiserui::activeButton("Denoised", isActive))
+    resources.settings.displayBuffer = DisplayBuffer::eOptixDenoised;
+  nvsamples::denoiserui::tooltip("Show the OptiX denoised image.");
+  ImGui::Spacing();
+
+  ImGui::Text("Denoised%s", isActive ? " (Active)" : "");
+
+  const ImVec2 imgPos = ImGui::GetCursorScreenPos();
+  if(m_denoisedUi.isValid())
+    m_denoisedUi.image(m_denoiserTarget.getUiImageView(eGBufferDenoised), thumbnailSize, linearToSrgb);
+  else
+    ImGui::Dummy(thumbnailSize);
+  ImGui::SetCursorScreenPos(imgPos);
+  ImGui::InvisibleButton("OptiXDenoised", thumbnailSize);
+  if(ImGui::IsItemClicked())
+    resources.settings.displayBuffer = isActive ? DisplayBuffer::eRendered : DisplayBuffer::eOptixDenoised;
+
+  if(isActive)
+    ImGui::GetWindowDrawList()->AddRect(imgPos, ImVec2(imgPos.x + thumbnailSize.x, imgPos.y + thumbnailSize.y),
+                                        IM_COL32(0, 255, 0, 255), 0.0f, 0, 3.0f);
+
+  ImGui::TreePop();
+  return false;  // Display buffer toggle is a view-only switch; no accumulation reset needed.
 }

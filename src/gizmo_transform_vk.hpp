@@ -21,7 +21,7 @@
 
 #include <nvvk/resource_allocator.hpp>
 #include <nvvk/resources.hpp>
-#include <nvvk/staging.hpp>
+#include <nvvk/uploader_interface.hpp>
 #include <nvvk/graphics_pipeline.hpp>
 #include <nvapp/application.hpp>
 
@@ -177,10 +177,10 @@ public:
 
   struct Resources
   {
-    nvapp::Application*      app      = nullptr;
-    nvvk::ResourceAllocator* alloc    = nullptr;
-    nvvk::StagingUploader*   uploader = nullptr;
-    VkDevice                 device   = VK_NULL_HANDLE;
+    nvapp::Application*         app      = nullptr;
+    nvvk::ResourceAllocator*    alloc    = nullptr;
+    nvvk::CmdUploaderInterface* uploader = nullptr;
+    VkDevice                    device   = VK_NULL_HANDLE;
   };
 
   //-----------------------------------------------------------------------------
@@ -358,10 +358,10 @@ private:
   // Member Variables
   //-----------------------------------------------------------------------------
 
-  nvapp::Application*      m_app      = nullptr;
-  nvvk::ResourceAllocator* m_alloc    = nullptr;
-  nvvk::StagingUploader*   m_uploader = nullptr;
-  VkDevice                 m_device   = VK_NULL_HANDLE;
+  nvapp::Application*         m_app      = nullptr;
+  nvvk::ResourceAllocator*    m_alloc    = nullptr;
+  nvvk::CmdUploaderInterface* m_uploader = nullptr;
+  VkDevice                    m_device   = VK_NULL_HANDLE;
 
   // Attached transform pointers (caller owns the storage)
   glm::vec3*       m_attachedPosition  = nullptr;

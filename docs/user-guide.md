@@ -62,20 +62,58 @@ Two denoisers are available to reduce path tracing noise while preserving detail
 
 ![](images/dlss.jpg)
 
-- When activated, select the rendering resolution (Min / Optimal / Max) — lower internal resolution means faster rendering, DLSS upscales to the viewport.
-- View the AI guide buffers (albedo, normal, motion, depth, specular) by clicking on thumbnails. Click again to toggle back to the rendered image.
+- Enable or disable it from the denoiser activation row; the status appears next to the row label. **Loading** means the nonblocking NGX prewarm is running, **Ready** means it can be enabled without waiting for startup initialization, and **On** means it is actively denoising the current frame.
+- Open the row's settings button to choose the input size (Min / Optimal / Max) — lower internal resolution means faster rendering, DLSS upscales to the viewport.
+- Developer guide-buffer previews (albedo, normal, motion, depth, specular) live at the bottom of the panel under **Developer Guide Buffers**. Use **Rendered** to switch back to the main image.
 - Transparency handling can be set to "Default (first hit)" or "Improved (blended guides)" for scenes with alpha-blended materials.
 
 **How to enable:** Set `USE_DLSS=ON` in CMake (enabled by default). The DLSS SDK is downloaded automatically. Requires an NVIDIA RTX 20-series or newer GPU and up-to-date drivers.
+
+#### DLSS Neural Rendering (DLSS-NR)
+
+DLSS-NR is a display-resolution **image enhancer** that runs on top of DLSS-RR or DLSS-SR. It
+operates on the tonemapped (LDR) image and applies learned local tone and structure adjustments.
+Enable it in the DLSS panel once the main DLSS feature is available. In path tracing mode, DLSS-RR
+must be enabled because NR needs a denoised input.
+
+Open the row's settings button to edit:
+- **Intensity** — overall NR effect strength.
+- **Local Tone** — adjusts local luminance contrast.
+- **Local Structure** — sharpens or smooths local detail; most visible on high-frequency surfaces.
+- **Global Tone** — adjusts global tone mapping strength applied by NR.
+- **Skin Structure** — NR-specific skin-detail preservation.
+- **Style** — NR processing style preset (SDK-defined).
+- **Auto Mask** — let NR derive its own per-pixel mask instead of using `EXT_DLSS_NR`.
+
+**Per-material NR mask (`EXT_DLSS_NR`):** Add the `EXT_DLSS_NR` extension to any material in the
+**Material Extensions** section of the Inspector to override NR strengths per object. Each channel
+multiplies the corresponding global setting for pixels covered by that material:
+
+| Channel | Global setting it scales |
+|---|---|
+| Intensity | Intensity |
+| Local Tone | Local Tone |
+| Local Structure | Local Structure |
+| Global Tone | Global Tone |
+
+Default `(1, 1, 1, 1)` leaves global values unchanged. Set a channel to `0` to fully suppress
+that effect on the material's pixels. This enables per-character NR tuning — for example, disabling
+local structure on a background prop while keeping it on a foreground character.
+
+> The per-material mask is written by the path tracer only. It has no effect when the rasterizer
+> is active (the rasterizer falls back to the global `Use Auto Mask` setting).
+
+**How to enable:** Requires `USE_DLSSNR=ON` in CMake plus a compatible beta NGX SDK.
 
 #### OptiX AI Denoiser
 
 [OptiX AI Denoiser](https://developer.nvidia.com/optix-denoiser) uses albedo and normal guide buffers to preserve detail while removing Monte Carlo noise.
 
-![](images/optix.jpg)
+![OptiX AI Denoiser panel](images/optix.jpg)
 
-- Click the **Denoise** button to denoise the current accumulation, or enable **Auto-Denoise** to trigger automatically every N frames.
-- The denoised image is visible when **Denoise Result** is active, indicated by a green outline.
+- Enable or disable it from the denoiser activation row; the status appears next to the row label.
+- Open the row's settings button, then click **Denoise Now** to denoise the current accumulation, or enable **Auto** to trigger automatically every N frames.
+- Use the **Rendered** / **Denoised** viewport toggle in **OptiX Output Preview** to compare the current render with the OptiX result.
 
 **How to enable:** Set `USE_OPTIX_DENOISER=ON` in CMake (enabled by default when CUDA Toolkit is found). OptiX headers are downloaded automatically — no separate SDK install needed. Requires the [CUDA Toolkit](https://developer.nvidia.com/cuda-downloads) (11.0+).
 
@@ -305,11 +343,14 @@ find the heaviest textures, and the footer totals the decoded texture memory. Th
 full **image viewer** and can **replace from file** or **reload**; an image that no texture references can be
 deleted from the toolbar (refcount-gated). Other unused resources are cleared by **Compact Scene** (`Ctrl+K`).
 
-### Punctual Lights
+### Lights
 
-The editor supports creating and editing **KHR_lights_punctual** lights — point, directional, and spot lights that are part of the glTF standard.
+The editor supports two kinds of lights, both visible in the unified **Lights** list in the Elements tab:
 
-**Creating lights:**
+- **KHR_lights_punctual** — point, directional, and spot lights. Created from the node hierarchy context menu or the **Add ▾** button on the Lights element list.
+- **EXT_lights_ies** — standalone photometric lights whose angular distribution comes from an IESNA LM-63 `.ies` file. These are loaded from the glTF; they do not require a `KHR_lights_punctual` companion.
+
+**Creating KHR punctual lights:**
 
 - Right-click any node in the hierarchy and select **Add Child → Light → Point / Directional / Spot Light**
 - Right-click the Scene root and select **Add → Light → Point / Directional / Spot Light**
@@ -317,9 +358,9 @@ The editor supports creating and editing **KHR_lights_punctual** lights — poin
 
 Each light is created as a new node in the scene graph. Position and orient the light by editing the node's transform (inspector or gizmo).
 
-**Editing light properties:**
+**Editing KHR light properties:**
 
-When a light is selected, the Inspector shows:
+When a KHR light is selected, the Inspector shows:
 
 | Property | Applies to | Description |
 |---|---|---|
@@ -333,6 +374,26 @@ When a light is selected, the Inspector shows:
 All light property edits are undoable.
 
 **Deleting lights:** Select the light's node in the hierarchy and delete it (`Del`). Use **Tools > Compact Scene** to remove orphaned light definitions from the file.
+
+### IES Photometric Profiles
+
+[EXT_lights_ies](https://github.com/KhronosGroup/glTF/tree/main/extensions/2.0/Vendor/EXT_lights_ies)
+replaces a light's smooth falloff with the angular distribution measured from a real luminaire —
+a ring downlight, a barn-door spot, a wide scatter fixture, and so on. The profile is an
+IESNA LM-63 `.ies` file referenced by the glTF — either embedded as a bufferView or as an
+external `.ies` URI alongside the `.gltf` file.
+
+Different profiles produce dramatically different results on the same geometry:
+
+| Ring + scatter | Tight beam + umbrella | X-arrow + jellyfish | Parallel beam + comet |
+|---|---|---|---|
+| ![](images/LightsIES_original.jpg) | ![](images/LightsIES_tightbeam_umbrella.jpg) | ![](images/LightsIES_xarrow_jellyfish.jpg) | ![](images/LightsIES_parallelbeam_comet.jpg) |
+
+When an IES node is selected, the Inspector shows an **IES LIGHT** section with editable
+**Multiplier** (brightness scale) and **Color** (linear RGB tint). Both are undoable. The
+profile itself is read-only — it refers to the `.ies` file the scene was saved with.
+
+![IES inspector panel — editable Multiplier and Color](images/LightsIES_inspector.png)
 
 ### Scene Merging
 
@@ -554,8 +615,8 @@ The bridge is also driven from the **Agentic** window (press F7, or open it from
 
 | Parameter | Description |
 |---|---|
-| `--showAxis` | Show the 3D axis widget in the viewport |
-| `--showMemStats` | Open the Memory Statistics window on launch |
+| `--uiShowAxis` | Show the 3D axis widget in the viewport |
+| `--uiShowMemStats` | Open the Memory Statistics window on launch |
 | `--silhouetteColor <R> <G> <B>` | Selection silhouette color (0.0-1.0) |
 
 **Rendering**
@@ -563,9 +624,9 @@ The bridge is also driven from the **Agentic** window (press F7, or open it from
 | Parameter | Description |
 |---|---|
 | `--renderSystem <0-1>` | Path tracer (0) or Rasterizer (1) |
-| `--envSystem <0-2>` | Sky (0), HDR (1), or None (2) |
-| `--maxFrames <N>` | Maximum path tracer iterations |
-| `--visualization <N>` | Visualization mode (0 = Rendered). Values map to `shaderio::Visualization` in `shaders/shaderio.h` — see that enum for the current list. |
+| `--envSystem <0-2>` | Sky (0), HDR (1), None (2) |
+| `--ptMaxFrames <N>` | Maximum path tracer iterations |
+| `--dbgVisualization <N>` | Visualization mode (0 = Rendered). Values map to `shaderio::Visualization` in `shaders/shaderio.h` — see that enum for the current list. |
 | `--useSolidBackground` | Use solid background color |
 | `--solidBackgroundColor <R> <G> <B>` | Solid background color (0.0-1.0) |
 
@@ -587,7 +648,7 @@ The bridge is also driven from the **Agentic** window (press F7, or open it from
 
 | Parameter | Description |
 |---|---|
-| `--wireframe` | Enable the wireframe overlay (global setting; both renderers honor it) |
+| `--dbgWireframe` | Enable the wireframe overlay (global setting; both renderers honor it) |
 | `--rasterUseRecordedCmd` | Use recorded (secondary) command buffers |
 
 **Denoisers**
@@ -604,19 +665,46 @@ The bridge is also driven from the **Agentic** window (press F7, or open it from
 | Parameter | Description |
 |---|---|
 | `--tmMethod <0-5>` | Filmic (0), Uncharted (1), Clip (2), ACES (3), AgX (4), Khronos PBR (5) |
-| `--tmExposure <val>` | Exposure |
-| `--tmGamma <val>` | Brightness |
-| `--tmContrast <val>` | Contrast |
-| `--tmSaturation <val>` | Saturation |
-| `--tmWhitePoint <val>` | Vignette |
+| `--tmActive <0-1>` | Enable tone mapping |
+| `--tmExposure <0.1-200>` | Exposure multiplier |
+| `--tmContrast <0-2>` | Contrast |
+| `--tmBrightness <0-2>` | Brightness (was `--tmGamma`) |
+| `--tmSaturation <0-2>` | Saturation |
+| `--tmVignette <-1..1>` | Vignette (was `--tmWhitePoint`) |
+| `--tmDither <0-1>` | Dither |
+| `--tmTemperature <2000-15000>` | White balance temperature, Kelvin |
+| `--tmTint <-0.03..0.03>` | White balance tint (Duv) |
+| `--tmVibrance <-1..1>` | Boosts muted colors only |
+| `--tmShadowBias <-1..1>`, `--tmMidtoneBias`, `--tmHighlightBias` | Tonal range bias |
+| `--tmCoolColor <R> <G> <B>`, `--tmWarmColor <R> <G> <B>` | Split-toning tints |
+| `--tmSplitBalance <-0.5..0.5>` | Split-toning balance |
+| `--tmAutoExposure <0-1>` | Auto-exposure (turn **off** for reproducible captures) |
+| `--tmAutoExposureSpeed <0-100>` | Adaptation speed |
+| `--tmEvMin <-24..24>`, `--tmEvMax <-24..24>` | Auto-exposure clamp, EV100 |
 
 **Environment**
 
 | Parameter | Description |
 |---|---|
-| `--hdrEnvIntensity <val>` | HDR environment intensity |
-| `--hdrEnvRotation <val>` | HDR environment rotation |
-| `--hdrBlur <val>` | HDR environment blur |
+| `--envSystem <0-2>` | Sky (0), HDR (1), None (2) |
+| `--hdrfile <path>` | HDR to load; loads immediately when set at runtime |
+| `--hdrIntensity <0-100>` | HDR environment intensity |
+| `--hdrRotation <-180..180>` | HDR environment rotation, **degrees** |
+| `--hdrBlur <0-1>` | HDR environment blur |
+
+**Sun & Sky** (used when `--envSystem 0`)
+
+| Parameter | Description |
+|---|---|
+| `--skySunAzimuth <-180..180>` | Sun azimuth, degrees |
+| `--skySunElevation <-90..90>` | Sun elevation, degrees — the "time of day" control |
+| `--skyMultiplier <0-10>` | Overall sky brightness |
+| `--skyHaze <0-15>` | Haze |
+| `--skyRedBlueShift <-1..1>` | Red/blue shift |
+| `--skySaturation <0-1>` | Saturation |
+| `--skyHorizonHeight <-1..1>`, `--skyHorizonBlur <0-5>` | Horizon placement and softness |
+| `--skyGroundColor <R> <G> <B>`, `--skyNightColor <R> <G> <B>` | Ground and night tints |
+| `--skySunDiskScale <0-10>`, `--skySunDiskIntensity <0-5>`, `--skySunGlowIntensity <0-5>` | Sun disk and glow |
 
 **Headless / Batch Rendering Example:**
 

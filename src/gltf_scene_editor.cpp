@@ -247,6 +247,7 @@ SceneGraphSnapshot SceneEditor::snapshotForDelete() const
   snapshot.animations = m_scene.m_model.animations;
   snapshot.skins      = m_scene.m_model.skins;
   snapshot.lights     = m_scene.m_model.lights;
+  snapshot.cameras    = m_scene.m_model.cameras;
   return snapshot;
 }
 
@@ -257,6 +258,7 @@ void SceneEditor::restoreFromSnapshot(const SceneGraphSnapshot& snapshot)
   m_scene.m_model.animations                           = snapshot.animations;
   m_scene.m_model.skins                                = snapshot.skins;
   m_scene.m_model.lights                               = snapshot.lights;
+  m_scene.m_model.cameras                              = snapshot.cameras;
   m_scene.parseScene();
 }
 
@@ -663,6 +665,13 @@ void SceneEditor::deleteNode(int nodeIndex)
   if(blockIfNodeReadOnly(nodeIndex, "delete"))
     return;
   deleteNodeRecursive(nodeIndex);
+  // Deleting a node that carried a light or camera would otherwise leave orphan entries in
+  // model.lights / model.cameras. The traversal-based renderer stops lighting the deleted subtree
+  // as soon as parseScene() runs below (m_lights is rebuilt from live traversal), but the orphan
+  // definitions would still show up in the Elements list and get written back on save. Prune here
+  // so add-then-delete leaves no trace in the underlying tinygltf model either.
+  pruneOrphanLights();
+  pruneOrphanCameras();
   m_scene.parseScene();
 }
 
@@ -1163,6 +1172,79 @@ void SceneEditor::remapIndicesAfterNodeDeletion(int deletedIndex)
   }
 
   m_scene.animation().resetPointer();
+}
+
+//--------------------------------------------------------------------------------------------------
+// Orphan-resource cleanup
+//
+// Node.light / node.camera live *outside* the scene graph in flat model.lights / model.cameras
+// arrays. Deleting the node removes the reference but not the entry, and unlike meshes/materials
+// the runtime path treats these entries as authoritative (the render-time light list is rebuilt
+// from live traversal, but model.lights survives untouched and re-appears on save or in the
+// Elements list). These helpers sweep both arrays for entries no longer referenced by any live
+// node and compact them in place, remapping the surviving node references so indices stay
+// contiguous. Called at the end of deleteNode() and reused by compactModel().
+//--------------------------------------------------------------------------------------------------
+namespace {
+
+// Shared prune-and-remap: T is tinygltf::Light / tinygltf::Camera; `refField` is the pointer-to-
+// member on tinygltf::Node that stores the index (node.light or node.camera). Returns true when
+// entries were removed. Kept file-local -- SceneEditor's pruneOrphan{Lights,Cameras}() thin
+// wrappers exist so the header stays type-agnostic.
+template <typename T>
+bool pruneOrphanPool(std::vector<T>& pool, std::vector<tinygltf::Node>& nodes, int tinygltf::Node::* refField)
+{
+  if(pool.empty())
+    return false;
+
+  std::vector<bool> used(pool.size(), false);
+  for(const tinygltf::Node& n : nodes)
+  {
+    const int idx = n.*refField;
+    if(idx >= 0 && idx < static_cast<int>(pool.size()))
+      used[idx] = true;
+  }
+
+  std::vector<int> remap(pool.size(), -1);
+  int              newIdx = 0;
+  for(size_t i = 0; i < pool.size(); ++i)
+  {
+    if(used[i])
+      remap[i] = newIdx++;
+  }
+
+  // Nothing orphaned -- avoid touching the vector at all so downstream dirty-tracking stays quiet.
+  if(newIdx == static_cast<int>(pool.size()))
+    return false;
+
+  std::vector<T> compacted;
+  compacted.reserve(newIdx);
+  for(size_t i = 0; i < pool.size(); ++i)
+  {
+    if(used[i])
+      compacted.push_back(std::move(pool[i]));
+  }
+  pool = std::move(compacted);
+
+  for(tinygltf::Node& n : nodes)
+  {
+    if(n.*refField >= 0)
+      n.*refField = remap[n.*refField];  // guaranteed >= 0: we set used[.] before building remap
+  }
+
+  return true;
+}
+
+}  // namespace
+
+void SceneEditor::pruneOrphanLights()
+{
+  pruneOrphanPool(m_scene.m_model.lights, m_scene.m_model.nodes, &tinygltf::Node::light);
+}
+
+void SceneEditor::pruneOrphanCameras()
+{
+  pruneOrphanPool(m_scene.m_model.cameras, m_scene.m_model.nodes, &tinygltf::Node::camera);
 }
 
 //--------------------------------------------------------------------------------------------------

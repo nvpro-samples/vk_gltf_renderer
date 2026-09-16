@@ -20,7 +20,7 @@
 #pragma once
 
 #include <nvvk/resource_allocator.hpp>
-#include <nvvk/staging.hpp>
+#include <nvvk/uploader_interface.hpp>
 #include <nvvk/debug_util.hpp>
 #include <nvvk/barriers.hpp>
 #include <nvapp/application.hpp>
@@ -44,14 +44,14 @@ public:
 
   struct Resources
   {
-    nvapp::Application*      app;
-    nvvk::ResourceAllocator* alloc;
-    nvvk::StagingUploader*   uploader;
-    VkDevice                 device;
-    VkSampler                sampler;
-    nvslang::SlangCompiler*  slangCompiler;
-    VkFormat                 colorFormat;
-    VkFormat                 depthFormat;
+    nvapp::Application*         app;
+    nvvk::ResourceAllocator*    alloc;
+    nvvk::CmdUploaderInterface* uploader;
+    VkDevice                    device;
+    VkSampler                   sampler;
+    nvslang::SlangCompiler*     slangCompiler;
+    VkFormat                    colorFormat;
+    VkFormat                    depthFormat;
   };
 
   void init(const Resources& res);

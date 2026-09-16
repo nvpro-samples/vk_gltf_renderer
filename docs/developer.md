@@ -120,7 +120,8 @@ src/
 ├── renderer_rasterizer.cpp/hpp # Forward PBR rasterizer
 ├── renderer_silhouette.cpp/hpp # Selection highlight (compute shader)
 ├── hover_picker.cpp/hpp        # Async G-buffer readback for KHR_interactivity hover detection
-├── resources.hpp               # Shared Vulkan resources and settings
+├── settings_registry.hpp       # One declaration per setting -> CLI + benchmark sequences + ImGui.ini
+├── resources.hpp               # Shared Vulkan resources and settings (`nvvk::FrameUploader` staging)
 │
 ├── gltf_scene.cpp/hpp          # Core scene loading and management
 ├── gltf_scene_vk.cpp/hpp       # GPU buffer/texture upload (SceneVk)
@@ -138,6 +139,7 @@ src/
 ├── gltf_material_cache.cpp/hpp # CPU-side material cache
 ├── gltf_image_loader.cpp/hpp   # Image decoding (DDS, KTX, STB, WebP)
 ├── gltf_animation_pointer.*    # KHR_animation_pointer support
+├── ies_profile.cpp/hpp         # EXT_lights_ies: IESNA LM-63 photometric profile parser
 │
 ├── ui_inspector.cpp/hpp        # Property inspector (per selection type: node/primitive/material/
 │                               #   mesh/camera/light/texture/image/sampler/animation)
@@ -199,6 +201,7 @@ shaders/
 ├── gizmo_visuals.slang         # Transform gizmo overlays
 ├── gizmo_visuals_shaderio.h.slang # Gizmo shader I/O
 ├── optix_image_to_buffer.slang # OptiX denoiser buffer conversion
+├── gltf_light_ies.h.slang      # EXT_lights_ies: photometric-profile falloff lookup
 │
 │   # Local material fork (see "Material System" below)
 ├── gltf_material_config.h      # MAT_EXT_* compile-time feature flags
@@ -349,6 +352,72 @@ without volumetric transport.
    `getShadowTransmission()` in `pathtrace_functions.h.slang`), gate with `#if GLTF_USE_<NAME>`.
 8. Update documentation in [`README.md`](../README.md) (extension support list) and
    [`user-guide.md`](user-guide.md).
+
+### Adding a non-PBR material extension (guide-buffer pattern)
+
+Some material extensions don't influence the BSDF at all — they feed denoiser / post-process
+inputs instead. `EXT_DLSS_NR` is the reference implementation: it writes a 4-channel per-material
+mask into a dedicated DLSS-NR guide-buffer slot rather than touching `evaluateMaterial()`. The
+checklist differs from the PBR pattern above:
+
+1. `MAT_EXT_*` flag + struct field in `gltf_material_config.h` / `gltf_scene_io.h.slang` (same
+   as PBR, but **no** `gltf_eval_config.h` / `gltf_material_eval.h.slang` entry needed).
+2. Add a `GBuffer` slot to `OutputImage` enum (`shaders/shaderio.h`) and the matching `VkFormat`
+   to `kRrInnerFormats[]` (`src/dlss.cpp`).
+3. Write the slot in `processPixel` (`shaders/gltf_pathtrace.slang`) inside the first-hit block,
+   guarded by `USE_DLSS_SHADER && MAT_EXT_<NAME>`. Propagate through `GuideScratch` →
+   `GuideOutput` → `packSampleResult` (`shaders/pathtrace_functions.h.slang`) if the value needs
+   to survive path tracing.
+4. Register the new slot in `kRrSlots[]` (`src/renderer_pathtracer.cpp`) so it is wired into
+   the `outImages` bindless array.
+5. Wire the new NGX input in `Dlss::evaluateNr()` or the appropriate evaluate function
+   (`src/dlss.cpp`), reading directly from `m_innerGBuffer`.
+6. tinygltf helpers (`src/tinygltf_utils.{hpp,cpp}`), material cache loading
+   (`src/gltf_material_cache.cpp`), extension registration (`src/gltf_scene.cpp`), and inspector
+   UI (`src/ui_inspector.{hpp,cpp}`) follow the same pattern as PBR extensions — see
+   `EXT_DLSS_NR` for the complete example.
+7. Update [`docs/denoising.md`](denoising.md) (for guide-buffer / denoiser integration) and
+   [`user-guide.md`](user-guide.md).
+
+## Lighting
+
+`EXT_lights_ies` provides photometrically accurate angular light distribution using IESNA LM-63
+profile files. Per spec it defines a **self-sufficient point light** and does not compose with
+`KHR_lights_punctual`. If a node carries both extensions, `EXT_lights_ies` wins and the KHR
+attachment on that specific node is dropped at load with a warning (see
+`Scene::handleLightTraversal` in [`src/gltf_scene.cpp`](../src/gltf_scene.cpp)); the shared KHR
+light entity in `model.lights[]` is preserved, so other nodes referencing it are unaffected.
+
+![IES profiles — ring and scatter distributions on floor and wall](images/LightsIES_original.jpg)
+
+[`src/ies_profile.hpp`](../src/ies_profile.hpp) parses the `.ies` file into a normalized,
+azimuthally-averaged 1D candela curve (see its "Simplification" note on why genuinely asymmetric
+fixtures lose their azimuthal variation); `GltfScene.iesProfiles` carries the flattened per-profile
+tables to the GPU, and `GltfLight.iesProfile` indexes into it (see `shaders/gltf_scene_io.h.slang`).
+Both render paths evaluate the profile identically via `evalIesFactor()` in
+[`shaders/gltf_light_ies.h.slang`](../shaders/gltf_light_ies.h.slang).
+
+The Inspector exposes `multiplier` and `color` as editable property-editor rows on any node
+carrying `EXT_lights_ies` (`UiInspector::renderNodeProperties` -> `renderIesEditor`). Edits are
+undoable via `EditNodeIesCommand`. The profile index itself is read-only (it refers to the loaded
+`.ies` file array). Nodes that additionally carry `KHR_lights_punctual` show an inline warning in
+the IES section explaining that the KHR attachment is ignored on that node. See
+[user-guide.md § IES Photometric Profiles](user-guide.md) for profile comparison renders and the
+inspector UI.
+
+## Environment Lighting
+
+`Settings::envSystem` (`shaderio::EnvSystem`) selects one of a fixed set of environment sources;
+both render paths read the same `Resources` fields so a mode switch behaves identically either way:
+
+| Mode | Rasterizer | Path tracer |
+|---|---|---|
+| `eSky` | `nvgui`-driven procedural sky compute pass | Same procedural sky, evaluated per ray |
+| `eHdr` | `Resources::hdrDome` cubes (runtime GGX/Lambert-prefiltered from `Resources::hdrIbl`'s lat-long image) via `texturesCube[HDR_DIFFUSE_INDEX/GLOSSY_INDEX]` | `Resources::hdrIbl`'s lat-long image + CDF, sampled directly (`texturesHdr[HDR_IMAGE_INDEX]`, `envSamplingData`) |
+| `eNone` | Black backdrop, no IBL term | Black backdrop, no IBL term |
+
+`GltfRenderer::updateHdrImages()` is the single place that writes the `texturesCube[]` /
+`texturesHdr[HDR_IMAGE_INDEX]` descriptors.
 
 ## Agentic Workflow Bridge
 

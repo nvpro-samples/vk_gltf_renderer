@@ -153,7 +153,7 @@ static constexpr VkBufferUsageFlags2 kSsboUsage =
 
 //--------------------------------------------------------------------------------------------------
 // Create a GPU SSBO and stage its initial data for upload. Returns a null buffer if byteSize is 0.
-nvvk::Buffer AnimationVk::createBufferFromData(nvvk::StagingUploader& staging, const void* data, size_t byteSize, const char* debugName)
+nvvk::Buffer AnimationVk::createBufferFromData(nvvk::CmdUploaderInterface& staging, const void* data, size_t byteSize, const char* debugName)
 {
   nvvk::Buffer buf;
   if(byteSize == 0)
@@ -166,7 +166,7 @@ nvvk::Buffer AnimationVk::createBufferFromData(nvvk::StagingUploader& staging, c
 }
 
 template <typename T>
-nvvk::Buffer AnimationVk::createBufferFromSpan(nvvk::StagingUploader& staging, std::span<const T> data, const char* debugName)
+nvvk::Buffer AnimationVk::createBufferFromSpan(nvvk::CmdUploaderInterface& staging, std::span<const T> data, const char* debugName)
 {
   return createBufferFromData(staging, data.data(), data.size_bytes(), debugName);
 }
@@ -177,7 +177,7 @@ nvvk::Buffer AnimationVk::createBufferFromSpan(nvvk::StagingUploader& staging, s
 // Upload all static animation data to GPU SSBOs. Called once when the scene is loaded or rebuilt.
 // For skinning: base geometry, skin weights, joint indices, and inverse bind matrices per primitive.
 // For morphing: base geometry and all morph target deltas packed sequentially per primitive.
-void AnimationVk::createGpuBuffers(nvvk::StagingUploader& staging, const Scene& scn)
+void AnimationVk::createGpuBuffers(nvvk::CmdUploaderInterface& staging, const Scene& scn)
 {
   destroyGpuBuffers();
 
@@ -411,7 +411,7 @@ void AnimationVk::destroyGpuBuffers()
 //
 // After all dispatches, a final barrier ensures the written vertex data is visible to
 // subsequent vertex input and acceleration structure build stages.
-void AnimationVk::dispatchAnimation(VkCommandBuffer cmd, nvvk::StagingUploader& staging, Scene& scn, const SceneVk& scnVk)
+void AnimationVk::dispatchAnimation(VkCommandBuffer cmd, nvvk::CmdUploaderInterface& staging, Scene& scn, const SceneVk& scnVk)
 {
   const tinygltf::Model&        model        = scn.getModel();
   const std::vector<glm::mat4>& nodeMatrices = scn.getNodesWorldMatrices();

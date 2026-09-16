@@ -271,10 +271,10 @@ PbrMaterial evaluateMaterial(in GltfShadeMaterial material, MeshState state, Tex
 
   if(isTexturePresent(material.normalTexture))
   {
-    GltfTextureInfo normalTexInfo  = texInfos[material.normalTexture];
-    float3          normal_vector  = getTexture(images, samplers, normalTexInfo, state.tc, state.texGrad).xyz;
-    normal_vector                  = normal_vector * 2.0F - 1.0F;
-    normal_vector                  = decodeTangentSpaceNormal(normal_vector, normalTexInfo);
+    GltfTextureInfo normalTexInfo = texInfos[material.normalTexture];
+    float3          normal_vector = getTexture(images, samplers, normalTexInfo, state.tc, state.texGrad).xyz;
+    normal_vector                 = normal_vector * 2.0F - 1.0F;
+    normal_vector                 = decodeTangentSpaceNormal(normal_vector, normalTexInfo);
     normal_vector *= float3(material.normalTextureScale, material.normalTextureScale, 1.0F);
     float3x3 tbn       = float3x3(state.T, state.B, state.N);
     pbrMat.N           = normalize(mul(normal_vector, tbn));
@@ -516,10 +516,9 @@ PbrMaterial evaluateMaterial(in GltfShadeMaterial material, MeshState state, Tex
       // nvpro_core2's bsdf_functions.h.slang (not included here), which is what the path tracer
       // uses for the same medium -- if the two drift, sigma_s no longer belongs to sigma_t.
       float3 singleScatterAlbedo = multiToSingleScatterAlbedo(scatterStrength * multiscatterColor, g);
-      // attenuationDistance == 0 means "disabled" -- see volumeExtinctionCoefficient().
-      float3 attenuationCoef    = (pbrMat.attenuationDistance == 0.0F) ?
-                                      float3(0.0F) :
-                                      -log(max(pbrMat.attenuationColor, float3(0.001))) / pbrMat.attenuationDistance;
+      // CPU sanitizes attenuationDistance to FLT_MAX when the spec-invalid value 0 is present;
+      // dividing by FLT_MAX gives ~0 extinction (= no attenuation), so no branch needed here.
+      float3 attenuationCoef    = -log(max(pbrMat.attenuationColor, float3(0.001))) / pbrMat.attenuationDistance;
       pbrMat.scatterCoefficient = attenuationCoef * singleScatterAlbedo;
       pbrMat.scatterAnisotropy  = g;  // consumed by the phase function; only meaningful with sigma_s
     }

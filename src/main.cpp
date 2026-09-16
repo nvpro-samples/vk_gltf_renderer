@@ -102,9 +102,36 @@ auto main(int argc, char** argv) -> int
   // Application defaults overrides
   appInfo.preferredVsyncOffMode = VK_PRESENT_MODE_MAILBOX_KHR;
 
-  // Command line parameters registration
-  parameterRegistry.add({"scenefile", "Input scene filename"}, {".gltf"}, &sceneFilename);
-  parameterRegistry.add({"hdrfile", "Input HDR filename"}, {".hdr"}, &hdrFilename);
+  // Command line parameters registration.
+  //
+  // scenefile/hdrfile load on change, so they work identically from the command line, a benchmark
+  // sequence, and nvpro_set_parameters. The callback no-ops during this start-up parse (the
+  // renderer is not attached yet) and the explicit load further down handles that case.
+  GltfRenderer* renderer = nullptr;  // assigned once the element exists, below
+  parameterRegistry.add({.name = "scenefile",
+                         .help = "Input scene filename (loads immediately when set at runtime)",
+                         .callbackSuccess =
+                             [&renderer, &sceneFilename](const nvutils::ParameterBase* const) {
+                               // Warn if scene load fails so caller knows old scene is still active.                       
+                               if(renderer && !renderer->loadSceneFile(sceneFilename))
+                               {
+                                 LOGW("scenefile '%s' did not load; previous scene (if any) is still active.\n",
+                                      nvutils::utf8FromPath(sceneFilename).c_str());
+                               }
+                             }},
+                        {".gltf"}, &sceneFilename);
+  parameterRegistry.add({.name = "hdrfile",
+                         .help = "Input HDR filename (loads immediately when set at runtime)",
+                         .callbackSuccess =
+                             [&renderer, &hdrFilename](const nvutils::ParameterBase* const) {
+                               // Warn if HDR load fails so caller knows old HDR is still active.
+                               if(renderer && !renderer->loadHdrEnvironment(hdrFilename))
+                               {
+                                 LOGW("hdrfile '%s' did not load; previous HDR (if any) is still active.\n",
+                                      nvutils::utf8FromPath(hdrFilename).c_str());
+                               }
+                             }},
+                        {".hdr"}, &hdrFilename);
 #ifdef USE_AGENTIC
   parameterRegistry.add({"agenticBridgeRoot", "Root directory for the optional external generation bridge"}, &agenticBridgeRoot);
   parameterRegistry.add({"agenticBridgeInit", "Create the external generation bridge manifest/directories and exit"},
@@ -132,6 +159,7 @@ auto main(int argc, char** argv) -> int
 
   // Create renderer early so it can register CLI/benchmark parameters
   auto elemGltfRenderer = std::make_shared<GltfRenderer>(&parameterRegistry, &cli, benchmarkOptions);
+  renderer              = elemGltfRenderer.get();  // now the scenefile/hdrfile callbacks can act
 
   sequencerInfo.registerScriptParameters(parameterRegistry, cli);
   sequencerInfo.postCallbacks.emplace_back(
@@ -218,7 +246,7 @@ auto main(int argc, char** argv) -> int
   VkPhysicalDeviceRayQueryFeaturesKHR rayqueryFeature{VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_RAY_QUERY_FEATURES_KHR};
   VkPhysicalDeviceRayTracingPipelineFeaturesKHR rtPipelineFeature{VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_RAY_TRACING_PIPELINE_FEATURES_KHR};
   VkPhysicalDeviceShaderObjectFeaturesEXT shaderObjectFeatures{.sType = VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_SHADER_OBJECT_FEATURES_EXT};
-  VkPhysicalDeviceRayTracingInvocationReorderFeaturesNV reorderFeature{VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_RAY_TRACING_INVOCATION_REORDER_FEATURES_NV};
+  VkPhysicalDeviceRayTracingInvocationReorderFeaturesEXT reorderFeature{VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_RAY_TRACING_INVOCATION_REORDER_FEATURES_EXT};
   VkPhysicalDeviceOpacityMicromapFeaturesEXT ommFeature{VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_OPACITY_MICROMAP_FEATURES_EXT};
   // clang-format on
 
@@ -234,7 +262,7 @@ auto main(int argc, char** argv) -> int
       {VK_EXT_SHADER_OBJECT_EXTENSION_NAME, &shaderObjectFeatures},
       {VK_KHR_FRAGMENT_SHADER_BARYCENTRIC_EXTENSION_NAME, &baryFeatures},
       {VK_EXT_NESTED_COMMAND_BUFFER_EXTENSION_NAME, &nestedCmdFeature},
-      {VK_NV_RAY_TRACING_INVOCATION_REORDER_EXTENSION_NAME, &reorderFeature, false},
+      {VK_EXT_RAY_TRACING_INVOCATION_REORDER_EXTENSION_NAME, &reorderFeature, false},
       {VK_EXT_OPACITY_MICROMAP_EXTENSION_NAME, &ommFeature, false},  // Optional: Opacity Micromap (OMM)
   };
 

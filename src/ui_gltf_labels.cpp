@@ -17,6 +17,12 @@
  * SPDX-License-Identifier: Apache-2.0
  */
 
+//
+// Shared glTF label / sampler-field helpers used by both the Elements list (browse columns) and
+// the Inspector (resource editors). Keeps the sampler wrap/filter enum<->name tables and the image
+// display name in exactly one place so the list summary and the editor never drift.
+//
+
 #include "ui_gltf_labels.hpp"
 
 #include <imgui.h>

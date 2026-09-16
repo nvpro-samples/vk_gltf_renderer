@@ -17,6 +17,15 @@
  * SPDX-License-Identifier: Apache-2.0
  */
 
+//
+// Per-node-operation evaluation for KHR_interactivity: the table-driven dispatcher from
+// InteractivityOp to actual behavior (spec chapters "Math Operations" through "Event
+// Operations"). Two entry points: evaluateNodeOutput (pull-based, a node's output value socket)
+// and executeFlowNode (push-based, a node whose input flow socket was just activated). Ops not
+// yet implemented safely no-op (logged once) rather than crashing -- see docs/interactivity.md's
+// coverage table.
+//
+
 #include <algorithm>
 #include <cmath>
 #include <cstdlib>

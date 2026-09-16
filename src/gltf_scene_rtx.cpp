@@ -93,8 +93,9 @@ void nvvkgltf::SceneRtx::deinit()
 
 //--------------------------------------------------------------------------------------------------
 // Create BLAS (and optionally build in a loop) then TLAS. Calls destroy() first.
-void nvvkgltf::SceneRtx::create(VkCommandBuffer                      cmd,
-                                nvvk::StagingUploader&               staging,
+void nvvkgltf::SceneRtx::create(VkCommandBuffer             cmd,
+                                nvvk::CmdUploaderInterface& staging,
+
                                 const nvvkgltf::Scene&               scn,
                                 const SceneVk&                       scnVk,
                                 VkBuildAccelerationStructureFlagsKHR flags)
@@ -296,9 +297,11 @@ static VkGeometryInstanceFlagsKHR getInstanceFlag(const tinygltf::Material& mat)
 
 //--------------------------------------------------------------------------------------------------
 // Build TLAS from scene render nodes.
-void nvvkgltf::SceneRtx::cmdCreateBuildTopLevelAccelerationStructure(VkCommandBuffer        cmd,
-                                                                     nvvk::StagingUploader& staging,
-                                                                     const nvvkgltf::Scene& scene)
+void nvvkgltf::SceneRtx::cmdCreateBuildTopLevelAccelerationStructure(VkCommandBuffer cmd,
+
+                                                                     nvvk::CmdUploaderInterface& staging,
+                                                                     const nvvkgltf::Scene&      scene)
+
 {
   nvutils::ScopedTimer st(__FUNCTION__);
   const auto&          drawObjects = scene.getRenderNodes();
@@ -410,8 +413,9 @@ void nvvkgltf::SceneRtx::updateInstanceFlagsCache(const nvvkgltf::Scene& scene)
 
 //--------------------------------------------------------------------------------------------------
 // Rebuild or update TLAS. dirtyRenderNodes empty = full rebuild from scratch.
-void nvvkgltf::SceneRtx::rebuildTopLevelAS(VkCommandBuffer                cmd,
-                                           nvvk::StagingUploader&         staging,
+void nvvkgltf::SceneRtx::rebuildTopLevelAS(VkCommandBuffer             cmd,
+                                           nvvk::CmdUploaderInterface& staging,
+
                                            const nvvkgltf::Scene&         scene,
                                            const std::unordered_set<int>& dirtyRenderNodes)
 {
@@ -527,7 +531,7 @@ void nvvkgltf::SceneRtx::cmdUpdateTlasFromInstanceBuffer(VkCommandBuffer cmd)
 
 //--------------------------------------------------------------------------------------------------
 // Sync TLAS from Scene dirty flags; clears renderNodesRtx. Returns true if TLAS was updated.
-bool nvvkgltf::SceneRtx::syncTopLevelAS(VkCommandBuffer cmd, nvvk::StagingUploader& staging, nvvkgltf::Scene& scene)
+bool nvvkgltf::SceneRtx::syncTopLevelAS(VkCommandBuffer cmd, nvvk::CmdUploaderInterface& staging, nvvkgltf::Scene& scene)
 {
   auto&       df          = scene.getDirtyFlags();
   const auto& dirty       = df.renderNodesRtx;

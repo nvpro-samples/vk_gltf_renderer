@@ -642,9 +642,11 @@ void GltfRenderer::renderUI()
     // Camera smooth animation runs always
     m_cameraManip->updateAnim();
 
-    // Camera orbit/pan/zoom only when gizmo is not capturing input
+    // Camera orbit/pan/zoom only when gizmo is not capturing input and no Ctrl modifier is
+    // held (Ctrl+key combos are application shortcuts like Ctrl+S / Ctrl+D, not camera controls).
     bool gizmoCapturedInput = m_visualHelpers.transform.isDragging();
-    if(!gizmoCapturedInput)
+    bool ctrlHeld           = ImGui::IsKeyDown(ImGuiKey_LeftCtrl) || ImGui::IsKeyDown(ImGuiKey_RightCtrl);
+    if(!gizmoCapturedInput && !ctrlHeld)
     {
       nvapp::ElementCamera::updateCamera(m_cameraManip, ImGui::GetCurrentWindow());
     }
@@ -972,7 +974,6 @@ void GltfRenderer::renderViewMenu(bool validScene, bool& fitScene, bool& fitObje
   ImGui::MenuItem(ICON_MS_STRAIGHTEN " Snap", nullptr, &m_resources.settings.snapEnabled);
   ImGui::MenuItem(ICON_MS_MOVIE " Animation Strip", nullptr, &m_resources.animationControl.showStrip);
   ImGui::Separator();
-  ImGui::MenuItem(ICON_MS_GRID_VIEW " Grid & Snap Settings...", nullptr, &m_resources.settings.showGridSettingsWindow);
   ImGui::EndMenu();
 }
 
@@ -1300,17 +1301,16 @@ void GltfRenderer::renderMenu()
   if(reloadShader)
   {
     SCOPED_BANNER("Reload Shaders");
-    // SYNC NOTE: User-initiated shader recompile (Ctrl-Shift-R) — wait before destroying old pipelines.
-    vkQueueWaitIdle(m_app->getQueue(0).queue);
-    compileShaders();
-    resetFrame();
+    reloadShaders();  // owns the GPU drain and the frame reset
   }
 
   if(openFile)
   {
+    const std::filesystem::path& currentScene =
+        m_resources.getScene() ? m_resources.getScene()->getFilename() : std::filesystem::path{};
     sceneToLoadFilename = nvgui::windowOpenFileDialog(m_app->getWindowHandle(), "Load 3D Scene",
                                                       "3D Scene Files|*.gltf;*.glb;*.obj;*.scene.json|glTF|*.gltf;*.glb|OBJ|*.obj|Scene Descriptor|*.scene.json",
-                                                      m_lastSceneDirectory);
+                                                      m_lastSceneDirectory, currentScene);
   }
   if(!sceneToLoadFilename.empty())
   {
@@ -1411,6 +1411,9 @@ void GltfRenderer::renderMenu()
     SCOPED_BANNER("Compact Scene");
     if(m_resources.getScene()->compactModel())
     {
+      // Compact renumbers every index-based reference (meshes, materials, textures, lights, ...),
+      // so any queued undo command holding pre-compact indices is now unsafe -- drop history.
+      m_undoStack.clear();
       // Compact rewires accessors — re-parse so render nodes / dirty flags match before GPU rebuild.
       refreshCpuSceneGraphFromModel();
       rebuildVulkanSceneFull();
@@ -1941,8 +1944,7 @@ void GltfRenderer::renderEnvironmentWindow()
   {
     if(PE::Combo("Environment Type", (int*)&m_resources.settings.envSystem, "Sky\0HDR\0None\0\0"))  // 0: Sky, 1: HDR, 2: None
     {
-      m_pathTracer.m_pushConst.fireflyClampThreshold =
-          (m_resources.settings.envSystem == shaderio::EnvSystem::eHdr) ? m_resources.hdrIbl.getIntegral() : 10.0f;
+      m_pathTracer.m_pushConst.fireflyClampThreshold = defaultFireflyClamp();
       changed |= true;
     }
     changed |= PE::Checkbox("Solid Color", &m_resources.settings.useSolidBackground);
@@ -1965,14 +1967,21 @@ void GltfRenderer::renderEnvironmentWindow()
       }
       changed |= PE::SliderFloat("Intensity", &m_resources.settings.hdrEnvIntensity, 0, 100, "%.3f",
                                  ImGuiSliderFlags_Logarithmic, "HDR intensity");
-      changed |= PE::SliderAngle("Rotation", &m_resources.settings.hdrEnvRotation, -360, 360, "%.0f deg", 0, "Rotating the environment");
+      changed |= PE::SliderFloat("Rotation", &m_resources.settings.hdrEnvRotation, -180.0F, 180.0F, "%.0f deg", 0,
+                                 "Rotating the environment");  // degrees; SliderAngle would expect radians
       changed |= PE::SliderFloat("Blur", &m_resources.settings.hdrBlur, 0, 1, "%.3f", 0, "Blur the environment");
       PE::end();
     }
   }
   else if(m_resources.settings.envSystem == shaderio::EnvSystem::eSky)
   {
-    changed |= nvgui::skyPhysicalParameterUI(m_resources.skyParams);
+    if(nvgui::skyPhysicalParameterUI(m_resources.skyParams))
+    {
+      changed = true;
+      // The sliders write sunDirection; mirror it back so skySunAzimuth/skySunElevation report
+      // what is actually on screen (and persist it) rather than the last value set by name.
+      syncSunAngles();
+    }
   }
 
   if(changed)
@@ -2086,6 +2095,9 @@ void GltfRenderer::renderStatisticsWindow()
     SCOPED_BANNER("Compact Scene");
     if(m_resources.getScene()->compactModel())
     {
+      // Compact renumbers every index-based reference; queued undo commands would restore stale
+      // indices. Mirror the Tools > Compact Scene path and drop history.
+      m_undoStack.clear();
       refreshCpuSceneGraphFromModel();
       rebuildVulkanSceneFull();
       resetFrame();  // Reset path tracer accumulation

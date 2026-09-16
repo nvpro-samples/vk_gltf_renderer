@@ -17,6 +17,14 @@
  * SPDX-License-Identifier: Apache-2.0
  */
 
+//
+// Runtime state for one playing instance of a KHR_interactivity behavior graph: variable values,
+// the flow-execution queue, and per-tick timing state. InteractivityGraph
+// (gltf_interactivity_graph.cpp) is the compiled, immutable graph this reads; Play/Pause/Reset only
+// ever touch an instance, so re-running a graph from scratch is just constructing a fresh one. See
+// docs/interactivity.md.
+//
+
 #include <algorithm>
 #include <cmath>
 #include <limits>

@@ -17,6 +17,15 @@
  * SPDX-License-Identifier: Apache-2.0
  */
 
+//
+// JSON-Pointer-Template parsing (KHR_interactivity's pointer/get, pointer/set, pointer/interpolate
+// addressing scheme -- the same template family KHR_animation_pointer's concrete paths belong to)
+// plus the abstract glTF-model read/write surface those ops need. Kept dependency-light on
+// purpose: this must NOT pull in gltf_scene.hpp, so the core graph engine stays unit-testable
+// without a Scene. The concrete Scene-backed implementation lives in
+// gltf_interactivity_scene_pointer.cpp.
+//
+
 #include "gltf_interactivity_pointer.hpp"
 #include "gltf_interactivity_instance.hpp"
 

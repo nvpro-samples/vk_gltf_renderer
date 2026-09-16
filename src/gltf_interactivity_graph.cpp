@@ -17,6 +17,14 @@
  * SPDX-License-Identifier: Apache-2.0
  */
 
+//
+// Compiled representation of a KHR_interactivity behavior graph: the *static* graph model, parsed
+// once from the glTF JSON at load time into an immutable, strongly-typed form (op enum instead of
+// strings, pre-resolved socket references). Never changes after parse() succeeds -- runtime
+// execution state (variable values, flow scheduling, delay timers) lives in
+// InteractivityGraphInstance (gltf_interactivity_instance.cpp). See docs/interactivity.md.
+//
+
 #include <algorithm>
 #include <charconv>
 #include <limits>

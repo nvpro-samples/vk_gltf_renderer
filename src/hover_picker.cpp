@@ -17,6 +17,14 @@
  * SPDX-License-Identifier: Apache-2.0
  */
 
+//
+// Async, non-blocking readback of a single pixel from Resources::eImgSelection (the per-pixel
+// render-node "ObjectID" G-buffer already produced every frame for the silhouette pass), used to
+// detect what's under the mouse cursor for KHR_interactivity hover events without casting any
+// extra rays. Never blocks: requestReadback() only records a copy, pollResult() only polls a
+// timeline semaphore. See docs/interactivity.md's "Phase E design" note.
+//
+
 #include <cstring>
 
 #include <nvvk/check_error.hpp>

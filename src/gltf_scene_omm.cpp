@@ -126,7 +126,7 @@ const nvvkgltf::SceneOmm::PrimitiveOmm& nvvkgltf::SceneOmm::get(uint32_t renderP
 
 //--------------------------------------------------------------------------------------------------
 // Parse EXT_mesh_opacity_micromap, upload build inputs, and build the micromaps on `cmd`.
-void nvvkgltf::SceneOmm::create(VkCommandBuffer cmd, nvvk::StagingUploader& staging, const nvvkgltf::Scene& scene)
+void nvvkgltf::SceneOmm::create(VkCommandBuffer cmd, nvvk::CmdUploaderInterface& staging, const nvvkgltf::Scene& scene)
 {
   destroy();
 

@@ -69,7 +69,7 @@ init()                    — create the 3 compute pipelines
 #include <cstdint>
 
 #include <nvvk/resource_allocator.hpp>
-#include <nvvk/staging.hpp>
+#include <nvvk/uploader_interface.hpp>
 
 #include "gltf_scene.hpp"
 #include "gltf_scene_vk.hpp"
@@ -101,13 +101,13 @@ public:
   void setGraphicsQueue(VkQueue queue) { m_graphicsQueue = queue; }
   void setDeferredFree(SceneVk::DeferredFreeFunc func) { m_deferredFree = std::move(func); }
 
-  void createGpuBuffers(nvvk::StagingUploader& staging, const Scene& scn);
+  void createGpuBuffers(nvvk::CmdUploaderInterface& staging, const Scene& scn);
   void destroyGpuBuffers();
 
   // Call when the renderer used the CPU upload path — next GPU frame must re-upload all locals.
   void markGpuStale();
 
-  void dispatchTransformUpdate(VkCommandBuffer cmd, nvvk::StagingUploader& staging, Scene& scn, const SceneVk& scnVk, SceneRtx& scnRtx);
+  void dispatchTransformUpdate(VkCommandBuffer cmd, nvvk::CmdUploaderInterface& staging, Scene& scn, const SceneVk& scnVk, SceneRtx& scnRtx);
 
   // DLSS instance motion vectors: snapshot the current render-node objectToWorld matrices
   void cmdSnapshotPrevObjectToWorld(VkCommandBuffer cmd, const SceneVk& scnVk, size_t numRenderNodes);
@@ -124,7 +124,7 @@ public:
 private:
   void createPipelines();
   void destroyPipelines();
-  bool ensureGpuBuffersMatchScene(nvvk::StagingUploader& staging, const Scene& scn);
+  bool ensureGpuBuffersMatchScene(nvvk::CmdUploaderInterface& staging, const Scene& scn);
   void destroyGpuBuffersImmediate();
 
   nvvk::ResourceAllocator*  m_alloc = nullptr;

@@ -279,6 +279,13 @@ void collectReferencedResources(const tinygltf::Model& model, UsedResources& use
         if(node.camera >= 0)
           used.cameras.insert(node.camera);
 
+        // Lights: node.light is the canonical reference (tinygltf mirrors it from
+        // node.extensions.KHR_lights_punctual on load, and the editor's addLightNode writes only
+        // node.light). The extension-form scan below is a defensive fallback for edited JSON where
+        // the mirror is out of sync.
+        if(node.light >= 0)
+          used.lights.insert(node.light);
+
         if(node.extensions.count("KHR_lights_punctual"))
         {
           const tinygltf::Value& ext = node.extensions.at("KHR_lights_punctual");
@@ -451,6 +458,8 @@ void updateAllReferences(tinygltf::Model&                 model,
     node.mesh   = safeRemap(node.mesh, meshRemap);
     node.skin   = safeRemap(node.skin, skinRemap);
     node.camera = safeRemap(node.camera, cameraRemap);
+    // Canonical light ref (mirrors the extension-form remap below).
+    node.light = safeRemap(node.light, lightRemap);
 
     if(node.extensions.count("KHR_lights_punctual"))
     {
@@ -859,21 +868,18 @@ bool Scene::compactModel()
     return false;
   }
 
-  const size_t origMesh  = m_model.meshes.size();
-  const size_t origMat   = m_model.materials.size();
-  const size_t origTex   = m_model.textures.size();
-  const size_t origImg   = m_model.images.size();
-  const size_t origSamp  = m_model.samplers.size();
-  const size_t origSkin  = m_model.skins.size();
-  const size_t origCam   = m_model.cameras.size();
-  const size_t origAnim  = m_model.animations.size();
-  size_t       origLight = 0;
-  if(m_model.extensions.count("KHR_lights_punctual"))
-  {
-    const tinygltf::Value& ext = m_model.extensions.at("KHR_lights_punctual");
-    if(ext.Has("lights") && ext.Get("lights").IsArray())
-      origLight = ext.Get("lights").ArrayLen();
-  }
+  const size_t origMesh = m_model.meshes.size();
+  const size_t origMat  = m_model.materials.size();
+  const size_t origTex  = m_model.textures.size();
+  const size_t origImg  = m_model.images.size();
+  const size_t origSamp = m_model.samplers.size();
+  const size_t origSkin = m_model.skins.size();
+  const size_t origCam  = m_model.cameras.size();
+  const size_t origAnim = m_model.animations.size();
+  // model.lights is canonical (tinygltf mirrors it from the KHR_lights_punctual root extension on
+  // load; the editor writes only to model.lights + node.light). Using the extension array here
+  // instead undercounts editor-created lights and makes needsCompaction miss them.
+  const size_t origLight = m_model.lights.size();
 
   // Phase 1: Collect all referenced resources via top-down scene graph traversal
   UsedResources used;
@@ -913,6 +919,7 @@ bool Scene::compactModel()
   std::vector<tinygltf::Skin>      newSkins      = extractUsedElements(m_model.skins, used.skins);
   std::vector<tinygltf::Camera>    newCameras    = extractUsedElements(m_model.cameras, used.cameras);
   std::vector<tinygltf::Animation> newAnimations = extractUsedElements(m_model.animations, used.animations);
+  std::vector<tinygltf::Light>     newLights     = extractUsedElements(m_model.lights, used.lights);
 
   // Phase 4: Rewrite all index references to use new indices
   updateAllReferences(m_model, newMeshes, newMaterials, newTextures, meshRemap, materialRemap, textureRemap, imageRemap,
@@ -927,6 +934,7 @@ bool Scene::compactModel()
   m_model.skins      = std::move(newSkins);
   m_model.cameras    = std::move(newCameras);
   m_model.animations = std::move(newAnimations);
+  m_model.lights     = std::move(newLights);
 
   // Compact geometry (accessors → bufferViews → buffers) now that orphaned meshes are gone.
   // Merges all surviving data into a single buffer[0].

@@ -38,7 +38,7 @@ Usage:
   // From any thread: record commands, end the buffer, then enqueue
   vkEndCommandBuffer(cmd);
   pipeline.enqueue(cmd);                                // fire-and-forget
-  pipeline.enqueue(cmd, [&]{ releaseStaging(); });      // with completion callback
+  pipeline.enqueue(cmd, [&]{ releaseCompletedAllocations(true); });  // with completion callback
 
   // Each frame on the main thread
   bool loading = pipeline.poll();

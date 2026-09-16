@@ -23,7 +23,7 @@
 #include <vulkan/vulkan.h>
 
 #include "nvvk/resource_allocator.hpp"
-#include "nvvk/staging.hpp"
+#include <nvvk/uploader_interface.hpp>
 #include "nvvk/graphics_pipeline.hpp"
 #include "nvapp/application.hpp"
 #include <nvslang/slang.hpp>
@@ -51,14 +51,14 @@ public:
 
   struct Resources
   {
-    nvapp::Application*      app                       = nullptr;
-    nvvk::ResourceAllocator* alloc                     = nullptr;
-    nvvk::StagingUploader*   uploader                  = nullptr;
-    VkDevice                 device                    = VK_NULL_HANDLE;
-    nvslang::SlangCompiler*  slangCompiler             = nullptr;
-    VkFormat                 colorFormat               = VK_FORMAT_R16G16B16A16_SFLOAT;
-    VkFormat                 depthFormat               = VK_FORMAT_D32_SFLOAT;
-    VkDescriptorSetLayout    helperDescriptorSetLayout = VK_NULL_HANDLE;  // Set 0: scene depth
+    nvapp::Application*         app                       = nullptr;
+    nvvk::ResourceAllocator*    alloc                     = nullptr;
+    nvvk::CmdUploaderInterface* uploader                  = nullptr;
+    VkDevice                    device                    = VK_NULL_HANDLE;
+    nvslang::SlangCompiler*     slangCompiler             = nullptr;
+    VkFormat                    colorFormat               = VK_FORMAT_R16G16B16A16_SFLOAT;
+    VkFormat                    depthFormat               = VK_FORMAT_D32_SFLOAT;
+    VkDescriptorSetLayout       helperDescriptorSetLayout = VK_NULL_HANDLE;  // Set 0: scene depth
   };
 
   void init(const Resources& res);

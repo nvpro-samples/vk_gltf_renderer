@@ -17,15 +17,25 @@
  * SPDX-License-Identifier: Apache-2.0
  */
 
+//
+// Dlss -- application-side adapter for NVIDIA DLSS (NGX). Drives both DLSS Ray Reconstruction
+// (path-tracer denoiser + upscaler, owns an 8-attachment guide GBuffer) and Super Resolution/DLAA
+// (rasterizer AA + upscaling, owns a 3-attachment + depth inner GBuffer), bridging the
+// project-independent dlss_wrapper (NgxContext + DlssFeature) to Resources, GBuffers, ImGui, and
+// the renderer's output image.
+//
+
 #include "dlss.hpp"
 
 #if defined(USE_DLSS)
 
+#include <algorithm>
 #include <cassert>
 #include <span>
 
 #include <imgui/imgui.h>
 
+#include <nvgui/fonts.hpp>
 #include <nvgui/property_editor.hpp>
 #include <nvgui/settings_handler.hpp>
 #include <nvgui/tooltip.hpp>
@@ -38,11 +48,15 @@
 // NVSDK_NGX_RayReconstruction_Hint_Render_Preset_* enum values.
 #include <nvsdk_ngx_defs_dlssd.h>
 
+#if defined(USE_DLSSNR)
+// DLSS-NR (Neural Rendering) — beta feature, separate from RR/SR.
+#include <nvsdk_ngx_helpers_dlssnr_vk.h>
+#endif
+
 // Halton sequence utility functions
 #include "shaders/dlss_util.h"
 
-// Optional BusyWindow integration
-#include "ui_busy_window.hpp"
+#include "ui_denoiser_controls.hpp"
 
 
 // =============================================================================================
@@ -64,6 +78,7 @@ inline constexpr VkFormat kRrInnerFormats[] = {
     VK_FORMAT_R16G16_SFLOAT,        // #DLSS - Motion vectors       : eDlssMotion
     VK_FORMAT_R16_SFLOAT,           // #DLSS - ViewZ                : eDlssDepth
     VK_FORMAT_R16_SFLOAT,           // #DLSS - Specular Hit Dist    : eDlssSpecularHitDist
+    VK_FORMAT_R16G16B16A16_SFLOAT,  // #DLSS-NR - Per-material mask : eNrMask
 };
 
 // One entry in a preset combo. `value` is the NGX preset enum (RR or SR table; both share the
@@ -120,6 +135,12 @@ inline const KindConfig& kindConfig(Dlss::Kind k)
   return (k == Dlss::Kind::RR) ? kRrConfig : kSrConfig;
 }
 
+constexpr int kPendingInitNone              = 0;
+constexpr int kPendingInitUnavailable       = 1;
+constexpr int kPendingInitAvailable         = 2;
+constexpr int kPendingInitAvailableWithNr   = 3;
+constexpr int kPendingInitUnavailableWithNr = 4;  // main DLSS feature absent, but NR is available (SR fallback)
+
 }  // namespace
 
 
@@ -145,6 +166,15 @@ void Dlss::init(Resources& resources)
   if(m_linearSampler == VK_NULL_HANDLE)
     resources.samplerPool.acquireSampler(m_linearSampler);
 
+#if defined(USE_DLSSNR)
+  // NR scratch GBuffer: SFLOAT for NGX internal compatibility; blitted to eImgTonemapped (UNORM)
+  // after evaluation. Allocated at resize time (updateSizeNr); just wire the allocator here.
+  NVVK_CHECK(m_nrGBuffer.init({.device       = resources.allocator.getDevice(),
+                               .alloc        = &resources.allocator,
+                               .colorFormats = {VK_FORMAT_R32G32B32A32_SFLOAT},
+                               .debugName    = "DLSS-NR"}));
+#endif
+
   if(m_kind == Kind::RR)
     initRr(resources);
   else
@@ -154,7 +184,13 @@ void Dlss::init(Resources& resources)
   // happens when DLSS-RR hardware isn't available on the current GPU.
   const bool rrSkipped = (m_kind == Kind::RR && m_state == InitStatus::eUnavailable);
   if(!rrSkipped)
+  {
     buildGuideEntries();
+    if(resources.app && !resources.app->isHeadless())
+      m_guideVisualizer.init({.device = resources.allocator.getDevice(), .colorFormats = {resources.app->getSwapchainFormat()}});
+  }
+
+  startAsyncInit(resources);
 }
 
 void Dlss::deinit(Resources& resources)
@@ -164,12 +200,22 @@ void Dlss::deinit(Resources& resources)
   if(m_initThread.joinable())
     m_initThread.join();
   m_initInProgress.store(false, std::memory_order_release);
-  m_pendingInitResult.store(0, std::memory_order_release);
+  m_pendingInitResult.store(kPendingInitNone, std::memory_order_release);
+
+  m_guideVisualizer.deinit();
+#if defined(USE_DLSSNR)
+  destroyNr();
+  m_nrGBuffer.deinit();
+#endif
 
   if(m_kind == Kind::RR)
     deinitRr(resources);
   else
-    deinitSr(resources);
+    deinitSr(resources);  // reads m_nrAvailable to decide whether to deinit NGX
+
+#if defined(USE_DLSSNR)
+  m_nrAvailable = false;
+#endif
 
   if(m_linearSampler != VK_NULL_HANDLE)
   {
@@ -183,15 +229,11 @@ void Dlss::deinit(Resources& resources)
 }
 
 // NGX init logic, runs on worker thread. Only CPU-side Vulkan calls; result published via m_pendingInitResult.
-Dlss::InitStatus Dlss::runNgxInit(Resources& resources)
+Dlss::InitStatus Dlss::runNgxInit(const NgxContext::InitInfo& ngxInitInfo, bool& nrAvailable)
 {
   const KindConfig& t = kindConfig(m_kind);
 
-  NgxContext::InitInfo ngxInitInfo{
-      .instance       = resources.instance,
-      .physicalDevice = resources.allocator.getPhysicalDevice(),
-      .device         = resources.allocator.getDevice(),
-  };
+  nrAvailable = false;
 
   if(m_ngx.init(ngxInitInfo) != NVSDK_NGX_Result_Success)
   {
@@ -199,14 +241,92 @@ Dlss::InitStatus Dlss::runNgxInit(Resources& resources)
     return InitStatus::eUnavailable;
   }
 
+#if defined(USE_DLSSNR)
+  // Probe NR before the main feature check: NR can be available even when DLSS-SR is not,
+  // so we must discover it before potentially tearing down the NGX context.
+  nrAvailable = NVSDK_NGX_SUCCEED(m_ngx.isFeatureAvailable(NVSDK_NGX_Feature_DLSSNR));
+  LOGI("DLSS-NR: %s\n", nrAvailable ? "Available" : "Not available on this GPU/driver");
+#endif
+
   if(m_ngx.isFeatureAvailable(t.ngxFeature) != NVSDK_NGX_Result_Success)
   {
     LOGW("%s: feature not available on this driver/hardware - DLSS disabled\n", t.logTag);
-    m_ngx.deinit();
+    if(!nrAvailable)
+      m_ngx.deinit();  // Keep NGX alive when NR will still use it.
     return InitStatus::eUnavailable;
   }
 
   return InitStatus::eAvailable;
+}
+
+void Dlss::startAsyncInit(Resources& resources)
+{
+  if(m_state != InitStatus::eNotChecked)
+    return;
+  if(m_pendingInitResult.load(std::memory_order_acquire) != kPendingInitNone)
+    return;
+
+  bool expected = false;
+  if(!m_initInProgress.compare_exchange_strong(expected, true, std::memory_order_acq_rel))
+    return;
+
+  NgxContext::InitInfo ngxInitInfo{
+      .instance       = resources.instance,
+      .physicalDevice = resources.allocator.getPhysicalDevice(),
+      .device         = resources.allocator.getDevice(),
+  };
+
+  m_initThread = std::thread([this, ngxInitInfo]() {
+    SCOPED_TIMER("DLSS NGX Initialization (async, may take 2-5 seconds)");
+    bool             nrAvailable = false;
+    const InitStatus result      = runNgxInit(ngxInitInfo, nrAvailable);
+
+    int pending = kPendingInitUnavailable;
+    if(result == InitStatus::eAvailable)
+      pending = nrAvailable ? kPendingInitAvailableWithNr : kPendingInitAvailable;
+    else if(nrAvailable)
+      pending = kPendingInitUnavailableWithNr;  // main DLSS feature absent, but NR is available
+
+    // Publish the result first, then clear the in-progress flag so an observer that sees
+    // !m_initInProgress also sees the pending result.
+    m_pendingInitResult.store(pending, std::memory_order_release);
+    m_initInProgress.store(false, std::memory_order_release);
+  });
+}
+
+bool Dlss::consumePendingInitResult()
+{
+  const int pending = m_pendingInitResult.exchange(kPendingInitNone, std::memory_order_acq_rel);
+  if(pending == kPendingInitNone)
+    return false;
+
+  if(m_initThread.joinable())
+    m_initThread.join();
+
+  m_state = (pending == kPendingInitUnavailable || pending == kPendingInitUnavailableWithNr) ? InitStatus::eUnavailable :
+                                                                                               InitStatus::eAvailable;
+#if defined(USE_DLSSNR)
+  m_nrAvailable = (pending == kPendingInitAvailableWithNr || pending == kPendingInitUnavailableWithNr);
+#endif
+  if(m_state == InitStatus::eAvailable)
+  {
+    LOGI("%s: Successfully initialized and ready\n", kindConfig(m_kind).logTag);
+    m_needsRecreate = true;
+    return true;
+  }
+
+#if defined(USE_DLSSNR)
+  if(pending == kPendingInitUnavailableWithNr)
+  {
+    LOGI("%s: DLSS feature unavailable but DLSS-NR is available\n", kindConfig(m_kind).logTag);
+    m_needsRecreate = false;
+    return false;
+  }
+#endif
+
+  LOGW("%s: NGX initialization failed\n", kindConfig(m_kind).logTag);
+  m_needsRecreate = false;
+  return false;
 }
 
 void Dlss::teardownNgx()
@@ -237,7 +357,7 @@ Dlss::State Dlss::state() const
   if(!isUserEnabled())
     return State::eOff;
 
-  // (3) Async NGX init in flight, or worker hasn't been kicked off yet. tick() drives forward.
+  // (3) Async NGX init in flight, or its first result has not been consumed yet.
   if(m_state == InitStatus::eNotChecked || m_initInProgress.load(std::memory_order_acquire))
     return State::eLoading;
 
@@ -255,79 +375,27 @@ Dlss::State Dlss::state() const
   return State::eActive;
 }
 
-// Advance the asynchronous NGX initialization state machine and notify the renderer if DLSS resources
-// should be (re-)configured this frame. The logic below proceeds through the following phases:
-//
-//   eOff/eUnsupported : DLSS is disabled or unsupported, normally nothing to do.
-//                       SR still returns true for an off-transition recreate so updateSizeSr()
-//                       can restore the inner render target to native size.
-//   pending result    : Consume the async worker result on the main thread, update m_state, and return true on success.
-//   already settled   : Initialization already completed, nothing changed, return false.
-//   worker running    : Initialization still in progress, return false and renderer operates at native resolution.
-//   first call        : Launch async worker for NGX init, return false.
-//
-// In addition, we check needsRecreate() (e.g. triggered by UI changes such as size, mode, or preset)
-// so tick() reflects both "first-time successful init" as well as feature recreation events.
+// Advance the asynchronous NGX initialization state machine and notify the renderer if DLSS
+// resources should be (re-)configured this frame. init() starts the normal background prewarm;
+// tick() consumes that result, starts a fallback worker if init() could not, and reports either
+// first-time NGX readiness or feature recreation requests.
 bool Dlss::tick(Resources& resources)
 {
-  // (a) Off / Unsupported: nothing for the worker to do. SR quality changes are the exception:
-  // turning SR off must still run updateSizeSr() once so the rasterizer stops presenting the
-  // previous lower-resolution DLSS input image.
+  const bool justInitedNgx = consumePendingInitResult();
+
   const State s = state();
   if(s == State::eUnsupported)
     return false;
-  if(s == State::eOff)
-    return m_kind == Kind::SR && needsRecreate();
 
-  bool justInitedNgx = false;
+  if(m_state == InitStatus::eNotChecked && !m_initInProgress.load(std::memory_order_acquire))
+    startAsyncInit(resources);
 
-  // (b) Worker has finished since the last call -- consume the pending result on the main thread.
-  const int pending = m_pendingInitResult.exchange(0, std::memory_order_acq_rel);
-  if(pending != 0)
-  {
-    if(m_initThread.joinable())
-      m_initThread.join();
-    m_state = (pending == 1) ? InitStatus::eAvailable : InitStatus::eUnavailable;
-    if(m_state == InitStatus::eAvailable)
-    {
-      LOGI("%s: Successfully initialized and ready\n", kindConfig(m_kind).logTag);
-      justInitedNgx = true;
-    }
-    else
-    {
-      LOGW("%s: NGX initialization failed\n", kindConfig(m_kind).logTag);
-    }
-  }
-  // (c) NGX is already up (this tick() didn't observe a fresh settle) and no other work to do.
-  else if(m_state != InitStatus::eNotChecked)
-  {
-    // fall through to needsRecreate() check below
-  }
-  // (d) Worker still running -- nothing to do here, just keep waiting.
-  else if(m_initInProgress.load(std::memory_order_acquire))
-  {
-    // fall through to needsRecreate() check below (will be false anyway when state is loading)
-  }
-  // (e) First call when state is eNotChecked -- kick off the worker.
-  else
-  {
-    m_initInProgress.store(true, std::memory_order_release);
-    // Show the modal NOW (main-thread call) if the renderer wired one.
-    if(m_busyWindow)
-      m_busyWindow->start("Loading DLSS network (one-time, 2-5 s)...");
-    m_initThread = std::thread([this, &resources]() {
-      SCOPED_TIMER("DLSS NGX Initialization (async, may take 2-5 seconds)");
-      const InitStatus result = runNgxInit(resources);
-      // Publish the result first, then clear the in-progress flag so an observer that sees !m_initInProgress also sees a non-zero pending result.
-      m_pendingInitResult.store(result == InitStatus::eAvailable ? 1 : 2, std::memory_order_release);
-      m_initInProgress.store(false, std::memory_order_release);
-      // Stop the BusyWindow LAST -- this is what unblocks the render thread.
-      if(m_busyWindow)
-        m_busyWindow->stop();
-    });
-  }
+  // When DLSS-RR is off, keep the NGX prewarm alive but do not allocate its heavy guide
+  // buffers until the user enables it. SR is different: even "Off" needs its motion target
+  // resized back to native when quality changes.
+  if(s == State::eOff && m_kind == Kind::RR)
+    return false;
 
-  // Also signal UI-driven recreates (size mode / preset / quality / re-enable).
   return justInitedNgx || needsRecreate();
 }
 
@@ -344,7 +412,12 @@ bool Dlss::needsRecreate() const
 
 VkExtent2D Dlss::updateSize(VkCommandBuffer cmd, Resources& resources, VkExtent2D size)
 {
-  return (m_kind == Kind::RR) ? updateSizeRr(cmd, size) : updateSizeSr(cmd, resources, size);
+  VkExtent2D innerSize = (m_kind == Kind::RR) ? updateSizeRr(cmd, size) : updateSizeSr(cmd, resources, size);
+#if defined(USE_DLSSNR)
+  // NR always operates at display resolution, independent of inner render resolution.
+  updateSizeNr(cmd, size);
+#endif
+  return innerSize;
 }
 
 void Dlss::setResources()
@@ -357,33 +430,376 @@ void Dlss::setResources()
 
 bool Dlss::onUi(Resources& resources)
 {
-  return (m_kind == Kind::RR) ? onUiRr(resources) : onUiSr(resources);
+  bool changed = onUiActivation(resources);
+#if defined(USE_DLSSNR)
+  changed |= onUiNrActivation();
+#endif
+  changed |= onUiSettings(resources);
+#if defined(USE_DLSSNR)
+  changed |= onUiNrSettings();
+#endif
+  changed |= onUiGuideBuffers();
+  return changed;
 }
+
+bool Dlss::onUiActivation(Resources& resources)
+{
+  return (m_kind == Kind::RR) ? onUiActivationRr(resources) : onUiActivationSr(resources);
+}
+
+bool Dlss::onUiSettings(Resources& resources)
+{
+  return (m_kind == Kind::RR) ? onUiSettingsRr() : onUiSettingsSr(resources);
+}
+
+
+#if defined(USE_DLSSNR)
+// ============================================================================================
+// DLSS-NR (Neural Rendering)
+// ============================================================================================
+
+void Dlss::updateSizeNr(VkCommandBuffer cmd, VkExtent2D displaySize)
+{
+  // Always track the display size so evaluateNr() knows what size to pass to NGX.
+  m_nrSize = displaySize;
+
+  if(!m_nrAvailable)
+    return;
+
+  // Wait for in-flight GPU work before releasing or recreating the NR handle.
+  if(m_nrCreated && m_graphicsQueue != VK_NULL_HANDLE)
+    NVVK_CHECK(vkQueueWaitIdle(m_graphicsQueue));
+
+  destroyNr();
+
+  if(!m_nrSettings.enabled)
+    return;
+
+  // Create NR feature handle.
+  NVSDK_NGX_DLSSNR_Create_Params createParams{displaySize.width, displaySize.height};
+  NVSDK_NGX_Result               result =
+      NGX_VULKAN_CREATE_DLSSNR_EXT1(m_ngx.getDevice(), cmd, 1, 1, &m_nrHandle, m_ngx.getNgxParams(), &createParams);
+  if(NVSDK_NGX_FAILED(result))
+  {
+    LOGW("DLSS-NR: NGX_VULKAN_CREATE_DLSSNR_EXT1 failed: 0x%x\n", result);
+    m_nrHandle  = nullptr;
+    m_nrCreated = false;
+    return;
+  }
+  m_nrCreated    = true;
+  m_nrForceReset = true;  // fresh handle, drop history on first eval
+
+  // Allocate / reallocate the NR output image.
+  NVVK_CHECK(m_nrGBuffer.update(cmd, displaySize));
+  m_nrGBuffer.cmdClear(cmd);
+}
+
+void Dlss::destroyNr()
+{
+  if(m_nrHandle)
+  {
+    NVSDK_NGX_VULKAN_ReleaseFeature(m_nrHandle);
+    m_nrHandle = nullptr;
+  }
+  m_nrCreated = false;
+}
+
+void Dlss::evaluateNr(VkCommandBuffer cmd)
+{
+  if(!isNrActive())
+    return;
+  if(m_nrInputImage == VK_NULL_HANDLE || m_nrInputView == VK_NULL_HANDLE)
+    return;
+
+  NVVK_DBG_SCOPE(cmd);
+
+  const VkImageSubresourceRange range{VK_IMAGE_ASPECT_COLOR_BIT, 0, 1, 0, 1};
+
+  auto colorRes = NVSDK_NGX_Create_ImageView_Resource_VK(m_nrInputView, m_nrInputImage, range, m_nrInputFormat,
+                                                         m_nrSize.width, m_nrSize.height, false);
+  auto outputRes =
+      NVSDK_NGX_Create_ImageView_Resource_VK(m_nrGBuffer.getColorAttachmentView(0), m_nrGBuffer.getColorImage(0), range,
+                                             m_nrGBuffer.getColorFormat(0), m_nrSize.width, m_nrSize.height, true);
+
+  // Depth and motion vectors — needed for NR to temporally stabilise the local structure effect.
+  // Kind::RR: both are colour attachments in the inner GBuffer written by the path tracer
+  //   (linearised ViewZ R16_SFLOAT; screen-space motion R16G16_SFLOAT) at render resolution.
+  //   MV values are in render-pixel space; scale to display-pixel space so NR tracks correctly.
+  NVSDK_NGX_Resource_VK  depthRes{}, motionRes{};
+  NVSDK_NGX_Resource_VK* pDepth   = nullptr;
+  NVSDK_NGX_Resource_VK* pMotion  = nullptr;
+  float                  mvScaleX = 1.0f;
+  float                  mvScaleY = 1.0f;
+  NVSDK_NGX_Dimensions   auxSubrect{m_nrSize.width, m_nrSize.height};
+
+  const VkImageSubresourceRange depthRange{VK_IMAGE_ASPECT_DEPTH_BIT, 0, 1, 0, 1};
+
+  if(m_kind == Kind::RR && m_innerGBuffer.getSize().width == 0)
+    return;  // GBuffer reacquired (init'd) but not yet sized by updateSizeRr(); skip this frame.
+
+  if(m_kind == Kind::RR)
+  {
+    // Linearised ViewZ (R16_SFLOAT) and motion (R16G16_SFLOAT) are colour attachments in inner GBuffer.
+    const VkExtent2D rs        = getRenderSize();
+    const auto       depthIdx  = static_cast<uint32_t>(shaderio::OutputImage::eDlssDepth);
+    const auto       motionIdx = static_cast<uint32_t>(shaderio::OutputImage::eDlssMotion);
+    depthRes                   = NVSDK_NGX_Create_ImageView_Resource_VK(m_innerGBuffer.getColorAttachmentView(depthIdx),
+                                                                        m_innerGBuffer.getColorImage(depthIdx), range,
+                                                                        m_innerGBuffer.getColorFormat(depthIdx), rs.width, rs.height, false);
+    motionRes  = NVSDK_NGX_Create_ImageView_Resource_VK(m_innerGBuffer.getColorAttachmentView(motionIdx),
+                                                        m_innerGBuffer.getColorImage(motionIdx), range,
+                                                        m_innerGBuffer.getColorFormat(motionIdx), rs.width, rs.height, false);
+    pDepth     = &depthRes;
+    pMotion    = &motionRes;
+    auxSubrect = {rs.width, rs.height};
+    mvScaleX   = rs.width > 0 ? float(m_nrSize.width) / float(rs.width) : 1.0f;
+    mvScaleY   = rs.height > 0 ? float(m_nrSize.height) / float(rs.height) : 1.0f;
+  }
+  else if(m_kind == Kind::SR)
+  {
+    // Hardware depth attachment (reversed-Z) and motion colour attachment in the SR inner GBuffer.
+    const VkExtent2D rs = getRenderSize();
+    depthRes   = NVSDK_NGX_Create_ImageView_Resource_VK(getSrImageView(SrSlot::eDepth), getSrImage(SrSlot::eDepth),
+                                                        depthRange, getSrFormat(SrSlot::eDepth), rs.width, rs.height, false);
+    motionRes  = NVSDK_NGX_Create_ImageView_Resource_VK(getSrImageView(SrSlot::eMotion), getSrImage(SrSlot::eMotion),
+                                                        range, getSrFormat(SrSlot::eMotion), rs.width, rs.height, false);
+    pDepth     = &depthRes;
+    pMotion    = &motionRes;
+    auxSubrect = {rs.width, rs.height};
+    mvScaleX   = rs.width > 0 ? float(m_nrSize.width) / float(rs.width) : 1.0f;
+    mvScaleY   = rs.height > 0 ? float(m_nrSize.height) / float(rs.height) : 1.0f;
+  }
+
+  NVSDK_NGX_VK_DLSSNR_Eval_Params params{};
+  params.pInColor  = &colorRes;
+  params.pInOutput = &outputRes;
+  // Per-material NR control mask from the RR inner GBuffer (eNrMask slot, path-tracer only).
+  NVSDK_NGX_Resource_VK  maskRes{};
+  NVSDK_NGX_Resource_VK* pMask = nullptr;
+  NVSDK_NGX_Dimensions   maskSubrect{m_nrSize.width, m_nrSize.height};
+  if(m_kind == Kind::RR)
+  {
+    const VkExtent2D rs      = getRenderSize();
+    const auto       maskIdx = static_cast<uint32_t>(shaderio::OutputImage::eNrMask);
+    maskRes                  = NVSDK_NGX_Create_ImageView_Resource_VK(m_innerGBuffer.getColorAttachmentView(maskIdx),
+                                                                      m_innerGBuffer.getColorImage(maskIdx), range,
+                                                                      m_innerGBuffer.getColorFormat(maskIdx), rs.width, rs.height, false);
+    pMask                    = &maskRes;
+    maskSubrect              = {rs.width, rs.height};
+  }
+
+  params.pInDepth                 = pDepth;
+  params.pInMVec                  = pMotion;
+  params.pInControlMask           = pMask;
+  params.InEnabled                = 1;
+  params.InReset                  = m_nrForceReset ? 1 : 0;
+  m_nrForceReset                  = false;
+  params.InIntensity              = m_nrSettings.intensity;
+  params.InLocalToneStrength      = m_nrSettings.localToneStrength;
+  params.InLocalStructureStrength = m_nrSettings.localStructureStrength;
+  params.InGlobalToneStrength     = m_nrSettings.globalToneStrength;
+  params.InStyle                  = m_nrSettings.style;
+  params.InUseAutoMask            = (pMask != nullptr) ? 0 : (m_nrSettings.useAutoMask ? 1 : 0);
+  params.InSkinStructureStrength  = m_nrSettings.skinStructureStrength;
+  params.InColorSubrectSize       = {m_nrSize.width, m_nrSize.height};
+  params.InOutputSubrectSize      = {m_nrSize.width, m_nrSize.height};
+  params.InDepthSubrectSize       = auxSubrect;
+  params.InMVecSubrectSize        = auxSubrect;
+  params.InControlMaskSubrectSize = maskSubrect;
+  params.InMVecScaleX             = mvScaleX;
+  params.InMVecScaleY             = mvScaleY;
+  // RR: linearised ViewZ — not reversed. SR: hardware depth — reversed-Z (far=0, near=1).
+  params.InDepthInverted = (m_kind == Kind::SR) ? 1 : 0;
+
+  NVSDK_NGX_Result result = NGX_VULKAN_EVALUATE_DLSSNR_EXT(cmd, m_nrHandle, m_ngx.getNgxParams(), &params);
+  if(NVSDK_NGX_FAILED(result))
+  {
+    LOGW("DLSS-NR: evaluate failed: 0x%x\n", result);
+    return;
+  }
+
+  // Blit NR output back to eImgTonemapped (NR ran on the LDR display image).
+  nvvk::cmdImageMemoryBarrier(cmd, {m_nrGBuffer.getColorImage(0), VK_IMAGE_LAYOUT_GENERAL, VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL});
+  nvvk::cmdImageMemoryBarrier(cmd, {m_nrInputImage, VK_IMAGE_LAYOUT_GENERAL, VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL});
+
+  VkImageBlit2 region{
+      .sType          = VK_STRUCTURE_TYPE_IMAGE_BLIT_2,
+      .srcSubresource = {VK_IMAGE_ASPECT_COLOR_BIT, 0, 0, 1},
+      .srcOffsets     = {{0, 0, 0}, {int32_t(m_nrSize.width), int32_t(m_nrSize.height), 1}},
+      .dstSubresource = {VK_IMAGE_ASPECT_COLOR_BIT, 0, 0, 1},
+      .dstOffsets     = {{0, 0, 0}, {int32_t(m_nrSize.width), int32_t(m_nrSize.height), 1}},
+  };
+  VkBlitImageInfo2 blitInfo{
+      .sType          = VK_STRUCTURE_TYPE_BLIT_IMAGE_INFO_2,
+      .srcImage       = m_nrGBuffer.getColorImage(0),
+      .srcImageLayout = VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL,
+      .dstImage       = m_nrInputImage,
+      .dstImageLayout = VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL,
+      .regionCount    = 1,
+      .pRegions       = &region,
+      .filter         = VK_FILTER_NEAREST,
+  };
+  vkCmdBlitImage2(cmd, &blitInfo);
+
+  nvvk::cmdImageMemoryBarrier(cmd, {m_nrGBuffer.getColorImage(0), VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL, VK_IMAGE_LAYOUT_GENERAL});
+  nvvk::cmdImageMemoryBarrier(cmd, {m_nrInputImage, VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL, VK_IMAGE_LAYOUT_GENERAL});
+}
+
+bool Dlss::onUiNrActivation()
+{
+  consumePendingInitResult();
+
+  bool changed = false;
+
+  // For the path-tracer (Kind::RR), NR requires a clean denoised input — disable the toggle
+  // when RR is off so the user can't enable NR on a noisy image.
+  const bool initPending     = m_state == InitStatus::eNotChecked || m_initInProgress.load(std::memory_order_acquire);
+  const bool nrBlocked       = (m_kind == Kind::RR) && !(isAvailable() && m_settings.enableRr);
+  const bool enableAvailable = !initPending && m_nrAvailable && !nrBlocked;
+
+  bool        nrEnabled = m_nrSettings.enabled;
+  const char* state     = "Ready";
+  ImVec4      color     = nvsamples::denoiserui::readyColor();
+  if(initPending)
+  {
+    state = "Checking";
+    color = nvsamples::denoiserui::workingColor();
+  }
+  else if(!m_nrAvailable)
+  {
+    state = "Unavailable";
+    color = nvsamples::denoiserui::unavailableColor();
+  }
+  else if(nrBlocked)
+  {
+    state = "Needs RR";
+    color = nvsamples::denoiserui::workingColor();
+  }
+  else if(m_nrSettings.enabled && isNrActive())
+  {
+    state = "On";
+    color = nvsamples::denoiserui::readyColor();
+  }
+
+#ifdef USE_DLSSNR
+  if(nvsamples::denoiserui::featureRow(
+         "dlss_nr", "DLSS Neural Rendering", &nrEnabled, enableAvailable, state, color, &m_nrSettingsOpen,
+         initPending ? "DLSS-NR availability is being checked in the background." :
+                       (nrBlocked ? "Requires DLSS Ray Reconstruction to be enabled." : "Enable DLSS-NR neural rendering."),
+         "Show DLSS-NR settings."))
+  {
+    m_nrSettings.enabled = nrEnabled;
+    changed              = true;
+    m_nrForceReset       = true;
+    m_needsRecreate      = true;
+  }
+#endif
+  return changed;
+}
+
+bool Dlss::onUiNrSettings()
+{
+  if(!m_nrSettingsOpen)
+    return false;
+
+  bool       changed   = false;
+  const bool nrBlocked = (m_kind == Kind::RR) && !(isAvailable() && m_settings.enableRr);
+
+  ImGui::Indent();
+  ImGui::PushID("dlss_nr_settings");
+  if(!m_nrAvailable)
+  {
+    ImGui::TextDisabled("Not available on this GPU/driver.");
+    ImGui::PopID();
+    ImGui::Unindent();
+    return false;
+  }
+  if(nrBlocked)
+  {
+    ImGui::TextDisabled("Requires DLSS-RR to be enabled (NR needs a denoised input).");
+    ImGui::PopID();
+    ImGui::Unindent();
+    return false;
+  }
+
+  ImGui::TextDisabled("DLSS Neural Rendering settings");
+
+  // Settings body — greyed when NR is disabled
+  if(!m_nrSettings.enabled)
+    ImGui::BeginDisabled();
+
+  // Strength sliders: per-frame weights, no temporal reset needed — changing them mid-stream
+  // is intentional and should blend smoothly.
+  namespace PE = nvgui::PropertyEditor;
+  PE::begin();
+  auto sliderF = [&](const char* label, float& val, float lo, float hi, const char* tip) {
+    if(PE::SliderFloat(label, &val, lo, hi, "%.2f", 0, tip))
+      changed = true;
+  };
+  sliderF("Intensity", m_nrSettings.intensity, 0.0f, 1.0f, "Overall NR effect strength (0 = off, 1 = full).");
+  sliderF("Local Tone", m_nrSettings.localToneStrength, 0.0f, 1.0f, "Strength of local tone-mapping adjustments.");
+  sliderF("Local Structure", m_nrSettings.localStructureStrength, 0.0f, 1.0f, "Strength of local structure enhancement.");
+  sliderF("Global Tone", m_nrSettings.globalToneStrength, 0.0f, 1.0f, "Strength of global tone-mapping adjustments.");
+  sliderF("Skin Structure", m_nrSettings.skinStructureStrength, 0.0f, 1.0f, "Skin texture enhancement strength.");
+
+  static const char* kNrStyleLabels[] = {"Default", "A", "B", "C", "D", "E", "F", "G"};
+  int                nrStyle          = static_cast<int>(m_nrSettings.style);
+  nrStyle                             = std::clamp(nrStyle, 0, IM_ARRAYSIZE(kNrStyleLabels) - 1);
+  if(PE::Combo("Style", &nrStyle, kNrStyleLabels, IM_ARRAYSIZE(kNrStyleLabels), 0, "NR style preset."))
+  {
+    m_nrSettings.style = static_cast<unsigned int>(nrStyle);
+    changed            = true;
+    m_nrForceReset     = true;  // switching model preset warrants a history reset
+  }
+
+  if(PE::Checkbox("Auto Mask", &m_nrSettings.useAutoMask, "Let NR automatically derive a per-pixel enhancement mask."))
+    changed = true;
+  PE::end();
+
+  if(!m_nrSettings.enabled)
+    ImGui::EndDisabled();
+
+  ImGui::PopID();
+  ImGui::Unindent();
+  return changed;
+}
+
+bool Dlss::onUiNr()
+{
+  bool changed = onUiNrActivation();
+  changed |= onUiNrSettings();
+  return changed;
+}
+
+#endif  // USE_DLSSNR
 
 
 // ============================================================================================
 // Settings / parameter registration (kind-aware)
 // ============================================================================================
 
-void Dlss::registerParameters(nvutils::ParameterRegistry* paramReg)
+void Dlss::registerParameters(SettingsRegistry* settings, std::function<void()> onSettingChanged)
 {
-  if(m_kind == Kind::RR)
-  {
-    paramReg->add({"dlssEnable", "DLSS Denoiser: Enable DLSS denoiser"}, &m_settings.enableRr);
-  }
-  else
-  {
-    paramReg->add({"dlssQuality", "DLSS Super Resolution mode: 0=Off, 1=DLAA, 2=Quality, 3=Balanced, 4=Performance, 5=UltraPerformance"},
-                  &m_settings.qualityMode);
-  }
-}
+  // Attach the caller's invalidation hook (if any) as callbackSuccess so a CLI or benchmark
+  // change fires it. The Info-with-callback form is used unconditionally to keep the two
+  // branches identical; when no hook was passed the field stays default-empty and behaves
+  // like a plain add(). See Dlss::registerParameters doc-comment for the ini-restore caveat.
+  nvutils::ParameterBase::CallbackSuccess cb;
+  if(onSettingChanged)
+    cb = [hook = std::move(onSettingChanged)](const nvutils::ParameterBase* const) { hook(); };
 
-void Dlss::setSettingsHandler(nvgui::SettingsHandler* settingsHandler)
-{
   if(m_kind == Kind::RR)
-    settingsHandler->setSetting("dlssEnable", &m_settings.enableRr);
+  {
+    settings->add({.name = "dlssEnable", .help = "DLSS Denoiser: Enable DLSS denoiser", .callbackSuccess = cb},
+                  &m_settings.enableRr, Persist::eYes);
+  }
   else
-    settingsHandler->setSetting("dlssQuality", &m_settings.qualityMode);
+  {
+    settings->add({.name = "dlssQuality",
+                   .help = "DLSS Super Resolution mode: 0=Off, 1=DLAA, 2=Quality, 3=Balanced, 4=Performance, 5=UltraPerformance",
+                   .callbackSuccess = cb},
+                  &m_settings.qualityMode, Persist::eYes);
+  }
 }
 
 
@@ -397,6 +813,16 @@ void Dlss::setOutputImage(VkImage image, VkImageView imageView, VkFormat format)
     return;
   m_dlss.setResource({DlssFeature::ResourceType::eColorOut, image, imageView, format});
 }
+
+#if defined(USE_DLSSNR)
+void Dlss::setNrImage(VkImage image, VkImageView view, VkFormat format)
+{
+  m_nrInputImage  = image;
+  m_nrInputView   = view;
+  m_nrInputFormat = format;
+}
+
+#endif  // USE_DLSSNR
 
 Dlss::FrameContext Dlss::beginFrame()
 {
@@ -418,6 +844,9 @@ void Dlss::notifyReset()
   // Restart the Halton sequence so we never feed NGX a partial cycle and arm the next evaluate() to drop temporal history.
   m_frameIndex           = 0;
   m_forceResetUntilFrame = m_globalFrame + 1;
+#if defined(USE_DLSSNR)
+  m_nrForceReset = true;
+#endif
 }
 
 // Evaluate the DLSS feature.
@@ -454,7 +883,7 @@ void Dlss::buildGuideEntries()
   }
 
   // SR: only color attachments in the inner render target make sense as guide thumbnails
-  // (depth is excluded — depth-format, sampled via ImTexture + linearSampler elsewhere).
+  // (depth is excluded — it is a depth format, not a color/float view).
   if(m_fallback)
   {
     // Fallback mode: only motion lives in the inner GBuffer (color/selection route to outer).
@@ -469,8 +898,8 @@ std::optional<Dlss::GuideImage> Dlss::activeGuideImage() const
 {
   if(m_selectedGuide < 0 || m_selectedGuide >= static_cast<int>(m_guideEntries.size()))
     return std::nullopt;
-  if(m_innerGBuffer.getSize().width == 0)
-    return std::nullopt;  // GBuffer not yet allocated (e.g. before first onResize).
+  if(!isActive())
+    return std::nullopt;
 
   const GuideEntry& entry = m_guideEntries[m_selectedGuide];
   return GuideImage{
@@ -480,53 +909,102 @@ std::optional<Dlss::GuideImage> Dlss::activeGuideImage() const
   };
 }
 
-bool Dlss::drawGuideThumbnails()
+bool Dlss::onUiGuideBuffers()
 {
   if(m_guideEntries.empty())
     return false;
 
-  bool changed = false;
-  if(!ImGui::CollapsingHeader("Guide Images"))
+  if(!ImGui::TreeNodeEx("Developer Guide Buffers"))
     return false;
 
-  ImGui::TextWrapped(
-      "Click on a thumbnail to view it in the viewport. Click again to toggle back to the "
-      "rendered image.");
+  if(!isActive())
+  {
+    ImGui::BeginDisabled();
+    ImGui::TextUnformatted("Enable DLSS to view guide buffers.");
+    ImGui::EndDisabled();
+    ImGui::TreePop();
+    return false;
+  }
+
+  drawGuideThumbnails();
+  ImGui::TreePop();
+  return false;  // Guide selection is view-only; no accumulation reset needed.
+}
+
+bool Dlss::drawGuideThumbnails()
+{
+  bool changed = false;
+  ImGui::AlignTextToFramePadding();
+  ImGui::TextDisabled("Viewport");
+  ImGui::SameLine();
+  if(nvsamples::denoiserui::activeButton("Rendered", m_selectedGuide < 0))
+  {
+    if(m_selectedGuide >= 0)
+    {
+      m_selectedGuide = -1;
+      changed         = true;
+    }
+  }
+  nvsamples::denoiserui::tooltip("Show the main rendered image.");
   ImGui::Spacing();
 
-  const ImVec2 thumbnailSize = {100 * m_innerGBuffer.getAspectRatio(), 100};
+  const float  aspect      = std::max(0.1f, m_innerGBuffer.getAspectRatio());
+  const ImVec2 itemSpacing = ImGui::GetStyle().ItemSpacing;
+  const float  availableX  = ImGui::GetContentRegionAvail().x;
+  const int    columns     = std::max(1, std::min(3, static_cast<int>((availableX + itemSpacing.x) / 124.0f)));
 
-  // 2-column grid; matches the previous DlssDenoiser look. Works for any entry count.
-  if(ImGui::BeginTable("dlss_guide_thumbnails", 2))
+  // Apply linear-to-sRGB gamma so the linear guide buffers look correct in the ImGui panel.
+  const nvapp::ImTextureVisualizer::Settings linearToSrgb{.pow = glm::vec4(1.0f / 2.2f, 1.0f / 2.2f, 1.0f / 2.2f, 1.0f)};
+
+  if(ImGui::BeginTable("dlss_guide_thumbnails", columns, ImGuiTableFlags_SizingStretchSame))
   {
     for(int i = 0; i < static_cast<int>(m_guideEntries.size()); ++i)
     {
-      if((i % 2) == 0)
+      if((i % columns) == 0)
         ImGui::TableNextRow();
       ImGui::TableNextColumn();
+      ImGui::PushID(i);
 
       const GuideEntry& entry    = m_guideEntries[i];
       const bool        isActive = (m_selectedGuide == i);
 
-      if(isActive)
-      {
-        ImGui::PushStyleColor(ImGuiCol_Border, ImVec4(0.0f, 1.0f, 0.0f, 1.0f));
-        ImGui::PushStyleVar(ImGuiStyleVar_FrameBorderSize, 3.0f);
-      }
-
       ImGui::Text("%s%s", entry.label, isActive ? " (Active)" : "");
-      if(ImGui::ImageButton(entry.label, m_guideTextures[entry.gbufColorIdx], thumbnailSize))
+      if(ImGui::IsItemHovered())
+        ImGui::SetTooltip("Show %s guide in the viewport.", entry.label);
+
+      const float cellW  = ImGui::GetContentRegionAvail().x;
+      float       thumbW = std::min(cellW, 116.0f);
+      float       thumbH = thumbW / aspect;
+      if(thumbH > 92.0f)
+      {
+        thumbH = 92.0f;
+        thumbW = thumbH * aspect;
+      }
+      const ImVec2 thumbnailSize = {thumbW, thumbH};
+
+      // Draw the guide image with sRGB gamma correction, then overlay an invisible button for clicks.
+      const ImVec2 imgPos = ImGui::GetCursorScreenPos();
+      // Skip registering the callback when the inner GBuffer is about to be resized this frame
+      // (m_needsRecreate set earlier in onUiSettings). The old VkImageView would be destroyed
+      // in onRender() before renderToSwapchain() executes the ImGui callback.
+      if(m_guideVisualizer.isValid() && !m_needsRecreate)
+        m_guideVisualizer.image(m_innerGBuffer.getUiImageView(entry.gbufColorIdx), thumbnailSize, linearToSrgb);
+      else
+        ImGui::Dummy(thumbnailSize);
+      ImGui::SetCursorScreenPos(imgPos);
+      ImGui::InvisibleButton(entry.label, thumbnailSize);
+      if(ImGui::IsItemClicked())
       {
         // Toggle: re-clicking the active thumbnail goes back to the rendered image.
         m_selectedGuide = isActive ? -1 : i;
         changed         = true;
       }
 
+      // Highlight the active thumbnail with a green border drawn on the draw list.
       if(isActive)
-      {
-        ImGui::PopStyleVar();
-        ImGui::PopStyleColor();
-      }
+        ImGui::GetWindowDrawList()->AddRect(imgPos, ImVec2(imgPos.x + thumbnailSize.x, imgPos.y + thumbnailSize.y),
+                                            IM_COL32(0, 255, 0, 255), 0.0f, 0, 3.0f);
+      ImGui::PopID();
     }
     ImGui::EndTable();
   }
@@ -616,7 +1094,7 @@ void Dlss::assertKind([[maybe_unused]] Kind expected) const
 namespace {
 
 // Renders DLSS preset combo for the active Kind and updates *currentPreset when changed.
-bool drawPresetCombo(Dlss::Kind kind, uint32_t* currentPreset, const char* tooltip)
+bool drawPresetCombo(Dlss::Kind kind, uint32_t* currentPreset, const char* label, const char* tooltip)
 {
   const auto presets = kindConfig(kind).presets;
   if(presets.empty())
@@ -641,7 +1119,7 @@ bool drawPresetCombo(Dlss::Kind kind, uint32_t* currentPreset, const char* toolt
     labels[i] = presets[i].label;
 
   namespace PE = nvgui::PropertyEditor;
-  if(PE::Combo("DLSS Preset", &currentIdx, labels, labelCount, 0, tooltip))
+  if(PE::Combo(label, &currentIdx, labels, labelCount, 0, tooltip))
   {
     *currentPreset = presets[currentIdx].value;
     return true;
@@ -658,12 +1136,12 @@ bool drawPresetCombo(Dlss::Kind kind, uint32_t* currentPreset, const char* toolt
 bool Dlss::drawResetHistoryButton()
 {
   bool clicked = false;
-  if(ImGui::Button("Reset History"))
+  if(ImGui::Button(ICON_MS_REFRESH " Reset History"))
   {
     notifyReset();
     clicked = true;
   }
-  nvgui::tooltip("Forces InReset=true on the next DLSS evaluate, discarding all accumulated temporal history.");
+  nvgui::tooltip("Discard the denoiser's temporal history on the next frame.");
   return clicked;
 }
 
@@ -697,7 +1175,6 @@ void Dlss::deinitRr(Resources& /*resources*/)
   if(m_appMemoryTracker)
     m_appMemoryTracker->untrack("DLSS/GBuffers", m_innerGBuffer,
                                 static_cast<uint32_t>(kindConfig(Kind::RR).innerColorFormats.size()));
-  deinitGuideTextures();
   m_innerGBuffer.deinit();
   if(m_state != InitStatus::eUnavailable)
     teardownNgx();
@@ -753,7 +1230,6 @@ VkExtent2D Dlss::updateSizeRr(VkCommandBuffer cmd, VkExtent2D size)
     m_appMemoryTracker->untrack("DLSS/GBuffers", m_innerGBuffer, dlssColorCount);
   NVVK_CHECK(m_innerGBuffer.update(cmd, renderingSize));
   m_innerGBuffer.cmdClear(cmd);
-  syncGuideTextures(dlssColorCount);
   if(m_appMemoryTracker)
     m_appMemoryTracker->track("DLSS/GBuffers", m_innerGBuffer, dlssColorCount);
 
@@ -782,50 +1258,75 @@ void Dlss::setResourcesRr()
   bind(DlssFeature::ResourceType::eSpecularHitDistance, shaderio::OutputImage::eDlssSpecularHitDist);
 }
 
-bool Dlss::onUiRr(Resources& resources)
+bool Dlss::onUiActivationRr(Resources& resources)
 {
-  bool changed = false;
+  consumePendingInitResult();
+  startAsyncInit(resources);
 
-  if(!resources.settings.dlssRrHardwareAvailable || m_state == InitStatus::eUnavailable)
+  bool       changed           = false;
+  const bool hardwareAvailable = resources.settings.dlssRrHardwareAvailable;
+  const bool initPending       = m_state == InitStatus::eNotChecked || m_initInProgress.load(std::memory_order_acquire);
+  const bool avail             = hardwareAvailable && m_state != InitStatus::eUnavailable;
+
+  bool        rrEnabled    = m_settings.enableRr;
+  const bool  wasEnabledRr = m_settings.enableRr;
+  const char* reason       = !hardwareAvailable ? "Hardware/extensions not available." : "NGX initialization failed.";
+  const char* enableTip    = avail ? "Enable DLSS-RR denoising and upscaling." : reason;
+  const char* uiState      = "Ready";
+  ImVec4      uiStateColor = nvsamples::denoiserui::readyColor();
+  if(!avail)
   {
-    ImGui::BeginDisabled();
-    bool dummyEnable = false;
-    ImGui::Checkbox("DLSS-RR", &dummyEnable);
-    ImGui::EndDisabled();
-    ImGui::SameLine();
-    const char* reason = !resources.settings.dlssRrHardwareAvailable ? "(Hardware/extensions not available)" :
-                                                                       "(NGX initialization failed)";
-    ImGui::TextDisabled("%s", reason);
-    return changed;
+    uiState      = "Unavailable";
+    uiStateColor = nvsamples::denoiserui::unavailableColor();
+  }
+  else if(initPending)
+  {
+    uiState      = "Loading";
+    uiStateColor = nvsamples::denoiserui::workingColor();
+    enableTip    = "DLSS-RR is initializing in the background.";
+  }
+  else if(m_settings.enableRr && state() == State::eActive)
+  {
+    uiState      = "On";
+    uiStateColor = nvsamples::denoiserui::readyColor();
   }
 
-  // Snapshot previous checkbox state to handle DLSS-RR on/off transitions.
-  const bool wasEnabledRr = m_settings.enableRr;
-  if(ImGui::Checkbox("DLSS-RR", &m_settings.enableRr))
+  if(nvsamples::denoiserui::featureRow("dlss_rr", "DLSS Ray Reconstruction", &rrEnabled, avail, uiState, uiStateColor,
+                                       &m_settingsOpen, enableTip, "Show DLSS-RR settings."))
   {
+    m_settings.enableRr = rrEnabled;
     notifyReset();
     if(wasEnabledRr && !m_settings.enableRr)
-    {
       releaseRrInnerGBuffer();
-    }
     else if(!wasEnabledRr && m_settings.enableRr)
-    {
-      // off->on: re-init the GBuffer.
       reacquireRrInnerGBuffer(resources);
-    }
     changed = true;
   }
-  nvgui::tooltip("DLSS-RR (Ray Reconstruction) is an NVIDIA RTX technology that uses an AI neural network to replace traditional denoisers.");
+  return changed;
+}
 
-  // Telemetry for the async lazy NGX init
-  if(isInitializing())
+bool Dlss::onUiSettingsRr()
+{
+  if(!m_settingsOpen)
+    return false;
+
+  bool changed = false;
+  ImGui::Indent();
+  ImGui::PushID("dlss_rr_settings");
+
+  if(m_state == InitStatus::eUnavailable)
   {
-    ImGui::SameLine();
-    ImGui::TextDisabled("(Loading NGX network...)");
+    ImGui::TextDisabled("DLSS-RR is unavailable on this GPU/driver.");
+    ImGui::PopID();
+    ImGui::Unindent();
+    return false;
   }
 
-  if(!m_settings.enableRr || !isAvailable())
-    return changed;
+  ImGui::TextDisabled("DLSS Ray Reconstruction settings");
+
+  // Settings body — greyed when RR is disabled
+  if(!m_settings.enableRr)
+    ImGui::BeginDisabled();
 
   const char* sizeModes[]     = {"Min", "Optimal", "Max"};
   int         currentSizeMode = static_cast<int>(m_settings.sizeMode);
@@ -834,13 +1335,13 @@ bool Dlss::onUiRr(Resources& resources)
   PE::begin();
   const char* transparencyModes[] = {"Default (first hit)", "Improved (blended guides)"};
   int         currentTransMode    = static_cast<int>(m_transparencyMode);
-  if(PE::Combo("Transparency Handling", &currentTransMode, transparencyModes, IM_ARRAYSIZE(transparencyModes), 0,
+  if(PE::Combo("Transparency", &currentTransMode, transparencyModes, IM_ARRAYSIZE(transparencyModes), 0,
                "Controls how DLSS guide buffers are generated for transparent materials."))
   {
     m_transparencyMode = static_cast<TransparencyMode>(currentTransMode);
     changed            = true;
   }
-  if(PE::Combo("DLSS Size Mode", &currentSizeMode, sizeModes, IM_ARRAYSIZE(sizeModes)))
+  if(PE::Combo("Input Size", &currentSizeMode, sizeModes, IM_ARRAYSIZE(sizeModes)))
   {
     m_settings.sizeMode = static_cast<SizeMode>(currentSizeMode);
     m_needsRecreate     = true;
@@ -848,12 +1349,8 @@ bool Dlss::onUiRr(Resources& resources)
     changed = true;
   }
   // RR preset combo
-  if(drawPresetCombo(Kind::RR, &m_preset,
-                     "Selects which NGX DLSS-RR network preset to load. 'Default' lets NGX pick "
-                     "the current SDK default (today: D). Preset E is the latest transformer "
-                     "model and is required when a Depth-of-Field guide buffer is used. Other "
-                     "presets listed in the SDK header are documented as 'do not use' and crash "
-                     "on this driver build."))
+  if(drawPresetCombo(Kind::RR, &m_preset, "Preset",
+                     "DLSS-RR network preset. Default lets NGX choose the SDK default; Preset E is required when a Depth-of-Field guide is used."))
   {
     m_needsRecreate = true;  // NGX bakes the preset at feature creation; previous history is incompatible.
     notifyReset();
@@ -865,12 +1362,17 @@ bool Dlss::onUiRr(Resources& resources)
   if(drawResetHistoryButton())
     changed = true;
 
-  ImGui::Text("Current Resolution: %d x %d", m_innerGBuffer.getSize().width, m_innerGBuffer.getSize().height);
+  const VkExtent2D renderSize = m_innerGBuffer.getSize();
+  if(renderSize.width == 0 || renderSize.height == 0)
+    ImGui::TextDisabled("Input resolution: pending");
+  else
+    ImGui::TextDisabled("Input resolution: %u x %u", renderSize.width, renderSize.height);
 
-  // Guide-image thumbnails
-  if(drawGuideThumbnails())
-    changed = true;
+  if(!m_settings.enableRr)
+    ImGui::EndDisabled();
 
+  ImGui::PopID();
+  ImGui::Unindent();
   return changed;
 }
 
@@ -897,7 +1399,6 @@ void Dlss::releaseRrInnerGBuffer()
     m_appMemoryTracker->untrack("DLSS/GBuffers", m_innerGBuffer,
                                 static_cast<uint32_t>(kindConfig(Kind::RR).innerColorFormats.size()));
 
-  deinitGuideTextures();
   m_innerGBuffer.deinit();
   m_guideEntries.clear();
   m_selectedGuide = -1;
@@ -961,23 +1462,29 @@ void Dlss::initSr(Resources& resources)
                                   .depthFormat  = m_fallback ? VK_FORMAT_UNDEFINED : m_innerDepthFormat,
                                   .debugName    = "DLSS-SR"}));
 
-  if(m_fallback)
-  {
-    m_state = InitStatus::eUnavailable;
-  }
+  // Fallback: m_state stays eNotChecked. The normal async probe (startAsyncInit) will run,
+  // discover that SR is unavailable, and set m_state = eUnavailable then. NR availability is
+  // also discovered in the same probe. Brief "Loading" state is acceptable since this
+  // only shows during the one-time startup probe (~2-5 s) on SR-unavailable hardware.
 }
 
 void Dlss::deinitSr(Resources& /*resources*/)
 {
   destroyImagesSr();
-  deinitGuideTextures();
   m_innerGBuffer.deinit();
   if(m_dlssCreated)
   {
     m_dlss.deinit();
     m_dlssCreated = false;
   }
-  if(m_state != InitStatus::eUnavailable)
+  // In the SR-fallback+NR case: m_state is eUnavailable but NGX is still alive to serve NR.
+  // m_nrAvailable is cleared in deinit() AFTER this call, so it still reflects the active state here.
+#if defined(USE_DLSSNR)
+  const bool nrKeepsNgxAlive = m_nrAvailable;
+#else
+  const bool nrKeepsNgxAlive = false;
+#endif
+  if(m_state != InitStatus::eUnavailable || nrKeepsNgxAlive)
     m_ngx.deinit();
 }
 
@@ -1013,7 +1520,6 @@ void Dlss::createImagesSr(VkCommandBuffer cmd, VkExtent2D size)
   m_innerGBuffer.cmdClear(cmd);
 
   const uint32_t count = m_fallback ? 1u : kInnerColorCount;
-  syncGuideTextures(count);
 
   if(m_appMemoryTracker)
   {
@@ -1169,22 +1675,70 @@ VkImage Dlss::getSrImage(SrSlot slot) const
   return VK_NULL_HANDLE;  // unreachable; switch is exhaustive
 }
 
-bool Dlss::onUiSr(Resources& resources)
+bool Dlss::onUiActivationSr(Resources& resources)
 {
+  consumePendingInitResult();
+  startAsyncInit(resources);
+
   bool changed = false;
 
-  if(!resources.settings.dlssSrHardwareAvailable || m_state == InitStatus::eUnavailable)
+  const bool hardwareAvailable = resources.settings.dlssSrHardwareAvailable;
+  const bool initPending       = m_state == InitStatus::eNotChecked || m_initInProgress.load(std::memory_order_acquire);
+  const bool avail             = hardwareAvailable && m_state != InitStatus::eUnavailable;
+
+  bool        srEnabled    = getQuality() != Quality::eOff;
+  const char* reason       = !hardwareAvailable ? "Hardware/extensions not available." : "NGX initialization failed.";
+  const char* enableTip    = avail ? "Enable DLSS Super Resolution / DLAA." : reason;
+  const char* uiState      = "Ready";
+  ImVec4      uiStateColor = nvsamples::denoiserui::readyColor();
+  if(!avail)
   {
-    ImGui::BeginDisabled();
-    bool dummy = false;
-    ImGui::Checkbox("DLSS", &dummy);
-    ImGui::EndDisabled();
-    ImGui::SameLine();
-    const char* reason = !resources.settings.dlssSrHardwareAvailable ? "(Hardware/extensions not available)" :
-                                                                       "(NGX initialization failed)";
-    ImGui::TextDisabled("%s", reason);
-    return changed;
+    uiState      = "Unavailable";
+    uiStateColor = nvsamples::denoiserui::unavailableColor();
   }
+  else if(initPending)
+  {
+    uiState      = "Loading";
+    uiStateColor = nvsamples::denoiserui::workingColor();
+    enableTip    = "DLSS-SR is initializing in the background.";
+  }
+  else if(srEnabled && state() == State::eActive)
+  {
+    uiState      = "On";
+    uiStateColor = nvsamples::denoiserui::readyColor();
+  }
+
+  if(nvsamples::denoiserui::featureRow("dlss_sr", "DLSS Super Resolution", &srEnabled, avail, uiState, uiStateColor,
+                                       &m_settingsOpen, enableTip, "Show DLSS-SR settings."))
+  {
+    m_settings.qualityMode = static_cast<int>(srEnabled ? Quality::eDLAA : Quality::eOff);
+    m_needsRecreate        = true;
+    notifyReset();
+    changed = true;
+  }
+  return changed;
+}
+
+bool Dlss::onUiSettingsSr(Resources& resources)
+{
+  if(!m_settingsOpen)
+    return false;
+
+  bool       changed = false;
+  const bool avail   = resources.settings.dlssSrHardwareAvailable && m_state != InitStatus::eUnavailable;
+
+  ImGui::Indent();
+  ImGui::PushID("dlss_sr_settings");
+
+  if(!avail)
+  {
+    ImGui::TextDisabled("DLSS-SR is unavailable on this GPU/driver.");
+    ImGui::PopID();
+    ImGui::Unindent();
+    return false;
+  }
+
+  ImGui::TextDisabled("DLSS Super Resolution settings");
 
   // Quality combo: Off, DLAA (native-res AA), or one of the four upscale presets. Switching
   // mode forces an NGX feature recreate (NGX bakes input resolution at create time).
@@ -1198,33 +1752,29 @@ bool Dlss::onUiSr(Resources& resources)
   };
   static_assert(IM_ARRAYSIZE(kQualityLabels) == static_cast<int>(Quality::eCount), "Quality combo labels must match Quality enum count");
   int currentQuality = static_cast<int>(getQuality());
-  if(ImGui::Combo("Quality", &currentQuality, kQualityLabels, IM_ARRAYSIZE(kQualityLabels)))
+
+  namespace PE = nvgui::PropertyEditor;
+  PE::begin();
+  if(PE::Combo("Quality", &currentQuality, kQualityLabels, IM_ARRAYSIZE(kQualityLabels), 0,
+               "DLSS Super Resolution mode. Off bypasses DLSS; DLAA renders at native resolution; Quality through Ultra Performance render smaller and upscale."))
   {
     m_settings.qualityMode = currentQuality;
     m_needsRecreate        = true;
     notifyReset();
     changed = true;
   }
-  // Telemetry for the async lazy NGX init -- renderer keeps drawing without DLSS during init.
-  if(isInitializing())
-  {
-    ImGui::SameLine();
-    ImGui::TextDisabled("(Loading NGX network...)");
-  }
-  nvgui::tooltip(
-      "DLSS Super Resolution mode:\n"
-      "  Off          - bypass DLSS, raster output goes straight to the display target.\n"
-      "  DLAA         - render at native resolution, AI temporal antialiasing only.\n"
-      "  Quality..Ultra - render at a smaller inner resolution, AI upscale to display res.");
 
   if(getQuality() == Quality::eOff)
+  {
+    PE::end();
+    ImGui::PopID();
+    ImGui::Unindent();
     return changed;
+  }
 
   // SR preset combo -- the table itself lives at file scope (kSrPresets[] in the KindConfig
   // section above), reusable from any future CLI flag / preset-cycler hotkey.
-  namespace PE = nvgui::PropertyEditor;
-  PE::begin();
-  if(drawPresetCombo(Kind::SR, &m_preset, "Selects which NGX DLSS-SR network preset to load.\n"))
+  if(drawPresetCombo(Kind::SR, &m_preset, "Preset", "DLSS-SR network preset. Default lets NGX choose the SDK default."))
   {
     m_needsRecreate = true;  // NGX bakes the preset at feature creation; previous history is incompatible.
     notifyReset();
@@ -1250,28 +1800,10 @@ bool Dlss::onUiSr(Resources& resources)
   if(drawResetHistoryButton())
     changed = true;
 
-  // Guide-image thumbnails (Color / Motion in normal mode). Click to route the viewport through
-  // activeGuideImage(); click again to clear.
-  if(drawGuideThumbnails())
-    changed = true;
-
+  ImGui::PopID();
+  ImGui::Unindent();
   return changed;
 }
 
-void Dlss::deinitGuideTextures()
-{
-  for(uint32_t i = 0; i < m_guideTextureCount; ++i)
-    m_guideTextures[i].deinit();
-  m_guideTextureCount = 0;
-}
-
-void Dlss::syncGuideTextures(uint32_t colorCount)
-{
-  deinitGuideTextures();
-  assert(colorCount <= kMaxGuideTextures);
-  for(uint32_t i = 0; i < colorCount; ++i)
-    m_guideTextures[i].init(m_innerGBuffer.getUiImageView(i));
-  m_guideTextureCount = colorCount;
-}
 
 #endif  // USE_DLSS

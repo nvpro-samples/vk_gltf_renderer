@@ -149,7 +149,9 @@ void populateShaderMaterial(shaderio::GltfShadeMaterial& dstMat, const tinygltf:
   KHR_materials_volume volume = tinygltf::utils::getVolume(srcMat);
   dstMat.attenuationColor     = volume.attenuationColor;
   dstMat.thicknessFactor      = volume.thicknessFactor;
-  dstMat.attenuationDistance  = volume.attenuationDistance;
+  // Spec range is (0, +inf); clamp out-of-range values to FLT_MAX (= no attenuation) on the CPU
+  // so shaders can skip the branch and rely on division by FLT_MAX giving ~0 extinction.
+  dstMat.attenuationDistance = (volume.attenuationDistance > 0.0f) ? volume.attenuationDistance : FLT_MAX;
   handleTexture(dstMat.thicknessTexture, volume.thicknessTexture);
 #endif
 
@@ -246,6 +248,11 @@ void populateShaderMaterial(shaderio::GltfShadeMaterial& dstMat, const tinygltf:
   dstMat.scatterAnisotropy       = scatter.scatterAnisotropy;
   handleTexture(dstMat.scatterStrengthTexture, scatter.scatterStrengthTexture);
   handleTexture(dstMat.multiscatterColorTexture, scatter.multiscatterColorTexture);
+#endif
+
+#if MAT_EXT_DLSS_NR
+  EXT_DLSS_NR dlssNr = tinygltf::utils::getExtDlssNr(srcMat);
+  dstMat.nrMask      = dlssNr.nrMask;
 #endif
 }
 

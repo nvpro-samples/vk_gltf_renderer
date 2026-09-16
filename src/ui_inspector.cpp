@@ -30,6 +30,7 @@
 #include "gltf_scene.hpp"
 #include "gltf_scene_editor.hpp"
 #include "tinygltf_utils.hpp"
+#include "ui_helpers.hpp"
 #include "ui_linear_color.hpp"
 #include "ui_gltf_labels.hpp"
 
@@ -56,10 +57,6 @@ namespace PE = nvgui::PropertyEditor;
 static const double f64_zero = 0., f64_one = 1., f64_ten = 10., f64_179 = 179., f64_001 = 0.001, f64_1000 = 1000.,
                     f64_10000 = 10000., f64_01 = 0.1, f64_100 = 100., f64_neg1000 = -1000.;
 
-static float logarithmicStep(float value)
-{
-  return std::max(0.1f * std::pow(10.0f, std::floor(std::log10(value))), 0.001f);
-}
 
 // Linear color-factor editors (linear numbers + perceptual sRGB swatch/wheel). See header for details.
 using uicolor::colorEdit3Linear;
@@ -645,6 +642,76 @@ void UiInspector::renderNoSelection()
 }
 
 //==================================================================================================
+// IES EDITOR (used by the Node inspector for any node carrying EXT_lights_ies -- see header for
+// contract. Per spec the extension is standalone and does not compose with KHR_lights_punctual, so
+// this is the only IES editing entry point in the UI; if a node also carries a KHR attachment the
+// caller displays a warning line above this editor.)
+//==================================================================================================
+
+bool UiInspector::renderIesEditor(int nodeIdx)
+{
+  if(!m_scene || nodeIdx < 0)
+    return false;
+  const tinygltf::Model& model = m_scene->getModel();
+  if(nodeIdx >= int(model.nodes.size()))
+    return false;
+
+  EXT_lights_ies_ref iesRef = tinygltf::utils::getNodeIesLight(model.nodes[nodeIdx]);
+  if(iesRef.light < 0)
+    return false;
+
+  // Profile identity line -- read-only (index refers to the loaded .ies array).
+  std::vector<EXT_lights_ies_profile> profiles = tinygltf::utils::getIesProfiles(model);
+  std::string                         profileLabel;
+  if(iesRef.light < int(profiles.size()))
+    profileLabel = profiles[iesRef.light].name.empty() ? profiles[iesRef.light].uri : profiles[iesRef.light].name;
+  ImGui::TextDisabled("%s IES profile [%d]: %s", ICON_MS_FLASHLIGHT_ON, iesRef.light, profileLabel.c_str());
+
+  // Capture pre-edit state before any widget can modify iesRef (for undo snapshot).
+  const EXT_lights_ies_ref preEditIesRef = iesRef;
+  const bool               readOnly      = m_scene->isNodeReadOnly(nodeIdx);
+
+  bool iesModif = false;
+  ImGui::BeginDisabled(readOnly);
+  if(PE::begin())
+  {
+    if(PE::DragFloat("Multiplier", &iesRef.multiplier, 0.01f, 0.0f, 100.0f, "%.3f", ImGuiSliderFlags_Logarithmic | ImGuiSliderFlags_NoRoundToFormat,
+                     "Non-negative scale on the IES candela distribution.\n"
+                     "Acts as a brightness multiplier on top of the profile."))
+      iesModif = true;
+    if(colorEdit3Linear("Color", glm::value_ptr(iesRef.color),
+                        "RGB tint in linear space, clamped to [0,1].\n"
+                        "Applied as a per-channel multiplier on the IES output."))
+      iesModif = true;
+    PE::end();
+  }
+  ImGui::EndDisabled();
+
+  if(iesModif)
+  {
+    tinygltf::utils::setNodeIesLight(m_scene->editor().getNodeForEdit(nodeIdx), iesRef);
+    m_scene->markNodeDirty(nodeIdx);
+  }
+
+  // Snapshot on first edit frame (uses preEditIesRef, before any write-back).
+  // Push undo command when the drag/edit cycle ends.
+  if(iesModif && !m_iesModifiedLastFrame)
+  {
+    m_iesNodeSnapshotIdx = nodeIdx;
+    m_iesSnapshotMult    = preEditIesRef.multiplier;
+    m_iesSnapshotColor   = preEditIesRef.color;
+  }
+  if(!iesModif && m_iesModifiedLastFrame && m_iesNodeSnapshotIdx == nodeIdx && m_undoStack)
+  {
+    EditNodeIesCommand::IesParams before{m_iesSnapshotMult, m_iesSnapshotColor};
+    EditNodeIesCommand::IesParams after{iesRef.multiplier, iesRef.color};
+    m_undoStack->pushExecuted(std::make_unique<EditNodeIesCommand>(*m_scene, nodeIdx, before, after));
+  }
+  m_iesModifiedLastFrame = iesModif;
+  return true;
+}
+
+//==================================================================================================
 // NODE PROPERTIES
 //==================================================================================================
 
@@ -678,6 +745,20 @@ void UiInspector::renderNodeProperties(int nodeIdx)
   // Pure navigation (jump links), not an edit -- stays clickable on a read-only node.
   if(ImGui::CollapsingHeader("RELATIONSHIPS", ImGuiTreeNodeFlags_DefaultOpen))
     renderNodeRelationships(nodeIdx);
+
+  // EXT_lights_ies is standalone per spec. If the node also carries KHR_lights_punctual, the KHR
+  // attachment is ignored (see Scene::handleLightTraversal) -- surface that inline so the author
+  // knows why edits to the KHR light have no effect on this node.
+  if(tinygltf::utils::getNodeIesLight(node).light >= 0)
+  {
+    if(ImGui::CollapsingHeader((std::string(ICON_MS_FLASHLIGHT_ON) + " IES LIGHT (EXT_lights_ies)").c_str(), ImGuiTreeNodeFlags_DefaultOpen))
+    {
+      if(node.light >= 0)
+        ImGui::TextColored(ImVec4(1.0f, 0.8f, 0.3f, 1.0f),
+                           "%s KHR_lights_punctual on this node is ignored (EXT_lights_ies is standalone).", ICON_MS_WARNING);
+      renderIesEditor(nodeIdx);
+    }
+  }
 
   ImGui::BeginDisabled(readOnly);
   if(ImGui::CollapsingHeader("NODE EXTENSIONS"))
@@ -882,66 +963,108 @@ void UiInspector::renderNodeExtensions(int nodeIdx)
                                                                           scratch.extensions.at(extName), description));
   };
 
-  ImGui::TextDisabled("glTF KHR_node_* extensions. Toggling adds the extension to the node if absent.");
+  // Remove `extName` from the node. Emits a SetNodeExtensionCommand with a NULL-typed newValue, which
+  // SetNodeExtensionCommand::apply() interprets as "erase". Undo restores the previous value verbatim.
+  auto popExtensionEdit = [&](const char* extName, const char* description) {
+    if(!tinygltf::utils::hasElementName(node.extensions, extName))
+      return;
+    tinygltf::Value oldValue = node.extensions.at(extName);
+    m_undoStack->executeCommand(
+        std::make_unique<SetNodeExtensionCommand>(*m_scene, nodeIdx, extName, oldValue, tinygltf::Value{}, description));
+  };
+
+  // All three KHR_node_* extensions we expose here (visibility, selectability, hoverability) share the
+  // same shape: a struct with a single bool flag, a get/set utility pair, and identical UI (checkbox +
+  // inline Remove when present, Add when absent). This aggregate is the *data* -- one entry per row.
+  struct NodeExtRow
+  {
+    const char* extName;     // KHR_NODE_*_EXTENSION_NAME
+    const char* label;       // property-editor label (also the ImGui id root)
+    const char* toggleTip;   // tooltip shown on the checkbox row
+    const char* addTip;      // tooltip shown on the Add row (empty for none)
+    const char* idTag;       // ImGui id suffix so Add##<tag> / Remove##<tag> don't collide
+    const char* onDesc;      // undo-history label when the flag turns ON
+    const char* offDesc;     // undo-history label when the flag turns OFF
+    const char* addDesc;     // undo-history label when the extension is added
+    const char* removeDesc;  // undo-history label when the extension is removed
+  };
+
+  // The *pattern*, defined once. `Ext` is deduced from the pointer-to-member `flag`; `get`/`set` are
+  // taken as auto (their signatures are still checked at the call sites in the body). Adding a fourth
+  // KHR_node_* boolean-flag extension is one more data row below -- no change to this helper.
+  // NOTE: `get`/`set` are intentionally not typed as function pointers here -- MSVC's C++20 template-
+  // lambda parser fails to resolve the `Ext` template parameter inside a function-pointer type in the
+  // parameter list (C4430 "missing type specifier - int assumed"), even though clang/gcc accept it.
+  auto renderNodeExtRow = [&]<class Ext>(const NodeExtRow& r, auto get, auto set, bool Ext::* flag) {
+    if(tinygltf::utils::hasElementName(node.extensions, r.extName))
+    {
+      Ext current = get(node);
+      if(PE::Checkbox(r.label, &(current.*flag), r.toggleTip))
+      {
+        pushExtensionEdit(r.extName, [&](tinygltf::Node& n) { set(n, current); }, (current.*flag) ? r.onDesc : r.offDesc);
+      }
+      ImGui::SameLine();
+      const std::string removeId = std::string("Remove##") + r.idTag;
+      if(ImGui::SmallButton(removeId.c_str()))
+      {
+        popExtensionEdit(r.extName, r.removeDesc);
+      }
+    }
+    else
+    {
+      const std::string addId = std::string("Add##") + r.idTag;
+      if(PE::entry(r.label, [&] { return ImGui::SmallButton(addId.c_str()); }, r.addTip))
+      {
+        pushExtensionEdit(r.extName, [&](tinygltf::Node& n) { set(n, Ext{}); }, r.addDesc);
+      }
+    }
+  };
+
+  ImGui::TextDisabled("glTF KHR_node_* extensions. Toggling adds the extension to the node if absent; use Remove to strip it.");
   if(PE::begin())
   {
-    // KHR_node_visibility
-    if(tinygltf::utils::hasElementName(node.extensions, KHR_NODE_VISIBILITY_EXTENSION_NAME))
-    {
-      KHR_node_visibility visibility = tinygltf::utils::getNodeVisibility(node);
-      if(PE::Checkbox("Visible (KHR_node_visibility)", &visibility.visible, "Hide the node and its children from rendering."))
-      {
-        pushExtensionEdit(
-            KHR_NODE_VISIBILITY_EXTENSION_NAME,
-            [&visibility](tinygltf::Node& n) { tinygltf::utils::setNodeVisibility(n, visibility); },
-            visibility.visible ? "Show node" : "Hide node");
-      }
-    }
-    else if(PE::entry("Visible (KHR_node_visibility)", [&] { return ImGui::SmallButton("Add##vis"); }, "Add KHR_node_visibility so the node can be hidden."))
-    {
-      pushExtensionEdit(
-          KHR_NODE_VISIBILITY_EXTENSION_NAME, [](tinygltf::Node& n) { tinygltf::utils::setNodeVisibility(n, {}); }, "Add node visibility");
-    }
+    renderNodeExtRow(
+        {
+            .extName    = KHR_NODE_VISIBILITY_EXTENSION_NAME,
+            .label      = "Visible (KHR_node_visibility)",
+            .toggleTip  = "Hide the node and its children from rendering.",
+            .addTip     = "Add KHR_node_visibility so the node can be hidden.",
+            .idTag      = "vis",
+            .onDesc     = "Show node",
+            .offDesc    = "Hide node",
+            .addDesc    = "Add node visibility",
+            .removeDesc = "Remove node visibility",
+        },
+        &tinygltf::utils::getNodeVisibility, &tinygltf::utils::setNodeVisibility, &KHR_node_visibility::visible);
 
-    // KHR_node_selectability (picking only)
-    if(tinygltf::utils::hasElementName(node.extensions, KHR_NODE_SELECTABILITY_EXTENSION_NAME))
-    {
-      KHR_node_selectability selectability = tinygltf::utils::getNodeSelectability(node);
-      if(PE::Checkbox("Selectable (KHR_node_selectability)", &selectability.selectable,
-                      "When off, clicking this node (or a child) selects the nearest selectable ancestor instead."))
-      {
-        pushExtensionEdit(
-            KHR_NODE_SELECTABILITY_EXTENSION_NAME,
-            [&selectability](tinygltf::Node& n) { tinygltf::utils::setNodeSelectability(n, selectability); },
-            selectability.selectable ? "Make selectable" : "Make unselectable");
-      }
-    }
-    else if(PE::entry("Selectable (KHR_node_selectability)", [&] { return ImGui::SmallButton("Add##sel"); }, {}))
-    {
-      pushExtensionEdit(
-          KHR_NODE_SELECTABILITY_EXTENSION_NAME,
-          [](tinygltf::Node& n) { tinygltf::utils::setNodeSelectability(n, {}); }, "Add node selectability");
-    }
+    renderNodeExtRow(
+        {
+            .extName    = KHR_NODE_SELECTABILITY_EXTENSION_NAME,
+            .label      = "Selectable (KHR_node_selectability)",
+            .toggleTip  = "When off, clicking this node (or a child) selects the nearest selectable ancestor instead.",
+            .addTip     = "",
+            .idTag      = "sel",
+            .onDesc     = "Make selectable",
+            .offDesc    = "Make unselectable",
+            .addDesc    = "Add node selectability",
+            .removeDesc = "Remove node selectability",
+        },
+        &tinygltf::utils::getNodeSelectability, &tinygltf::utils::setNodeSelectability, &KHR_node_selectability::selectable);
 
-    // KHR_node_hoverability (consumed by KHR_interactivity)
-    if(tinygltf::utils::hasElementName(node.extensions, KHR_NODE_HOVERABILITY_EXTENSION_NAME))
-    {
-      KHR_node_hoverability hoverability = tinygltf::utils::getNodeHoverability(node);
-      if(PE::Checkbox("Hoverable (KHR_node_hoverability)", &hoverability.hoverable,
-                      "Whether this node and its children can be hovered (consumed by KHR_interactivity)."))
-      {
-        pushExtensionEdit(
-            KHR_NODE_HOVERABILITY_EXTENSION_NAME,
-            [&hoverability](tinygltf::Node& n) { tinygltf::utils::setNodeHoverability(n, hoverability); },
-            hoverability.hoverable ? "Make hoverable" : "Make unhoverable");
-      }
-    }
-    else if(PE::entry("Hoverable (KHR_node_hoverability)", [&] { return ImGui::SmallButton("Add##hov"); }, {}))
-    {
-      pushExtensionEdit(
-          KHR_NODE_HOVERABILITY_EXTENSION_NAME, [](tinygltf::Node& n) { tinygltf::utils::setNodeHoverability(n, {}); },
-          "Add node hoverability");
-    }
+    renderNodeExtRow(
+        {
+            .extName    = KHR_NODE_HOVERABILITY_EXTENSION_NAME,
+            .label      = "Hoverable (KHR_node_hoverability)",
+            .toggleTip  = "Whether this node and its children can be hovered (consumed by KHR_interactivity).",
+            .addTip     = "",
+            .idTag      = "hov",
+            .onDesc     = "Make hoverable",
+            .offDesc    = "Make unhoverable",
+            .addDesc    = "Add node hoverability",
+            .removeDesc = "Remove node hoverability",
+        },
+        &tinygltf::utils::getNodeHoverability, &tinygltf::utils::setNodeHoverability, &KHR_node_hoverability::hoverable);
+
     PE::end();
   }
 }
@@ -952,51 +1075,100 @@ void UiInspector::renderNodeExtensions(int nodeIdx)
 
 void UiInspector::renderPrimitiveProperties(int nodeIdx, int primIdx, int meshIdx)
 {
-  const tinygltf::Model& model = m_scene->getModel();
+  const tinygltf::Model& model    = m_scene->getModel();
+  const bool             readOnly = m_scene->isNodeReadOnly(nodeIdx);
 
-  // glTF 2.1: primitives belonging to a referenced external asset are read-only.
-  const bool readOnly = m_scene->isNodeReadOnly(nodeIdx);
-  if(readOnly)
-    ImGui::TextColored(ImVec4(1.0f, 0.8f, 0.3f, 1.0f), "%s Referenced asset (read-only)", ICON_MS_LOCK);
-  ImGui::BeginDisabled(readOnly);
-
-  // Transform section (from parent node)
-  if(ImGui::CollapsingHeader("TRANSFORM (Node)"))
+  // --- NODE section: transform + extensions + relationships ---
   {
-    renderTransformSection(nodeIdx);
-  }
-
-  // Primitive -- identity (with jump links to node/mesh) + geometry stats. The material lives in its own
-  // section below, so renderPrimitiveDetail omits the material link here.
-  if(ImGui::CollapsingHeader("PRIMITIVE"))
-  {
-    ImGui::Text("%s Primitive %d", ICON_MS_SHAPE_LINE, primIdx);
-    elementLinkRow("Node", SceneSelection::SelectionType::eNode, nodeIdx);
-    elementLinkRow("Mesh", SceneSelection::SelectionType::eMesh, meshIdx);
-    ImGui::Separator();
-    renderPrimitiveDetail(meshIdx, primIdx);
-  }
-
-  // Material -- single home for assignment toolbar + property editor
-  if(meshIdx >= 0 && meshIdx < static_cast<int>(model.meshes.size()))
-  {
-    const tinygltf::Mesh& mesh = model.meshes[meshIdx];
-    if(primIdx >= 0 && primIdx < static_cast<int>(mesh.primitives.size()))
+    const char* nodeName = (nodeIdx >= 0 && nodeIdx < int(model.nodes.size())) ? model.nodes[nodeIdx].name.c_str() : "";
+    char        nodeHdr[160];
+    std::snprintf(nodeHdr, sizeof(nodeHdr), "NODE  [%d] %s##node_%d", nodeIdx, nodeName, nodeIdx);
+    if(ImGui::CollapsingHeader(nodeHdr))
     {
-      int matIdx = mesh.primitives[primIdx].material;
-      if(matIdx >= 0 && matIdx < static_cast<int>(model.materials.size()))
+      if(readOnly)
+        ImGui::TextColored(ImVec4(1.0f, 0.8f, 0.3f, 1.0f), "%s Referenced asset (read-only)", ICON_MS_LOCK);
+
+      ImGui::BeginDisabled(readOnly);
+      if(ImGui::TreeNodeEx("Transform##prim_transform", ImGuiTreeNodeFlags_DefaultOpen | ImGuiTreeNodeFlags_SpanAvailWidth))
       {
-        if(ImGui::CollapsingHeader("MATERIAL", ImGuiTreeNodeFlags_DefaultOpen))
-        {
-          renderMaterialAssignmentToolbar(meshIdx, primIdx, nodeIdx, matIdx);
-          ImGui::Separator();
-          renderMaterialSection(matIdx, true);
-        }
+        renderTransformSection(nodeIdx);
+        ImGui::TreePop();
+      }
+      ImGui::EndDisabled();
+
+      if(ImGui::TreeNodeEx("Node extensions##prim_ext", ImGuiTreeNodeFlags_SpanAvailWidth))
+      {
+        ImGui::BeginDisabled(readOnly);
+        renderNodeExtensions(nodeIdx);
+        ImGui::EndDisabled();
+        ImGui::TreePop();
+      }
+
+      if(ImGui::TreeNodeEx("Relationships##prim_rel", ImGuiTreeNodeFlags_SpanAvailWidth))
+      {
+        renderNodeRelationships(nodeIdx);
+        ImGui::TreePop();
       }
     }
   }
 
-  ImGui::EndDisabled();
+  // --- MESH section: all primitives, selected one open by default ---
+  if(meshIdx >= 0 && meshIdx < int(model.meshes.size()))
+  {
+    const tinygltf::Mesh& mesh = model.meshes[meshIdx];
+    char                  meshHdr[160];
+    std::snprintf(meshHdr, sizeof(meshHdr), "MESH  [%d] %s##mesh_%d", meshIdx, mesh.name.c_str(), meshIdx);
+    if(ImGui::CollapsingHeader(meshHdr))
+    {
+      for(int i = 0; i < int(mesh.primitives.size()); ++i)
+      {
+        ImGui::PushID(i);
+        const bool isSelected = (i == primIdx);
+        char       primHdr[80];
+        if(isSelected)
+          std::snprintf(primHdr, sizeof(primHdr), "%s Primitive %d  [selected]", ICON_MS_SHAPE_LINE, i);
+        else
+          std::snprintf(primHdr, sizeof(primHdr), "%s Primitive %d", ICON_MS_SHAPE_LINE, i);
+        const ImGuiTreeNodeFlags flags = ImGuiTreeNodeFlags_SpanAvailWidth | (isSelected ? ImGuiTreeNodeFlags_DefaultOpen : 0);
+        if(ImGui::TreeNodeEx(primHdr, flags))
+        {
+          renderPrimitiveDetail(meshIdx, i);
+          elementLinkRow("Material", SceneSelection::SelectionType::eMaterial, mesh.primitives[i].material, 100.0f, "none");
+          ImGui::TreePop();
+        }
+        ImGui::PopID();
+      }
+    }
+  }
+
+  // --- MATERIAL section: assignment toolbar + full property editor (unchanged content) ---
+  if(meshIdx >= 0 && meshIdx < int(model.meshes.size()))
+  {
+    const tinygltf::Mesh& mesh = model.meshes[meshIdx];
+    if(primIdx >= 0 && primIdx < int(mesh.primitives.size()))
+    {
+      const int matIdx = mesh.primitives[primIdx].material;
+      {
+        char matHdr[160];
+        if(matIdx >= 0 && matIdx < int(model.materials.size()))
+          std::snprintf(matHdr, sizeof(matHdr), "MATERIAL  [%d] %s##material_section", matIdx,
+                        model.materials[matIdx].name.c_str());
+        else
+          std::snprintf(matHdr, sizeof(matHdr), "MATERIAL  (none)##material_section");
+        if(ImGui::CollapsingHeader(matHdr, ImGuiTreeNodeFlags_DefaultOpen))
+        {
+          ImGui::BeginDisabled(readOnly);
+          renderMaterialAssignmentToolbar(meshIdx, primIdx, nodeIdx, matIdx);
+          ImGui::EndDisabled();
+          if(matIdx >= 0 && matIdx < int(model.materials.size()))
+          {
+            ImGui::Separator();
+            renderMaterialSection(matIdx, !readOnly);
+          }
+        }
+      }
+    }
+  }
 }
 
 //==================================================================================================
@@ -1090,18 +1262,38 @@ void UiInspector::renderPrimitiveDetail(int meshIdx, int primIdx)
     return;
   const tinygltf::Primitive& prim = mesh.primitives[primIdx];
 
-  ImGui::Text("Mode: %s     Vertices: %lld     Triangles: %lld", primitiveModeName(prim.mode),
-              primitiveVertexCount(model, prim), primitiveTriangleCount(model, prim));
+  ImGui::Text("%s    %lld verts    %lld tris", primitiveModeName(prim.mode), primitiveVertexCount(model, prim),
+              primitiveTriangleCount(model, prim));
 
-  ImGui::Text("Attributes:");
-  ImGui::Indent();
-  for(const auto& [name, accessor] : prim.attributes)
-    ImGui::BulletText("%s  (accessor %d, %lld)", name.c_str(), accessor, accessorElementCount(model, accessor));
-  if(prim.indices >= 0)
-    ImGui::BulletText("INDICES  (accessor %d, %lld)", prim.indices, accessorElementCount(model, prim.indices));
+  if(ImGui::BeginTable("##acc", 3, ImGuiTableFlags_None))
+  {
+    ImGui::TableSetupColumn("##name", ImGuiTableColumnFlags_WidthFixed, 110.0f);
+    ImGui::TableSetupColumn("##acc", ImGuiTableColumnFlags_WidthFixed, 58.0f);
+    ImGui::TableSetupColumn("##cnt", ImGuiTableColumnFlags_WidthStretch);
+    for(const auto& [name, acc] : prim.attributes)
+    {
+      ImGui::TableNextRow();
+      ImGui::TableSetColumnIndex(0);
+      ImGui::TextDisabled("%s", name.c_str());
+      ImGui::TableSetColumnIndex(1);
+      ImGui::TextDisabled("acc[%d]", acc);
+      ImGui::TableSetColumnIndex(2);
+      ImGui::Text("%lld", accessorElementCount(model, acc));
+    }
+    if(prim.indices >= 0)
+    {
+      ImGui::TableNextRow();
+      ImGui::TableSetColumnIndex(0);
+      ImGui::TextDisabled("INDICES");
+      ImGui::TableSetColumnIndex(1);
+      ImGui::TextDisabled("acc[%d]", prim.indices);
+      ImGui::TableSetColumnIndex(2);
+      ImGui::Text("%lld", accessorElementCount(model, prim.indices));
+    }
+    ImGui::EndTable();
+  }
   if(!prim.targets.empty())
-    ImGui::BulletText("Morph targets: %zu", prim.targets.size());
-  ImGui::Unindent();
+    ImGui::TextDisabled("Morph targets: %zu", prim.targets.size());
 }
 
 void UiInspector::renderMeshProperties(int meshIdx)
@@ -1127,38 +1319,38 @@ void UiInspector::renderMeshProperties(int meshIdx)
   }
   ImGui::Text("Primitives: %zu    Vertices: %lld    Triangles: %lld", mesh.primitives.size(), totalVerts, totalTris);
 
-  // Instances: nodes that reference this mesh (jump to the first).
-  int instances = 0, firstNode = -1;
-  for(int n = 0; n < int(model.nodes.size()); ++n)
-    if(model.nodes[n].mesh == meshIdx)
-    {
-      instances++;
-      if(firstNode < 0)
-        firstNode = n;
-    }
-  ImGui::Text("Instances: %d", instances);
-  if(firstNode >= 0)
-  {
-    ImGui::SameLine();
-    elementLink(elementRefLabel(SceneSelection::SelectionType::eNode, firstNode).c_str(),
-                SceneSelection::SelectionType::eNode, firstNode);
-  }
   ImGui::Separator();
 
-  // Per-primitive detail, then this view's own material jump link (the pick inspector has a full
-  // MATERIAL section instead, so the link lives at the call site rather than inside the shared helper).
+  // Per-primitive: compact collapsible rows, first open by default.
   for(int i = 0; i < int(mesh.primitives.size()); ++i)
   {
     ImGui::PushID(i);
     char hdr[64];
     std::snprintf(hdr, sizeof(hdr), "%s Primitive %d", ICON_MS_SHAPE_LINE, i);
-    if(ImGui::TreeNodeEx(hdr, i == 0 ? ImGuiTreeNodeFlags_DefaultOpen : 0))
+    const ImGuiTreeNodeFlags flags = ImGuiTreeNodeFlags_SpanAvailWidth | (i == 0 ? ImGuiTreeNodeFlags_DefaultOpen : 0);
+    if(ImGui::TreeNodeEx(hdr, flags))
     {
       renderPrimitiveDetail(meshIdx, i);
       elementLinkRow("Material", SceneSelection::SelectionType::eMaterial, mesh.primitives[i].material, 100.0f, "none (default material)");
       ImGui::TreePop();
     }
     ImGui::PopID();
+  }
+
+  ImGui::Separator();
+
+  // Used by nodes: all instancing nodes as jump links.
+  int instances = 0;
+  for(int n = 0; n < int(model.nodes.size()); ++n)
+    if(model.nodes[n].mesh == meshIdx)
+      instances++;
+  char usedHdr[64];
+  std::snprintf(usedHdr, sizeof(usedHdr), "Used by nodes (%d)##used_by_%d", instances, meshIdx);
+  if(ImGui::CollapsingHeader(usedHdr))
+  {
+    for(int n = 0; n < int(model.nodes.size()); ++n)
+      if(model.nodes[n].mesh == meshIdx)
+        elementLink(elementRefLabel(SceneSelection::SelectionType::eNode, n).c_str(), SceneSelection::SelectionType::eNode, n);
   }
 }
 
@@ -1252,6 +1444,9 @@ void UiInspector::renderLightProperties(int lightIdx)
       break;
     }
   elementLinkRow("Attached to", SceneSelection::SelectionType::eNode, lightNode, 100.0f, "(unattached)");
+
+  // EXT_lights_ies is standalone per spec: even if the attached node also carries a profile, it
+  // does not compose with this KHR light -- see Scene::handleLightTraversal and the Node inspector.
   ImGui::Separator();
 
   bool modif = false;
@@ -1909,17 +2104,17 @@ void UiInspector::renderMaterialAssignmentToolbar(int meshIdx, int primIdx, int 
     ImGui::SetTooltip("Assign a different material");
   }
 
-  // [Copy] -- copy material reference to clipboard
+  // [Copy] -- copy material reference to clipboard (disabled when no material assigned)
   ImGui::SameLine(0.0f, 2.0f);
+  ImGui::BeginDisabled(matIdx < 0);
   if(ImGui::SmallButton(ICON_MS_CONTENT_COPY))
   {
     if(m_selection)
       m_selection->copyMaterialToClipboard(matIdx);
   }
-  if(ImGui::IsItemHovered())
-  {
-    ImGui::SetTooltip("Copy material reference");
-  }
+  if(ImGui::IsItemHovered(ImGuiHoveredFlags_AllowWhenDisabled))
+    ImGui::SetTooltip(matIdx < 0 ? "Copy material reference\n(no material assigned)" : "Copy material reference");
+  ImGui::EndDisabled();
 
   // [Paste] -- assign clipboard material to this primitive
   ImGui::SameLine(0.0f, 2.0f);
@@ -2074,6 +2269,7 @@ bool UiInspector::renderMaterialExtensions(tinygltf::Material& material, int mat
   anyChange |= materialUnlit(material);
   anyChange |= materialVolume(material, matIdx);  // Volume needs matIdx for special RTX dirty marking
   anyChange |= materialScatter(material);
+  anyChange |= materialDlssNr(material);
 
   // Single point of truth for dirty marking
   if(anyChange)
@@ -2462,7 +2658,7 @@ bool UiInspector::materialVolume(tinygltf::Material& material, int matIdx)
           if(!isInfinite)
           {
             modif |= PE::DragFloat("Attenuation Distance", &volume.attenuationDistance,
-                                   logarithmicStep(volume.attenuationDistance), 0.0, FLT_MAX, "%.3f", ImGuiSliderFlags_None,
+                                   logarithmicStep(volume.attenuationDistance), 1e-6f, FLT_MAX, "%.4g", ImGuiSliderFlags_None,
                                    "Average distance light travels before interacting with a particle (world space).\n"
                                    "Smaller = denser medium, faster color absorption.");
           }
@@ -2521,4 +2717,30 @@ bool UiInspector::materialScatter(tinygltf::Material& material)
         tinygltf::utils::setScatter(material, {});
       },
       KHR_MATERIALS_VOLUME_SCATTER_EXTENSION_NAME);
+}
+
+bool UiInspector::materialDlssNr(tinygltf::Material& material)
+{
+  return renderMaterialExtensionSection(
+      material, "DLSS-NR Mask", EXT_DLSS_NR_EXTENSION_NAME,
+      [&material]() {
+        EXT_DLSS_NR ext   = tinygltf::utils::getExtDlssNr(material);
+        bool        modif = false;
+        if(PE::begin())
+        {
+          modif |= PE::SliderFloat("Intensity", &ext.nrMask.x, 0.0f, 1.0f, "%.3f", 0,
+                                   "Scales the global NR intensity for this material. 1 = global value, 0 = NR disabled.");
+          modif |= PE::SliderFloat("Local Tone", &ext.nrMask.y, 0.0f, 1.0f, "%.3f", 0,
+                                   "Scales the local tone strength for this material. 1 = global value, 0 = disabled.");
+          modif |= PE::SliderFloat("Local Structure", &ext.nrMask.z, 0.0f, 1.0f, "%.3f", 0,
+                                   "Scales the local structure strength for this material. 1 = global value, 0 = disabled.");
+          modif |= PE::SliderFloat("Global Tone", &ext.nrMask.w, 0.0f, 1.0f, "%.3f", 0,
+                                   "Scales the global tone strength for this material. 1 = global value, 0 = disabled.");
+          PE::end();
+        }
+        if(modif)
+          tinygltf::utils::setExtDlssNr(material, ext);
+        return modif;
+      },
+      [&material]() { tinygltf::utils::setExtDlssNr(material, {}); });
 }

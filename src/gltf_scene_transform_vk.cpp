@@ -278,7 +278,7 @@ void TransformComputeVk::markGpuStale()
 // Returns true if the buffers were rebuilt this call (createGpuBuffers ran and already appended a
 // full local-matrix upload), so the caller can skip its own redundant per-node upload for this frame.
 //--------------------------------------------------------------------------------------------------
-bool TransformComputeVk::ensureGpuBuffersMatchScene(nvvk::StagingUploader& staging, const Scene& scn)
+bool TransformComputeVk::ensureGpuBuffersMatchScene(nvvk::CmdUploaderInterface& staging, const Scene& scn)
 {
   const size_t   nRn   = scn.getRenderNodes().size();
   const size_t   nNd   = scn.getModel().nodes.size();
@@ -396,7 +396,7 @@ void TransformComputeVk::destroyGpuBuffersImmediate()
 // Allocate and upload all scene-graph SSBOs: node parents, topological order, render-node
 // mappings, per-instance local matrices, and the local/world matrix pair. Called once on
 // scene load and again whenever the graph topology changes.
-void TransformComputeVk::createGpuBuffers(nvvk::StagingUploader& staging, const Scene& scn)
+void TransformComputeVk::createGpuBuffers(nvvk::CmdUploaderInterface& staging, const Scene& scn)
 {
   destroyGpuBuffers();
 
@@ -466,7 +466,16 @@ void TransformComputeVk::createGpuBuffers(nvvk::StagingUploader& staging, const 
 //      (parseScene(), variant-driven material IDs, etc.).
 //   4. TLAS in-place update from the instance buffer (cmdUpdateTlasFromInstanceBuffer).
 //   5. If tlasVisibilityNeedsCpuSync — syncTopLevelAS refreshes instance BLAS refs from CPU Scene.
-void TransformComputeVk::dispatchTransformUpdate(VkCommandBuffer cmd, nvvk::StagingUploader& staging, Scene& scn, const SceneVk& scnVk, SceneRtx& scnRtx)
+void TransformComputeVk::dispatchTransformUpdate(VkCommandBuffer cmd,
+
+                                                 nvvk::CmdUploaderInterface& staging,
+
+                                                 Scene& scn,
+
+                                                 const SceneVk& scnVk,
+
+                                                 SceneRtx& scnRtx)
+
 {
   if(!m_alloc)
     return;

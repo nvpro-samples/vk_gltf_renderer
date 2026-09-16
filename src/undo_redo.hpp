@@ -602,6 +602,36 @@ private:
 };
 
 //--------------------------------------------------------------------------------------------------
+// EditNodeIesCommand - Undo/redo for EXT_lights_ies node parameter edits (multiplier, color)
+//--------------------------------------------------------------------------------------------------
+
+class EditNodeIesCommand : public ICommand
+{
+public:
+  struct IesParams
+  {
+    float     multiplier = 1.0f;
+    glm::vec3 color{1.0f};
+  };
+
+  EditNodeIesCommand(nvvkgltf::Scene& scene, int nodeIndex, const IesParams& oldParams, const IesParams& newParams);
+
+  void                      execute() override;
+  void                      undo() override;
+  [[nodiscard]] std::string description() const override;
+  [[nodiscard]] bool        canMergeWith(const ICommand& other) const override;
+  void                      mergeWith(const ICommand& other) override;
+
+private:
+  nvvkgltf::Scene& m_scene;
+  int              m_nodeIndex;
+  IesParams        m_oldParams;
+  IesParams        m_newParams;
+
+  void restore(const IesParams& params);
+};
+
+//--------------------------------------------------------------------------------------------------
 // EditLightCommand - Undo/redo for light property changes
 //
 // Uses full tinygltf::Light snapshots (before/after) so a single command

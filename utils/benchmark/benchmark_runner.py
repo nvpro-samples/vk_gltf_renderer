@@ -180,7 +180,7 @@ def _run_single_headless(
         "1080",
         "--frames",
         str(frames),
-        "--maxFrames",
+        "--ptMaxFrames",
         str(frames),
         "--ptSamples",
         str(spp),

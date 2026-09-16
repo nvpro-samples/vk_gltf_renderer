@@ -19,6 +19,8 @@
 
 #pragma once
 
+#include "settings_registry.hpp"
+
 #include <glm/glm.hpp>
 #include <memory>
 #include <vector>
@@ -26,7 +28,7 @@
 #include <nvutils/parameter_registry.hpp>
 #include <nvvk/render_target.hpp>
 #include <nvvk/resource_allocator.hpp>
-#include <nvapp/imgui_texture.hpp>
+#include <nvapp/imgui_texture_visualizer.hpp>
 
 // OptiX includes
 #include <optix.h>
@@ -160,8 +162,8 @@ public:
   void deinit(Resources& resources);
 
   // Register parameters for UI
-  void registerParameters(nvutils::ParameterRegistry* paramReg);
-  void setSettingsHandler(nvgui::SettingsHandler* settingsHandler);
+  /// Declare this subsystem's settings (command line + benchmark + MCP + persistence).
+  void registerParameters(SettingsRegistry* settings);
 
   // Checks if the OptiX denoiser and necessary hardware is available and ready
   bool isAvailable() const { return m_availability == Availability::eAvailable; }
@@ -203,6 +205,9 @@ public:
 
   // UI controls
   bool onUi(Resources& resources);
+  bool onUiActivation(Resources& resources);
+  bool onUiSettings(Resources& resources);
+  bool onUiPreview(Resources& resources);
 
 private:
   // Initialize OptiX context and denoiser
@@ -237,6 +242,7 @@ private:
   bool         m_hasValidOutput       = false;
   bool         m_needModelRecreate    = false;  // Denoiser must be destroyed and recreated
   uint64_t     m_lastAutoDenoiseFrame = 0;      // Track last frame we auto-denoised
+  bool         m_settingsOpen         = false;
 
   // OptiX context and denoiser
   OptixDeviceContext m_optixContext     = nullptr;
@@ -283,10 +289,10 @@ private:
   nvvkgltf::GpuMemoryTracker  m_exportMemoryTracker;
 
   // Denoiser-owned outputs (denoised RGB + albedo/normal guide). See GBufferIndex.
-  nvvk::RenderTarget m_denoiserTarget;
-  nvvk::RenderTarget m_upscaleStaging;  // Half-res staging for selection/depth upscale blit (see StagingIndex)
-  nvapp::ImTexture   m_denoisedUi{};
-  VkSampler          m_linearSampler{};
+  nvvk::RenderTarget         m_denoiserTarget;
+  nvvk::RenderTarget         m_upscaleStaging;  // Half-res staging for selection/depth upscale blit (see StagingIndex)
+  nvapp::ImTextureVisualizer m_denoisedUi{};
+  VkSampler                  m_linearSampler{};
 
 
   // Compute pipeline for image-to-buffer copy

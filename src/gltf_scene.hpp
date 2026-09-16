@@ -111,6 +111,11 @@ struct RenderLight
   glm::mat4 worldMatrix = glm::mat4(1.0f);
   int       light       = 0;
   int       nodeID      = -1;
+
+  // EXT_lights_ies (read from the node, not the light): -1 = no profile attached.
+  int       iesProfile    = -1;
+  float     iesMultiplier = 1.0f;
+  glm::vec3 iesColor      = glm::vec3(1.0f);
 };
 
 // Centralized registry for renderNode mappings (nodeID/primID <-> renderNodeID).

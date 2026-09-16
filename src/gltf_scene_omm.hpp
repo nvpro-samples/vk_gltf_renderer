@@ -25,7 +25,7 @@
 #include <vulkan/vulkan_core.h>
 
 #include <nvvk/resource_allocator.hpp>
-#include <nvvk/staging.hpp>
+#include <nvvk/uploader_interface.hpp>
 
 #include "gltf_scene.hpp"
 
@@ -73,7 +73,7 @@ public:
 
   // Parse EXT_mesh_opacity_micromap, upload build inputs, and record the micromap builds on `cmd`.
   // No-op unless enabled and the scene actually uses the extension.
-  void create(VkCommandBuffer cmd, nvvk::StagingUploader& staging, const nvvkgltf::Scene& scene);
+  void create(VkCommandBuffer cmd, nvvk::CmdUploaderInterface& staging, const nvvkgltf::Scene& scene);
 
   // Release all micromaps and buffers.
   void destroy();

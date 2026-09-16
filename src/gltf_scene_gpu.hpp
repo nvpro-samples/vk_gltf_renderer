@@ -50,7 +50,7 @@ namespace nvvkgltf {
 class SceneGpu
 {
 public:
-  SceneGpu(SceneVk& sceneVk, AnimationVk& animationVk, SceneRtx& sceneRtx, TransformComputeVk& transformCompute, nvvk::StagingUploader& staging)
+  SceneGpu(SceneVk& sceneVk, AnimationVk& animationVk, SceneRtx& sceneRtx, TransformComputeVk& transformCompute, nvvk::CmdUploaderInterface& staging)
       : m_sceneVk(sceneVk)
       , m_animationVk(animationVk)
       , m_sceneRtx(sceneRtx)
@@ -110,11 +110,11 @@ public:
   bool useComputeTransformation = true;
 
 private:
-  SceneVk&               m_sceneVk;
-  AnimationVk&           m_animationVk;
-  SceneRtx&              m_sceneRtx;
-  TransformComputeVk&    m_transformCompute;
-  nvvk::StagingUploader& m_staging;
+  SceneVk&                    m_sceneVk;
+  AnimationVk&                m_animationVk;
+  SceneRtx&                   m_sceneRtx;
+  TransformComputeVk&         m_transformCompute;
+  nvvk::CmdUploaderInterface& m_staging;
 };
 
 }  // namespace nvvkgltf

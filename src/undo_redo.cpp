@@ -661,6 +661,54 @@ std::string AddPrimitiveCommand::description() const
 }
 
 //--------------------------------------------------------------------------------------------------
+// EditNodeIesCommand
+//--------------------------------------------------------------------------------------------------
+
+EditNodeIesCommand::EditNodeIesCommand(nvvkgltf::Scene& scene, int nodeIndex, const IesParams& oldParams, const IesParams& newParams)
+    : m_scene(scene)
+    , m_nodeIndex(nodeIndex)
+    , m_oldParams(oldParams)
+    , m_newParams(newParams)
+{
+}
+
+void EditNodeIesCommand::execute()
+{
+  restore(m_newParams);
+}
+
+void EditNodeIesCommand::undo()
+{
+  restore(m_oldParams);
+}
+
+void EditNodeIesCommand::restore(const IesParams& params)
+{
+  tinygltf::Node&    node = m_scene.editor().getNodeForEdit(m_nodeIndex);
+  EXT_lights_ies_ref ref  = tinygltf::utils::getNodeIesLight(node);
+  ref.multiplier          = params.multiplier;
+  ref.color               = params.color;
+  tinygltf::utils::setNodeIesLight(node, ref);
+  m_scene.markNodeDirty(m_nodeIndex);
+}
+
+std::string EditNodeIesCommand::description() const
+{
+  return "Edit IES Light";
+}
+
+bool EditNodeIesCommand::canMergeWith(const ICommand& other) const
+{
+  auto* o = dynamic_cast<const EditNodeIesCommand*>(&other);
+  return o && o->m_nodeIndex == m_nodeIndex;
+}
+
+void EditNodeIesCommand::mergeWith(const ICommand& other)
+{
+  m_newParams = dynamic_cast<const EditNodeIesCommand&>(other).m_newParams;
+}
+
+//--------------------------------------------------------------------------------------------------
 // EditLightCommand
 //--------------------------------------------------------------------------------------------------
 

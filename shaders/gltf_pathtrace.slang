@@ -258,6 +258,10 @@ PathStepResult pathTraceOneBounce(IRaytracer raytracer, inout RayDesc ray, inout
                                                    ptIsInside(pt), specularAlbedo);
       }
       pt.guide.specularAlbedo = float16_t3(specularAlbedo);
+#if MAT_EXT_DLSS_NR
+      if(materialIndex >= 0)
+        pt.guide.nrMask = float16_t4(materials[materialIndex].nrMask);
+#endif  // MAT_EXT_DLSS_NR
 #endif  // USE_DLSS_SHADER
       pt.guide.normalRoughness = float16_t4(float16_t3(pbrMat.N), float16_t(pbrMat.roughness.x));
       pt.guide.albedo          = float16_t3(guideAlbedo);
@@ -545,9 +549,9 @@ SampleResult samplePixel(IRaytracer raytracer,
 
   SampleResult sampleResult = pathTrace(raytracer, ray, seed);
 
-  // Removing fireflies
+  // Removing fireflies (threshold <= 0 disables the clamp)
   float lum = dot(sampleResult.radiance.xyz, float3(1.0F / 3.0F));
-  if(lum > pushConst.fireflyClampThreshold)
+  if(pushConst.fireflyClampThreshold > 0.0F && lum > pushConst.fireflyClampThreshold)
   {
     sampleResult.radiance *= pushConst.fireflyClampThreshold / lum;
   }
@@ -662,6 +666,7 @@ void processPixel(IRaytracer raytracer, float2 samplePos, float2 imageSize)
     outImages[int(OutputImage::eDlssAlbedo)][int2(samplePos)]          = sampleResult.guideOutput.albedo;
     outImages[int(OutputImage::eDlssSpecAlbedo)][int2(samplePos)] = float4(sampleResult.guideOutput.specularAlbedo.xyz, 1.0f);
     outImages[int(OutputImage::eDlssSpecularHitDist)][int2(samplePos)] = float4(sampleResult.guideOutput.specularHitDist);
+    outImages[int(OutputImage::eNrMask)][int2(samplePos)] = float4(sampleResult.guideOutput.nrMask);
   }
 #endif  // USE_DLSS_SHADER
 

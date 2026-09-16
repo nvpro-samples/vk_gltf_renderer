@@ -17,6 +17,14 @@
  * SPDX-License-Identifier: Apache-2.0
  */
 
+//
+// KHR_interactivity Graphs panel (Phase F), plus a viewport toolbar indicator: InteractivityControl
+// (play/pause/reset state for the default graph's runtime instance, no ImGui in the struct itself),
+// the standalone "Interactivity" window (transport controls, live graph/node/variable stats, a
+// custom event sender, a debug/log history surface), and a small toolbar Play/Pause button shown
+// only when the loaded scene has a graph. State owner: Resources::interactivityControl.
+//
+
 #include "ui_interactivity.hpp"
 
 #include <string>

@@ -41,6 +41,7 @@
 #include "renderer_pathtracer.hpp"
 
 #include "scene_shader_macros.hpp"
+#include "ui_helpers.hpp"
 #include "ui_linear_color.hpp"
 
 // Pre-compiled shaders
@@ -55,7 +56,6 @@
 #ifndef USE_DEFERRED_RTX_COMPILE
 #define USE_DEFERRED_RTX_COMPILE 0
 #endif
-
 
 PathTracer::PathTracer()
 {
@@ -92,7 +92,7 @@ void PathTracer::onAttach(Resources& resources, nvvk::ProfilerGpuTimer* profiler
   m_rtPipelineProperties.pNext = &m_reorderProperties;
   vkGetPhysicalDeviceProperties2(resources.allocator.getPhysicalDevice(), &prop2);
 
-  m_supportSER = (bool)(m_reorderProperties.rayTracingInvocationReorderReorderingHint & VK_RAY_TRACING_INVOCATION_REORDER_MODE_REORDER_NV) ?
+  m_supportSER = (bool)(m_reorderProperties.rayTracingInvocationReorderReorderingHint & VK_RAY_TRACING_INVOCATION_REORDER_MODE_REORDER_EXT) ?
                      true :
                      false;
   // Keep whatever --ptUseSER asked for (the parameter is parsed before this runs); the device
@@ -116,54 +116,42 @@ void PathTracer::onAttach(Resources& resources, nvvk::ProfilerGpuTimer* profiler
 
 //--------------------------------------------------------------------------------------------------
 // Register command line parameters for the PathTracer
-void PathTracer::registerParameters(nvutils::ParameterRegistry* paramReg)
+void PathTracer::registerParameters(SettingsRegistry* settings)
 {
-  // PathTracer-specific command line parameters
-  paramReg->add({"ptMaxDepth", "PathTracer: Maximum ray depth"}, &m_pushConst.maxDepth);
-  paramReg->add({.name            = "ptSamples",
+  // PathTracer-specific settings. Persist marks what survives a restart (see settings_registry.hpp).
+  // Bounds mirror the UI sliders so CLI and benchmark sequences accept the same range the UI does:
+  //   ptMaxDepth  -> "Max Depth" slider in showUI() (0..20)
+  //   ptSamples   -> "Samples" slider in showUI() (MIN_SAMPLES_PER_PIXEL..MAX_SAMPLES_PER_PIXEL);
+  //                  the adaptive-sampling autopilot also clamps to the same range at runtime.
+  settings->add({"ptMaxDepth", "PathTracer: Maximum ray depth"}, &m_pushConst.maxDepth, Persist::eYes, 0, 20);
+  settings->add({.name            = "ptSamples",
                  .help            = "PathTracer: Samples per pixel",
                  .callbackSuccess = [this](const nvutils::ParameterBase* const) { m_adaptiveSampling = false; }},
-                &m_pushConst.numSamples);
-  paramReg->add({"ptFireflyClamp", "PathTracer: Firefly clamp threshold"}, &m_pushConst.fireflyClampThreshold);
-  paramReg->add({"ptTexGradScale", "PathTracer: Ray-footprint gradient scale (0=mip0, 1=physical)"}, &m_pushConst.texGradScale);
-  paramReg->add({"ptAperture", "PathTracer: Camera aperture"}, &m_pushConst.aperture);
-  paramReg->add({"ptFocalDistance", "PathTracer: Focal distance"}, &m_pushConst.focalDistance);
-  paramReg->add({"ptAutoFocus", "PathTracer: Enable auto focus"}, &m_autoFocus);
-  paramReg->add({"ptTechnique", "PathTracer: Rendering technique [RayQuery:0, RayTracing:1]"}, (int*)&m_renderTechnique);
+                &m_pushConst.numSamples, Persist::eYes, MIN_SAMPLES_PER_PIXEL, MAX_SAMPLES_PER_PIXEL);
+  settings->add({"ptFireflyClamp", "PathTracer: Firefly clamp threshold"}, &m_pushConst.fireflyClampThreshold, Persist::eYes);
+  settings->add({"ptTexGradScale", "PathTracer: Ray-footprint gradient scale (0=mip0, 1=physical)"},
+                &m_pushConst.texGradScale, Persist::eYes, 0.0F, 1.0F);
+  settings->add({"ptAperture", "PathTracer: Camera aperture"}, &m_pushConst.aperture, Persist::eYes, 0.0F, 1.0F);
+  settings->add({"ptFocalDistance", "PathTracer: Focal distance"}, &m_pushConst.focalDistance, Persist::eYes);
+  settings->add({"ptAutoFocus", "PathTracer: Enable auto focus"}, &m_autoFocus, Persist::eYes);
+  settings->add({"ptTechnique", "PathTracer: Rendering technique [RayQuery:0, RayTracing:1]"}, (int*)&m_renderTechnique,
+                Persist::eYes, 0, 1);
   // SER is a specialization constant of both path-tracing pipelines, so a change is picked up by
   // ensureShadersAndPipelines() on the next frame -- which is what makes it settable mid-run from a
   // benchmark sequence, not just on the command line. Silently ignored when the device lacks SER.
-  paramReg->add({"ptUseSER", "PathTracer: Use Shader Execution Reordering (ignored if unsupported)"}, &m_useSER);
-  paramReg->add({"ptAdaptiveSampling", "PathTracer: Enable adaptive sampling"}, &m_adaptiveSampling);
-  paramReg->add({"ptPerformanceTarget", "PathTracer: Performance target [Interactive:0, Balanced:1, Quality:2, MaxQuality:3]"},
-                (int*)&m_performanceTarget);
+  settings->add({"ptUseSER", "PathTracer: Use Shader Execution Reordering (ignored if unsupported)"}, &m_useSER, Persist::eYes);
+  settings->add({"ptAdaptiveSampling", "PathTracer: Enable adaptive sampling"}, &m_adaptiveSampling, Persist::eYes);
+  settings->add({"ptPerformanceTarget", "PathTracer: Performance target [Interactive:0, Balanced:1, Quality:2, MaxQuality:3]"},
+                (int*)&m_performanceTarget, Persist::eYes, 0, 3);
 #if defined(USE_DLSS)
-  m_dlss->registerParameters(paramReg);
+  m_dlss->registerParameters(settings);
 #endif
 
 #if defined(USE_OPTIX_DENOISER)
-  m_optix->registerParameters(paramReg);
+  m_optix->registerParameters(settings);
 #endif
 }
 
-//--------------------------------------------------------------------------------------------------
-// Set the settings handler
-void PathTracer::setSettingsHandler(nvgui::SettingsHandler* settingsHandler)
-{
-  settingsHandler->setSetting("ptTechnique", (int*)&m_renderTechnique);
-  settingsHandler->setSetting("ptAdaptiveSampling", &m_adaptiveSampling);
-  settingsHandler->setSetting("ptPerformanceTarget", (int*)&m_performanceTarget);
-  settingsHandler->setSetting("ptMaxDepth", &m_pushConst.maxDepth);
-  settingsHandler->setSetting("ptTexGradScale", &m_pushConst.texGradScale);
-
-#if defined(USE_DLSS)
-  m_dlss->setSettingsHandler(settingsHandler);
-#endif
-
-#if defined(USE_OPTIX_DENOISER)
-  m_optix->setSettingsHandler(settingsHandler);
-#endif
-}
 
 //--------------------------------------------------------------------------------------------------
 // Destroy the resources
@@ -230,6 +218,11 @@ void PathTracer::updateDlssResources(VkCommandBuffer cmd, Resources& resources)
   m_dlss->setOutputImage(resources.gBuffers.getColorImage(Resources::eImgRendered),
                          resources.gBuffers.getColorAttachmentView(Resources::eImgRendered),
                          resources.gBuffers.getColorFormat(Resources::eImgRendered));
+#if defined(USE_DLSSNR)
+  m_dlss->setNrImage(resources.gBuffers.getColorImage(Resources::eImgTonemapped),
+                     resources.gBuffers.getColorAttachmentView(Resources::eImgTonemapped),
+                     resources.gBuffers.getColorFormat(Resources::eImgTonemapped));
+#endif
 #endif
 }
 
@@ -298,12 +291,12 @@ bool PathTracer::onUIRender(Resources& resources)
 #endif
 
     changed |= PE::SliderInt("Max Depth", &m_pushConst.maxDepth, 0, 20, "%d", 0, "Maximum number of bounces");
-    changed |= PE::SliderFloat("FireFly Clamp", &m_pushConst.fireflyClampThreshold, 0.0f, 10.0f, "%.2f", 0,
-                               "Clamp threshold for fireflies");
+    changed |= PE::SliderFloat("FireFly Clamp", &m_pushConst.fireflyClampThreshold, 0.0f, 100.0f, "%.4g", 0,
+                               "Clamp threshold for fireflies. 0 = disabled.");
     changed |= PE::SliderFloat("Texture LOD", &m_pushConst.texGradScale, 0.0f, 1.0f, "%.2f", 0,
                                "Ray-footprint gradient scale for texture LOD.\n"
-                               "0 = always mip 0 (sharpest, relies on MC accumulation for AA).\n"
-                               "1 = full physically-derived LOD (default, may look soft at distance).");
+                               "0 = always mip 0 (default: sharpest, relies on MC accumulation for AA).\n"
+                               "1 = full physically-derived LOD (may look soft at distance).");
     PE::end();
   }
 
@@ -403,29 +396,50 @@ bool PathTracer::onUIRender(Resources& resources)
 
   if(ImGui::CollapsingHeader("AI Denoisers", ImGuiTreeNodeFlags_DefaultOpen))
   {
-// DLSS section
 #if defined(USE_DLSS)
-    bool oldTransp = m_dlss->useDlssTransparency();
-    if(m_dlss->onUi(resources))
-    {
-      changed = true;
-    }
-    if(oldTransp != m_dlss->useDlssTransparency())
-    {
-      // SYNC NOTE: DLSS transparency toggle — wait before destroying pipelines compiled with old specialization.
-      NVVK_CHECK(vkQueueWaitIdle(resources.app->getQueue(0).queue));
-      destroyPipelines();
-    }
+    bool oldTransp   = m_dlss->useDlssTransparency();
+    bool dlssChanged = m_dlss->onUiActivation(resources);
+#if defined(USE_DLSSNR)
+    dlssChanged |= m_dlss->onUiNrActivation();
+#endif
 #else
     ImGui::TextDisabled("DLSS is not enabled.");
     nvsamples::HelpMarker("Define USE_DLSS in CMake to enable DLSS support.");
 #endif
 
 #if defined(USE_OPTIX_DENOISER)
-    changed |= m_optix->onUi(resources);
+    changed |= m_optix->onUiActivation(resources);
 #else
     ImGui::TextDisabled("OptiX Denoiser is not enabled.");
     nvsamples::HelpMarker("Define USE_OPTIX_DENOISER in CMake to enable OptiX denoiser support.");
+#endif
+
+    ImGui::Spacing();
+
+#if defined(USE_DLSS)
+    dlssChanged |= m_dlss->onUiSettings(resources);
+#if defined(USE_DLSSNR)
+    dlssChanged |= m_dlss->onUiNrSettings();
+#endif
+    changed |= dlssChanged;
+    if(oldTransp != m_dlss->useDlssTransparency())
+    {
+      // SYNC NOTE: DLSS transparency toggle — wait before destroying pipelines compiled with old specialization.
+      NVVK_CHECK(vkQueueWaitIdle(resources.app->getQueue(0).queue));
+      destroyPipelines();
+    }
+#endif
+#if defined(USE_OPTIX_DENOISER)
+    changed |= m_optix->onUiSettings(resources);
+#endif
+
+    ImGui::Spacing();
+
+#if defined(USE_OPTIX_DENOISER)
+    changed |= m_optix->onUiPreview(resources);
+#endif
+#if defined(USE_DLSS)
+    changed |= m_dlss->onUiGuideBuffers();
 #endif
   }
   return changed;
@@ -435,8 +449,8 @@ PathTracer::CompileStateSnapshot PathTracer::getCompileStateSnapshot()
 {
   std::lock_guard<std::mutex> lock(m_compileMutex);
   return {
-      m_compiledWireframe, m_compiledVisualize, m_compiledOptimal, m_compiledDlss,
-      m_compiledDlssGuide, m_compiledFeatures,  m_rqPipeline,      m_rtxPipeline,
+      m_compiledWireframe, m_compiledVisualize, m_compiledOptimal, m_compiledDlss, m_compiledDlssGuide,
+      m_compiledFeatures,  m_pipelineUseSER,    m_rqPipeline,      m_rtxPipeline,
   };
 }
 
@@ -485,14 +499,14 @@ void PathTracer::ensureShadersAndPipelines(Resources& resources)
       std::lock_guard<std::mutex> lock(m_compileMutex);
       vkDestroyPipeline(m_device, m_rqPipeline, nullptr);
       vkDestroyPipeline(m_device, m_rtxPipeline, nullptr);
-      m_rqPipeline  = VK_NULL_HANDLE;
-      m_rtxPipeline = VK_NULL_HANDLE;
+      m_rqPipeline     = VK_NULL_HANDLE;
+      m_rtxPipeline    = VK_NULL_HANDLE;
+      m_pipelineUseSER = m_useSER;
       resources.allocator.destroyBuffer(m_sbtBuffer);
       m_sbtBuffer  = {};
       m_sbtRegions = {};
     }
-    m_pipelineUseSER = m_useSER;
-    state            = getCompileStateSnapshot();
+    state = getCompileStateSnapshot();
   }
 
   const bool rqMissing  = m_renderTechnique == RenderTechnique::RayQuery && state.rqPipeline == VK_NULL_HANDLE;
@@ -549,8 +563,13 @@ void PathTracer::onRender(VkCommandBuffer cmd, Resources& resources)
   const bool guideChanged      = (state.dlssGuide != wantDlssGuide);
   const bool featureSetChanged = wantOptimal && (state.features != resources.currentFeatureSet);
   const bool needRecompile = wireframeChanged || visualizeChanged || optimalChanged || dlssChanged || guideChanged || featureSetChanged;
-  const bool needPipeline = (m_renderTechnique == RenderTechnique::RayQuery) ? (state.rqPipeline == VK_NULL_HANDLE) :
-                                                                               (state.rtxPipeline == VK_NULL_HANDLE);
+  // SER toggle only needs a pipeline rebuild (it's a specialization constant, not a macro),
+  // but the live pipeline still needs to be replaced — detect that here.
+  // Use the mutex-protected snapshot value to avoid racing with the compile worker.
+  const bool serChanged   = (m_useSER && m_supportSER) != state.pipelineUseSER;
+  const bool needPipeline = serChanged
+                            || ((m_renderTechnique == RenderTechnique::RayQuery) ? (state.rqPipeline == VK_NULL_HANDLE) :
+                                                                                   (state.rtxPipeline == VK_NULL_HANDLE));
 
   if(needRecompile || needPipeline)
   {
@@ -712,8 +731,8 @@ void PathTracer::pushDescriptorSet(VkCommandBuffer cmd, Resources& resources, Vk
     // hides the inner RenderTarget behind getRrAttachment() so we can iterate the OutputImage enum
     // values without touching m_innerGBuffer directly.
     static constexpr OutputImage kRrSlots[] = {
-        eResultImage,         eSelectImage, eDlssAlbedo, eDlssSpecAlbedo,
-        eDlssNormalRoughness, eDlssMotion,  eDlssDepth,  eDlssSpecularHitDist,
+        eResultImage, eSelectImage, eDlssAlbedo,          eDlssSpecAlbedo, eDlssNormalRoughness,
+        eDlssMotion,  eDlssDepth,   eDlssSpecularHitDist, eNrMask,
     };
     outputImages.resize(static_cast<size_t>(kRrSlots[std::size(kRrSlots) - 1]) + 1);
     for(OutputImage slot : kRrSlots)
@@ -1096,6 +1115,11 @@ void PathTracer::compileShader(Resources& resources, bool fromFile)
         isDlssEnabled(),
         resources.currentFeatureSet.has(nvvkgltf::SceneFeatureSet::eDlssGuide),
         resources.settings.optimalShader ? resources.currentFeatureSet : nvvkgltf::SceneFeatureSet{},
+#if defined(USE_DLSS)
+        m_dlss ? m_dlss->useDlssTransparency() : false,
+#else
+        false,
+#endif
     };
     if(swapVariant(resources, targetKey))
     {
@@ -1208,6 +1232,9 @@ void PathTracer::compileShader(Resources& resources, bool fromFile)
     constexpr bool kEmbeddedDlss = false;
     m_compiledDlss               = compiledFromFile ? isDlssEnabled() : kEmbeddedDlss;
     m_compiledDlssGuide = compiledFromFile ? resources.currentFeatureSet.has(nvvkgltf::SceneFeatureSet::eDlssGuide) : kEmbeddedDlssGuide;
+#if defined(USE_DLSS)
+    m_compiledDlssTransparency = (compiledFromFile && m_dlss) ? m_dlss->useDlssTransparency() : false;
+#endif
 
     // Destroy pipeline since there is a new shader
     destroyPipelinesLocked();
@@ -1247,8 +1274,8 @@ bool PathTracer::swapVariant(Resources& resources, const VariantKey& newKey)
 
   // 1) Park the currently-active shader/pipelines/SBT so we don't leak them.
   // The current variant key reflects what compileShader() last recorded.
-  const VariantKey currentKey{m_compiledWireframe, m_compiledVisualize, m_compiledOptimal,
-                              m_compiledDlss,      m_compiledDlssGuide, m_compiledFeatures};
+  const VariantKey currentKey{m_compiledWireframe, m_compiledVisualize, m_compiledOptimal,         m_compiledDlss,
+                              m_compiledDlssGuide, m_compiledFeatures,  m_compiledDlssTransparency};
   const bool       hasLive = m_shaderModule != VK_NULL_HANDLE || m_rtxPipeline != VK_NULL_HANDLE
                        || m_rqPipeline != VK_NULL_HANDLE || m_sbtBuffer.buffer != VK_NULL_HANDLE;
   if(hasLive)
@@ -1320,12 +1347,13 @@ bool PathTracer::swapVariant(Resources& resources, const VariantKey& newKey)
         m_sbtBuffer   = {};
         m_sbtRegions  = {};
       }
-      m_compiledWireframe = newKey.wireframe;
-      m_compiledVisualize = newKey.visualize;
-      m_compiledOptimal   = newKey.optimal;
-      m_compiledDlss      = newKey.dlss;
-      m_compiledDlssGuide = newKey.dlssGuide;
-      m_compiledFeatures  = newKey.features;
+      m_compiledWireframe        = newKey.wireframe;
+      m_compiledVisualize        = newKey.visualize;
+      m_compiledOptimal          = newKey.optimal;
+      m_compiledDlss             = newKey.dlss;
+      m_compiledDlssGuide        = newKey.dlssGuide;
+      m_compiledFeatures         = newKey.features;
+      m_compiledDlssTransparency = newKey.dlssTransparency;
       m_variantCache.erase(it);
       return true;
     }

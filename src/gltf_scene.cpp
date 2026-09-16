@@ -216,6 +216,8 @@ nvvkgltf::Scene::Scene()
   // Base list of supported extensions; samples can add onto this for custom
   // image formats.
   m_supportedExtensions = {
+      "EXT_DLSS_NR",
+      "EXT_lights_ies",
       "EXT_mesh_gpu_instancing",
       "EXT_mesh_opacity_micromap",
       "EXT_meshopt_compression",
@@ -1575,10 +1577,32 @@ void nvvkgltf::Scene::markNodeDirty(int nodeIndex)
 
   m_dirtyFlags.nodes.insert(nodeIndex);
 
-  const tinygltf::Node& node = m_model.nodes[nodeIndex];
+  const tinygltf::Node& node   = m_model.nodes[nodeIndex];
+  EXT_lights_ies_ref    iesRef = tinygltf::utils::getNodeIesLight(node);
 
   if(node.light >= 0)
     markLightDirty(node.light);
+
+  // IES nodes with no valid KHR light index need the sentinel to trigger uploadLights.
+  // This covers pure IES (node.light == -1) and hybrid nodes whose KHR index is out-of-range
+  // (markLightDirty silently no-ops on invalid indices, so the sentinel is required there too).
+  if(iesRef.light >= 0 && (node.light < 0 || node.light >= static_cast<int>(m_model.lights.size())))
+    m_dirtyFlags.lights.insert(-1);
+
+  // Keep RenderLight IES params in sync with the (possibly just-edited) tinygltf node.
+  // m_lights is in traversal order, so find the entry for this node by nodeID.
+  if(iesRef.light >= 0)
+  {
+    for(RenderLight& rl : m_lights)
+    {
+      if(rl.nodeID == nodeIndex)
+      {
+        rl.iesMultiplier = iesRef.multiplier;
+        rl.iesColor      = iesRef.color;
+        break;
+      }
+    }
+  }
 }
 
 // We mark RenderNodes as dirty for RTX if their materials changes features that affect ray tracing, such as alpha mode or double-sidedness.
@@ -1849,8 +1873,12 @@ void nvvkgltf::Scene::updateWorldMatricesSerial()
       }
     }
 
-    if(node.light >= 0)
-      m_lights[node.light].worldMatrix = m_nodesWorldMatrices[nodeID];
+    for(RenderLight& rl : m_lights)
+      if(rl.nodeID == nodeID)
+      {
+        rl.worldMatrix = m_nodesWorldMatrices[nodeID];
+        break;
+      }
 
     for(int child : node.children)
       updateMatrix(child);
@@ -1935,8 +1963,12 @@ void nvvkgltf::Scene::updateWorldMatricesParallel()
         }
       }
 
-      if(node.light >= 0)
-        m_lights[node.light].worldMatrix = m_nodesWorldMatrices[nodeID];
+      for(RenderLight& rl : m_lights)
+        if(rl.nodeID == nodeID)
+        {
+          rl.worldMatrix = m_nodesWorldMatrices[nodeID];
+          break;
+        }
     });
   }
 
@@ -2056,9 +2088,14 @@ void nvvkgltf::Scene::updateRenderNodesFull()
   traverseSceneWithVisibility([&](int nodeID, const glm::mat4& worldMat, bool visible) {
     tinygltf::Node& tnode = m_model.nodes[nodeID];
 
-    if(tnode.light > -1 && static_cast<size_t>(tnode.light) < m_lights.size())
+    if(tnode.light > -1 || tinygltf::utils::getNodeIesLight(tnode).light > -1)
     {
-      m_lights[tnode.light].worldMatrix = worldMat;
+      for(RenderLight& rl : m_lights)
+        if(rl.nodeID == nodeID)
+        {
+          rl.worldMatrix = worldMat;
+          break;
+        }
     }
 
     if(tnode.mesh > -1)
@@ -2121,7 +2158,9 @@ void nvvkgltf::Scene::rebuildRenderNodesAndLights()
   traverseSceneWithVisibility([&](int nodeID, const glm::mat4& worldMat, bool visible) {
     tinygltf::Node& tnode = m_model.nodes[nodeID];
 
-    if(tnode.light > -1)
+    // A node can carry EXT_lights_ies with no KHR_lights_punctual light at all (per spec).
+    // handleLightTraversal handles both cases; this predicate must stay in sync with it.
+    if(tnode.light > -1 || tinygltf::utils::getNodeIesLight(tnode).light > -1)
     {
       handleLightTraversal(nodeID, worldMat);
     }
@@ -2373,31 +2412,62 @@ bool nvvkgltf::Scene::handleCameraTraversal(int nodeID, const glm::mat4& worldMa
 
 bool nvvkgltf::Scene::handleLightTraversal(int nodeID, const glm::mat4& worldMatrix)
 {
-  tinygltf::Node&       node = m_model.nodes[nodeID];
-  nvvkgltf::RenderLight renderLight;
-  renderLight.light = node.light;
-  if(node.light < 0 || node.light >= m_model.lights.size())
-    return false;
+  tinygltf::Node& node = m_model.nodes[nodeID];
 
-  tinygltf::Light& light = m_model.lights[node.light];
-  // Add a default color if the light has no color
-  if(light.color.empty())
+  // Per spec, EXT_lights_ies defines a self-sufficient point light and does not compose with
+  // KHR_lights_punctual. When both extensions coexist on a node, EXT_lights_ies wins and the
+  // KHR attachment on this node is dropped (the shared KHR light entity in model.lights[] is
+  // preserved; other nodes may still reference it). The three legal outcomes are:
+  //   node.light >= 0 && iesRef.light <  0  -> KHR_lights_punctual
+  //   iesRef.light >= 0                     -> EXT_lights_ies (KHR attachment on this node ignored)
+  //   neither                               -> no light
+  EXT_lights_ies_ref iesRef = tinygltf::utils::getNodeIesLight(node);
+  if(node.light < 0 && iesRef.light < 0)
+    return false;  // node carries neither extension
+
+  // Reject an out-of-range KHR light index when there is no IES profile to fall back on.
+  // (KHR+IES hybrid nodes with an invalid node.light are still valid: IES wins and
+  // renderLight.light is set to -1 below, so the bad index is never used.)
+  if(node.light >= 0 && iesRef.light < 0 && node.light >= static_cast<int>(m_model.lights.size()))
   {
-    light.color = {1.0f, 1.0f, 1.0f};
+    LOGW("Node %d references KHR_lights_punctual light[%d] which is out of range (%zu lights defined); skipping.\n",
+         nodeID, node.light, m_model.lights.size());
+    return false;
   }
-  // Add a default radius if the light has no radius
-  if(!light.extras.Has("radius"))
+
+  const bool bothOnNode = (node.light >= 0 && iesRef.light >= 0);
+  if(bothOnNode)
   {
-    if(!light.extras.IsObject())
-    {  // Avoid overwriting other extras
-      light.extras = tinygltf::Value(tinygltf::Value::Object());
+    const std::string& nodeName = node.name.empty() ? std::string("(unnamed)") : node.name;
+    LOGW(
+        "Node '%s' (index %d) carries both EXT_lights_ies and KHR_lights_punctual. "
+        "Per spec, EXT_lights_ies is standalone; the KHR attachment on this node will be ignored.\n",
+        nodeName.c_str(), nodeID);
+  }
+
+  nvvkgltf::RenderLight renderLight;
+  renderLight.light         = bothOnNode ? -1 : node.light;
+  renderLight.worldMatrix   = worldMatrix;
+  renderLight.nodeID        = nodeID;
+  renderLight.iesProfile    = iesRef.light;
+  renderLight.iesMultiplier = iesRef.multiplier;
+  renderLight.iesColor      = iesRef.color;
+
+  // For KHR_lights_punctual lights, ensure required fields have defaults.
+  if(node.light >= 0 && node.light < static_cast<int>(m_model.lights.size()))
+  {
+    tinygltf::Light& light = m_model.lights[node.light];
+    if(light.color.empty())
+      light.color = {1.0f, 1.0f, 1.0f};
+    if(!light.extras.Has("radius"))
+    {
+      if(!light.extras.IsObject())
+        light.extras = tinygltf::Value(tinygltf::Value::Object());
+      tinygltf::Value::Object extras = light.extras.Get<tinygltf::Value::Object>();
+      extras["radius"]               = tinygltf::Value(0.);
+      light.extras                   = tinygltf::Value(extras);
     }
-    tinygltf::Value::Object extras = light.extras.Get<tinygltf::Value::Object>();
-    extras["radius"]               = tinygltf::Value(0.);
-    light.extras                   = tinygltf::Value(extras);
   }
-  renderLight.worldMatrix = worldMatrix;
-  renderLight.nodeID      = nodeID;
 
   m_lights.push_back(renderLight);
   return false;  // Continue traversal

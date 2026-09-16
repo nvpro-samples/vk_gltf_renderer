@@ -12,6 +12,14 @@
 - The **path tracer** (`renderer_pathtracer`) is the reference producer of the guide buffers; the
   **rasterizer** produces a subset for DLSS-SR.
 
+## DLSS startup
+
+`Dlss::init` starts a nonblocking NGX prewarm as soon as the renderer is attached. This does not
+require a loaded scene: the worker only initializes NGX and probes feature availability. The actual
+DLSS feature handle and sized render targets are still created later from `Dlss::updateSize`, where
+a command buffer and display extent are available. Disabled DLSS-RR therefore reports **Ready** once
+NGX is warmed, but its heavier guide buffers stay unsized until the user enables it.
+
 ## Guide buffers
 
 The path tracer writes all guide buffers in `processPixel` (`shaders/gltf_pathtrace.slang`, first-hit
@@ -88,5 +96,137 @@ rotation moves the environment. See the `calculateMotionVector` overload comment
 
 ## Debugging motion vectors
 
-In the DLSS panel, expand **Guide Images** and select the **Motion** thumbnail
+In the DLSS panel, expand **Developer Guide Buffers** and select the **Motion** thumbnail
 (`Dlss::buildGuideEntries`, `src/dlss.cpp`) to visualize the MV buffer while moving the camera.
+
+---
+
+## DLSS-NR (Neural Rendering)
+
+DLSS-NR (`NVSDK_NGX_Feature_DLSSNR`) is a **display-resolution image enhancer** that runs
+**after** DLSS-RR or DLSS-SR and **after tonemapping**. It is orthogonal to RR/SR: any instance
+(path-tracer RR or rasterizer SR) can optionally run NR on top. Gated by the `USE_DLSSNR` CMake
+option and the `#if defined(USE_DLSSNR)` guards in `src/dlss.{cpp,hpp}`.
+
+### Why post-tonemap?
+
+NR expects **LDR input** (0–1 range). Running it on the pre-tonemap HDR image
+(`eImgRendered`, linear float) causes visible corruption on bright light sources — the
+values blow out the internal normalisation. The correct pipeline is:
+
+```text
+path tracer / rasterizer
+  → DLSS-RR or DLSS-SR evaluate    (→ eImgRendered)
+  → tonemap()                       (→ eImgTonemapped, R8G8B8A8_UNORM)
+  → Dlss::evaluateNr()              (reads & writes eImgTonemapped)
+```
+
+`evaluateNr()` is called from `GltfRenderer::onRender` (`src/renderer.cpp`) immediately after
+`tonemap()`. Call sites: the path tracer and rasterizer both call `setNrImage(eImgTonemapped,…)`
+at resize time (`renderer_pathtracer.cpp`, `renderer_rasterizer.cpp`).
+
+### NR GBuffer
+
+NR needs a **SFLOAT scratch** image to avoid format conversion artefacts inside the NGX temporal
+buffers. `m_nrGBuffer` (R32G32B32A32_SFLOAT, display resolution) is allocated in
+`Dlss::updateSizeNr`. After NR evaluates, `evaluateNr()` blits the SFLOAT scratch back to
+`eImgTonemapped` (R8G8B8A8_UNORM) using `vkCmdBlitImage2KHR`, which handles the format
+conversion automatically.
+
+### Temporal stability — depth and motion vectors
+
+Without depth and motion, NR re-computes local structure detection independently each frame,
+producing a characteristic **flicker** between two local-structure states. `evaluateNr()` provides
+`pInDepth` and `pInMVec` so NGX can stabilise across frames.
+
+| Kind | Depth source | Motion source |
+|---|---|---|
+| RR (path tracer) | `eDlssDepth` colour attachment, R16_SFLOAT linearised ViewZ | `eDlssMotion` colour attachment, R16G16_SFLOAT |
+| SR (rasterizer) | hardware depth attachment (reversed-Z), `VK_IMAGE_ASPECT_DEPTH_BIT` | `getSrImage(SrSlot::eMotion)` |
+
+MV are in render-pixel space; NR operates at display resolution. `InMVecScaleX/Y` is set to
+`displayWidth / renderWidth` (and `…Y`). `InDepthInverted = 0` for RR (linearised), `1` for SR
+(reversed-Z).
+
+### NR control parameters
+
+`NrSettings` (nested in `Dlss`, `src/dlss.hpp`) exposes the per-session global knobs:
+
+| Field | NGX param | Range |
+|---|---|---|
+| `intensity` | `InIntensity` | [0, 1] |
+| `localToneStrength` | `InLocalToneStrength` | [0, 1] |
+| `localStructureStrength` | `InLocalStructureStrength` | [0, 1] |
+| `globalToneStrength` | `InGlobalToneStrength` | [0, 1] |
+| `skinStructureStrength` | `InSkinStructureStrength` | [0, 1] |
+| `style` | `InStyle` | SDK enum |
+| `useAutoMask` | `InUseAutoMask` | bool |
+
+These are edited in the DLSS panel's NR settings pane and apply globally to the entire image.
+
+### Per-material NR control mask — `EXT_DLSS_NR`
+
+`pInControlMask` is a 4-channel image passed to NGX that **multiplies** the global strength
+values per pixel:
+
+| Channel | Meaning | Default |
+|---|---|---|
+| R | intensity mask | 1.0 |
+| G | local tone strength mask | 1.0 |
+| B | local structure strength mask | 1.0 |
+| A | global tone strength mask | 1.0 |
+
+`(1, 1, 1, 1)` is a no-op (global values pass through unchanged). Setting a channel to 0 disables
+that effect for the covered pixels. This enables per-character / per-object NR tuning — e.g.
+suppress local structure on a background material while keeping it on a foreground character.
+
+This is exposed as the `EXT_DLSS_NR` glTF material extension. The full pipeline:
+
+1. **Material data** — `EXT_DLSS_NR.nrMask` (vec4, default (1,1,1,1)) stored via
+   `getExtDlssNr` / `setExtDlssNr` (`src/tinygltf_utils.{hpp,cpp}`). Loaded into
+   `GltfShadeMaterial.nrMask` by `gltf_material_cache.cpp` under `#if MAT_EXT_DLSS_NR`.
+   Gated by `MAT_EXT_DLSS_NR` in `shaders/gltf_material_config.h` (defaults to 1).
+
+2. **GBuffer slot** — `OutputImage::eNrMask` (index 8, R16G16B16A16_SFLOAT) is the 9th colour
+   attachment in the RR inner GBuffer. The path tracer writes it in `processPixel`
+   (`shaders/gltf_pathtrace.slang`) on the first-hit block under `USE_DLSS_SHADER &&
+   MAT_EXT_DLSS_NR`, reading directly from `materials[materialIndex].nrMask`. The slot is
+   registered in `kRrSlots[]` in `renderer_pathtracer.cpp` so it is wired into the `outImages`
+   bindless array. The format is declared in `kRrInnerFormats[]` (`src/dlss.cpp`).
+
+3. **Temporal accumulation** — the mask is captured in `GuideScratch.nrMask` (first-hit only,
+   no per-bounce accumulation) and copied to `GuideOutput.nrMask` by `packSampleResult`
+   (`shaders/pathtrace_functions.h.slang`). Both structs are guarded by `USE_DLSS_SHADER`.
+
+4. **NGX wiring** — `Dlss::evaluateNr()` reads `eNrMask` directly from `m_innerGBuffer` (Kind::RR
+   only) and passes it as `pInControlMask` with `InControlMaskSubrectSize` at render resolution.
+   When a mask is present, `InUseAutoMask = 0`; when absent (Kind::SR or path tracer not active),
+   it falls back to the `useAutoMask` setting.
+
+5. **UI** — `UiInspector::materialDlssNr()` (`src/ui_inspector.cpp`) renders four `SliderFloat`
+   controls (Intensity / Local Tone / Local Structure / Global Tone) via
+   `renderMaterialExtensionSection()`, which provides the Add / Remove scaffolding automatically.
+   The extension appears in the **Material Extensions** section of the inspector.
+
+6. **glTF support** — `"EXT_DLSS_NR"` is declared in `m_supportedExtensions`
+   (`src/gltf_scene.cpp`) so the loader preserves the extension data on round-trip save/load.
+
+> **Rasterizer note:** The rasterizer does not write `eNrMask` (no 4th framebuffer attachment in
+> the SR pass). For Kind::SR, `pInControlMask = nullptr` and `InUseAutoMask` follows the global
+> `useAutoMask` setting. Per-material masking from `EXT_DLSS_NR` is a path-tracer-only feature.
+
+### Adding a new NR parameter
+
+If a future NGX SDK exposes a new per-pixel input (e.g. skin mask, emissive mask):
+
+1. Add a field to `GltfShadeMaterial` (gated by a new `MAT_EXT_*` flag in
+   `gltf_material_config.h`).
+2. Add a `GBuffer` slot to `OutputImage` (`shaders/shaderio.h`) and the matching format to
+   `kRrInnerFormats[]` (`src/dlss.cpp`).
+3. Write the slot in the path tracer first-hit block (`shaders/gltf_pathtrace.slang`), propagate
+   through `GuideScratch` → `GuideOutput` → `packSampleResult` if needed.
+4. Register the slot in `kRrSlots[]` (`src/renderer_pathtracer.cpp`).
+5. Wire the NGX input in `Dlss::evaluateNr()` (`src/dlss.cpp`), mirroring the `pInControlMask`
+   pattern.
+6. Add tinygltf helpers, material cache loading, glTF extension registration, and inspector UI
+   following the `EXT_DLSS_NR` pattern.

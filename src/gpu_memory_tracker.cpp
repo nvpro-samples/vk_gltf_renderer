@@ -17,6 +17,12 @@
  * SPDX-License-Identifier: Apache-2.0
  */
 
+//
+// Tracks GPU memory allocations by named category (e.g. "Geometry", "Images", "BLAS"). Records
+// current and peak byte counts per category so the application can display memory usage
+// breakdowns and detect allocation regressions during development.
+//
+
 #include "gpu_memory_tracker.hpp"
 
 #include <nvvk/render_target.hpp>

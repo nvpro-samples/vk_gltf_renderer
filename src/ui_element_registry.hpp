@@ -72,6 +72,12 @@ struct ElementTypeDesc
   std::function<std::string(int)> name;    // display-only label (may be derived: URI, "Sampler N", ...)
   std::function<void(int)>        select;  // set the shared selection to this element
 
+  // Optional override: return the list index [0, count) that corresponds to the current selection,
+  // or -1 if nothing in this category is selected. When null, the default selKind-based lookup
+  // in selectedElementIndex() is used. Needed for categories that mix multiple selection types
+  // (e.g. KHR lights + IES-only nodes in one list).
+  std::function<int(const SceneSelection::SelectionContext&, const tinygltf::Model&)> selectedIndexFor;
+
   // Raw, editable glTF name used to seed the rename text field. Optional: null => `name` is already the
   // raw field and doubles as the seed. Set this when `name` is a derived display label (e.g. an image's
   // URI/placeholder fallback) so a no-op rename can't write that derived text back as the real name.

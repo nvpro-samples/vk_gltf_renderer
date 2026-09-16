@@ -33,7 +33,7 @@
 #include "gltf_scene_omm.hpp"
 #include "gltf_material_cache.hpp"
 #include "nvvk/sampler_pool.hpp"
-#include "nvvk/staging.hpp"
+#include <nvvk/uploader_interface.hpp>
 #include "gpu_memory_tracker.hpp"
 #include "shaders/gltf_scene_io.h.slang"
 
@@ -82,11 +82,15 @@ public:
   using DeferredFreeFunc = std::function<void(std::function<void()>&&)>;
   void setDeferredFree(DeferredFreeFunc func) { m_deferredFree = std::move(func); }
 
-  virtual void create(VkCommandBuffer        cmd,
-                      nvvk::StagingUploader& staging,
-                      nvvkgltf::Scene&       scn,
-                      bool                   generateMipmaps  = true,
-                      bool                   enableRayTracing = true);
+  virtual void create(VkCommandBuffer cmd,
+
+                      nvvk::CmdUploaderInterface& staging,
+                      nvvkgltf::Scene&            scn,
+
+                      bool generateMipmaps = true,
+
+                      bool enableRayTracing = true);
+
 
   // --- Tier 1: sync API (reads + clears Scene dirty flags) ---
   enum SyncFlags : uint32_t
@@ -96,25 +100,30 @@ public:
     eSyncMaterials   = 1 << 1,
     eSyncLights      = 1 << 2,
   };
-  [[nodiscard]] uint32_t syncFromScene(nvvk::StagingUploader& staging, nvvkgltf::Scene& scn, uint32_t mask = ~0u);
+  [[nodiscard]] uint32_t syncFromScene(nvvk::CmdUploaderInterface& staging, nvvkgltf::Scene& scn, uint32_t mask = ~0u);
 
   // --- Tier 2: explicit upload (const Scene, caller owns dirty tracking) ---
-  void uploadRenderNodes(nvvk::StagingUploader& staging, const nvvkgltf::Scene& scn, const std::unordered_set<int>& dirtyIndices = {});
-  void uploadMaterials(nvvk::StagingUploader& staging, const nvvkgltf::Scene& scn, const std::unordered_set<int>& dirtyIndices = {});
-  void uploadLights(nvvk::StagingUploader& staging, const nvvkgltf::Scene& scn, const std::unordered_set<int>& dirtyIndices = {});
-  void uploadEmissiveTriangles(nvvk::StagingUploader& staging, const nvvkgltf::Scene& scn);
-  void uploadPrimitives(VkCommandBuffer cmd, nvvk::StagingUploader& staging, nvvkgltf::Scene& scn);
-  void uploadVertexBuffers(nvvk::StagingUploader& staging, const nvvkgltf::Scene& scn);
+  void uploadRenderNodes(nvvk::CmdUploaderInterface& staging,
+
+                         const nvvkgltf::Scene& scn,
+
+                         const std::unordered_set<int>& dirtyIndices = {});
+
+  void uploadMaterials(nvvk::CmdUploaderInterface& staging, const nvvkgltf::Scene& scn, const std::unordered_set<int>& dirtyIndices = {});
+  void uploadLights(nvvk::CmdUploaderInterface& staging, const nvvkgltf::Scene& scn, const std::unordered_set<int>& dirtyIndices = {});
+  void uploadEmissiveTriangles(nvvk::CmdUploaderInterface& staging, const nvvkgltf::Scene& scn);
+  void uploadPrimitives(VkCommandBuffer cmd, nvvk::CmdUploaderInterface& staging, nvvkgltf::Scene& scn);
+  void uploadVertexBuffers(nvvk::CmdUploaderInterface& staging, const nvvkgltf::Scene& scn);
 
   // Call once per sync cycle after all buffer uploads. Updates scene descriptor if any buffer address changed.
   // Returns true if an update was performed (staging was appended).
-  [[nodiscard]] bool flushSceneDescIfDirty(nvvk::StagingUploader& staging, const nvvkgltf::Scene& scn);
+  [[nodiscard]] bool flushSceneDescIfDirty(nvvk::CmdUploaderInterface& staging, const nvvkgltf::Scene& scn);
 
   virtual void destroy();
 
   // Geometry-only recreation (preserves textures) - useful after tangent generation or mesh optimization
   void destroyGeometry();
-  void createGeometry(VkCommandBuffer cmd, nvvk::StagingUploader& staging, const nvvkgltf::Scene& scn);
+  void createGeometry(VkCommandBuffer cmd, nvvk::CmdUploaderInterface& staging, const nvvkgltf::Scene& scn);
 
   // Incremental texture/image reconcile for a TAIL-ONLY change (DirtyFlags::texturesTailChanged): brings
   // GPU residency in line with the model when the only edits were appends to, or removals from, the end of
@@ -122,7 +131,7 @@ public:
   // tail images and appends their texture views; shrink deferred-frees the removed tail images. This is the
   // fast path behind importing (and undoing/redoing) a texture, avoiding a full create()/destroy() cycle
   // that would re-read every image from disk. The caller writes only the new descriptor slots afterwards.
-  void syncTextureTail(VkCommandBuffer cmd, nvvk::StagingUploader& staging, nvvkgltf::Scene& scn);
+  void syncTextureTail(VkCommandBuffer cmd, nvvk::CmdUploaderInterface& staging, nvvkgltf::Scene& scn);
 
   // In-place update of one sampler's wrap/filter (DirtyFlags::samplers): recreates only the VkSampler
   // at model.samplers[samplerIndex]'s slot via the sampler pool. Images and texture views are untouched;
@@ -134,7 +143,7 @@ public:
   // images are loaded (via syncTextureTail). This is create() without the destroy()/full image re-read,
   // so a merge no longer re-reads every image from disk. Requires a tail-only, non-empty-base texture set
   // (existing GPU arrays must match the pre-merge model sizes); the merge/reference paths guarantee this.
-  void recreatePreservingTextures(VkCommandBuffer cmd, nvvk::StagingUploader& staging, nvvkgltf::Scene& scn);
+  void recreatePreservingTextures(VkCommandBuffer cmd, nvvk::CmdUploaderInterface& staging, nvvkgltf::Scene& scn);
 
   // Getters
   const nvvk::Buffer&               material() const { return m_bMaterial; }
@@ -202,17 +211,24 @@ public:
 
 protected:
   VkBufferUsageFlags2 getBufferUsageFlags() const;
-  virtual void createVertexBuffers(VkCommandBuffer cmd, nvvk::StagingUploader& staging, const nvvkgltf::Scene& scn);
+  virtual void createVertexBuffers(VkCommandBuffer cmd, nvvk::CmdUploaderInterface& staging, const nvvkgltf::Scene& scn);
   template <typename T>
-  bool updateAttributeBuffer(const std::string&         attributeName,
-                             const tinygltf::Model&     model,
+  bool updateAttributeBuffer(const std::string& attributeName,
+
+                             const tinygltf::Model& model,
+
                              const tinygltf::Primitive& primitive,
-                             nvvk::ResourceAllocator*   alloc,
-                             nvvk::StagingUploader*     staging,
-                             nvvk::Buffer&              attributeBuffer);
+
+                             nvvk::ResourceAllocator* alloc,
+
+                             nvvk::CmdUploaderInterface* staging,
+
+                             nvvk::Buffer& attributeBuffer);
+
   // imageSearchPaths: directories to search for image files (base first, then imports). Empty or missing files yield default image.
-  virtual void createTextureImages(VkCommandBuffer                           cmd,
-                                   nvvk::StagingUploader&                    staging,
+  virtual void createTextureImages(VkCommandBuffer             cmd,
+                                   nvvk::CmdUploaderInterface& staging,
+
                                    nvvkgltf::Scene&                          scn,
                                    const std::vector<std::filesystem::path>& imageSearchPaths);
 
@@ -225,9 +241,9 @@ protected:
                                              const std::vector<std::filesystem::path>& imageSearchPaths,
                                              size_t                                    imageId) const;
   // Replace m_images[idx] with a 1x1 solid-color image (magenta = load failure, white = empty scene).
-  void createDefaultImage(nvvk::StagingUploader& staging, uint32_t idx, const std::array<uint8_t, 4>& color);
+  void createDefaultImage(nvvk::CmdUploaderInterface& staging, uint32_t idx, const std::array<uint8_t, 4>& color);
   // Create the GPU image for m_images[imageId] (already loaded), substituting the magenta default on failure.
-  void materializeImage(VkCommandBuffer cmd, nvvk::StagingUploader& staging, size_t imageId);
+  void materializeImage(VkCommandBuffer cmd, nvvk::CmdUploaderInterface& staging, size_t imageId);
   // Append one texture view to m_textures, resolving model.textures[textureIndex]'s source image (default on bad source).
   void appendTextureView(const tinygltf::Model& model, size_t textureIndex);
   // Append the fallback texture view (image 0) so every texture entry references some image view.
@@ -251,14 +267,21 @@ protected:
   void findSrgbImages(const tinygltf::Model& model);
 
   // Rebuild scene descriptor buffer (buffer addresses + numLights). Called internally when buffers change.
-  void updateSceneDescBuffer(nvvk::StagingUploader& staging, const nvvkgltf::Scene& scn);
+  void updateSceneDescBuffer(nvvk::CmdUploaderInterface& staging, const nvvkgltf::Scene& scn);
+
+  // EXT_lights_ies (load-only, not re-run on edits): resolves and parses every profile in
+  // extensions.EXT_lights_ies.lights[] (uri relative to the glTF's search paths, or an embedded
+  // bufferView) via ies_profile.hpp, and uploads the flattened table to m_bIesProfiles. A profile
+  // that fails to load/parse is left as a flat (all-1.0) table so referencing lights just fall
+  // back to their unmodified KHR_lights_punctual distribution instead of erroring out.
+  void loadIesProfiles(nvvk::CmdUploaderInterface& staging, const nvvkgltf::Scene& scn);
 
   // Ensure render node buffer matches required size; recreates if needed. Marks scene descriptor dirty on buffer creation.
-  void ensureRenderNodeBuffer(nvvk::StagingUploader& staging, size_t renderNodeCount);
+  void ensureRenderNodeBuffer(nvvk::CmdUploaderInterface& staging, size_t renderNodeCount);
 
   virtual bool loadImage(const std::filesystem::path& basedir, const tinygltf::Model& model, uint64_t imageID);
   virtual void loadImageFromMemory(uint64_t imageID, const void* data, size_t byteLength);
-  virtual bool createImage(const VkCommandBuffer& cmd, nvvk::StagingUploader& staging, SceneImage& image);
+  virtual bool createImage(const VkCommandBuffer& cmd, nvvk::CmdUploaderInterface& staging, SceneImage& image);
 
   //--
   VkDevice         m_device{VK_NULL_HANDLE};
@@ -271,6 +294,7 @@ protected:
   nvvk::Buffer m_bMaterial;
   nvvk::Buffer m_bTextureInfos;
   nvvk::Buffer m_bLights;
+  nvvk::Buffer m_bIesProfiles;        // EXT_lights_ies: flattened [profile][sample] table, see loadIesProfiles()
   nvvk::Buffer m_bEmissiveTriangles;  // Referenced emissive triangles sampled as area lights
   uint32_t     m_numEmissiveTriangles = 0;
   float        m_emissiveTotalWeight  = 0.0f;  // Sum of per-triangle selection weights (area * defensive luminance)

@@ -8,6 +8,7 @@
 #define PATHTRACE_FUNCTIONS_H 1
 
 #include "gltf_eval_config.h"
+#include "gltf_light_ies.h.slang"
 
 //-----------------------------------------------------------------------
 // Types and tuning constants
@@ -81,7 +82,8 @@ struct GuideOutput
 #if USE_DLSS_SHADER
   float16_t3 specularAlbedo  = float16_t3(0);
   float      specularHitDist = 0.0f;  // Distance to reflected surface (0=no reflection, 65504=sky reflection)
-#endif                                // USE_DLSS_SHADER
+  float16_t4 nrMask          = float16_t4(1, 1, 1, 1);
+#endif  // USE_DLSS_SHADER
 };
 
 //-----------------------------------------------------------------------
@@ -95,6 +97,7 @@ struct GuideScratch
   float16_t3 specularAlbedo     = float16_t3(0);
   float16_t  specularHitDist    = float16_t(0);
   bool       captureSpecularHit = false;
+  float16_t4 nrMask             = float16_t4(1, 1, 1, 1);
 #endif  // USE_DLSS_SHADER
 };
 #endif  // USE_GUIDE_SHADER
@@ -326,10 +329,9 @@ float3 getShadowTransmission(GltfRenderNode      renderNode,
       // extinction sigma_t = sigma_a + sigma_s: the out-scattering portion is already
       // included, so the scatter coefficient must not be added on top (that would
       // double-count it and over-darken the ray). See volumeExtinctionCoefficient()
-      // in nvpro_core2's bsdf_functions.h.slang. attenuationDistance == 0 means "disabled".
-      float3 extinction = (mat.attenuationDistance == 0.0F) ?
-                              float3(0.0F) :
-                              -log(max(mat.attenuationColor, float3(0.001))) / mat.attenuationDistance;
+      // in nvpro_core2's bsdf_functions.h.slang. CPU sanitizes attenuationDistance to FLT_MAX
+      // for the spec-invalid value 0; dividing by FLT_MAX gives ~0 (= no attenuation).
+      float3 extinction = -log(max(mat.attenuationColor, float3(0.001))) / mat.attenuationDistance;
       currentTransmission *= exp(-hitT * extinction);
     }
     isInside = !isInside;
@@ -600,6 +602,7 @@ void sampleLights(in float3       pos,
         cullNormal = (light.type == LightType::eLightTypeDirectional) ? -light.direction : normalize(light.position - pos);
       }
       LightContrib contrib = singleLightContribution(light, pos, cullNormal, float2(rand(seed), rand(seed)));
+      contrib.intensity *= evalIesFactor(pushConst.gltfScene, light, pos);  // EXT_lights_ies
 
       directLight.direction = -contrib.incidentVector;
       directLight.distance  = contrib.distance;
@@ -1247,6 +1250,9 @@ SampleResult packSampleResult(PathTracerState pt)
 #if USE_DLSS_SHADER
   sampleResult.guideOutput.specularAlbedo  = pt.guide.specularAlbedo;
   sampleResult.guideOutput.specularHitDist = pt.guide.specularHitDist;
+#if MAT_EXT_DLSS_NR
+  sampleResult.guideOutput.nrMask = pt.guide.nrMask;
+#endif  // MAT_EXT_DLSS_NR
 #endif  // USE_DLSS_SHADER
 #endif  // USE_GUIDE_SHADER
   return sampleResult;

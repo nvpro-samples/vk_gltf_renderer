@@ -36,6 +36,9 @@ namespace nvvkgltf {
 
 // Snapshot of model state needed to reliably undo structural operations.
 // Captures all model vectors modified by deleteNode, addLightNode, etc.
+// NOTE: whenever deleteNode() starts mutating a new tinygltf::Model member, add it here too --
+// otherwise undo silently drops the change. `cameras` and `lights` are here because deleteNode
+// prunes orphan entries in both arrays (see SceneEditor::pruneOrphanLights/Cameras).
 struct SceneGraphSnapshot
 {
   std::vector<tinygltf::Node>      nodes;
@@ -43,6 +46,7 @@ struct SceneGraphSnapshot
   std::vector<tinygltf::Animation> animations;
   std::vector<tinygltf::Skin>      skins;
   std::vector<tinygltf::Light>     lights;
+  std::vector<tinygltf::Camera>    cameras;
 };
 
 // Procedural primitive kinds that can be appended to a live scene.
@@ -273,6 +277,12 @@ private:
   void removeNodeFromParent(int nodeIndex);
   void removeNodeFromSceneRoots(int nodeIndex);
   void remapIndicesAfterNodeDeletion(int deletedIndex);
+  // After node deletion(s), sweep model.lights / model.cameras for entries no longer referenced by
+  // any surviving node.light / node.camera; erase them and remap the surviving references so indices
+  // stay contiguous. Prevents orphan lights from continuing to light the scene (via stale entries in
+  // model.lights) and keeps saved glTF free of dangling definitions.
+  void pruneOrphanLights();
+  void pruneOrphanCameras();
   int  findEquivalentMesh(int meshIndex) const;
 };
 

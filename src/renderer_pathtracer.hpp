@@ -19,6 +19,8 @@
 
 #pragma once
 
+#include "settings_registry.hpp"
+
 #include <mutex>
 #include <thread>
 
@@ -79,8 +81,8 @@ public:
   void setBusyWindow(BusyWindow* busy) { m_busyWindow = busy; }
 
   // Register command line parameters
-  void registerParameters(nvutils::ParameterRegistry* paramReg);
-  void setSettingsHandler(nvgui::SettingsHandler* settingsHandler);
+  /// Declare this subsystem's settings (command line + benchmark + MCP + persistence).
+  void registerParameters(SettingsRegistry* settings);
 
   VkDevice                        m_device{};  // Vulkan device
   VkPipelineLayout                m_pipelineLayout{};
@@ -98,8 +100,8 @@ public:
 
   // Ray tracing properties
   VkPhysicalDeviceRayTracingPipelinePropertiesKHR m_rtPipelineProperties{VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_RAY_TRACING_PIPELINE_PROPERTIES_KHR};
-  VkPhysicalDeviceRayTracingInvocationReorderPropertiesNV m_reorderProperties{
-      VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_RAY_TRACING_INVOCATION_REORDER_PROPERTIES_NV};
+  VkPhysicalDeviceRayTracingInvocationReorderPropertiesEXT m_reorderProperties{
+      VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_RAY_TRACING_INVOCATION_REORDER_PROPERTIES_EXT};
 
   bool m_supportSER{false};         // True when the device supports SER (Shader Execution Reordering).
   bool m_useSER{true};              // Requested SER state; clamped to m_supportSER each frame.
@@ -109,6 +111,7 @@ public:
   bool m_compiledOptimal{false};    // True when the shader is the scene-aware optimized build.
   bool m_compiledDlss{false};       // True when the current shader was compiled with DLSS active (USE_DLSS_SHADER).
   bool m_compiledDlssGuide{false};  // True when the current shader has the guide-buffer variant compiled in (USE_GUIDE_SHADER).
+  bool m_compiledDlssTransparency{false};  // True when the live pipeline was specialized with USE_DLSS_TRANSP=1.
   nvvkgltf::SceneFeatureSet m_compiledFeatures{};  // The feature set the current shader was compiled against.
 
   // Variant pipeline cache: avoids slow pipeline (re)compilation by reusing previously built
@@ -121,13 +124,15 @@ public:
     bool dlss      = false;  // True when DLSS is active (drives USE_DLSS_SHADER: sample-loop gate).
     bool dlssGuide = false;  // True when guide-buffer capture is compiled in (USE_GUIDE_SHADER: DLSS or OptiX).
     nvvkgltf::SceneFeatureSet features{};  // only meaningful when `optimal == true`
+    bool dlssTransparency = false;         // True when the pipeline was specialized with USE_DLSS_TRANSP=1.
 
     bool operator==(const VariantKey& o) const
     {
       // dlss and dlssGuide are compared in every mode (they drive USE_DLSS_SHADER / USE_GUIDE_SHADER
       // independently of optimal); the full extension feature set only matters for the optimal build.
       return wireframe == o.wireframe && visualize == o.visualize && optimal == o.optimal && dlss == o.dlss
-             && dlssGuide == o.dlssGuide && (optimal ? (features == o.features) : true);
+             && dlssGuide == o.dlssGuide && dlssTransparency == o.dlssTransparency
+             && (optimal ? (features == o.features) : true);
     }
   };
 
@@ -234,8 +239,9 @@ private:
     bool                      dlss      = false;
     bool                      dlssGuide = false;
     nvvkgltf::SceneFeatureSet features{};
-    VkPipeline                rqPipeline  = VK_NULL_HANDLE;
-    VkPipeline                rtxPipeline = VK_NULL_HANDLE;
+    bool                      pipelineUseSER = false;
+    VkPipeline                rqPipeline     = VK_NULL_HANDLE;
+    VkPipeline                rtxPipeline    = VK_NULL_HANDLE;
   };
 
   void                 ensureShadersAndPipelines(Resources& resources);

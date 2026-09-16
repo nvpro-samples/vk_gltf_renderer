@@ -45,7 +45,7 @@
 #include <nvvk/hdr_ibl.hpp>
 #include <nvvk/resource_allocator.hpp>
 #include <nvvk/sampler_pool.hpp>
-#include <nvvk/staging.hpp>
+#include <nvvk/frame_uploader.hpp>
 #include "gltf_scene.hpp"
 #include "gltf_scene_gpu.hpp"
 #include "ui_animation.hpp"
@@ -106,12 +106,16 @@ struct Settings
   bool      showAgenticWindow       = false;  // Show Agentic bridge window
   bool      showGridSettingsWindow  = false;  // Show Grid & Snap settings window
   float     hdrEnvIntensity         = 1.0f;   // Intensity of the environment (HDR)
-  float     hdrEnvRotation          = 0.0f;   // Rotation of the environment (HDR)
+  float     hdrEnvRotation          = 0.0f;   // Rotation of the HDR environment, in DEGREES (-180..180)
   float     hdrBlur                 = 0.0f;   // Blur of the environment (HDR)
   glm::vec3 silhouetteColor         = {0.933f, 0.580f, 0.180f};  // Color of the silhouette
   bool      useSolidBackground      = false;                     // Use solid background color
   glm::vec3 solidBackgroundColor    = {0.0f, 0.0f, 0.0f};        // Solid background color
   int       maxFrames               = {500};                     // Maximum number of frames to render
+  // Sun position as the UI and the command line express it. sunDirection in skyParams stays the
+  // single source of truth; these are kept in sync with it both ways (see syncSunAngles).
+  float     skySunAzimuth           = 90.0f;                     // degrees
+  float     skySunElevation         = 45.0f;                     // degrees
   bool      useInfinitePlane        = false;                     // Use infinite plane
   bool      isShadowCatcher         = true;                      // Infinite place only catch shadow
   float     infinitePlaneDistance   = 0;                         // Distance/height of the infinite plane
@@ -135,39 +139,6 @@ struct Settings
 };
 
 
-// StagingUploader with per-frame timeline semaphore tracking.
-// Overrides acquireStagingSpace so that all staging operations automatically
-// get the current frame's semaphore state, enabling releaseStaging() to free
-// resources only after the GPU has finished using them.
-class FrameStagingUploader : public nvvk::StagingUploader
-{
-public:
-  // Release completed staging resources and update the timeline semaphore
-  // for the new frame. Must be called once per frame before any staging uploads.
-  void beginFrame(const nvvk::SemaphoreInfo& frameSem)
-  {
-    releaseStaging();
-    m_timelineSemaphore = frameSem.semaphore;
-    m_timelineValue     = frameSem.value;
-  }
-
-  // Acquire staging space with the current frame's timeline semaphore and value
-  VkResult acquireStagingSpace(nvvk::BufferRange&          stagingSpace,
-                               size_t                      dataSize,
-                               const void*                 data,
-                               const nvvk::SemaphoreState& semaphoreState = {}) override
-  {
-    if(!semaphoreState.isValid() && m_timelineSemaphore != VK_NULL_HANDLE)
-      return StagingUploader::acquireStagingSpace(stagingSpace, dataSize, data,
-                                                  nvvk::SemaphoreState::makeFixed(m_timelineSemaphore, m_timelineValue));
-    return StagingUploader::acquireStagingSpace(stagingSpace, dataSize, data, semaphoreState);
-  }
-
-private:
-  VkSemaphore m_timelineSemaphore = VK_NULL_HANDLE;
-  uint64_t    m_timelineValue     = 0;
-};
-
 struct Resources
 {
   enum ImageType
@@ -182,7 +153,7 @@ struct Resources
 
   VkInstance              instance{};
   nvvk::ResourceAllocator allocator{};  // Vulkan Memory Allocator
-  FrameStagingUploader    staging;
+  nvvk::FrameUploader     staging;      // Per-frame + load-path staging copies (records into caller cmd)
 
   nvvk::SamplerPool      samplerPool{};    // Texture Sampler Pool
   VkCommandPool          commandPool{};    // Command pool for secondary command buffer

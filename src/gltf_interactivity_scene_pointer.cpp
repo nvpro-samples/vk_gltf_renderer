@@ -17,6 +17,15 @@
  * SPDX-License-Identifier: Apache-2.0
  */
 
+//
+// Scene-backed InteractivityPointerResolver: resolves KHR_interactivity pointer/get and
+// pointer/set against the live tinygltf::Model owned by a Scene. Covers node TRS/matrix/
+// globalMatrix/mesh/camera/skin/parent/children/weights + KHR_node_visibility, core + extension
+// material properties (generic tinygltf::Value walk), punctual-light properties, perspective-
+// camera basics, and core read-only array/length/ref pointers -- not the full glTF Object Model
+// (no accessor/buffer/image/sampler/texture-index-level pointers). See docs/interactivity.md.
+//
+
 #include <algorithm>
 #include <charconv>
 #include <vector>

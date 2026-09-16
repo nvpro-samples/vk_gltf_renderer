@@ -18,6 +18,8 @@
  */
 
 #pragma once
+
+#include "settings_registry.hpp"
 #include <memory>
 
 #include <nvapp/application.hpp>
@@ -55,8 +57,8 @@ public:
   void freeRecordCommandBuffer(Resources& resources);
 
   // Register command line parameters
-  void registerParameters(nvutils::ParameterRegistry* paramReg);
-  void setSettingsHandler(nvgui::SettingsHandler* settingsHandler);
+  /// Declare this subsystem's settings (command line + benchmark + MCP + persistence).
+  void registerParameters(SettingsRegistry* settings);
 
   void resetHdr() { m_lastHdrDomeView = {}; }
 
@@ -115,6 +117,10 @@ private:
   // UI
   bool m_useRecordedCmd = true;   // Use recorded command buffer for rendering
   bool m_lastWireframe  = false;  // Tracks settings.wireframe to invalidate recorded commands
+  // Latched by registerParameters()'s CLI/benchmark callbacks (rasterUseRecordedCmd, dlssQuality)
+  // and consumed at the top of onRender() to invalidate m_recordedSceneCmd. The UI paths still
+  // call freeRecordCommandBuffer() inline; this flag closes the gap for non-UI setters.
+  bool m_recordedSceneCmdDirty = false;
 
   // ---- DLSS-SR (DLAA / Quality / Balanced / Performance / Ultra) ----
 #if defined(USE_DLSS)

@@ -21,7 +21,7 @@
 
 #include <vector>
 #include <nvvk/resource_allocator.hpp>
-#include <nvvk/staging.hpp>
+#include <nvvk/uploader_interface.hpp>
 
 #include "gltf_scene.hpp"
 #include "gltf_scene_vk.hpp"
@@ -57,11 +57,11 @@ public:
   void deinit();                              // Destroy everything
 
   // --- Scene data (call once per scene load/rebuild) ---
-  void createGpuBuffers(nvvk::StagingUploader& staging, const Scene& scn);  // Upload static SSBOs
-  void destroyGpuBuffers();                                                 // Release static + workspace SSBOs
+  void createGpuBuffers(nvvk::CmdUploaderInterface& staging, const Scene& scn);  // Upload static SSBOs
+  void destroyGpuBuffers();                                                      // Release static + workspace SSBOs
 
   // --- Per-frame animation (call each frame when animation is active) ---
-  void dispatchAnimation(VkCommandBuffer cmd, nvvk::StagingUploader& staging, Scene& scn, const SceneVk& scnVk);
+  void dispatchAnimation(VkCommandBuffer cmd, nvvk::CmdUploaderInterface& staging, Scene& scn, const SceneVk& scnVk);
 
   [[nodiscard]] bool isInitialized() const { return m_alloc != nullptr && m_skinPipeline != VK_NULL_HANDLE; }
 
@@ -116,9 +116,9 @@ private:
   void destroyPipelines();
 
   template <typename T>
-  nvvk::Buffer createBufferFromSpan(nvvk::StagingUploader& staging, std::span<const T> data, const char* debugName = nullptr);
+  nvvk::Buffer createBufferFromSpan(nvvk::CmdUploaderInterface& staging, std::span<const T> data, const char* debugName = nullptr);
 
-  nvvk::Buffer createBufferFromData(nvvk::StagingUploader& staging, const void* data, size_t byteSize, const char* debugName = nullptr);
+  nvvk::Buffer createBufferFromData(nvvk::CmdUploaderInterface& staging, const void* data, size_t byteSize, const char* debugName = nullptr);
 };
 
 }  // namespace nvvkgltf

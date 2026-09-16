@@ -47,7 +47,7 @@ with the code, the code wins (fix the doc — see "Keep the docs true").
 |---|---|
 | Supported glTF extensions | `m_supportedExtensions` in `src/gltf_scene.cpp` |
 | Visualization / debug modes | `enum Visualization` in `shaders/shaderio.h` |
-| Command-line parameters (names, ranges, defaults) | `parameterRegistry.add(...)` in `src/main.cpp`, `src/renderer*.cpp`, `src/benchmarking.cpp` |
+| Command-line / persisted settings (names, defaults, whether they persist) | `m_settings.add(...)` in `src/renderer*.cpp`, plus `parameterRegistry.add(...)` in `src/main.cpp` and `src/benchmarking.cpp` |
 | Menu labels, keyboard shortcuts, UI panels | menu/UI builders in `src/ui_renderer.cpp` (and other `src/ui_*`) |
 | Elements-list categories, columns, CRUD | `ensureElementRegistry()` (the `ElementTypeDesc` array) in `src/ui_scene_browser_elements.cpp` |
 | Material extension gates | `MAT_EXT_*` in `shaders/gltf_material_config.h`, `GLTF_USE_*` in `shaders/gltf_eval_config.h` |
@@ -87,6 +87,11 @@ with the code, the code wins (fix the doc — see "Keep the docs true").
 - **Host/device structs live in `shaders/shaderio.h`** (and the `*_io.h.slang` /
   `*_shaderio.h.slang` headers). Change both sides together; never let CPU and
   GPU layouts drift.
+- **Every user-settable value is declared once**, through `SettingsRegistry`
+  (`src/settings_registry.hpp`). One call feeds the command line, benchmark
+  sequences, and the persisted `.ini`; `Persist` says whether it survives a
+  restart. Never register a setting in two places again — that is what let the
+  two old lists drift.
 - **Scene editing is non-destructive** and fully undoable — route mutations
   through the editor + `undo_redo` system, not ad-hoc.
 

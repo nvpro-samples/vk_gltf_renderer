@@ -17,6 +17,15 @@
  * SPDX-License-Identifier: Apache-2.0
  */
 
+//
+// ThumbnailCache -- bounded, virtualization-friendly ImGui thumbnails for scene textures/images.
+// Turns a VkImageView already resident on the GPU into an ImGui-displayable ImTextureID (a
+// descriptor set from the ImGui-Vulkan backend pool). Designed for scenes with thousands of
+// images: callers request thumbnails only for on-screen rows, and the cache keeps at most
+// `capacity` live descriptor sets, evicting least-recently-used ones into a frames-in-flight-deep
+// trash ring so an evicted descriptor outlives any frame still referencing it.
+//
+
 #include <cassert>
 #include <utility>
 

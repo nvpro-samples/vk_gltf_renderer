@@ -137,6 +137,28 @@ bool webPLoadCallback(nvvkgltf::SceneVk::SceneImage& image, const void* data, si
   return true;
 }
 
+
+// Sun direction <-> azimuth/elevation. The UI derives the angles from skyParams.sunDirection on the
+// fly (nvgui::azimuthElevationSliders), so the direction stays the single source of truth and these
+// two convert in both directions: the command line and MCP set angles, the UI sliders set the
+// direction, and syncSunAngles() keeps the reported angles honest after the UI moves it.
+glm::vec3 sunDirectionFromAngles(float azimuthDegrees, float elevationDegrees, bool yIsUp)
+{
+  const float azimuth   = glm::radians(azimuthDegrees);
+  const float elevation = glm::radians(elevationDegrees);
+  const float cosE      = std::cos(elevation);
+  if(yIsUp)
+    return {cosE * std::cos(azimuth), std::sin(elevation), cosE * std::sin(azimuth)};
+  return {cosE * std::cos(azimuth), cosE * std::sin(azimuth), std::sin(elevation)};
+}
+
+void anglesFromSunDirection(const glm::vec3& direction, bool yIsUp, float& azimuthDegrees, float& elevationDegrees)
+{
+  const glm::vec3 d = glm::normalize(direction);
+  azimuthDegrees    = glm::degrees(yIsUp ? std::atan2(d.z, d.x) : std::atan2(d.y, d.x));
+  elevationDegrees  = glm::degrees(std::asin(yIsUp ? d.y : d.z));
+}
+
 }  // namespace
 
 namespace {
@@ -157,40 +179,140 @@ uint64_t sumTrackerPeakBytes(const nvvkgltf::GpuMemoryTracker& tracker)
 GltfRenderer::GltfRenderer(nvutils::ParameterRegistry* paramReg, const nvutils::ParameterParser* paramParser, BenchmarkOptions& benchmarkOptions)
     : m_parameterParser(paramParser)
     , m_benchmark(benchmarkOptions)
+    , m_settings(paramReg)
 {
-  // All parameters that can be set from the command line
-  paramReg->add({"envSystem", "Environment: [Sky:0, HDR:1, None:2]"}, (int*)&m_resources.settings.envSystem);
-  paramReg->add({"renderSystem", "Renderer [Path tracer:0, Rasterizer:1]"}, (int*)&m_resources.settings.renderSystem);
-  paramReg->add({"showAxis", "Show Axis"}, &m_resources.settings.showAxis);
-  paramReg->add({"showMemStats", "Show Memory Statistics"}, &m_resources.settings.showMemStats);
-  paramReg->add({"hdrEnvIntensity", "HDR Environment Intensity"}, &m_resources.settings.hdrEnvIntensity);
-  paramReg->add({"hdrEnvRotation", "HDR Environment Rotation"}, &m_resources.settings.hdrEnvRotation);
-  paramReg->add({"hdrBlur", "HDR Environment Blur"}, &m_resources.settings.hdrBlur);
-  paramReg->addVector({"silhouetteColor", "Color of the silhouette"}, &m_resources.settings.silhouetteColor);
-  paramReg->add({"visualization", "Visualization Mode"}, (int*)&m_resources.settings.visualization);
-  paramReg->add({"wireframe", "Enable wireframe overlay"}, &m_resources.settings.wireframe);
-  paramReg->add({"optimalShader",
-                 "Compile gltf_pathtrace.slang with GLTF_USE_* gates specialized per scene "
-                 "(no runtime MAT_EXT_* changes; triggers shader recompile on scene/material change). Default off."},
-                &m_resources.settings.optimalShader);
-  paramReg->add({"useSolidBackground", "Use solid color background"}, &m_resources.settings.useSolidBackground, true);
-  paramReg->addVector({"solidBackgroundColor", "Solid Background Color"}, &m_resources.settings.solidBackgroundColor);
-  paramReg->add({"maxFrames", "Maximum number of iterations"}, &m_resources.settings.maxFrames);
-  paramReg->add({"output", "Output image file path for headless mode"}, &m_resources.headlessOutputPath);
+  // Every user-settable value is declared once here (see settings_registry.hpp): the command line,
+  // benchmark sequences, MCP, and ImGui.ini all follow from this one call. Persist says whether the
+  // value is remembered between runs.
+  m_settings.add({"envSystem", "Environment: [Sky:0, HDR:1, None:2]"}, (int*)&m_resources.settings.envSystem, Persist::eYes, 0, 2);
+  m_settings.add({"renderSystem", "Renderer [Path tracer:0, Rasterizer:1]"}, (int*)&m_resources.settings.renderSystem,
+                 Persist::eYes, 0, 1);
+  m_settings.add({"uiShowAxis", "Show Axis"}, &m_resources.settings.showAxis, Persist::eYes);
+  m_settings.add({"uiShowMemStats", "Show Memory Statistics"}, &m_resources.settings.showMemStats, Persist::eYes);
+  m_settings.add({"hdrIntensity", "HDR Environment Intensity"}, &m_resources.settings.hdrEnvIntensity, Persist::eYes, 0.0F, 100.0F);
+  m_settings.add({"hdrRotation", "HDR Environment Rotation (degrees, -180..180)"}, &m_resources.settings.hdrEnvRotation,
+                 Persist::eYes, -180.0F, 180.0F);
+  m_settings.add({"hdrBlur", "HDR Environment Blur"}, &m_resources.settings.hdrBlur, Persist::eYes, 0.0F, 1.0F);
+  m_settings.addVector({"silhouetteColor", "Color of the silhouette"}, &m_resources.settings.silhouetteColor, Persist::eYes);
+  m_settings.add({"dbgVisualization", "Visualization Mode"}, (int*)&m_resources.settings.visualization, Persist::eYes);
+  m_settings.add({"dbgWireframe", "Enable wireframe overlay"}, &m_resources.settings.wireframe, Persist::eYes);
+  m_settings.add({"ptOptimalShader",
+                  "Compile gltf_pathtrace.slang with GLTF_USE_* gates specialized per scene "
+                  "(no runtime MAT_EXT_* changes; triggers shader recompile on scene/material change). Default off."},
+                 &m_resources.settings.optimalShader, Persist::eYes);
+  m_settings.add({"useSolidBackground", "Use solid color background"}, &m_resources.settings.useSolidBackground, Persist::eYes, true);
+  m_settings.addVector({"solidBackgroundColor", "Solid Background Color"}, &m_resources.settings.solidBackgroundColor, Persist::eYes);
+  m_settings.add({"ptMaxFrames", "Maximum number of iterations"}, &m_resources.settings.maxFrames, Persist::eYes);
+  // Headless-only output path: consumed at start-up, so remembering it would be misleading.
+  m_settings.add({"output", "Output image file path for headless mode"}, &m_resources.headlessOutputPath, Persist::eNo);
 
-  paramReg->add({"tmMethod", "Tonemapper method: [Filmic:0, Uncharted:1, Clip:2, ACES:3, AgX:4, KhronosPBR:5]"},
-                &m_resources.tonemapperData.method);
-  paramReg->add({"tmAutoExposure", "Tonemapper auto-exposure: [Off:0, On:1] (turn off for reproducible headless captures)"},
-                &m_resources.tonemapperData.autoExposure);
-  paramReg->add({"tmExposure", "Tonemapper exposure"}, &m_resources.tonemapperData.exposure);
-  paramReg->add({"tmGamma", "Tonemapper brightness"}, &m_resources.tonemapperData.brightness);
-  paramReg->add({"tmContrast", "Tonemapper contrast"}, &m_resources.tonemapperData.contrast);
-  paramReg->add({"tmSaturation", "Tonemapper saturation"}, &m_resources.tonemapperData.saturation);
-  paramReg->add({"tmWhitePoint", "Tonemapper vignette"}, &m_resources.tonemapperData.vignette);
+  // Tonemapper. Ranges match the UI sliders in nvgui/tonemapper.cpp, so a script or an agent is
+  // bounded the same way the user is. tmBrightness and tmVignette were once tmGamma and
+  // tmWhitePoint -- names for fields TonemapperData does not have.
+  m_settings.add({"tmMethod", "Tonemapper: Method [Filmic:0, Uncharted:1, Clip:2, ACES:3, AgX:4, KhronosPBR:5]"},
+                 &m_resources.tonemapperData.method, Persist::eYes, 0, 5);
+  m_settings.add({"tmActive", "Tonemapper: Enable tone mapping [Off:0, On:1]"}, &m_resources.tonemapperData.isActive,
+                 Persist::eYes, 0, 1);
+  m_settings.add({"tmExposure", "Tonemapper: Exposure multiplier"}, &m_resources.tonemapperData.exposure, Persist::eYes, 0.1F, 200.0F);
+  m_settings.add({"tmContrast", "Tonemapper: Contrast"}, &m_resources.tonemapperData.contrast, Persist::eYes, 0.0F, 2.0F);
+  m_settings.add({"tmBrightness", "Tonemapper: Brightness"}, &m_resources.tonemapperData.brightness, Persist::eYes, 0.0F, 2.0F);
+  m_settings.add({"tmSaturation", "Tonemapper: Saturation"}, &m_resources.tonemapperData.saturation, Persist::eYes, 0.0F, 2.0F);
+  m_settings.add({"tmVignette", "Tonemapper: Vignette (0 = none)"}, &m_resources.tonemapperData.vignette, Persist::eYes, -1.0F, 1.0F);
+  m_settings.add({"tmDither", "Tonemapper: Dither [Off:0, On:1]"}, &m_resources.tonemapperData.dither, Persist::eYes, 0, 1);
+  // White balance
+  m_settings.add({"tmTemperature", "Tonemapper: White balance temperature (Kelvin)"},
+                 &m_resources.tonemapperData.temperature, Persist::eYes, 2000.0F, 15000.0F);
+  m_settings.add({"tmTint", "Tonemapper: White balance tint (ANSI C78.377 Duv)"}, &m_resources.tonemapperData.tint,
+                 Persist::eYes, -0.03F, 0.03F);
+  // Colour grading
+  m_settings.add({"tmVibrance", "Tonemapper: Vibrance (boosts muted colors only)"},
+                 &m_resources.tonemapperData.vibrance, Persist::eYes, -1.0F, 1.0F);
+  m_settings.add({"tmShadowBias", "Tonemapper: Shadow tone bias"}, &m_resources.tonemapperData.shadowBias,
+                 Persist::eYes, -1.0F, 1.0F);
+  m_settings.add({"tmMidtoneBias", "Tonemapper: Midtone brightness bias"}, &m_resources.tonemapperData.midtoneBias,
+                 Persist::eYes, -1.0F, 1.0F);
+  m_settings.add({"tmHighlightBias", "Tonemapper: Highlight tone bias"}, &m_resources.tonemapperData.highlightBias,
+                 Persist::eYes, -1.0F, 1.0F);
+  m_settings.addVector({"tmCoolColor", "Tonemapper: Split-toning tint for shadows"},
+                       &m_resources.tonemapperData.coolColor, Persist::eYes);
+  m_settings.addVector({"tmWarmColor", "Tonemapper: Split-toning tint for highlights"},
+                       &m_resources.tonemapperData.warmColor, Persist::eYes);
+  m_settings.add({"tmSplitBalance", "Tonemapper: Split-toning cool/warm balance"},
+                 &m_resources.tonemapperData.splitBalance, Persist::eYes, -0.5F, 0.5F);
+  // Auto exposure (turn off for reproducible headless captures)
+  m_settings.add({"tmAutoExposure", "Tonemapper: Auto-exposure [Off:0, On:1]"},
+                 &m_resources.tonemapperData.autoExposure, Persist::eYes, 0, 1);
+  m_settings.add({"tmAutoExposureSpeed", "Tonemapper: Auto-exposure adaptation speed"},
+                 &m_resources.tonemapperData.autoExposureSpeed, Persist::eYes, 0.0F, 100.0F);
+  m_settings.add({"tmEvMin", "Tonemapper: Auto-exposure minimum (EV100)"}, &m_resources.tonemapperData.evMinValue,
+                 Persist::eYes, -24.0F, 24.0F);
+  m_settings.add({"tmEvMax", "Tonemapper: Auto-exposure maximum (EV100)"}, &m_resources.tonemapperData.evMaxValue,
+                 Persist::eYes, -24.0F, 24.0F);
+
+  // Panel visibility: persisted before, but not settable. Exposed now so a scripted capture can
+  // hide the chrome (see docs/benchmarking.md).
+  m_settings.add({"uiShowCamera", "Show the Camera window"}, &m_resources.settings.showCameraWindow, Persist::eYes);
+  m_settings.add({"uiShowSettings", "Show the Settings window"}, &m_resources.settings.showSettingsWindow, Persist::eYes);
+  m_settings.add({"uiShowEnvironment", "Show the Environment window"}, &m_resources.settings.showEnvironmentWindow, Persist::eYes);
+  m_settings.add({"uiShowTonemapper", "Show the Tonemapper window"}, &m_resources.settings.showTonemapperWindow, Persist::eYes);
+  m_settings.add({"uiShowStatistics", "Show the Statistics window"}, &m_resources.settings.showStatisticsWindow, Persist::eYes);
+  m_settings.add({"uiShowSceneBrowser", "Show the Scene Browser window"}, &m_resources.settings.showSceneBrowserWindow,
+                 Persist::eYes);
+  m_settings.add({"uiShowInspector", "Show the Inspector window"}, &m_resources.settings.showInspectorWindow, Persist::eYes);
+  m_settings.add({"uiShowInteractivity", "Show the KHR_interactivity Graphs window"},
+                 &m_resources.settings.showInteractivityWindow, Persist::eYes);
+  m_settings.add({"uiShowAgentic", "Show the Agentic bridge window"}, &m_resources.settings.showAgenticWindow, Persist::eYes);
+  m_settings.add({"uiShowGridSettings", "Show the Grid & Snap settings window"},
+                 &m_resources.settings.showGridSettingsWindow, Persist::eYes);
+
+  // Sun & sky. Previously the only environment the command line could not touch at all.
+  // Angles drive skyParams.sunDirection through the callback; everything else is direct.
+  const auto applySunAngles = [this](const nvutils::ParameterBase* const) {
+    m_resources.skyParams.sunDirection = sunDirectionFromAngles(m_resources.settings.skySunAzimuth, m_resources.settings.skySunElevation,
+                                                                m_resources.skyParams.yIsUp != 0);
+    resetFrame();
+  };
+  m_settings.add({.name = "skySunAzimuth", .help = "Sky: Sun azimuth (degrees)", .callbackSuccess = applySunAngles},
+                 &m_resources.settings.skySunAzimuth, Persist::eYes, -180.0F, 180.0F);
+  m_settings.add({.name = "skySunElevation", .help = "Sky: Sun elevation (degrees)", .callbackSuccess = applySunAngles},
+                 &m_resources.settings.skySunElevation, Persist::eYes, -90.0F, 90.0F);
+  // ImGui.ini restore writes skySunAzimuth/Elevation directly and never runs applySunAngles, so
+  // skyParams.sunDirection -- the value rendering and the sky UI actually use -- would stay at
+  // its default and the remembered sun position would silently not be restored. Re-run the
+  // conversion once, after Application::run() has reloaded the ini (see onUIRender's one-shot).
+  //
+  // CLI precedence: the loadFilter installed in onAttach already skips ini writes for any key
+  // ParameterParser::wasParsed() marked, so a CLI-set azimuth or elevation survives the ini
+  // reload. This hook then recomputes sunDirection from the resulting per-key mix (CLI value
+  // where the user overrode it, ini value otherwise), which is exactly the intended
+  // CLI-wins-per-key behavior.
+  m_settings.addPostRestoreHook([this, applySunAngles]() { applySunAngles(nullptr); });
+  m_settings.add({"skyMultiplier", "Sky: Overall brightness multiplier"}, &m_resources.skyParams.multiplier,
+                 Persist::eYes, 0.0F, 10.0F);
+  m_settings.add({"skyHaze", "Sky: Haze"}, &m_resources.skyParams.haze, Persist::eYes, 0.0F, 15.0F);
+  m_settings.add({"skyRedBlueShift", "Sky: Red/blue shift"}, &m_resources.skyParams.redblueshift, Persist::eYes, -1.0F, 1.0F);
+  m_settings.add({"skySaturation", "Sky: Saturation"}, &m_resources.skyParams.saturation, Persist::eYes, 0.0F, 1.0F);
+  m_settings.add({"skyHorizonHeight", "Sky: Horizon height"}, &m_resources.skyParams.horizonHeight, Persist::eYes, -1.0F, 1.0F);
+  m_settings.add({"skyHorizonBlur", "Sky: Horizon blur"}, &m_resources.skyParams.horizonBlur, Persist::eYes, 0.0F, 5.0F);
+  m_settings.addVector({"skyGroundColor", "Sky: Ground color"}, &m_resources.skyParams.groundColor, Persist::eYes);
+  m_settings.addVector({"skyNightColor", "Sky: Night color"}, &m_resources.skyParams.nightColor, Persist::eYes);
+  m_settings.add({"skySunDiskScale", "Sky: Sun disk scale"}, &m_resources.skyParams.sunDiskScale, Persist::eYes, 0.0F, 10.0F);
+  m_settings.add({"skySunDiskIntensity", "Sky: Sun disk intensity"}, &m_resources.skyParams.sunDiskIntensity,
+                 Persist::eYes, 0.0F, 5.0F);
+  m_settings.add({"skySunGlowIntensity", "Sky: Sun glow intensity"}, &m_resources.skyParams.sunGlowIntensity,
+                 Persist::eYes, 0.0F, 5.0F);
+
+  // Gizmo, grid and snap: previously persisted but unreachable from the command line or MCP.
+  m_settings.add({"uiShowGrid", "Show the infinite grid"}, &m_resources.settings.showGrid, Persist::eYes);
+  m_settings.add({"uiShowGizmo", "Show the transform gizmo on the selected node"}, &m_resources.settings.showGizmo, Persist::eYes);
+  m_settings.add({"uiGridUnit", "Grid base unit (world units)"}, &m_resources.settings.gridUnit, Persist::eYes);
+  m_settings.add({"uiSnapEnabled", "Snap gizmo transforms to grid increments"}, &m_resources.settings.snapEnabled, Persist::eYes);
+  m_settings.add({"uiSnapRotation", "Rotation snap increment (degrees)"}, &m_resources.settings.snapRotation, Persist::eYes);
+  m_settings.add({"uiSnapScale", "Scale snap increment"}, &m_resources.settings.snapScale, Persist::eYes);
 
   // Register PathTracer-specific command line parameters
-  m_pathTracer.registerParameters(paramReg);
-  m_rasterizer.registerParameters(paramReg);
+  m_pathTracer.registerParameters(&m_settings);
+  m_rasterizer.registerParameters(&m_settings);
 
   m_benchmark.registerParameters(
       paramReg, {
@@ -246,35 +368,10 @@ void GltfRenderer::onAttach(nvapp::Application* app)
   m_resources.app      = app;
 
   // ===== Settings Handler (ImGui persistent) =====
+  // The list lives with the declarations in the constructor; this replays the persisted ones now
+  // that the handler exists. Nothing to keep in sync by hand.
   m_settingsHandler.setHandlerName("GltfRenderer");
-  m_settingsHandler.setSetting("maxFrames", &m_resources.settings.maxFrames);
-  m_settingsHandler.setSetting("showAxis", &m_resources.settings.showAxis);
-  m_settingsHandler.setSetting("showGrid", &m_resources.settings.showGrid);
-  m_settingsHandler.setSetting("showGizmo", &m_resources.settings.showGizmo);
-  m_settingsHandler.setSetting("snapEnabled", &m_resources.settings.snapEnabled);
-  m_settingsHandler.setSetting("gridUnit", &m_resources.settings.gridUnit);
-  m_settingsHandler.setSetting("snapRotation", &m_resources.settings.snapRotation);
-  m_settingsHandler.setSetting("snapScale", &m_resources.settings.snapScale);
-  m_settingsHandler.setSetting("showGridSettingsWindow", &m_resources.settings.showGridSettingsWindow);
-  m_settingsHandler.setSetting("showMemStats", &m_resources.settings.showMemStats);
-  m_settingsHandler.setSetting("showCameraWindow", &m_resources.settings.showCameraWindow);
-  m_settingsHandler.setSetting("showSettingsWindow", &m_resources.settings.showSettingsWindow);
-  m_settingsHandler.setSetting("showEnvironmentWindow", &m_resources.settings.showEnvironmentWindow);
-  m_settingsHandler.setSetting("showTonemapperWindow", &m_resources.settings.showTonemapperWindow);
-  m_settingsHandler.setSetting("showStatisticsWindow", &m_resources.settings.showStatisticsWindow);
-  m_settingsHandler.setSetting("showSceneBrowserWindow", &m_resources.settings.showSceneBrowserWindow);
-  m_settingsHandler.setSetting("showInspectorWindow", &m_resources.settings.showInspectorWindow);
-  m_settingsHandler.setSetting("showInteractivityWindow", &m_resources.settings.showInteractivityWindow);
-  m_settingsHandler.setSetting("showAgenticWindow", &m_resources.settings.showAgenticWindow);
-  m_settingsHandler.setSetting("envSystem", (int*)&m_resources.settings.envSystem);
-  m_settingsHandler.setSetting("renderSystem", (int*)&m_resources.settings.renderSystem);
-  m_settingsHandler.setSetting("useSolidBackground", &m_resources.settings.useSolidBackground);
-  m_settingsHandler.setSetting("solidBackgroundColor", &m_resources.settings.solidBackgroundColor);
-  m_settingsHandler.setSetting("optimalShader", &m_resources.settings.optimalShader);
-  m_settingsHandler.setSetting("tmMethod", &m_resources.tonemapperData.method);
-  m_settingsHandler.setSetting("tmAutoExposure", &m_resources.tonemapperData.autoExposure);
-  m_pathTracer.setSettingsHandler(&m_settingsHandler);
-  m_rasterizer.setSettingsHandler(&m_settingsHandler);
+  m_settings.applyPersistence(m_settingsHandler);
   m_settingsHandler.setLoadFilter([this](const std::string& key) {
     // Skip loading settings that were explicitly set via the command line
     return !(m_parameterParser && m_parameterParser->wasParsed(key));
@@ -302,8 +399,15 @@ void GltfRenderer::onAttach(nvapp::Application* app)
 
   m_loadPipeline.init(m_device, app->getQueue(0).queue, m_transientCmdPool);
 
-  // Staging buffer uploader
-  m_resources.staging.init(&m_resources.allocator, true);
+  // FrameUploader records copies into the caller's command buffer and retires staging
+  // once the frame timeline semaphore (or a load-pipeline wait) has signaled.
+  // blockSize is the max size of a single append (circular allocator constraint) and
+  // is larger than the library default so scene-create can stage large meshes/textures.
+  NVVK_CHECK(m_resources.staging.init({
+      .allocator = &m_resources.allocator,
+      .blockSize = 256ull * 1024 * 1024,
+      .debugName = "frameUploads",
+  }));
 
   m_resources.commandPool = app->getCommandPool();
 
@@ -388,10 +492,10 @@ void GltfRenderer::onAttach(nvapp::Application* app)
     m_resources.slangCompiler.addOption(
         {CompilerOptionName::Optimization, {CompilerOptionValueKind::Int, SLANG_OPTIMIZATION_LEVEL_NONE}});
 
-    // Enable specific capabilities for better performance and features
-    m_resources.slangCompiler.addCapability("spvShaderInvocationReorderNV");  // Enable the shader invocation reorder capability for better performance on NVIDIA hardware
-    m_resources.slangCompiler.addCapability("spvInt64Atomics");            // # 64-bit atomic operations
-    m_resources.slangCompiler.addCapability("spvShaderClockKHR");          // # Shader clock for profiling
+    // Enable specific capabilities for better performance and features.
+    m_resources.slangCompiler.addCapability("spvShaderInvocationReorderEXT");  // SER via VK_EXT_ray_tracing_invocation_reorder
+    m_resources.slangCompiler.addCapability("spvInt64Atomics");                // # 64-bit atomic operations
+    m_resources.slangCompiler.addCapability("spvShaderClockKHR");              // # Shader clock for profiling
     m_resources.slangCompiler.addCapability("spvRayTracingMotionBlurNV");  // # Motion blur for ray tracing
     m_resources.slangCompiler.addCapability("spvRayQueryKHR");             // # Ray query operations
     m_resources.slangCompiler.addCapability("spvGroupNonUniformBallot");  // # Ballot operations for subgroup functionality
@@ -421,10 +525,6 @@ void GltfRenderer::onAttach(nvapp::Application* app)
   m_pathTracer.onAttach(m_resources, &m_profilerGpuTimer);
   m_pathTracer.setProfilerTimeline(m_profilerTimeline);
   m_pathTracer.setBusyWindow(&m_busy);  // Show BusyWindow during async shader/pipeline compiles
-#if defined(USE_DLSS)
-  if(Dlss* rrDlss = m_pathTracer.getDlss())
-    rrDlss->setBusyWindow(&m_busy);
-#endif
   m_rasterizer.onAttach(m_resources, &m_profilerGpuTimer);
 
   m_pathTracer.createPipeline(m_resources);
@@ -496,7 +596,7 @@ void GltfRenderer::onAttach(nvapp::Application* app)
           [this](const std::filesystem::path& path) {
             createHDR(path);
             m_resources.settings.envSystem                 = shaderio::EnvSystem::eHdr;
-            m_pathTracer.m_pushConst.fireflyClampThreshold = m_resources.hdrIbl.getIntegral();
+            m_pathTracer.m_pushConst.fireflyClampThreshold = defaultFireflyClamp();
           },
       .resetFrame     = [this]() { resetFrame(); },
       .runTonemapPass = [this](VkCommandBuffer cmd,
@@ -741,6 +841,17 @@ void GltfRenderer::applyPendingSamplerUpdate()
 
 void GltfRenderer::onUIRender()
 {
+  // Run any post-restore hooks now that Application::run() has reloaded the ini (which happens
+  // between onAttach and the first frame, in both windowed and headless paths). ImGui writes
+  // restored values straight into storage without firing the parameter's callbackSuccess, so
+  // derived state (e.g. skyParams.sunDirection from the restored skySunAzimuth/Elevation) would
+  // otherwise stay stale until the user touched a UI slider.
+  if(m_pendingRestoreCallbacks)
+  {
+    m_pendingRestoreCallbacks = false;
+    m_settings.runPostRestoreHooks();
+  }
+
   applyPendingTextureRebuild();   // frame-top: full GPU texture rebuild for a prior-frame structural edit (see method)
   applyPendingTextureTailSync();  // frame-top: incremental append/remove for a prior-frame import/undo/redo (see method)
   applyPendingSamplerUpdate();    // frame-top: in-place VkSampler update for a prior-frame sampler wrap/filter edit
@@ -800,8 +911,9 @@ void GltfRenderer::onRender(VkCommandBuffer cmd)
   else if(m_loadPipeline.poll())
     return;  // Still loading -- give control back to the UI
 
-  // Begin the frame for the staging uploader, using the semaphore from the current frame to clear and synchronize
-  m_resources.staging.beginFrame(m_app->getFrameSignalSemaphore());
+  // Recycle staging from completed frames, then tag new uploads with this frame's signal.
+  m_resources.staging.releaseCompletedAllocations();
+  m_resources.staging.updateFrameSemaphoreState(nvvk::SemaphoreState::makeFixed(m_app->getFrameSignalSemaphore()));
 
   // Empty scene, clear the G-Buffer
   if(!m_resources.getScene() || !m_resources.getScene()->valid())
@@ -908,7 +1020,7 @@ void GltfRenderer::onRender(VkCommandBuffer cmd)
                  | (m_resources.settings.useInfinitePlane ? shaderio::eSceneUseInfinitePlane : 0)
                  | ((m_resources.settings.useInfinitePlane && m_resources.settings.isShadowCatcher) ? shaderio::eSceneInfinitePlaneShadowCatcher :
                                                                                                       0),
-        .envRotation               = m_resources.settings.hdrEnvRotation,
+        .envRotation               = glm::radians(m_resources.settings.hdrEnvRotation),  // stored in degrees
         .envBlur                   = m_resources.settings.hdrBlur,
         .envIntensity              = m_resources.settings.hdrEnvIntensity,
         .backgroundColor           = m_resources.settings.solidBackgroundColor,
@@ -951,7 +1063,18 @@ void GltfRenderer::onRender(VkCommandBuffer cmd)
   }
 
   // Apply the post-processing effects
-  tonemap(cmd);
+  const bool nrAllowed = tonemap(cmd);
+#if defined(USE_DLSS) && defined(USE_DLSSNR)
+  // DLSS-NR: enhance eImgTonemapped (LDR) after tonemapping; NR expects display-range input.
+  // Skip on guide buffers, visualization debug modes, and bypassed-tonemapper paths.
+  if(nrAllowed)
+    if(Dlss* dlss = activeDlss())
+      if(dlss->isNrActive())
+      {
+        auto nrSection = m_profilerGpuTimer.cmdFrameSection(cmd, "DLSS-NR");
+        dlss->evaluateNr(cmd);
+      }
+#endif
   silhouette(cmd);
   // KHR_interactivity hover detection: record this frame's cursor readback after silhouette's own
   // read of eImgSelection (see HoverPicker::requestReadback's comment for why that ordering avoids
@@ -1158,7 +1281,7 @@ void GltfRenderer::onFileDrop(const std::filesystem::path& filename)
     m_lastHdrDirectory = filename.parent_path();
     createHDR(filename);
     m_resources.settings.envSystem                 = shaderio::EnvSystem::eHdr;
-    m_pathTracer.m_pushConst.fireflyClampThreshold = m_resources.hdrIbl.getIntegral();
+    m_pathTracer.m_pushConst.fireflyClampThreshold = defaultFireflyClamp();
   }
 
   resetFrame();
@@ -1237,15 +1360,26 @@ bool GltfRenderer::dlssGuideRequired() const
 }
 
 //--------------------------------------------------------------------------------------------------
+// Returns the scene-appropriate firefly clamp threshold:
+//   - HDR environment → use its luminance integral (already calibrated to the environment's range)
+//   - Otherwise → a fixed baseline high enough to preserve legitimately bright highlights
+float GltfRenderer::defaultFireflyClamp() const
+{
+  if(m_resources.settings.envSystem == shaderio::EnvSystem::eHdr)
+    return m_resources.hdrIbl.getIntegral();
+  return 30.0f;
+}
+
+//--------------------------------------------------------------------------------------------------
 // Apply the tonemapper on the rendered image
-void GltfRenderer::tonemap(VkCommandBuffer cmd)
+bool GltfRenderer::tonemap(VkCommandBuffer cmd)
 {
   NVVK_DBG_SCOPE(cmd);  // <-- Helps to debug in NSight
   auto timerSection = m_profilerGpuTimer.cmdFrameSection(cmd, __FUNCTION__);
-  runTonemapPass(cmd, /*skipBeautifiedOverlay=*/false);
+  return runTonemapPass(cmd, /*skipBeautifiedOverlay=*/false);
 }
 
-void GltfRenderer::runTonemapPass(VkCommandBuffer cmd, bool skipBeautifiedOverlay)
+bool GltfRenderer::runTonemapPass(VkCommandBuffer cmd, bool skipBeautifiedOverlay)
 {
   // Select which buffer to tonemap based on user selection
   VkDescriptorImageInfo inputBuffer =
@@ -1303,22 +1437,23 @@ void GltfRenderer::runTonemapPass(VkCommandBuffer cmd, bool skipBeautifiedOverla
 
   // Disable tonemapping for debug buffers or guide buffers (display raw values)
   shaderio::TonemapperData tonemapperData = m_resources.tonemapperData;
-  if((m_resources.settings.visualization != shaderio::Visualization::eRendered
-      && m_resources.settings.visualization != shaderio::Visualization::eClay)
-     || usingGuideBuffer)
-  {
+  const bool               vizNormal      = (m_resources.settings.visualization == shaderio::Visualization::eRendered
+                          || m_resources.settings.visualization == shaderio::Visualization::eClay);
+  if(!vizNormal || usingGuideBuffer)
     tonemapperData.isActive = 0;
-  }
   if(bypassTonemapper)
-  {
     tonemapperData.isActive = 0;
-  }
 
   m_resources.tonemapper.runCompute(cmd, gbufSize, tonemapperData, inputBuffer,
                                     m_resources.gBuffers.getColorStorageImageInfo(Resources::eImgTonemapped));
 
-  // Memory barrier to ensure compute shader writes are complete before fragment shader reads
-  nvvk::cmdMemoryBarrier(cmd, VK_PIPELINE_STAGE_2_COMPUTE_SHADER_BIT, VK_PIPELINE_STAGE_2_FRAGMENT_SHADER_BIT);
+  // Barrier: tonemapper compute writes must be visible to both the DLSS-NR compute pass (which
+  // reads eImgTonemapped immediately after tonemap()) and the silhouette fragment shader.
+  nvvk::cmdMemoryBarrier(cmd, VK_PIPELINE_STAGE_2_COMPUTE_SHADER_BIT,
+                         VK_PIPELINE_STAGE_2_COMPUTE_SHADER_BIT | VK_PIPELINE_STAGE_2_FRAGMENT_SHADER_BIT);
+
+  // NR post-process is only valid on the main rendered path (not guide buffers, viz modes, or bypassed tonemapper).
+  return vizNormal && !usingGuideBuffer && !bypassTonemapper;
 }
 
 //--------------------------------------------------------------------------------------------------
@@ -1503,7 +1638,7 @@ void GltfRenderer::setOpacityMicromapAvailable(bool available)
 
 //--------------------------------------------------------------------------------------------------
 // Load the scene
-void GltfRenderer::createScene(const std::filesystem::path& sceneFilename)
+bool GltfRenderer::createScene(const std::filesystem::path& sceneFilename)
 {
   nvutils::ScopedTimer st(__FUNCTION__);
   m_sceneSelection.clearSelection();  // Clear selection in new UI system
@@ -1511,7 +1646,7 @@ void GltfRenderer::createScene(const std::filesystem::path& sceneFilename)
 
   if(sceneFilename.empty())
   {
-    return;
+    return false;
   }
 
   std::filesystem::path filename = nvutils::findFile(sceneFilename, nvsamples::getResourcesDirs(), false);
@@ -1519,7 +1654,7 @@ void GltfRenderer::createScene(const std::filesystem::path& sceneFilename)
   {
     LOGW("Cannot find file: %s\n", nvutils::utf8FromPath(sceneFilename).c_str());
     removeFromRecentFiles(filename);
-    return;
+    return false;
   }
 
   // Convert OBJ to glTF
@@ -1547,7 +1682,7 @@ void GltfRenderer::createScene(const std::filesystem::path& sceneFilename)
       LOGW("Error loading OBJ: %s\n", error.c_str());
       LOGW("Warning: %s\n", warn.c_str());
       removeFromRecentFiles(filename);
-      return;
+      return false;
     }
   }
   else
@@ -1559,13 +1694,14 @@ void GltfRenderer::createScene(const std::filesystem::path& sceneFilename)
     {
       LOGW("Error loading scene: %s\n", nvutils::utf8FromPath(filename).c_str());
       removeFromRecentFiles(filename);
-      return;
+      return false;
     }
     m_resources.scene = std::move(scn);
   }
 
   // Scene object is ready; wire up GPU resources and UI (shared with createEmptyScene()).
   finalizeSceneSetup(filename);
+  return true;
 }
 
 //--------------------------------------------------------------------------------------------------
@@ -1589,6 +1725,10 @@ void GltfRenderer::finalizeSceneSetup(const std::filesystem::path& filename)
   // when optimalShader is off, the path tracer ignores currentFeatureSet.
   m_resources.recomputeSceneFeatures(dlssGuideRequired());
 
+  // Calibrate the firefly clamp to the scene: retroreflective materials can produce legitimately
+  // high peak radiance that the default clamp of 10 would clip, visibly suppressing the effect.
+  m_pathTracer.m_pushConst.fireflyClampThreshold = defaultFireflyClamp();
+
   wireSceneToUi();  // Scene Browser + Inspector pointers, callbacks, bounds
 
   nvvkgltf::Scene* scene = m_resources.getScene();
@@ -1597,8 +1737,9 @@ void GltfRenderer::finalizeSceneSetup(const std::filesystem::path& filename)
   // Set camera from scene
   nvvkgltf::addSceneCamerasToWidget(m_cameraManip, filename, scene->getRenderCameras(), scene->getSceneBounds());
 
-  // Default sky parameters
-  m_resources.skyParams = {};
+  // The sky is an environment setting, not a scene property -- glTF carries none -- so a scene
+  // load leaves it alone, matching how hdrEnvIntensity/hdrEnvRotation already behave. Resetting it
+  // here used to discard whatever the user, the command line, or MCP had set.
 
   // Need to update (push) all textures
   if(!updateTextures())
@@ -1745,13 +1886,13 @@ void GltfRenderer::createSceneFromDescriptor(const std::filesystem::path& descri
   // can specialize its shader when settings.optimalShader is on.
   m_resources.recomputeSceneFeatures(dlssGuideRequired());
 
+  m_pathTracer.m_pushConst.fireflyClampThreshold = defaultFireflyClamp();
+
   wireSceneToUi();
 
   m_resources.settings.infinitePlaneDistance = scene->getSceneBounds().min().y;
 
   nvvkgltf::addSceneCamerasToWidget(m_cameraManip, descriptorPath, scene->getRenderCameras(), scene->getSceneBounds());
-
-  m_resources.skyParams = {};
 
   if(!updateTextures())
   {
@@ -1779,6 +1920,7 @@ void GltfRenderer::cleanupScene()
   if(m_resources.getScene())
     m_resources.transformCompute.destroyGpuBuffers();
   m_resources.scene.reset();
+  m_thumbnailCache.clear();
   m_resources.sceneGpu.destroy();
   m_sceneBrowser.setScene(nullptr);
   m_inspector.setScene(nullptr);
@@ -2053,7 +2195,7 @@ void GltfRenderer::buildAccelerationStructures()
       m_resources.sceneRtx.cmdCreateBuildTopLevelAccelerationStructure(cmd, m_resources.staging, *m_resources.getScene());
       m_resources.staging.cmdUploadAppended(cmd);
       NVVK_CHECK(vkEndCommandBuffer(cmd));
-      m_loadPipeline.enqueue(cmd, [this] { m_resources.staging.releaseStaging(true); });
+      m_loadPipeline.enqueue(cmd, [this] { m_resources.staging.releaseCompletedAllocations(true); });
     }
   }
 
@@ -2188,6 +2330,92 @@ void GltfRenderer::createDescriptorSets()
   NVVK_CHECK(m_resources.descriptorBinding[1].createDescriptorSetLayout(m_device, VK_DESCRIPTOR_SET_LAYOUT_CREATE_PUSH_DESCRIPTOR_BIT_KHR,
                                                                         &m_resources.descriptorSetLayout[1]));
   NVVK_DBG_NAME(m_resources.descriptorSetLayout[1]);
+}
+
+//--------------------------------------------------------------------------------------------------
+// Load an environment map / scene by path.
+//
+// These back the --hdrfile / --scenefile parameters, which carry a callbackSuccess so that setting
+// them does the load -- from the command line or a benchmark sequence alike. Before that, writing
+// either was accepted and did nothing, because both were only read once during start-up.
+//
+// Path resolution is delegated to createHDR / createScene: both call nvutils::findFile against
+// nvsamples::getResourcesDirs() so bare resource-relative inputs (e.g. `--hdrfile studio.hdr`
+// where studio.hdr ships under the sample's resources dir) work exactly like a cwd-relative or
+// absolute path. Reporting success/failure is likewise the loaders' job: HdrIbl::isValid() flips
+// off with a warning log when its input cannot be loaded, and Scene creation leaves getScene()
+// null when it bails -- so we no longer need a pre-flight std::filesystem::exists() gate here
+// that would reject resource-relative inputs the loader would otherwise have found.
+bool GltfRenderer::loadHdrEnvironment(const std::filesystem::path& filename)
+{
+  // Not attached yet: this is the start-up command-line parse, and main() performs that load
+  // itself once the device exists.
+  if(!m_app)
+    return false;
+
+  createHDR(filename);
+  if(!m_resources.hdrIbl.isValid())
+    return false;
+
+  // Loading an environment the renderer is not told to sample would be another silent no-op.
+  m_resources.settings.envSystem = shaderio::EnvSystem::eHdr;
+  // A new HDR changes hdrIbl.getIntegral(), which defaultFireflyClamp() uses when envSystem is
+  // eHdr. Refresh the path-tracer clamp in lock-step -- matching the pattern in onFileDrop, the
+  // Agentic applyHdri callback, and the HDR-picker UI -- so a --hdrfile change from a benchmark
+  // sequence or MCP write doesn't keep clamping against the previous HDR's integral.
+  m_pathTracer.m_pushConst.fireflyClampThreshold = defaultFireflyClamp();
+  resetFrame();
+  return true;
+}
+
+bool GltfRenderer::loadSceneFile(const std::filesystem::path& filename)
+{
+  if(!m_app)
+    return false;
+
+  // Programmatic full-scene replacement (CLI/benchmark/MCP). Mirror the teardown that the
+  // onFileDrop replace-path runs before `createScene` -- without it, we leak/keep-stale the
+  // previous scene's derived state: sceneRtx BLAS/TLAS, sceneGpu buffers, transformCompute GPU
+  // buffers, undo stack, thumbnails, hover/pick, animation & interactivity controls, and the
+  // rasterizer's recorded secondary command buffer (see cleanupScene()'s comment naming itself
+  // "the authoritative invalidation point"). createHDR self-quiesces so loadHdrEnvironment does
+  // not need a parallel wrapper-level teardown; createScene does not, so we do it here.
+  //
+  // Synchronous (unlike onFileDrop, which threads the load behind a busy indicator) because a
+  // benchmark/MCP client needs the scene fully installed on the GPU before this call returns --
+  // otherwise the next sequenced parameter change would race the upload.
+  //
+  // Consequence: a failed load leaves an empty scene rather than the previous one. That is the
+  // right failure mode for programmatic clients (an obviously empty capture beats a silently
+  // wrong one attributed to the requested filename); the caller in main.cpp also emits a LOGW
+  // naming the offending file.
+  vkQueueWaitIdle(m_app->getQueue(0).queue);
+  m_loadPipeline.clear();
+  cleanupScene();
+
+  // Return createScene's own outcome, not `getScene() != nullptr`: even after cleanupScene()
+  // above, we want the return to describe what the *new* attempt did, not accidentally report
+  // success just because some scene pointer happens to be non-null.
+  return createScene(filename);
+}
+
+//--------------------------------------------------------------------------------------------------
+// Mirror skyParams.sunDirection back into the reported azimuth/elevation. Called after the sky UI
+// moves the sun, so reading skySunAzimuth/skySunElevation tells the truth.
+void GltfRenderer::syncSunAngles()
+{
+  anglesFromSunDirection(m_resources.skyParams.sunDirection, m_resources.skyParams.yIsUp != 0,
+                         m_resources.settings.skySunAzimuth, m_resources.settings.skySunElevation);
+}
+
+//--------------------------------------------------------------------------------------------------
+// Recompile the active renderer's shaders and show the result.
+// SYNC NOTE: the recompile destroys live pipelines, so the queue must be drained first.
+void GltfRenderer::reloadShaders()
+{
+  vkQueueWaitIdle(m_app->getQueue(0).queue);
+  compileShaders();
+  resetFrame();
 }
 
 //--------------------------------------------------------------------------------------------------
@@ -2424,8 +2652,12 @@ void GltfRenderer::createHDR(const std::filesystem::path& hdrFilename)
 
   VkCommandBuffer cmd{};
   nvvk::beginSingleTimeCommands(cmd, m_device, m_transientCmdPool);
-  nvvk::StagingUploader uploader;
-  uploader.init(&m_resources.allocator, true);
+  nvvk::FrameUploader uploader;
+  NVVK_CHECK(uploader.init({
+      .allocator = &m_resources.allocator,
+      .blockSize = 1024ull * 1024 * 1024,  // 8K RGBA32F HDR is 1 GiB
+      .debugName = "hdrUpload",
+  }));
 
   // Load an HDR and create the important sampling acceleration structure
   std::filesystem::path filename;

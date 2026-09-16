@@ -25,6 +25,7 @@
 -------------------------------------------------------------------------------------------------*/
 
 #include <algorithm>
+#include <array>
 #include <span>
 #include <sstream>
 #include <string>
@@ -45,6 +46,25 @@
 #define MSFT_TEXTURE_DDS_NAME "MSFT_texture_dds"
 #define KHR_LIGHTS_PUNCTUAL_EXTENSION_NAME "KHR_lights_punctual"
 #define KHR_ANIMATION_POINTER "KHR_animation_pointer"
+
+// https://github.com/KhronosGroup/glTF/blob/main/extensions/2.0/Vendor/EXT_lights_ies/README.md
+// Root-level profile list lives at extensions.EXT_lights_ies.lights[] (uri | bufferView + mimeType).
+// The reference (which profile a light uses, plus a multiplier/color tint) lives on the *node*,
+// at node.extensions.EXT_lights_ies, alongside that node's KHR_lights_punctual point/spot light.
+#define EXT_LIGHTS_IES_EXTENSION_NAME "EXT_lights_ies"
+struct EXT_lights_ies_profile
+{
+  std::string uri;              // external file (relative to the glTF), or a data: URI
+  int         bufferView = -1;  // embedded alternative to uri; mimeType must be application/x-ies-lm-63
+  std::string mimeType;
+  std::string name;
+};
+struct EXT_lights_ies_ref
+{
+  int       light      = -1;  // index into extensions.EXT_lights_ies.lights[], -1 = not present
+  float     multiplier = 1.0f;
+  glm::vec3 color      = {1.0f, 1.0f, 1.0f};
+};
 
 // https://github.com/KhronosGroup/glTF/blob/main/extensions/2.0/Khronos/KHR_materials_specular/README.md
 #define KHR_MATERIALS_SPECULAR_EXTENSION_NAME "KHR_materials_specular"
@@ -251,6 +271,15 @@ struct KHR_materials_retroreflection
   tinygltf::TextureInfo retroreflectionTexture = {};
 };
 
+// EXT_DLSS_NR: per-material DLSS Neural Rendering control mask.
+// Multiplied against the global NR strength values; default (1,1,1,1) leaves global values unchanged.
+// R=intensity, G=local tone strength, B=local structure strength, A=global tone strength.
+#define EXT_DLSS_NR_EXTENSION_NAME "EXT_DLSS_NR"
+struct EXT_DLSS_NR
+{
+  glm::vec4 nrMask = {1.0f, 1.0f, 1.0f, 1.0f};
+};
+
 // https://github.com/KhronosGroup/glTF/tree/main/extensions/2.0/Vendor/EXT_meshopt_compression
 // Both EXT and KHR variants use the same data format; we support either extension name.
 #define KHR_MESHOPT_COMPRESSION_EXTENSION_NAME "KHR_meshopt_compression"
@@ -359,6 +388,9 @@ inline void setValue(tinygltf::Value& value, const std::string& key, const T& va
 -------------------------------------------------------------------------------------------------*/
 inline void setValue(tinygltf::Value& value, const std::string& key, const tinygltf::TextureInfo& textureInfo)
 {
+  // index == -1 means "no texture" — omit the key entirely so the serialized glTF stays valid.
+  if(textureInfo.index < 0)
+    return;
   // Build a proper OBJECT_TYPE Value: writing through Get<Object>() alone leaves the entry NULL_TYPE,
   // so a later Has()/Get() (which require IsObject()) reads nothing back and the assignment is lost.
   tinygltf::Value::Object t;
@@ -391,8 +423,9 @@ inline void getArrayValue(const tinygltf::Value& value, const std::string& name,
 {
   if(value.Has(name))
   {
-    const auto& v = value.Get(name).Get<tinygltf::Value::Array>();
-    std::transform(v.begin(), v.end(), glm::value_ptr(result),
+    const auto& v     = value.Get(name).Get<tinygltf::Value::Array>();
+    const auto  count = std::min(v.size(), sizeof(T) / sizeof(float));
+    std::transform(v.begin(), v.begin() + count, glm::value_ptr(result),
                    [](const tinygltf::Value& v) { return static_cast<float>(v.Get<double>()); });
   }
 }
@@ -1198,6 +1231,8 @@ KHR_materials_diffuse_transmission getDiffuseTransmission(const tinygltf::Materi
 void setDiffuseTransmission(tinygltf::Material& tmat, const KHR_materials_diffuse_transmission& diffuseTransmission);
 KHR_materials_retroreflection getRetroreflection(const tinygltf::Material& tmat);
 void                          setRetroreflection(tinygltf::Material& tmat, const KHR_materials_retroreflection& retro);
+EXT_DLSS_NR                   getExtDlssNr(const tinygltf::Material& tmat);
+void                          setExtDlssNr(tinygltf::Material& tmat, const EXT_DLSS_NR& ext);
 
 
 template <typename T>
@@ -1344,6 +1379,18 @@ not walk the hierarchy; the spec's cascade rule (an ancestor with
 -------------------------------------------------------------------------------------------------*/
 KHR_node_selectability getNodeSelectability(const tinygltf::Node& node);
 void                   setNodeSelectability(tinygltf::Node& node, const KHR_node_selectability& selectability);
+
+/*-------------------------------------------------------------------------------------------------
+## Function `getIesProfiles` / `getNodeIesLight` / `setNodeIesLight`
+> EXT_lights_ies: `getIesProfiles` returns the root-level photometric-profile list
+> (`extensions.EXT_lights_ies.lights[]`); `getNodeIesLight` returns the per-node reference
+> into that list, or `{light: -1}` if the node has none; `setNodeIesLight` writes `multiplier`
+> and `color` back (the `light` index is immutable — it refers to the loaded profile array).
+-------------------------------------------------------------------------------------------------*/
+std::vector<EXT_lights_ies_profile> getIesProfiles(const tinygltf::Model& model);
+EXT_lights_ies_ref                  getNodeIesLight(const tinygltf::Node& node);
+void                                setNodeIesLight(tinygltf::Node& node, const EXT_lights_ies_ref& ref);
+
 
 /*-------------------------------------------------------------------------------------------------
 ## Function `createTangentAttribute`

@@ -11,7 +11,7 @@ The GPU workflow drives the scripted sequencer described further down; headless 
 
 ## Headless timing (simple)
 
-Render **500 frames** (or any count) with path tracing. Set **`--frames` and `--maxFrames` to the same value** so every app frame accumulates samples (default `maxFrames` is already 500).
+Render **500 frames** (or any count) with path tracing. Set **`--frames` and `--ptMaxFrames` to the same value** so every app frame accumulates samples (default `ptMaxFrames` is already 500).
 
 ### One-off CLI
 
@@ -19,7 +19,7 @@ Render **500 frames** (or any count) with path tracing. Set **`--frames` and `--
 ./vk_gltf_renderer --headless --size 1920 1080 \
   --scenefile shader_ball.gltf \
   --hdrfile std_env.hdr \
-  --frames 500 --maxFrames 500 \
+  --frames 500 --ptMaxFrames 500 \
   --ptSamples 1 --ptAdaptiveSampling 0 \
   --renderSystem 0 --envSystem 1
 ```
@@ -35,7 +35,7 @@ BENCHMARK_JSON {"schema":1,"type":"headless_summary",...}
 ```
 
 - **app_frame** — headless loop index (`--frames`).
-- In headless mode, `main()` raises `--maxFrames` to at least `--frames` if you set it lower, so every app frame can accumulate samples during timing runs.
+- In headless mode, `main()` raises `--ptMaxFrames` to at least `--frames` if you set it lower, so every app frame can accumulate samples during timing runs.
 - **wall_ms** — measured post-warmup render time. The first completed frame is excluded so one-time setup such as shader specialization is not charged to throughput.
 - **total_wall_ms** — full headless render-loop wall time, including warmup and any synchronous setup.
 - **ms_per_frame** — `wall_ms / measured_frames`.
@@ -86,7 +86,7 @@ Use the profiler instead: run the sequencer at log level `eSTATS` and read the `
 
 The script must do two things. It has to pin the work per frame -- `--ptSamples N`,
 `--ptAdaptiveSampling 0` (adaptive sampling varies the samples per frame, so ms/frame stops being
-comparable), and `--maxFrames` large enough that accumulation never stops mid-sequence (otherwise
+comparable), and `--ptMaxFrames` large enough that accumulation never stops mid-sequence (otherwise
 the frame being timed is just the tonemapper). And it has to **open with a throwaway `load`
 sequence**, because scene loading and pipeline creation consume the frames of whichever sequence is
 running at the time -- see the note below.
@@ -97,9 +97,9 @@ SEQUENCE "load"
 --renderSystem 0
 --ptSamples 2
 --ptAdaptiveSampling 0
---maxFrames 1000000
+--ptMaxFrames 1000000
 --ptTechnique 1
---optimalShader 1
+--ptOptimalShader 1
 --ptUseSER 1
 --fitScene
 
@@ -122,7 +122,7 @@ and highly divergent; treat them as indicative of that class of content rather t
 |---|---|
 | `--ptTechnique` | Ray query (compute) vs the ray tracing pipeline; the pipeline was ~2x faster |
 | `--ptUseSER` | Shader Execution Reordering; ~2.3-2.8x on a divergent scattering workload. Silently ignored when the device does not support it |
-| `--optimalShader` | Recompiles with only the scene's feature gates; 14-20% across the scatter sample scenes with SER on, ~32% with SER off |
+| `--ptOptimalShader` | Recompiles with only the scene's feature gates; 14-20% across the scatter sample scenes with SER on, ~32% with SER off |
 
 Three traps worth knowing, each of which produces confident-looking numbers that mean nothing:
 
@@ -134,7 +134,7 @@ Three traps worth knowing, each of which produces confident-looking numbers that
   check `samples` in the block you quote: it should be close to the `--sequenceaverages` you asked
   for. This is the same rule the [UI inspection](#ui-inspection-windowed-panel-capture) workflow
   states, and it applies just as much to timing.
-- **Persisted settings.** `_bin/<config>/vk_gltf_renderer.ini` stores `optimalShader`, `ptTechnique`
+- **Persisted settings.** `_bin/<config>/vk_gltf_renderer.ini` stores `ptOptimalShader`, `ptTechnique`
   and `ptAdaptiveSampling` between runs, so a previous session silently changes what you measure.
   Set every knob that matters explicitly in the script rather than relying on defaults.
 - **Stale shader search paths.** The path tracer compiles Slang at runtime from the directories baked
@@ -206,7 +206,7 @@ SEQUENCE "PT 1spp"
 --sequenceresetframes 8
 --renderSystem 0
 --ptSamples 1
---maxFrames 1
+--ptMaxFrames 1
 --ptAdaptiveSampling 0
 --gltfCamera 0
 --updateData
@@ -220,7 +220,7 @@ SEQUENCE "PT 1spp"
 | `--sequenceresetframes` | Warmup frames after parameter changes (0 = measure immediately) |
 | Other `--flags` | Any registered CLI parameter (renderer, path tracer, tonemapper, etc.) |
 
-**Path tracer note:** Set `--maxFrames` to match `--ptSamples` when measuring convergence cost. Use `--maxFrames 1` with `--ptSamples 1` for per-frame interactive GPU time.
+**Path tracer note:** Set `--ptMaxFrames` to match `--ptSamples` when measuring convergence cost. Use `--ptMaxFrames 1` with `--ptSamples 1` for per-frame interactive GPU time.
 
 ## Comparing versions
 

@@ -54,11 +54,11 @@ public:
 
   // ---------- Create ----------
   // Create BLAS and TLAS for the scene (no compaction). Calls destroy() first.
-  void create(VkCommandBuffer cmd, nvvk::StagingUploader& staging, const nvvkgltf::Scene& scn, const SceneVk& scnVk, VkBuildAccelerationStructureFlagsKHR flags);
+  void create(VkCommandBuffer cmd, nvvk::CmdUploaderInterface& staging, const nvvkgltf::Scene& scn, const SceneVk& scnVk, VkBuildAccelerationStructureFlagsKHR flags);
   void createBottomLevelAccelerationStructure(const nvvkgltf::Scene& scene, const SceneVk& sceneVk, VkBuildAccelerationStructureFlagsKHR flags);
   // Build BLAS on GPU; may return false if budget exceeded (call again to continue). Returns true when done.
   [[nodiscard]] bool cmdBuildBottomLevelAccelerationStructure(VkCommandBuffer cmd, VkDeviceSize hintMaxBudget = 512'000'000);
-  void cmdCreateBuildTopLevelAccelerationStructure(VkCommandBuffer cmd, nvvk::StagingUploader& staging, const nvvkgltf::Scene& scene);
+  void cmdCreateBuildTopLevelAccelerationStructure(VkCommandBuffer cmd, nvvk::CmdUploaderInterface& staging, const nvvkgltf::Scene& scene);
   VkResult                                 cmdCompactBlas(VkCommandBuffer cmd);
   void                                     destroyNonCompactedBlas();
   void                                     trackBlasMemory();
@@ -69,15 +69,16 @@ public:
   // so that dirty material indices are still available for surgical cache updates.
   void updateInstanceFlagsCache(const nvvkgltf::Scene& scene);
   // Sync TLAS from Scene dirty flags (reads + clears renderNodesRtx). Returns true if TLAS was updated.
-  [[nodiscard]] bool syncTopLevelAS(VkCommandBuffer cmd, nvvk::StagingUploader& staging, nvvkgltf::Scene& scene);
+  [[nodiscard]] bool syncTopLevelAS(VkCommandBuffer cmd, nvvk::CmdUploaderInterface& staging, nvvkgltf::Scene& scene);
 
   // GPU transform path: instance buffer was written by compute — run in-place TLAS update only (no CPU instance upload).
   void                          cmdUpdateTlasFromInstanceBuffer(VkCommandBuffer cmd);
   [[nodiscard]] VkDeviceAddress getInstancesBufferAddress() const { return m_instancesBuffer.address; }
 
   // Rebuild or update TLAS. dirtyRenderNodes empty = full update.
-  void rebuildTopLevelAS(VkCommandBuffer                cmd,
-                         nvvk::StagingUploader&         staging,
+  void rebuildTopLevelAS(VkCommandBuffer             cmd,
+                         nvvk::CmdUploaderInterface& staging,
+
                          const nvvkgltf::Scene&         scene,
                          const std::unordered_set<int>& dirtyRenderNodes = {});
   // Update BLAS for morph targets and skinned primitives.

@@ -412,6 +412,22 @@ void tinygltf::utils::setRetroreflection(tinygltf::Material& tmat, const KHR_mat
   tinygltf::utils::setValue(ext, "retroreflectionTexture", retro.retroreflectionTexture);
 }
 
+EXT_DLSS_NR tinygltf::utils::getExtDlssNr(const tinygltf::Material& tmat)
+{
+  EXT_DLSS_NR gmat;
+  if(const auto* ext = tinygltf::utils::findExtension(tmat.extensions, EXT_DLSS_NR_EXTENSION_NAME))
+  {
+    tinygltf::utils::getArrayValue(*ext, "nrMask", gmat.nrMask);
+  }
+  return gmat;
+}
+
+void tinygltf::utils::setExtDlssNr(tinygltf::Material& tmat, const EXT_DLSS_NR& ext)
+{
+  tinygltf::Value& extVal = tinygltf::utils::ensureExtension(tmat.extensions, EXT_DLSS_NR_EXTENSION_NAME);
+  tinygltf::utils::setArrayValue(extVal, "nrMask", 4, glm::value_ptr(ext.nrMask));
+}
+
 KHR_node_visibility tinygltf::utils::getNodeVisibility(const tinygltf::Node& node)
 {
   KHR_node_visibility gnode;
@@ -458,6 +474,47 @@ void tinygltf::utils::setNodeSelectability(tinygltf::Node& node, const KHR_node_
 {
   tinygltf::Value& ext = tinygltf::utils::ensureExtension(node.extensions, KHR_NODE_SELECTABILITY_EXTENSION_NAME);
   tinygltf::utils::setValue(ext, "selectable", selectability.selectable);
+}
+
+std::vector<EXT_lights_ies_profile> tinygltf::utils::getIesProfiles(const tinygltf::Model& model)
+{
+  std::vector<EXT_lights_ies_profile> profiles;
+  const auto&                         it = model.extensions.find(EXT_LIGHTS_IES_EXTENSION_NAME);
+  if(it == model.extensions.end() || !it->second.Has("lights"))
+    return profiles;
+
+  const auto& lights = it->second.Get("lights");
+  profiles.reserve(lights.ArrayLen());
+  for(size_t i = 0; i < lights.ArrayLen(); i++)
+  {
+    const auto&            lightValue = lights.Get(int(i));
+    EXT_lights_ies_profile profile;
+    tinygltf::utils::getValue(lightValue, "uri", profile.uri);
+    tinygltf::utils::getValue(lightValue, "bufferView", profile.bufferView);
+    tinygltf::utils::getValue(lightValue, "mimeType", profile.mimeType);
+    tinygltf::utils::getValue(lightValue, "name", profile.name);
+    profiles.emplace_back(std::move(profile));
+  }
+  return profiles;
+}
+
+EXT_lights_ies_ref tinygltf::utils::getNodeIesLight(const tinygltf::Node& node)
+{
+  EXT_lights_ies_ref ref;
+  if(const auto* ext = tinygltf::utils::findExtension(node.extensions, EXT_LIGHTS_IES_EXTENSION_NAME))
+  {
+    tinygltf::utils::getValue(*ext, "light", ref.light);
+    tinygltf::utils::getValue(*ext, "multiplier", ref.multiplier);
+    tinygltf::utils::getArrayValue(*ext, "color", ref.color);
+  }
+  return ref;
+}
+
+void tinygltf::utils::setNodeIesLight(tinygltf::Node& node, const EXT_lights_ies_ref& ref)
+{
+  tinygltf::Value& ext = tinygltf::utils::ensureExtension(node.extensions, EXT_LIGHTS_IES_EXTENSION_NAME);
+  tinygltf::utils::setValue(ext, "multiplier", ref.multiplier);
+  tinygltf::utils::setArrayValue(ext, "color", 3, glm::value_ptr(ref.color));
 }
 
 KHR_materials_pbrSpecularGlossiness tinygltf::utils::getPbrSpecularGlossiness(const tinygltf::Material& tmat)
@@ -656,32 +713,23 @@ void tinygltf::utils::getNodeTRS(const tinygltf::Node& node, glm::vec3& translat
 // If a component is equal to the default value, it is cleared from the node
 void tinygltf::utils::setNodeTRS(tinygltf::Node& node, const glm::vec3& translation, const glm::quat& rotation, const glm::vec3& scale)
 {
-  if(translation != glm::vec3(0.0f, 0.0f, 0.0f))
-  {
+  // Use epsilon comparisons so near-default values from floating-point decomposition are omitted.
+  const float kEps = 1e-6f;
+
+  if(!glm::all(glm::epsilonEqual(translation, glm::vec3(0.0f), kEps)))
     node.translation = {translation.x, translation.y, translation.z};
-  }
   else
-  {
     node.translation.clear();
-  }
 
-  if(rotation != glm::quat(1.0f, 0.0f, 0.0f, 0.0f))
-  {
+  if(!glm::all(glm::epsilonEqual(rotation, glm::quat(1.0f, 0.0f, 0.0f, 0.0f), kEps)))
     node.rotation = {rotation.x, rotation.y, rotation.z, rotation.w};
-  }
   else
-  {
     node.rotation.clear();
-  }
 
-  if(scale != glm::vec3(1.0f, 1.0f, 1.0f))
-  {
+  if(!glm::all(glm::epsilonEqual(scale, glm::vec3(1.0f), kEps)))
     node.scale = {scale.x, scale.y, scale.z};
-  }
   else
-  {
     node.scale.clear();
-  }
 }
 
 glm::mat4 tinygltf::utils::getNodeMatrix(const tinygltf::Node& node)
@@ -725,7 +773,10 @@ void tinygltf::utils::traverseSceneGraph(const tinygltf::Model&                 
   {
     return;
   }
-  if(node.light > -1 && fctLight && fctLight(nodeID, worldMat))
+  // A node can carry EXT_lights_ies with no KHR_lights_punctual (per spec: EXT_lights_ies is
+  // standalone). Such a node must still be dispatched to fctLight or it's silently invisible
+  // to every light-consuming pass (traversal simply never reaches it as a "light" node).
+  if(fctLight && (node.light > -1 || tinygltf::utils::getNodeIesLight(node).light > -1) && fctLight(nodeID, worldMat))
   {
     return;
   }

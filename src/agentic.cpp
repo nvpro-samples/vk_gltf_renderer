@@ -46,7 +46,7 @@
 #include <nvvk/check_error.hpp>
 #include <nvvk/commands.hpp>
 #include <nvvk/default_structs.hpp>
-#include <nvvk/staging.hpp>
+#include <nvvk/frame_uploader.hpp>
 
 #include "resources.hpp"
 
@@ -614,9 +614,9 @@ bool Controller::loadBeautifiedImage(const std::filesystem::path& filename)
   m_beautifiedImage.descriptor.imageLayout = VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL;
   m_beautifiedExtent                       = {static_cast<uint32_t>(width), static_cast<uint32_t>(height)};
 
-  VkCommandBuffer       cmd{};
-  nvvk::StagingUploader uploader;
-  uploader.init(&m_deps.resources->allocator, true);
+  VkCommandBuffer     cmd{};
+  nvvk::FrameUploader uploader;
+  NVVK_CHECK(uploader.init({.allocator = &m_deps.resources->allocator, .debugName = "agenticUpload"}));
   nvvk::beginSingleTimeCommands(cmd, m_deps.device, m_deps.transientCmdPool);
   nvvk::cmdImageMemoryBarrier(cmd, {m_beautifiedImage.image, VK_IMAGE_LAYOUT_UNDEFINED, m_beautifiedImage.descriptor.imageLayout});
   const size_t byteCount = static_cast<size_t>(width) * static_cast<size_t>(height) * 4;

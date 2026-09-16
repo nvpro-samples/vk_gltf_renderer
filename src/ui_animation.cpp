@@ -17,6 +17,14 @@
  * SPDX-License-Identifier: Apache-2.0
  */
 
+//
+// Animation UI for the glTF renderer: AnimationControl (playback state + domain logic --
+// play/pause, clip selection, scrub, frame step, reset, speed; no ImGui, so other call sites can
+// read it without pulling in the UI layer) and ui::animation::renderStripWidgets, the transport
+// row overlaid at the bottom of the viewport. State owner: Resources::animationControl;
+// GltfRenderer::updateAnimation drives it every frame.
+//
+
 #include "ui_animation.hpp"
 
 #include <algorithm>

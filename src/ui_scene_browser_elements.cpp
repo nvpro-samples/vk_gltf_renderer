@@ -63,7 +63,9 @@ const char* nodeResourceIcon(const tinygltf::Node& node)
     return ICON_MS_CAMERA_ALT;
   if(node.light >= 0)
     return ICON_MS_LIGHTBULB;
-  return ICON_MS_CATEGORY;  // empty / pure transform group
+  if(tinygltf::utils::getNodeIesLight(node).light >= 0)
+    return ICON_MS_FLASHLIGHT_ON;  // pure EXT_lights_ies (no KHR_lights_punctual)
+  return ICON_MS_CATEGORY;         // empty / pure transform group
 }
 
 // Right-align a short text within the current table cell (numeric columns read better right-aligned).
@@ -427,40 +429,212 @@ void UiSceneBrowser::ensureElementRegistry()
   }
 
   //------------------------------------------------------------------------------------------------
-  // LIGHTS - node-attached resource. Add creates a light node (node + light); delete/duplicate are
-  // node-coupled and handled through the scene graph in a dedicated pass.
+  // LIGHTS - KHR_lights_punctual and pure EXT_lights_ies lights in one unified list.
+  //   Indices [0, khrCount)          → KHR_lights_punctual (model.lights[i])
+  //   Indices [khrCount, khrCount+n) → pure EXT_lights_ies nodes (no KHR light)
+  // The two sub-ranges use different selection types: eLight for KHR, eNode for IES.
+  // selectedIndexFor bridges both into the list's linear index space.
   //------------------------------------------------------------------------------------------------
   {
+    // Helper: list of node indices that carry EXT_lights_ies but no KHR_lights_punctual.
+    auto getIesOnlyNodes = [this]() {
+      std::vector<int>       nodes;
+      const tinygltf::Model& model = m_scene->getModel();
+      for(int n = 0; n < int(model.nodes.size()); ++n)
+        if(model.nodes[n].light < 0 && tinygltf::utils::getNodeIesLight(model.nodes[n]).light >= 0)
+          nodes.push_back(n);
+      return nodes;
+    };
+
     ElementTypeDesc d;
     d.icon     = ICON_MS_LIGHTBULB;
     d.singular = "Light";
     d.plural   = "Lights";
-    d.selKind  = SceneSelection::SelectionType::eLight;
-    d.count    = [this] { return int(m_scene->getModel().lights.size()); };
-    d.name     = [this](int i) { return m_scene->getModel().lights[i].name; };
-    d.select   = [this](int i) { m_selection->selectLight(i); };
-    d.columns.push_back({"Name", 0.0f, false, [this](int i) {
-                           const tinygltf::Light& l = m_scene->getModel().lights[i];
-                           drawSwatch(lightColorOf(l));
-                           ImGui::SameLine();
-                           ImGui::TextUnformatted(l.name.c_str());
+    d.selKind  = SceneSelection::SelectionType::eLight;  // default (KHR range)
+
+    d.count = [this, getIesOnlyNodes] { return int(m_scene->getModel().lights.size()) + int(getIesOnlyNodes().size()); };
+
+    d.name = [this, getIesOnlyNodes](int i) -> std::string {
+      const tinygltf::Model& model    = m_scene->getModel();
+      const int              khrCount = int(model.lights.size());
+      if(i < khrCount)
+        return model.lights[i].name;
+      // IES-only: prefer node name, then profile name/URI.
+      const auto iesNodes = getIesOnlyNodes();
+      const int  iesIdx   = i - khrCount;
+      if(iesIdx >= int(iesNodes.size()))
+        return {};
+      const tinygltf::Node& node = model.nodes[iesNodes[iesIdx]];
+      if(!node.name.empty())
+        return node.name;
+      EXT_lights_ies_ref                  ref      = tinygltf::utils::getNodeIesLight(node);
+      std::vector<EXT_lights_ies_profile> profiles = tinygltf::utils::getIesProfiles(model);
+      if(ref.light >= 0 && ref.light < int(profiles.size()))
+      {
+        if(!profiles[ref.light].name.empty())
+          return profiles[ref.light].name;
+        if(!profiles[ref.light].uri.empty())
+          return profiles[ref.light].uri;
+      }
+      return "IES Light " + std::to_string(iesIdx);
+    };
+
+    d.select = [this, getIesOnlyNodes](int i) {
+      const tinygltf::Model& model    = m_scene->getModel();
+      const int              khrCount = int(model.lights.size());
+      if(i < khrCount)
+      {
+        // KHR+IES hybrid: EXT_lights_ies wins over the KHR attachment on that node (per spec), and
+        // IES properties only appear in the node inspector. Route to the node so the inspector
+        // surfaces the IES multiplier/color that actually affect rendering.
+        for(int n = 0; n < int(model.nodes.size()); ++n)
+        {
+          if(model.nodes[n].light == i && tinygltf::utils::getNodeIesLight(model.nodes[n]).light >= 0)
+          {
+            m_selection->selectNode(n);
+            return;
+          }
+        }
+        m_selection->selectLight(i);
+      }
+      else
+      {
+        const auto iesNodes = getIesOnlyNodes();
+        const int  iesIdx   = i - khrCount;
+        if(iesIdx < int(iesNodes.size()))
+          m_selection->selectNode(iesNodes[iesIdx]);
+      }
+    };
+
+    d.selectedIndexFor = [this, getIesOnlyNodes](const SceneSelection::SelectionContext& s, const tinygltf::Model& model) -> int {
+      const int khrCount = int(model.lights.size());
+      using Sel          = SceneSelection::SelectionType;
+      if(s.type == Sel::eLight && s.lightIndex >= 0 && s.lightIndex < khrCount)
+        return s.lightIndex;
+      if(s.type == Sel::eNode && s.nodeIndex >= 0)
+      {
+        const auto iesNodes = getIesOnlyNodes();
+        for(int k = 0; k < int(iesNodes.size()); ++k)
+          if(iesNodes[k] == s.nodeIndex)
+            return khrCount + k;
+      }
+      // Contextual: a node selection highlights its KHR light if it has one.
+      if(s.type == Sel::eNode && s.nodeIndex >= 0 && s.nodeIndex < int(model.nodes.size()))
+      {
+        const int khrLight = model.nodes[s.nodeIndex].light;
+        if(khrLight >= 0 && khrLight < khrCount)
+          return khrLight;
+      }
+      return -1;
+    };
+
+    // Name column: color swatch + name, differentiated by icon for IES-only.
+    // Capture d.name so the displayed label uses the same fallback as search/sort.
+    auto rowName = d.name;
+    d.columns.push_back({"Name", 0.0f, false, [this, getIesOnlyNodes, rowName](int i) {
+                           const tinygltf::Model& model    = m_scene->getModel();
+                           const int              khrCount = int(model.lights.size());
+                           if(i < khrCount)
+                           {
+                             const tinygltf::Light& l = model.lights[i];
+                             drawSwatch(lightColorOf(l));
+                             ImGui::SameLine();
+                             ImGui::TextUnformatted(l.name.c_str());
+                           }
+                           else
+                           {
+                             const auto            iesNodes = getIesOnlyNodes();
+                             const int             iesIdx   = i - khrCount;
+                             const tinygltf::Node& node     = model.nodes[iesNodes[iesIdx]];
+                             EXT_lights_ies_ref    ref      = tinygltf::utils::getNodeIesLight(node);
+                             glm::vec3             col      = ref.color;
+                             drawSwatch(ImVec4(col.x, col.y, col.z, 1.0f));
+                             ImGui::SameLine();
+                             ImGui::Text("%s %s", ICON_MS_FLASHLIGHT_ON, rowName(i).c_str());
+                           }
                          }});
-    d.columns.push_back({"Type", 100.0f, false, [this](int i) {
-                           const std::string& t = m_scene->getModel().lights[i].type;
-                           ImGui::TextUnformatted(t.empty() ? "point" : t.c_str());
+
+    // Type column: KHR type (with +IES suffix when both present), or "IES" for pure IES.
+    d.columns.push_back({"Type", 100.0f, false, [this, getIesOnlyNodes](int i) {
+                           const tinygltf::Model& model    = m_scene->getModel();
+                           const int              khrCount = int(model.lights.size());
+                           if(i < khrCount)
+                           {
+                             const std::string& t      = model.lights[i].type;
+                             bool               hasIes = false;
+                             for(const auto& node : model.nodes)
+                               if(node.light == i && tinygltf::utils::getNodeIesLight(node).light >= 0)
+                               {
+                                 hasIes = true;
+                                 break;
+                               }
+                             std::string label = t.empty() ? "point" : t;
+                             if(hasIes)
+                               label += "+IES";
+                             ImGui::TextUnformatted(label.c_str());
+                           }
+                           else
+                           {
+                             ImGui::TextUnformatted("IES");
+                           }
                          }});
-    d.columns.push_back({"Intensity", 84.0f, true, [this](int i) {
-                           char buf[32];
-                           std::snprintf(buf, sizeof(buf), "%.1f", m_scene->getModel().lights[i].intensity);
+
+    // Intensity column: KHR intensity, or IES multiplier for pure IES.
+    d.columns.push_back({"Intensity", 84.0f, true, [this, getIesOnlyNodes](int i) {
+                           const tinygltf::Model& model    = m_scene->getModel();
+                           const int              khrCount = int(model.lights.size());
+                           char                   buf[32];
+                           if(i < khrCount)
+                             std::snprintf(buf, sizeof(buf), "%.1f", model.lights[i].intensity);
+                           else
+                           {
+                             const auto iesNodes = getIesOnlyNodes();
+                             EXT_lights_ies_ref ref = tinygltf::utils::getNodeIesLight(model.nodes[iesNodes[i - khrCount]]);
+                             std::snprintf(buf, sizeof(buf), "%.2f", ref.multiplier);
+                           }
                            cellRightText(buf);
                          }});
-    d.columns[2].sortKey = [this](int i) { return m_scene->getModel().lights[i].intensity; };
+    d.columns[2].sortKey = [this, getIesOnlyNodes](int i) -> double {
+      const tinygltf::Model& model    = m_scene->getModel();
+      const int              khrCount = int(model.lights.size());
+      if(i < khrCount)
+        return model.lights[i].intensity;
+      const auto         iesNodes = getIesOnlyNodes();
+      EXT_lights_ies_ref ref      = tinygltf::utils::getNodeIesLight(model.nodes[iesNodes[i - khrCount]]);
+      return ref.multiplier;
+    };
+
     for(const auto& info : nvvkgltf::kLightKinds)
       d.addVariants.push_back({info.name, ICON_MS_LIGHTBULB, [this, info] { addLight(info.type, info.name, -1); }});
-    d.rename = [this](int i, const std::string& n) {
-      m_undoStack->executeCommand(std::make_unique<RenameLightCommand>(*m_scene, i, m_scene->getModel().lights[i].name, n));
+
+    d.editableName = [this, getIesOnlyNodes](int i) -> std::string {
+      const tinygltf::Model& model    = m_scene->getModel();
+      const int              khrCount = int(model.lights.size());
+      if(i < khrCount)
+        return model.lights[i].name;
+      const auto iesNodes = getIesOnlyNodes();
+      const int  iesIdx   = i - khrCount;
+      return iesIdx < int(iesNodes.size()) ? model.nodes[iesNodes[iesIdx]].name : std::string{};
+    };
+
+    d.rename = [this, getIesOnlyNodes](int i, const std::string& n) {
+      const tinygltf::Model& model    = m_scene->getModel();
+      const int              khrCount = int(model.lights.size());
+      if(i < khrCount)
+      {
+        m_undoStack->executeCommand(std::make_unique<RenameLightCommand>(*m_scene, i, model.lights[i].name, n));
+      }
+      else
+      {
+        const auto iesNodes = getIesOnlyNodes();
+        const int  iesIdx   = i - khrCount;
+        if(iesIdx < int(iesNodes.size()))
+          m_undoStack->executeCommand(
+              std::make_unique<RenameNodeCommand>(*m_scene, iesNodes[iesIdx], model.nodes[iesNodes[iesIdx]].name, n));
+      }
       markCachesDirty();
     };
+
     m_elementTypes.push_back(std::move(d));
   }
 
@@ -802,6 +976,10 @@ int UiSceneBrowser::selectedElementIndex(const ElementTypeDesc& desc) const
   using Sel                                     = SceneSelection::SelectionType;
   const SceneSelection::SelectionContext& s     = m_selection->getSelection();
   const tinygltf::Model&                  model = m_scene->getModel();
+
+  // Category-specific override (e.g. a list mixing multiple selection types).
+  if(desc.selectedIndexFor)
+    return desc.selectedIndexFor(s, model);
 
   // Direct: the selected element is itself of this category.
   if(s.type == desc.selKind)

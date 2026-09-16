@@ -52,6 +52,7 @@
 #include "gltf_scene_vk.hpp"
 #include "gltf_scene_animation.hpp"
 #include "gltf_image_loader.hpp"
+#include "ies_profile.hpp"
 #include "tinygltf_utils.hpp"
 #include "nvutils/parallel_work.hpp"
 #include "nvvk/helpers.hpp"
@@ -273,11 +274,15 @@ void nvvkgltf::SceneVk::deinit()
 // textures, lights, and scene descriptor. Calls destroy() first to ensure a clean state.
 // Note: does NOT apply morph/skinning deformation to vertex buffers. The caller is responsible
 // for running the initial animation pass (GPU compute or CPU fallback) after creation.
-void nvvkgltf::SceneVk::create(VkCommandBuffer        cmd,
-                               nvvk::StagingUploader& staging,
-                               nvvkgltf::Scene&       scn,
-                               bool                   generateMipmaps /*= true*/,
-                               bool                   enableRayTracing /*= true*/)
+void nvvkgltf::SceneVk::create(VkCommandBuffer cmd,
+
+                               nvvk::CmdUploaderInterface& staging,
+                               nvvkgltf::Scene&            scn,
+
+                               bool generateMipmaps /*= true*/,
+
+                               bool enableRayTracing /*= true*/)
+
 {
   nvutils::ScopedTimer st(__FUNCTION__);
   destroy();  // Make sure not to leave allocated buffers
@@ -295,6 +300,7 @@ void nvvkgltf::SceneVk::create(VkCommandBuffer        cmd,
   uploadRenderNodes(staging, scn);
   createVertexBuffers(cmd, staging, scn);
   uploadLights(staging, scn);
+  loadIesProfiles(staging, scn);
   uploadEmissiveTriangles(staging, scn);
 
   (void)flushSceneDescIfDirty(staging, scn);
@@ -310,7 +316,7 @@ void nvvkgltf::SceneVk::create(VkCommandBuffer        cmd,
 //--------------------------------------------------------------------------------------------------
 // Sync GPU buffers from Scene dirty flags. Uploads materials, lights, and/or render nodes according
 // to mask; clears the corresponding dirty sets. Returns a bitmask of which categories were updated.
-uint32_t nvvkgltf::SceneVk::syncFromScene(nvvk::StagingUploader& staging, nvvkgltf::Scene& scn, uint32_t mask)
+uint32_t nvvkgltf::SceneVk::syncFromScene(nvvk::CmdUploaderInterface& staging, nvvkgltf::Scene& scn, uint32_t mask)
 {
   uint32_t result = eSyncNone;
   auto&    df     = scn.getDirtyFlags();
@@ -335,7 +341,20 @@ uint32_t nvvkgltf::SceneVk::syncFromScene(nvvk::StagingUploader& staging, nvvkgl
     const auto&                     dirty         = df.lights;
     const std::vector<RenderLight>& rlights       = scn.getRenderLights();
     const VkDeviceSize              requiredBytes = rlights.size() * sizeof(shaderio::GltfLight);
-    if(!rlights.empty() && (dirty.empty() == false || m_bLights.buffer == VK_NULL_HANDLE || m_bLights.bufferSize != requiredBytes))
+    const bool                      sizeChanged   = (m_bLights.bufferSize != requiredBytes);
+    // Handle the "lights went to zero" case explicitly: uploadLights() early-outs on empty, so if we
+    // relied on it alone the GPU would keep the old buffer AND the scene descriptor would keep the old
+    // numLights -- e.g. deleting the last light node would leave it lighting the scene. Free the buffer
+    // and mark the scene descriptor dirty so numLights=0 reaches the GPU.
+    if(rlights.empty() && sizeChanged && m_bLights.buffer != VK_NULL_HANDLE)
+    {
+      destroyBufferDeferred(m_bLights);
+      m_bLights        = {};
+      m_sceneDescDirty = true;
+      df.lights.clear();
+      result |= eSyncLights;
+    }
+    else if(!rlights.empty() && (!dirty.empty() || m_bLights.buffer == VK_NULL_HANDLE || sizeChanged))
     {
       uploadLights(staging, scn, dirty);
       df.lights.clear();
@@ -381,7 +400,7 @@ uint32_t nvvkgltf::SceneVk::syncFromScene(nvvk::StagingUploader& staging, nvvkgl
 //--------------------------------------------------------------------------------------------------
 // Recreate only geometry (vertex/index buffers). Call after destroyGeometry(); preserves textures
 // and materials. The caller is responsible for running the initial animation pass after this.
-void nvvkgltf::SceneVk::createGeometry(VkCommandBuffer cmd, nvvk::StagingUploader& staging, const nvvkgltf::Scene& scn)
+void nvvkgltf::SceneVk::createGeometry(VkCommandBuffer cmd, nvvk::CmdUploaderInterface& staging, const nvvkgltf::Scene& scn)
 {
   m_sceneDescDirty = true;  // Geometry buffers may be recreated below.
   createVertexBuffers(cmd, staging, scn);
@@ -393,20 +412,22 @@ void nvvkgltf::SceneVk::createGeometry(VkCommandBuffer cmd, nvvk::StagingUploade
 //--------------------------------------------------------------------------------------------------
 // Update or create the scene descriptor buffer (GPU pointer to materials, textures, primitives,
 // render nodes, lights). Called when buffer addresses change (e.g. after create or buffer resize).
-void nvvkgltf::SceneVk::updateSceneDescBuffer(nvvk::StagingUploader& staging, const nvvkgltf::Scene& scn)
+void nvvkgltf::SceneVk::updateSceneDescBuffer(nvvk::CmdUploaderInterface& staging, const nvvkgltf::Scene& scn)
 {
   // Buffer references
   shaderio::GltfScene scene_desc{};
-  scene_desc.materials            = (shaderio::GltfShadeMaterial*)m_bMaterial.address;
-  scene_desc.textureInfos         = (shaderio::GltfTextureInfo*)m_bTextureInfos.address;
-  scene_desc.renderPrimitives     = (shaderio::GltfRenderPrimitive*)m_bRenderPrim.address;
-  scene_desc.renderNodes          = (shaderio::GltfRenderNode*)m_bRenderNode.address;
-  scene_desc.lights               = (shaderio::GltfLight*)m_bLights.address;
-  scene_desc.numLights            = static_cast<int>(scn.getRenderLights().size());
-  scene_desc.emissiveTriangles    = (shaderio::EmissiveTriangle*)m_bEmissiveTriangles.address;
-  scene_desc.numEmissiveTriangles = static_cast<int>(m_numEmissiveTriangles);
-  scene_desc.emissiveTotalWeight  = m_emissiveTotalWeight;
-  scene_desc.emissiveMeanLum      = m_emissiveMeanLum;
+  scene_desc.materials             = (shaderio::GltfShadeMaterial*)m_bMaterial.address;
+  scene_desc.textureInfos          = (shaderio::GltfTextureInfo*)m_bTextureInfos.address;
+  scene_desc.renderPrimitives      = (shaderio::GltfRenderPrimitive*)m_bRenderPrim.address;
+  scene_desc.renderNodes           = (shaderio::GltfRenderNode*)m_bRenderNode.address;
+  scene_desc.lights                = (shaderio::GltfLight*)m_bLights.address;
+  scene_desc.numLights             = static_cast<int>(scn.getRenderLights().size());
+  scene_desc.iesProfiles           = (float*)m_bIesProfiles.address;
+  scene_desc.iesProfileSampleCount = nvvkgltf::kIesProfileSampleCount;
+  scene_desc.emissiveTriangles     = (shaderio::EmissiveTriangle*)m_bEmissiveTriangles.address;
+  scene_desc.numEmissiveTriangles  = static_cast<int>(m_numEmissiveTriangles);
+  scene_desc.emissiveTotalWeight   = m_emissiveTotalWeight;
+  scene_desc.emissiveMeanLum       = m_emissiveMeanLum;
 
   if(m_bSceneDesc.buffer == VK_NULL_HANDLE)
   {
@@ -420,7 +441,7 @@ void nvvkgltf::SceneVk::updateSceneDescBuffer(nvvk::StagingUploader& staging, co
 
 //--------------------------------------------------------------------------------------------------
 // Flush scene descriptor buffer once per sync cycle if any buffer address changed.
-bool nvvkgltf::SceneVk::flushSceneDescIfDirty(nvvk::StagingUploader& staging, const nvvkgltf::Scene& scn)
+bool nvvkgltf::SceneVk::flushSceneDescIfDirty(nvvk::CmdUploaderInterface& staging, const nvvkgltf::Scene& scn)
 {
   if(!m_sceneDescDirty)
     return false;
@@ -432,7 +453,12 @@ bool nvvkgltf::SceneVk::flushSceneDescIfDirty(nvvk::StagingUploader& staging, co
 //--------------------------------------------------------------------------------------------------
 // Upload material and texture-info data to GPU. dirtyIndices = material indices to update;
 // empty = full upload. Supports surgical update when few materials change.
-void nvvkgltf::SceneVk::uploadMaterials(nvvk::StagingUploader& staging, const nvvkgltf::Scene& scn, const std::unordered_set<int>& dirtyIndices)
+void nvvkgltf::SceneVk::uploadMaterials(nvvk::CmdUploaderInterface& staging,
+
+                                        const nvvkgltf::Scene& scn,
+
+                                        const std::unordered_set<int>& dirtyIndices)
+
 {
   // nvutils::ScopedTimer st(__FUNCTION__);
 
@@ -573,7 +599,7 @@ static shaderio::GltfRenderNode buildRenderNodeInfo(const nvvkgltf::RenderNode& 
 //--------------------------------------------------------------------------------------------------
 // Ensure the render node GPU buffer matches the required size. Destroys and nulls the buffer if
 // the current size doesn't match, so the caller can detect wasNullBuffer and recreate.
-void nvvkgltf::SceneVk::ensureRenderNodeBuffer(nvvk::StagingUploader& staging, size_t renderNodeCount)
+void nvvkgltf::SceneVk::ensureRenderNodeBuffer(nvvk::CmdUploaderInterface& staging, size_t renderNodeCount)
 {
   const size_t requiredBytes = renderNodeCount * sizeof(shaderio::GltfRenderNode);
   if(m_bRenderNode.bufferSize != requiredBytes)
@@ -598,7 +624,12 @@ void nvvkgltf::SceneVk::ensureRenderNodeBuffer(nvvk::StagingUploader& staging, s
   }
 }
 
-void nvvkgltf::SceneVk::uploadRenderNodes(nvvk::StagingUploader& staging, const nvvkgltf::Scene& scn, const std::unordered_set<int>& dirtyIndices)
+void nvvkgltf::SceneVk::uploadRenderNodes(nvvk::CmdUploaderInterface& staging,
+
+                                          const nvvkgltf::Scene& scn,
+
+                                          const std::unordered_set<int>& dirtyIndices)
+
 {
   const std::vector<nvvkgltf::RenderNode>& renderNodes = scn.getRenderNodes();
 
@@ -640,7 +671,7 @@ void nvvkgltf::SceneVk::uploadRenderNodes(nvvk::StagingUploader& staging, const 
 
 //--------------------------------------------------------------------------------------------------
 // Upload light data to GPU. dirtyIndices = glTF light indices that changed; empty = full upload.
-void nvvkgltf::SceneVk::uploadLights(nvvk::StagingUploader& staging, const nvvkgltf::Scene& scn, const std::unordered_set<int>& dirtyIndices)
+void nvvkgltf::SceneVk::uploadLights(nvvk::CmdUploaderInterface& staging, const nvvkgltf::Scene& scn, const std::unordered_set<int>& dirtyIndices)
 {
   const std::vector<nvvkgltf::RenderLight>& rlights = scn.getRenderLights();
   if(rlights.empty())
@@ -676,7 +707,11 @@ void nvvkgltf::SceneVk::uploadLights(nvvk::StagingUploader& staging, const nvvkg
   {
     for(size_t renderLightIdx = 0; renderLightIdx < rlights.size(); ++renderLightIdx)
     {
-      if(dirtyIndices.contains(rlights[renderLightIdx].light))
+      // Pure EXT_lights_ies lights have no KHR light index (light == -1) and are never tracked
+      // in dirtyIndices; re-upload them alongside any dirty KHR light so their world matrix
+      // (updated every frame by updateMatrices) always reaches the GPU.
+      const bool isPureIes = (rlights[renderLightIdx].light < 0);
+      if(isPureIes || dirtyIndices.contains(rlights[renderLightIdx].light))
       {
         size_t offset = renderLightIdx * sizeof(shaderio::GltfLight);
         staging.appendBuffer(m_bLights, offset, sizeof(shaderio::GltfLight), &shaderLights[renderLightIdx]);
@@ -693,7 +728,7 @@ void nvvkgltf::SceneVk::uploadLights(nvvk::StagingUploader& staging, const nvvkg
 // emitters (bright/large triangles picked more often); the total is passed via the scene descriptor.
 // World area is computed from the render node's transform, so the list is rebuilt on material or
 // render-node changes (see syncFromScene). A null buffer with count 0 is a valid "no emitters" state.
-void nvvkgltf::SceneVk::uploadEmissiveTriangles(nvvk::StagingUploader& staging, const nvvkgltf::Scene& scn)
+void nvvkgltf::SceneVk::uploadEmissiveTriangles(nvvk::CmdUploaderInterface& staging, const nvvkgltf::Scene& scn)
 {
   const tinygltf::Model&                        model       = scn.getModel();
   const std::vector<nvvkgltf::RenderNode>&      renderNodes = scn.getRenderNodes();
@@ -876,7 +911,7 @@ void nvvkgltf::SceneVk::uploadEmissiveTriangles(nvvk::StagingUploader& staging, 
 
 //--------------------------------------------------------------------------------------------------
 // Upload render primitive info (and morph/skin vertex data) to GPU. Used for morph targets and skinning.
-void nvvkgltf::SceneVk::uploadPrimitives(VkCommandBuffer cmd, nvvk::StagingUploader& staging, nvvkgltf::Scene& scn)
+void nvvkgltf::SceneVk::uploadPrimitives(VkCommandBuffer cmd, nvvk::CmdUploaderInterface& staging, nvvkgltf::Scene& scn)
 {
   scn.animation().computeMorphTargets();
   scn.animation().computeSkinning();
@@ -936,12 +971,18 @@ void nvvkgltf::SceneVk::uploadPrimitives(VkCommandBuffer cmd, nvvk::StagingUploa
 //--------------------------------------------------------------------------------------------------
 // Create or update a vertex attribute buffer for a primitive. Returns true if a new buffer was created.
 template <typename T>
-bool nvvkgltf::SceneVk::updateAttributeBuffer(const std::string&         attributeName,
-                                              const tinygltf::Model&     model,
+bool nvvkgltf::SceneVk::updateAttributeBuffer(const std::string& attributeName,
+
+                                              const tinygltf::Model& model,
+
                                               const tinygltf::Primitive& primitive,
-                                              nvvk::ResourceAllocator*   alloc,
-                                              nvvk::StagingUploader*     staging,
-                                              nvvk::Buffer&              attributeBuffer)
+
+                                              nvvk::ResourceAllocator* alloc,
+
+                                              nvvk::CmdUploaderInterface* staging,
+
+                                              nvvk::Buffer& attributeBuffer)
+
 {
   const auto& findResult = primitive.attributes.find(attributeName);
   if(findResult != primitive.attributes.end())
@@ -997,7 +1038,7 @@ VkBufferUsageFlags2 nvvkgltf::SceneVk::getBufferUsageFlags() const
 //--------------------------------------------------------------------------------------------------
 // Create vertex/index buffers and render-primitive info for all primitives. One vertex buffer set
 // per primitive; primitive buffer references vertex/index buffers and material id.
-void nvvkgltf::SceneVk::createVertexBuffers(VkCommandBuffer cmd, nvvk::StagingUploader& staging, const nvvkgltf::Scene& scn)
+void nvvkgltf::SceneVk::createVertexBuffers(VkCommandBuffer cmd, nvvk::CmdUploaderInterface& staging, const nvvkgltf::Scene& scn)
 {
   nvutils::ScopedTimer st(__FUNCTION__);
 
@@ -1130,7 +1171,7 @@ void nvvkgltf::SceneVk::createVertexBuffers(VkCommandBuffer cmd, nvvk::StagingUp
 
 //--------------------------------------------------------------------------------------------------
 // Re-upload all vertex buffers (e.g. after tangent recompute). Updates primitives that changed.
-void nvvkgltf::SceneVk::uploadVertexBuffers(nvvk::StagingUploader& staging, const nvvkgltf::Scene& scene)
+void nvvkgltf::SceneVk::uploadVertexBuffers(nvvk::CmdUploaderInterface& staging, const nvvkgltf::Scene& scene)
 {
   const auto& model = scene.getModel();
 
@@ -1244,10 +1285,92 @@ std::filesystem::path nvvkgltf::SceneVk::resolveImageDiskPath(const tinygltf::Mo
 }
 
 //--------------------------------------------------------------------------------------------------
+// EXT_lights_ies (load-only): parse every profile in extensions.EXT_lights_ies.lights[] and upload
+// the flattened [profile][sample] table shaders/gltf_light_ies.h.slang looks up by GltfLight.iesProfile.
+// `uri` is resolved like an image URI (external file); `bufferView` reads straight from the model's
+// buffers; `data:` URIs are not decoded (rare for IES profiles) and fall back to a neutral table.
+void nvvkgltf::SceneVk::loadIesProfiles(nvvk::CmdUploaderInterface& staging, const nvvkgltf::Scene& scn)
+{
+  const tinygltf::Model&              model    = scn.getModel();
+  std::vector<EXT_lights_ies_profile> profiles = tinygltf::utils::getIesProfiles(model);
+
+  destroyBufferDeferred(m_bIesProfiles);
+  if(profiles.empty())
+    return;
+
+  std::vector<std::filesystem::path> searchPaths = resolveImageSearchPaths(scn);
+
+  // Neutral (all-1.0) default: a profile that fails to resolve/parse just leaves its referencing
+  // lights at their unmodified KHR_lights_punctual distribution instead of erroring out.
+  std::vector<float> table(profiles.size() * size_t(nvvkgltf::kIesProfileSampleCount), 1.0f);
+  for(size_t i = 0; i < profiles.size(); i++)
+  {
+    const auto&          profile = profiles[i];
+    std::vector<uint8_t> bytes;
+
+    if(profile.bufferView >= 0)
+    {
+      if(static_cast<size_t>(profile.bufferView) < model.bufferViews.size())
+      {
+        const tinygltf::BufferView& bv = model.bufferViews[profile.bufferView];
+        if(bv.buffer >= 0 && static_cast<size_t>(bv.buffer) < model.buffers.size())
+        {
+          const tinygltf::Buffer& buf = model.buffers[bv.buffer];
+          if(bv.byteOffset < buf.data.size() && bv.byteLength <= buf.data.size() - bv.byteOffset)
+            bytes.assign(buf.data.begin() + bv.byteOffset, buf.data.begin() + bv.byteOffset + bv.byteLength);
+        }
+      }
+    }
+    else if(!profile.uri.empty() && (profile.uri.size() < 5 || profile.uri.compare(0, 5, "data:") != 0))
+    {
+      std::string uriDecoded;
+      tinygltf::URIDecode(profile.uri, &uriDecoded, nullptr);
+      std::filesystem::path diskPath = nvutils::findFile(nvutils::pathFromUtf8(uriDecoded), searchPaths, false);
+
+      nvutils::FileReadMapping fileMapping;
+      if(!diskPath.empty() && fileMapping.open(diskPath))
+      {
+        const auto* data = reinterpret_cast<const uint8_t*>(fileMapping.data());
+        bytes.assign(data, data + fileMapping.size());
+      }
+      else
+      {
+        LOGW("EXT_lights_ies: could not open IES profile file '%s'.\n", profile.uri.c_str());
+      }
+    }
+    else if(!profile.uri.empty())
+    {
+      LOGW("EXT_lights_ies: data: URIs are not supported for IES profiles ('%s' skipped).\n", profile.name.c_str());
+    }
+
+    if(!bytes.empty())
+    {
+      std::vector<float> samples;
+      if(nvvkgltf::parseIesProfile(bytes, samples) && samples.size() == size_t(nvvkgltf::kIesProfileSampleCount))
+      {
+        std::copy(samples.begin(), samples.end(), table.begin() + i * nvvkgltf::kIesProfileSampleCount);
+      }
+      else
+      {
+        LOGW("EXT_lights_ies: failed to parse IES profile '%s'.\n",
+             profile.name.empty() ? profile.uri.c_str() : profile.name.c_str());
+      }
+    }
+  }
+
+  NVVK_CHECK(m_alloc->createBuffer(m_bIesProfiles, std::span(table).size_bytes(),
+                                   VK_BUFFER_USAGE_2_STORAGE_BUFFER_BIT | VK_BUFFER_USAGE_2_SHADER_DEVICE_ADDRESS_BIT));
+  NVVK_DBG_NAME(m_bIesProfiles.buffer);
+  m_memoryTracker.track(kMemCategorySceneData, m_bIesProfiles.allocation);
+  NVVK_CHECK(staging.appendBuffer(m_bIesProfiles, 0, std::span(table)));
+  m_sceneDescDirty = true;  // buffer was (re)created; scene descriptor's iesProfiles pointer must be rewritten
+}
+
+//--------------------------------------------------------------------------------------------------
 // Replace m_images[idx] with a 1x1 solid-color dummy. The texture descriptor array cannot contain
 // gaps, so unused / failed / empty-scene slots get a dummy (magenta on failure, white for an empty
 // scene) to keep every texture source index valid.
-void nvvkgltf::SceneVk::createDefaultImage(nvvk::StagingUploader& staging, uint32_t idx, const std::array<uint8_t, 4>& color)
+void nvvkgltf::SceneVk::createDefaultImage(nvvk::CmdUploaderInterface& staging, uint32_t idx, const std::array<uint8_t, 4>& color)
 {
   VkImageCreateInfo image_create_info = DEFAULT_VkImageCreateInfo;
   image_create_info.extent            = {1, 1, 1};
@@ -1263,7 +1386,7 @@ void nvvkgltf::SceneVk::createDefaultImage(nvvk::StagingUploader& staging, uint3
 //--------------------------------------------------------------------------------------------------
 // Create the GPU image for the already-loaded m_images[imageId]; substitute the magenta default when
 // the source was missing, unreadable, or an unsupported format (createImage returns false).
-void nvvkgltf::SceneVk::materializeImage(VkCommandBuffer cmd, nvvk::StagingUploader& staging, size_t imageId)
+void nvvkgltf::SceneVk::materializeImage(VkCommandBuffer cmd, nvvk::CmdUploaderInterface& staging, size_t imageId)
 {
   if(!createImage(cmd, staging, m_images[imageId]))
     createDefaultImage(staging, static_cast<uint32_t>(imageId), {255, 0, 255, 255});  // not present or failed to load
@@ -1335,8 +1458,9 @@ void nvvkgltf::SceneVk::updateSampler(const tinygltf::Model& model, int samplerI
 
 //--------------------------------------------------------------------------------------------------
 // Create GPU images for all textures referenced by the scene. Loads from disk or embedded data.
-void nvvkgltf::SceneVk::createTextureImages(VkCommandBuffer                           cmd,
-                                            nvvk::StagingUploader&                    staging,
+void nvvkgltf::SceneVk::createTextureImages(VkCommandBuffer             cmd,
+                                            nvvk::CmdUploaderInterface& staging,
+
                                             nvvkgltf::Scene&                          scn,
                                             const std::vector<std::filesystem::path>& imageSearchPaths)
 {
@@ -1431,7 +1555,7 @@ void nvvkgltf::SceneVk::createTextureImages(VkCommandBuffer                     
 // residency in line with the model when the only edits were at the tail (import / undo / redo of an
 // imported texture). The caller guarantees a tail-only, non-empty-on-both-sides change (via
 // DirtyFlags::texturesTailChanged), so m_images / m_textures already match the pre-edit model sizes.
-void nvvkgltf::SceneVk::syncTextureTail(VkCommandBuffer cmd, nvvk::StagingUploader& staging, nvvkgltf::Scene& scn)
+void nvvkgltf::SceneVk::syncTextureTail(VkCommandBuffer cmd, nvvk::CmdUploaderInterface& staging, nvvkgltf::Scene& scn)
 {
   const tinygltf::Model& model = scn.getModel();
 
@@ -1495,7 +1619,7 @@ void nvvkgltf::SceneVk::syncTextureTail(VkCommandBuffer cmd, nvvk::StagingUpload
 // destroyGeometry() (existing textures/images/samplers/material buffers survive) and createTextureImages()
 // with syncTextureTail() (only the new tail images are loaded). Geometry, render nodes, materials and
 // lights are re-derived in full from the grown model; that is CPU-cheap and touches no disk.
-void nvvkgltf::SceneVk::recreatePreservingTextures(VkCommandBuffer cmd, nvvk::StagingUploader& staging, nvvkgltf::Scene& scn)
+void nvvkgltf::SceneVk::recreatePreservingTextures(VkCommandBuffer cmd, nvvk::CmdUploaderInterface& staging, nvvkgltf::Scene& scn)
 {
   nvutils::ScopedTimer   st(__FUNCTION__);
   const tinygltf::Model& model = scn.getModel();
@@ -1511,6 +1635,7 @@ void nvvkgltf::SceneVk::recreatePreservingTextures(VkCommandBuffer cmd, nvvk::St
   uploadRenderNodes(staging, scn);
   createVertexBuffers(cmd, staging, scn);
   uploadLights(staging, scn);
+  loadIesProfiles(staging, scn);  // re-derived in full -- cheap, and picks up profiles from a merged-in file
 
   (void)flushSceneDescIfDirty(staging, scn);
 
@@ -1749,7 +1874,7 @@ void nvvkgltf::SceneVk::loadImageFromMemory(uint64_t imageID, const void* data, 
 
 //--------------------------------------------------------------------------------------------------
 // Create a Vulkan image from a populated SceneImage (size, format, mipData). Returns false if invalid.
-bool nvvkgltf::SceneVk::createImage(const VkCommandBuffer& cmd, nvvk::StagingUploader& staging, SceneImage& image)
+bool nvvkgltf::SceneVk::createImage(const VkCommandBuffer& cmd, nvvk::CmdUploaderInterface& staging, SceneImage& image)
 {
   if(image.size.width == 0 || image.size.height == 0)
     return false;
@@ -1863,33 +1988,55 @@ std::vector<shaderio::GltfLight> getShaderLights(const std::vector<nvvkgltf::Ren
   lightsInfo.reserve(renderlights.size());
   for(auto& l : renderlights)
   {
-    const auto& gltfLight = gltfLights[l.light];
-
     shaderio::GltfLight info{};
-    info.position   = l.worldMatrix[3];
-    info.direction  = -l.worldMatrix[2];  // glm::vec3(l.worldMatrix * glm::vec4(0, 0, -1, 0));
-    info.innerAngle = static_cast<float>(gltfLight.spot.innerConeAngle);
-    info.outerAngle = static_cast<float>(gltfLight.spot.outerConeAngle);
-    if(gltfLight.color.size() == 3)
-      info.color = glm::vec3(gltfLight.color[0], gltfLight.color[1], gltfLight.color[2]);
-    else
-      info.color = glm::vec3(1, 1, 1);  // default color (white)
-    info.intensity = static_cast<float>(gltfLight.intensity);
-    info.type      = gltfLight.type == "point" ? shaderio::eLightTypePoint :
-                     gltfLight.type == "spot"  ? shaderio::eLightTypeSpot :
-                                                 shaderio::eLightTypeDirectional;
+    info.position  = l.worldMatrix[3];
+    info.direction = glm::normalize(glm::vec3(-l.worldMatrix[2]));
 
-    info.radius = gltfLight.extras.Has("radius") ? float(gltfLight.extras.Get("radius").GetNumberAsDouble()) : 0.0f;
-
-    if(info.type == shaderio::eLightTypeDirectional)
+    if(l.light >= 0 && l.light < static_cast<int>(gltfLights.size()))
     {
-      const double sun_distance     = 149597870.0;  // km
-      double       angular_size_rad = 2.0 * std::atan(info.radius / sun_distance);
-      info.angularSizeOrInvRange    = static_cast<float>(angular_size_rad);
+      // KHR_lights_punctual light (possibly also carrying EXT_lights_ies).
+      const auto& gltfLight = gltfLights[l.light];
+      info.innerAngle       = static_cast<float>(gltfLight.spot.innerConeAngle);
+      info.outerAngle       = static_cast<float>(gltfLight.spot.outerConeAngle);
+      info.color = gltfLight.color.size() == 3 ? glm::vec3(gltfLight.color[0], gltfLight.color[1], gltfLight.color[2]) :
+                                                 glm::vec3(1.0f);
+      info.intensity = static_cast<float>(gltfLight.intensity);
+      info.type      = gltfLight.type == "point" ? shaderio::eLightTypePoint :
+                       gltfLight.type == "spot"  ? shaderio::eLightTypeSpot :
+                                                   shaderio::eLightTypeDirectional;
+      info.radius = gltfLight.extras.Has("radius") ? float(gltfLight.extras.Get("radius").GetNumberAsDouble()) : 0.0f;
+      if(info.type == shaderio::eLightTypeDirectional)
+      {
+        const double sun_distance     = 149597870.0;  // km
+        double       angular_size_rad = 2.0 * std::atan(info.radius / sun_distance);
+        info.angularSizeOrInvRange    = static_cast<float>(angular_size_rad);
+      }
+      else
+      {
+        info.angularSizeOrInvRange = (gltfLight.range > 0.0) ? 1.0f / static_cast<float>(gltfLight.range) : 0.0f;
+      }
     }
     else
     {
-      info.angularSizeOrInvRange = (gltfLight.range > 0.0) ? 1.0f / static_cast<float>(gltfLight.range) : 0.0f;
+      // Pure EXT_lights_ies (no KHR_lights_punctual): IES profile governs angular distribution;
+      // base intensity and color come from the node-level multiplier/color below.
+      info.color                 = glm::vec3(1.0f);
+      info.intensity             = 1.0f;
+      info.type                  = shaderio::eLightTypePoint;
+      info.innerAngle            = 0.0f;
+      info.outerAngle            = glm::radians(90.0f);
+      info.angularSizeOrInvRange = 0.0f;  // infinite range
+      info.radius                = 0.0f;
+    }
+
+    // EXT_lights_ies: fold the node's multiplier/color tint into the light's own color/intensity
+    // (the shader only needs the profile index to reshape the angular distribution; see
+    // shaders/gltf_light_ies.h.slang).
+    info.iesProfile = l.iesProfile;
+    if(info.iesProfile >= 0)
+    {
+      info.color *= l.iesColor;
+      info.intensity *= l.iesMultiplier;
     }
 
     lightsInfo.emplace_back(info);
@@ -1989,6 +2136,12 @@ void nvvkgltf::SceneVk::destroy()
     m_memoryTracker.untrack(kMemCategorySceneData, m_bLights.allocation);
     m_alloc->destroyBuffer(m_bLights);
     m_bLights = {};  // Reset to ensure clean state
+  }
+  if(m_bIesProfiles.buffer != VK_NULL_HANDLE)
+  {
+    m_memoryTracker.untrack(kMemCategorySceneData, m_bIesProfiles.allocation);
+    m_alloc->destroyBuffer(m_bIesProfiles);
+    m_bIesProfiles = {};  // Reset to ensure clean state
   }
   if(m_bEmissiveTriangles.buffer != VK_NULL_HANDLE)
   {

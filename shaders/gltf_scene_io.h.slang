@@ -111,7 +111,7 @@ struct GltfLight
   float angularSizeOrInvRange = radians(0.53F);  // angular size for directional lights, 1/range for spot and point lights
   float innerAngle = radians(10.0F);             // Inner angle of the light
   float outerAngle = radians(30.0F);             // Outer angle of the light
-  int   _pad       = 0;                          // Padding
+  int   iesProfile = -1;  // EXT_lights_ies: index into GltfScene.iesProfiles (stride iesProfileSampleCount), -1 = none
 };
 
 
@@ -198,8 +198,8 @@ struct GltfShadeMaterial
 #endif
 
 #if MAT_EXT_VOLUME
-  float thicknessFactor     = 0;  // KHR_materials_volume
-  float attenuationDistance = 0;
+  float thicknessFactor     = 0;              // KHR_materials_volume
+  float attenuationDistance = 3.402823e+38f;  // +Infinity per spec default
 #endif
 
 #if MAT_EXT_CLEARCOAT
@@ -333,6 +333,10 @@ struct GltfShadeMaterial
   uint16_t multiscatterColorTexture = 0;
 #endif
 
+#if MAT_EXT_DLSS_NR
+  float4 nrMask = float4(1, 1, 1, 1);  // EXT_DLSS_NR: per-material NR control mask (R=intensity, G=localTone, B=localStructure, A=globalTone)
+#endif
+
   // Trailing 8-byte explicit pad. Two reasons for uint64_t (rather than just uint32_t):
   //  1. It guarantees sizeof(GltfShadeMaterial) is a multiple of 8 for every MAT_EXT_*
   //     combination (struct alignment follows max member alignment, which uint64_t makes 8).
@@ -356,6 +360,12 @@ struct GltfScene
   int                  numEmissiveTriangles;  // number of sampled emissive triangles (area lights)
   float                emissiveTotalWeight;   // sum of per-triangle selection weights (area * defensive luminance)
   float                emissiveMeanLum;       // area-weighted mean emitter luminance (for defensive sampling)
+
+  // EXT_lights_ies: flattened [profile][sample] table, sample = normalized candela (peak = 1) at
+  // vertical angle sample/(iesProfileSampleCount-1) * 180 degrees off the light's photometric axis,
+  // azimuthally averaged (see docs/developer.md > Lighting). GltfLight.iesProfile indexes the profile.
+  float* iesProfiles;
+  int    iesProfileSampleCount;
 };
 
 // Defensive emissive selection: blend power-weighted selection (area * luminance) with area-uniform

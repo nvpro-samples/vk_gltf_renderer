@@ -93,6 +93,7 @@ private:
   void renderMeshProperties(int meshIdx);
   void renderCameraProperties(int camIdx);
   void renderLightProperties(int lightIdx);
+  bool renderIesEditor(int nodeIdx);
   void renderTextureProperties(int textureIdx);
   void renderImageProperties(int imageIdx);
   void renderSamplerProperties(int samplerIdx);
@@ -180,6 +181,7 @@ private:
   bool materialUnlit(tinygltf::Material& material);
   bool materialVolume(tinygltf::Material& material, int matIdx);  // Needs matIdx for special RTX dirty marking
   bool materialScatter(tinygltf::Material& material);
+  bool materialDlssNr(tinygltf::Material& material);
 
   //==================================================================================================
   // MEMBER VARIABLES
@@ -230,4 +232,11 @@ private:
   int                              m_lightSnapshotIdx = -1;
   std::unique_ptr<tinygltf::Light> m_lightSnapshotData;
   bool                             m_lightModifiedLastFrame = false;
+
+  // IES node snapshot for undo: captures EXT_lights_ies_ref (multiplier + color) before editing.
+  // Pushed as EditNodeIesCommand when the edit cycle ends. Used by renderIesEditor (Node inspector).
+  int       m_iesNodeSnapshotIdx = -1;
+  float     m_iesSnapshotMult    = 1.0f;
+  glm::vec3 m_iesSnapshotColor{1.0f};
+  bool      m_iesModifiedLastFrame = false;
 };

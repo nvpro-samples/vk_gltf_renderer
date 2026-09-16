@@ -62,6 +62,7 @@ enum OutputImage
   eDlssMotion,             // Motion (RGBA32)
   eDlssDepth,              // Depth (R32)
   eDlssSpecularHitDist,    // Specular hit distance (R16F)
+  eNrMask,                 // NR per-material control mask (RGBA16F)
   eOptixAlbedoNormal = 2,  // Albedo/encoded normal (RGBA32)
 };
 
@@ -184,7 +185,7 @@ struct PathtracePushConstant
   int                    maxDepth              = 5;     // Maximum depth of the ray
   int                    frameCount            = 0;     // Frame number
   float                  fireflyClampThreshold = 10.f;  // Firefly clamp threshold
-  float                  texGradScale          = 1.f;   // Ray-footprint gradient scale
+  float                  texGradScale          = 0.f;   // Ray-footprint gradient scale
   int                    numSamples            = 1;     // Number of samples per pixel per frame
   int                    totalSamples          = 0;     // Total samples accumulated so far
   float                  focalDistance         = 0.0f;  // Focal distance for depth of field

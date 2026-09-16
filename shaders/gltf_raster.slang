@@ -37,6 +37,7 @@
 #include "nvshaders/functions.h.slang"
 #include "nvshaders/hdr_env_sampling.h.slang"
 #include "nvshaders/light_contrib.h.slang"
+#include "gltf_light_ies.h.slang"
 #include "nvshaders/pbr_ggx_microfacet.h.slang"
 #include "nvshaders/pbr_direct_eval.h.slang"
 #include "nvshaders/pbr_ibl_eval.h.slang"
@@ -475,6 +476,7 @@ PixelOutput fragmentMain(VertexOutput input, uint primitiveID: SV_PrimitiveID, f
   {
     GltfLight    light   = pushConst.gltfScene.lights[i];
     LightContrib contrib = singleLightContribution(light, hit.pos, pbrMat.N);
+    contrib.intensity *= evalIesFactor(pushConst.gltfScene, light, hit.pos);  // EXT_lights_ies
     if(all(contrib.intensity == 0.0))
       continue;
 

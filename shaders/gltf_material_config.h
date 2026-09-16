@@ -78,6 +78,9 @@ otherwise the material buffer layout will disagree.
 #define MAT_EXT_TEXTURE_TRANSFORM                                                                                      \
   MAT_EXT_VAL  // KHR_texture_transform (adds float3x2 to every GltfTextureInfo, ~24B/slot)
 #endif
+#ifndef MAT_EXT_DLSS_NR
+#define MAT_EXT_DLSS_NR MAT_EXT_VAL  // EXT_DLSS_NR (per-material NR control mask)
+#endif
 
 
 #endif  // GLTF_MATERIAL_CONFIG_H

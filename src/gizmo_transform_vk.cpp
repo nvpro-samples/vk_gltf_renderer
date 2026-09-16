@@ -61,13 +61,14 @@ static glm::vec3 snapVec3(const glm::vec3& value, float step)
 // Helper: Upload nvutils primitive mesh to GPU
 //-----------------------------------------------------------------------------
 
-static void uploadPrimitiveMesh(const nvutils::PrimitiveMesh&                  primMesh,
-                                const glm::mat4&                               transform,
-                                TransformHelperVk::GizmoComponent              component,
-                                TransformHelperVk::GeometryType                type,
-                                VkCommandBuffer                                cmd,
-                                nvvk::ResourceAllocator*                       alloc,
-                                nvvk::StagingUploader*                         uploader,
+static void uploadPrimitiveMesh(const nvutils::PrimitiveMesh&     primMesh,
+                                const glm::mat4&                  transform,
+                                TransformHelperVk::GizmoComponent component,
+                                TransformHelperVk::GeometryType   type,
+                                VkCommandBuffer                   cmd,
+                                nvvk::ResourceAllocator*          alloc,
+                                nvvk::CmdUploaderInterface*       uploader,
+
                                 std::vector<TransformHelperVk::GizmoGeometry>& outGeometry)
 {
   std::vector<TransformHelperVk::GizmoVertex> vertices;
@@ -367,7 +368,7 @@ void TransformHelperVk::createGizmoGeometry()
   generateScaleGizmo(cmd);
 
   m_app->submitAndWaitTempCmdBuffer(cmd);
-  m_uploader->releaseStaging();
+  // Staging is retired by FrameUploader::releaseCompletedAllocations (next frame or deinit).
 }
 
 void TransformHelperVk::destroyGizmoGeometry()

@@ -38,6 +38,7 @@
 #include <nvvk/ray_picker.hpp>
 #include <nvvk/resource_allocator.hpp>
 #include <nvvk/semaphore.hpp>
+#include "settings_registry.hpp"
 #include "gltf_scene.hpp"
 #include "gltf_scene_rtx.hpp"
 #include "gltf_scene_vk.hpp"
@@ -77,7 +78,14 @@ public:
   /// Emits parseable BENCHMARK_ADV memory block (called from ParameterSequencer post-callback).
   void benchmarkAdvance(const nvutils::ParameterSequencer::State& state);
 
-  void createScene(const std::filesystem::path& sceneFilename);
+  /// Load a scene from disk into `m_resources.scene`. Returns true only if a new scene was
+  /// actually installed; returns false on any failure (empty path, findFile miss, OBJ parse
+  /// error, glTF load error) and leaves the current scene pointer in place. Does *not* tear
+  /// down previously-loaded derived state (sceneRtx BLAS/TLAS, sceneGpu buffers, undo stack,
+  /// thumbnails, rasterizer recorded cmd, ...): callers that replace an existing scene at
+  /// runtime must tear down first, see `loadSceneFile` and `onFileDrop`. Startup in `main.cpp`
+  /// runs before any scene exists and can call this directly.
+  bool createScene(const std::filesystem::path& sceneFilename);
   // Ensure an editable Scene exists (wired to the UI, no GPU build) so add/import can run from nothing.
   void ensureEmptyScene();
   void createSceneFromDescriptor(const std::filesystem::path& descriptorPath);
@@ -100,6 +108,20 @@ public:
 #endif
   /// Ensures path-tracer accumulation covers the full headless run (--maxFrames >= --frames).
   void alignMaxFramesForHeadless(uint32_t headlessFrames);
+
+  /// Drain the queue, recompile the active renderer's shaders, and reset accumulation.
+  /// Application thread only: it destroys and recreates live pipelines.
+  void reloadShaders();
+
+  /// Mirror skyParams.sunDirection back into skySunAzimuth/skySunElevation after the sky UI moves it.
+  void syncSunAngles();
+
+  /// Load an environment map / scene by path; these back --hdrfile / --scenefile, which load on
+  /// change. False if the file does not exist or the renderer is not attached yet (the start-up
+  /// parse, where main() does the load itself). Application thread only.
+  [[nodiscard]] bool loadHdrEnvironment(const std::filesystem::path& filename);
+  [[nodiscard]] bool loadSceneFile(const std::filesystem::path& filename);
+
 
 private:
   void onAttach(nvapp::Application* app) override;
@@ -141,17 +163,18 @@ private:
   // exercised end-to-end without an actual mouse click.
   void pickSceneNodeFromScript(int nodeIndex);
   void silhouette(VkCommandBuffer cmd);
-  void tonemap(VkCommandBuffer cmd);
-  void runTonemapPass(VkCommandBuffer cmd, bool skipBeautifiedOverlay);
+  bool tonemap(VkCommandBuffer cmd);
+  bool runTonemapPass(VkCommandBuffer cmd, bool skipBeautifiedOverlay);
   void renderVisualHelpers(VkCommandBuffer cmd);
 #if defined(USE_DLSS)
   Dlss*       activeDlss();
   const Dlss* activeDlss() const;
 #endif
 
-  bool dlssGuideRequired() const;  // True when the path tracer currently needs DLSS/OptiX guide-buffer capture code.
-  void updateGizmoAttachment();
-  bool updateTextures();
+  bool  dlssGuideRequired() const;    // True when the path tracer currently needs DLSS/OptiX guide-buffer capture code.
+  float defaultFireflyClamp() const;  // Scene-appropriate firefly clamp: HDR luminance integral, else a fixed baseline.
+  void  updateGizmoAttachment();
+  bool  updateTextures();
   // Write a contiguous range of scene texture / sampler descriptors (eTextures / eSamplers). updateTextures()
   // writes the whole set; applyPendingTextureTailSync() writes only the newly appended slots.
   bool writeTextureDescriptorRange(uint32_t firstTexture, uint32_t textureCount, uint32_t firstSampler, uint32_t samplerCount);
@@ -387,8 +410,14 @@ private:
 
   VkCommandPool m_transientCmdPool{};  // Command pool for transient command buffers
 
+  SettingsRegistry                m_settings;           // Single declaration point for every setting
   nvgui::SettingsHandler          m_settingsHandler;    // Settings handler for ImGui.ini
   const nvutils::ParameterParser* m_parameterParser{};  // CLI parameter parser, for INI load filtering (see wasParsed)
+  // ImGui.ini restore runs in Application::run() *after* onAttach and writes storage directly, so
+  // it bypasses the per-setting callbackSuccess. Run any opted-in post-restore hooks once on the
+  // first frame to refresh derived state (e.g. skyParams.sunDirection from the restored
+  // skySunAzimuth/Elevation).
+  bool m_pendingRestoreCallbacks{true};
 
   BenchmarkController m_benchmark;
 };
