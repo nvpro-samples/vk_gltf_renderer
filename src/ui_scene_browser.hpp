@@ -160,7 +160,7 @@ private:
   void renderNodeHierarchy(int nodeIdx, float rowHeight = 0.0f, bool canVirtualizeChildren = true);
   void renderMeshInHierarchy(int meshIdx, int nodeIdx);
   void renderPrimitiveInHierarchy(int primIdx, int meshIdx, int nodeIdx);
-  void renderLightInHierarchy(int lightIdx);
+  void renderLightInHierarchy(int lightIdx, int nodeIdx);
   void renderCameraInHierarchy(int cameraIdx);
   void renderImageViewer();  // Modal image viewer (large preview + metadata + replace/reload), opened from the Inspector
 

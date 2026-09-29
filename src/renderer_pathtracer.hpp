@@ -105,6 +105,7 @@ public:
 
   bool m_supportSER{false};         // True when the device supports SER (Shader Execution Reordering).
   bool m_useSER{true};              // Requested SER state; clamped to m_supportSER each frame.
+  bool m_shadowTransmission{true};  // Shadow rays pass through transmissive surfaces (biased; see ePtShadowTransmission).
   bool m_pipelineUseSER{false};     // SER value the currently-live pipelines were built with.
   bool m_compiledWireframe{false};  // True when the shader is the wireframe build.
   bool m_compiledVisualize{false};  // True when the shader has the debug-visualization code compiled in (USE_VISUALIZE).

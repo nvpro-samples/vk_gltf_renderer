@@ -50,6 +50,7 @@
 #include "gltf_interactivity_scene_pointer.hpp"
 #include "gltf_scene_merger.hpp"
 #include "gltf_compact_model.hpp"
+#include "tinygltf_utils.hpp"
 #include "version.hpp"
 
 namespace {
@@ -117,9 +118,8 @@ bool loadGltfFile(const std::filesystem::path& filename,
           const tinygltf::File& target = (*ctx.ownerFiles)[a.file];
           if(target.uri.empty())  // bufferView / data-URI aliased targets are not yet supported
             break;
-          std::string targetDecoded;
-          tinygltf::URIDecode(target.uri, &targetDecoded, nullptr);
-          const std::filesystem::path targetPath = ctx.ownerBaseDir / nvutils::pathFromUtf8(targetDecoded);
+          const std::string           targetDecoded = tinygltf::utils::decodePathFromUri(target.uri);
+          const std::filesystem::path targetPath    = ctx.ownerBaseDir / nvutils::pathFromUtf8(targetDecoded);
           return tinygltf::ReadWholeFile(out, err, nvutils::utf8FromPath(targetPath), nullptr);
         }
       }
@@ -252,6 +252,9 @@ nvvkgltf::Scene::Scene()
       "KHR_xmp_json_ld",
       "MSFT_texture_dds",
       "NV_attributes_iray",
+      "OMI_environment_sky",
+      "NV_environment_sky_panorama",
+      "NV_environment_sky_atmosphere",
 #ifdef USE_DRACO
       "KHR_draco_mesh_compression",
 #endif
@@ -594,10 +597,9 @@ bool nvvkgltf::Scene::save(const std::filesystem::path& filename, bool selfConta
         continue;
       if(image.uri.size() >= 5 && image.uri.compare(0, 5, "data:") == 0)
         continue;  // data URI: no file to copy
-      std::string uri_decoded;
-      tinygltf::URIDecode(image.uri, &uri_decoded, nullptr);
-      fs::path pathDecoded = nvutils::pathFromUtf8(uri_decoded);
-      fs::path srcFile     = nvutils::findFile(pathDecoded, searchPaths, false);
+      const std::string uri_decoded = tinygltf::utils::decodePathFromUri(image.uri);
+      fs::path          pathDecoded = nvutils::pathFromUtf8(uri_decoded);
+      fs::path          srcFile     = nvutils::findFile(pathDecoded, searchPaths, false);
       if(srcFile.empty())
         continue;
 
@@ -650,7 +652,7 @@ bool nvvkgltf::Scene::save(const std::filesystem::path& filename, bool selfConta
           continue;
         }
       }
-      image.uri = dstRelative.generic_string();  // forward slashes for glTF
+      image.uri = tinygltf::utils::encodePathAsUri(dstRelative.generic_string());  // forward slashes for glTF; encoded for URIDecode round-trip
       uriBySource.emplace(srcKey, image.uri);
     }
     if(numCopied > 0)
@@ -665,6 +667,14 @@ bool nvvkgltf::Scene::save(const std::filesystem::path& filename, bool selfConta
       outModel.asset.generator += " + ";
     outModel.asset.generator += std::string(generatorPrefix) + " " APP_VERSION_STRING;
   }
+
+  // Let the application contribute extensions that live outside the scene graph -- the
+  // environment sky is written here, from renderer state rather than from the model. It has to
+  // run against `outModel`: that copy is what gets serialized, so a hook writing into the live
+  // model would produce a file missing the extension, with no error to show for it. Runs before
+  // syncExtensionsUsed so anything it adds is reflected in extensionsUsed.
+  if(m_preSaveHook)
+    m_preSaveHook(outModel, filename);
 
   // Reconcile top-level extensionsUsed / extensionsRequired with what the model actually
   // contains, so the written asset complies with the glTF 2.0 "Specifying Extensions" rules
@@ -710,8 +720,7 @@ void nvvkgltf::Scene::resolveImageURIs()
     if(image.uri.size() >= 5 && image.uri.compare(0, 5, "data:") == 0)
       continue;
 
-    std::string uriDecoded;
-    tinygltf::URIDecode(image.uri, &uriDecoded, nullptr);
+    const std::string uriDecoded = tinygltf::utils::decodePathFromUri(image.uri);
 
     if(!nvutils::findFile(nvutils::pathFromUtf8(uriDecoded), m_imageSearchPaths, false).empty())
       continue;
@@ -727,7 +736,8 @@ void nvvkgltf::Scene::resolveImageURIs()
       if(!nvutils::findFile(nvutils::pathFromUtf8(candidate), m_imageSearchPaths, false).empty())
       {
         LOGW("Image \"%s\" not found on disk; using \"%s\" instead.\n", image.uri.c_str(), candidate.c_str());
-        image.uri = candidate;
+        // `candidate` is a decoded filesystem path; re-encode before storing so URIDecode round-trips it.
+        image.uri = tinygltf::utils::encodePathAsUri(candidate);
         break;
       }
     }
@@ -948,9 +958,8 @@ void nvvkgltf::Scene::flattenReferencedModel(tinygltf::Model&             model,
     if(file.uri.empty())  // embedded (bufferView/data:) external assets are not yet supported
       continue;
 
-    std::string uriDecoded;
-    tinygltf::URIDecode(file.uri, &uriDecoded, nullptr);
-    const std::filesystem::path childPath = modelDir / nvutils::pathFromUtf8(uriDecoded);
+    const std::string           uriDecoded = tinygltf::utils::decodePathFromUri(file.uri);
+    const std::filesystem::path childPath  = modelDir / nvutils::pathFromUtf8(uriDecoded);
 
     std::error_code ec;
     const std::filesystem::path canonical = std::filesystem::weakly_canonical(std::filesystem::absolute(childPath, ec), ec);
@@ -1094,8 +1103,7 @@ bool nvvkgltf::Scene::resolveExternalAssets()
     }
 
     // #6: percent-decode the URI before resolving it to a path.
-    std::string uriDecoded;
-    tinygltf::URIDecode(file.uri, &uriDecoded, nullptr);
+    const std::string           uriDecoded    = tinygltf::utils::decodePathFromUri(file.uri);
     const std::filesystem::path childPath     = baseDir / nvutils::pathFromUtf8(uriDecoded);
     const std::string           childPathUtf8 = nvutils::utf8FromPath(childPath);
 
@@ -1231,9 +1239,8 @@ int nvvkgltf::Scene::referenceScene(const std::filesystem::path& filename)
     const std::string& uri = m_model.files[f].uri;
     if(uri.empty())
       continue;
-    std::string uriDecoded;
-    tinygltf::URIDecode(uri, &uriDecoded, nullptr);
-    std::filesystem::path p = nvutils::pathFromUtf8(uriDecoded);
+    const std::string     uriDecoded = tinygltf::utils::decodePathFromUri(uri);
+    std::filesystem::path p          = nvutils::pathFromUtf8(uriDecoded);
     if(p.is_relative() && !m_filename.empty())
       p = m_filename.parent_path() / p;
     if(std::filesystem::weakly_canonical(std::filesystem::absolute(p, ec), ec) == absTarget)
@@ -1286,7 +1293,9 @@ int nvvkgltf::Scene::referenceScene(const std::filesystem::path& filename)
     std::filesystem::path rel;
     if(!m_filename.empty())
       rel = std::filesystem::relative(absTarget, m_filename.parent_path(), ec);
-    storedUri = (!rel.empty() && !ec) ? rel.generic_string() : absTarget.generic_string();
+    const std::string rawUri = (!rel.empty() && !ec) ? rel.generic_string() : absTarget.generic_string();
+    // Percent-encode so tinygltf::URIDecode round-trips filesystem paths that contain `+` or `%`.
+    storedUri = tinygltf::utils::encodePathAsUri(rawUri);
   }
 
   // Capture pre-mutation sizes so we can roll back all additions on any failure.
@@ -2535,7 +2544,7 @@ void nvvkgltf::Scene::createRenderNodesForNode(int nodeID, const glm::mat4& worl
       const tinygltf::Value& ext = tinygltf::utils::getElementValue(node.extensions, EXT_MESH_GPU_INSTANCING_EXTENSION_NAME);
       const tinygltf::Value& attributes = ext.Get("attributes");
       size_t numInstances = handleGpuInstancing(attributes, renderNode, worldMatrix, nodeID, static_cast<int>(primIdx));
-      m_numTriangles += numTriangles * static_cast<int32_t>(numInstances);
+      m_numTriangles += static_cast<uint64_t>(numTriangles) * numInstances;
     }
     else
     {
@@ -3156,6 +3165,35 @@ bool nvvkgltf::Scene::collectRenderNodeIndices(const std::unordered_set<int>& no
   }
 
   return true;
+}
+
+//--------------------------------------------------------------------------------------------------
+//
+bool nvvkgltf::Scene::dirtyNodesReachGeometry() const
+{
+  const DirtyFlags& df = m_dirtyFlags;
+  if(df.allRenderNodesDirty || df.primitivesChanged || df.tlasVisibilityNeedsCpuSync || !df.renderNodesVk.empty()
+     || !df.renderNodesRtx.empty())
+    return true;
+
+  // Depth-first over the dirty subtrees. Each node is visited once, so overlapping dirty subtrees (a
+  // parent and its child both dirty) cost nothing extra and a malformed cycle cannot spin.
+  const std::vector<tinygltf::Node>& nodes = m_model.nodes;
+  std::vector<bool>                  visited(nodes.size(), false);
+  std::vector<int>                   stack(df.nodes.begin(), df.nodes.end());
+  while(!stack.empty())
+  {
+    const int nodeID = stack.back();
+    stack.pop_back();
+    if(nodeID < 0 || nodeID >= static_cast<int>(nodes.size()) || visited[nodeID])
+      continue;
+    visited[nodeID]            = true;
+    const tinygltf::Node& node = nodes[nodeID];
+    if(node.mesh >= 0)
+      return true;
+    stack.insert(stack.end(), node.children.begin(), node.children.end());
+  }
+  return false;
 }
 
 //--------------------------------------------------------------------------------------------------

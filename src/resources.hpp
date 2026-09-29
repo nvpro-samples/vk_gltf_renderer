@@ -28,14 +28,15 @@
 #include <bitset>
 #include <cstdint>
 #include <memory>
+#include <string>
 #include <unordered_set>
 
 #include <glm/glm.hpp>
+#include <glm/gtc/quaternion.hpp>
 #include <glm/ext/scalar_constants.hpp>
 
 #include "shaders/shaderio.h"  // Shared between host and device
 
-#include <nvgui/sky.hpp>
 #include <nvshaders_host/hdr_env_dome.hpp>
 #include <nvshaders_host/tonemapper.hpp>
 #include <nvslang/slang.hpp>
@@ -81,6 +82,65 @@ enum DirtyFlags
   eNumDirtyFlags  // Keep last - Number of dirty flags
 };
 
+// Questions about an environment type, asked in several places and answered once. Free functions
+// rather than members: they are properties of the enum, and both the renderer and the Environment
+// panel need them.
+
+// True when `env` has an analytic background field the renderer can evaluate per ray -- the
+// sun-bearing counterpart of the baked lighting image. Mirrors hasAuthoredSkyBackground() in
+// shaders/sky_background.h.slang, which is the shader-side authority.
+inline bool hasAuthoredSkyBackground(shaderio::EnvSystem env)
+{
+  return env == shaderio::EnvSystem::ePlain || env == shaderio::EnvSystem::eGradient;
+}
+
+// True when `env` is an analytic sky EnvBaker produces a lat-long image for, rather than one that
+// arrives from a file.
+inline bool isBakedEnvironment(shaderio::EnvSystem env)
+{
+  return env == shaderio::EnvSystem::ePlain || env == shaderio::EnvSystem::eGradient || env == shaderio::EnvSystem::eSky;
+}
+
+// The SkyType the bake dispatches for an environment, or -1 when `env` is not a sky the bake
+// produces at all (HDR, or none).
+//
+// Two of them because the questions differ: authoredSkyType is "which authored OMI type is this",
+// which the per-ray background pass asks; bakeSkyType additionally maps the physical sky onto its
+// Bruneton evaluator, which only the bake needs to know.
+inline int authoredSkyType(shaderio::EnvSystem env)
+{
+  switch(env)
+  {
+    case shaderio::EnvSystem::ePlain:
+      return int(shaderio::SkyType::ePlain);
+    case shaderio::EnvSystem::eGradient:
+      return int(shaderio::SkyType::eGradient);
+    default:
+      return -1;  // Not an authored sky: the HDR / physical / none background paths apply.
+  }
+}
+
+inline int bakeSkyType(shaderio::EnvSystem env)
+{
+  if(env == shaderio::EnvSystem::eSky)
+    return int(shaderio::SkyType::ePhysicalBruneton);
+  return authoredSkyType(env);
+}
+
+// True when `env` is a sky that has a sun at all -- the two analytic types that draw one. Plain has
+// none, and a panorama's sun is already in its image.
+inline bool skyHasSun(shaderio::EnvSystem env)
+{
+  return env == shaderio::EnvSystem::eSky || env == shaderio::EnvSystem::eGradient;
+}
+
+// True when turning `env` (Settings::envRotation) changes anything: a panorama, and the two skies
+// with a sun. A plain sky looks the same from every direction, and None has nothing to turn.
+inline bool environmentTurns(shaderio::EnvSystem env)
+{
+  return env == shaderio::EnvSystem::eHdr || skyHasSun(env);
+}
+
 struct Settings
 {
   RenderingMode           renderSystem           = RenderingMode::ePathtracer;          // Renderer to use
@@ -102,20 +162,116 @@ struct Settings
   bool                    showStatisticsWindow   = false;  // Show Statistics window
   bool                    showSceneBrowserWindow = true;   // Show Scene Browser window
   bool                    showInspectorWindow    = true;   // Show Inspector window
-  bool      showInteractivityWindow = false;  // Show KHR_interactivity Graphs window (opt-in, unlike the above)
-  bool      showAgenticWindow       = false;  // Show Agentic bridge window
-  bool      showGridSettingsWindow  = false;  // Show Grid & Snap settings window
-  float     hdrEnvIntensity         = 1.0f;   // Intensity of the environment (HDR)
-  float     hdrEnvRotation          = 0.0f;   // Rotation of the HDR environment, in DEGREES (-180..180)
-  float     hdrBlur                 = 0.0f;   // Blur of the environment (HDR)
-  glm::vec3 silhouetteColor         = {0.933f, 0.580f, 0.180f};  // Color of the silhouette
-  bool      useSolidBackground      = false;                     // Use solid background color
-  glm::vec3 solidBackgroundColor    = {0.0f, 0.0f, 0.0f};        // Solid background color
-  int       maxFrames               = {500};                     // Maximum number of frames to render
-  // Sun position as the UI and the command line express it. sunDirection in skyParams stays the
+  bool  showInteractivityWindow = false;  // Show KHR_interactivity Graphs window (opt-in, unlike the above)
+  bool  showAgenticWindow       = false;  // Show Agentic bridge window
+  bool  showGridSettingsWindow  = false;  // Show Grid & Snap settings window
+  float hdrEnvIntensity         = 1.0f;   // Intensity of the environment (HDR)
+  // The environment's orientation: a unit quaternion taking its own frame to world, stored x, y, z, w
+  // -- OMI_environment_sky's `rotation`, verbatim, and the only orientation any environment has. It
+  // turns the HDR image, every analytic sky, and the compass Time of Day places the sun with.
+  // Stored as given (the command line may not normalise it); read through envRotationQuat().
+  glm::vec4 envRotation          = {0.0f, 0.0f, 0.0f, 1.0f};
+  float     hdrBlur              = 0.0f;                      // Blur of the environment (HDR)
+  glm::vec3 silhouetteColor      = {0.933f, 0.580f, 0.180f};  // Color of the silhouette
+  bool      useSolidBackground   = false;                     // Use solid background color
+  glm::vec3 solidBackgroundColor = {0.0f, 0.0f, 0.0f};        // Solid background color
+  int       maxFrames            = {500};                     // Maximum number of frames to render
+  // Sun position as the UI and the command line express it. Resources::sunDirection stays the
   // single source of truth; these are kept in sync with it both ways (see syncSunAngles).
-  float     skySunAzimuth           = 90.0f;                     // degrees
-  float     skySunElevation         = 45.0f;                     // degrees
+  float sunAzimuth   = 90.0f;  // degrees
+  float sunElevation = 45.0f;  // degrees
+
+  // Time of Day: where and when, from which the two angles above are computed (src/sun_position.*).
+  //
+  // Convenience state, and ini-only on purpose. OMI_environment_sky has no field for a place or a
+  // date -- it describes a medium, not a moment -- so writing them would fork the schema for
+  // something the sun's direction already captures exactly. What travels with the scene is the
+  // marked sun light's rotation; these reconstruct the widget on the same machine.
+  //
+  // todDate and todUtcOffset are seeded from the system clock at start-up, so a fresh install
+  // opens on today rather than on an arbitrary epoch.
+  float       todHour      = 12.0f;   // local clock hours past midnight, at todUtcOffset
+  float       todLatitude  = 47.37f;  // Zurich
+  float       todLongitude = 8.54f;
+  float       todUtcOffset = 1.0f;          // hours east of UTC, as a clock offset (not a time zone)
+  std::string todDate      = "2026-01-01";  // yyyy-mm-dd
+  // Write-only: picking a city overwrites the three above and nothing reads it back, which is why
+  // it does not persist -- restoring it after them would undo whatever was edited since. The panel
+  // derives the name it shows from the coordinates instead (sun_position::cityAt).
+  std::string todCity;
+
+  // Physical sky (Bruneton). Kept here, in the same place as every other user-settable value,
+  // rather than inside SkyBruneton -- that class owns GPU resources, not user intent, and
+  // SettingsRegistry needs a stable address.
+  //
+  // Altitude is in metres because that is what a person types; SkyBruneton works in kilometres.
+  float atmoSunAngularRadius = 0.004675f;  // radians; Earth's sun is 0.00935/2
+  float atmoObserverAltitude = 300.0f;     // metres above the planet surface
+  // Aerial perspective: how much air the scene contains between the eye and a surface. A distance
+  // multiplier on glTF's metre, so 1.0 means "this scene is in metres, as the format says" and 2.0
+  // means "treat it as twice the size"; 0 switches the term off. A viewer setting rather than scene
+  // data -- it describes how big the model is meant to be, which no extension has a field for.
+  float     atmoAerialPerspectiveScale = 1.0f;
+  glm::vec3 atmoGroundAlbedo           = {0.1f, 0.1f, 0.1f};  // linear; what the ground reflects
+
+  // The rest of the atmosphere: what the planet is made of, and how big it is.
+  //
+  // These describe a *world*, and all of them are scene data: they arrive from the glTF and go
+  // back out to it -- the first six through OMI_environment_sky's `physical` type, the rest
+  // through the NV_environment_sky_atmosphere block beside it.
+  //
+  // Persisted all the same, because the scene cannot lose: a load overwrites them outright, and it
+  // happens after the .ini is restored. So persistence only decides what you get when *no* scene
+  // carries an atmosphere, and there the answer should be the one you last chose.
+  //
+  // Units are km and km^-1 throughout, matching SkyBruneton. OMI states m^-1; that conversion
+  // happens at the file boundary, not here.
+  glm::vec3 atmoRayleighScattering = {0.00580234f, 0.0135578f, 0.0331f};
+  // Haze. Upstream's Bruneton demo uses 0.003996, which is an aerosol optical depth of about 0.005 --
+  // cleaner than the cleanest place on Earth, and it shows: it left the sun outrunning the sky by
+  // 2-3x at every elevation. Measured direct-to-diffuse illuminance on a horizontal surface against
+  // a real clear day:
+  //
+  //     elevation      60     45     30     15
+  //     upstream     13.4   11.1    8.0    4.0
+  //     here          6.0    4.9    3.5    1.7
+  //     measured    ~6-7     ~5     ~3    ~1.3
+  //
+  // 0.06 /km is an optical depth of ~0.08, which is a clear continental day rather than a mountain
+  // observatory. It barely changes how much light reaches the scene (total illuminance moves under
+  // 1%); what it changes is the *balance*, which is what was wrong.
+  glm::vec3 atmoMieScattering       = {0.06f, 0.06f, 0.06f};
+  float     atmoMieAnisotropy       = 0.8f;                         // Cornette-Shanks g; forward-scattering at g > 0
+  glm::vec3 atmoSolarIrradiance     = {1.474f, 1.8504f, 1.91198f};  // W/m^2 at the top of the atmosphere
+  float     atmoRayleighScaleHeight = 8.0f;                         // km; the air thins by 1/e over this height
+  float     atmoMieScaleHeight      = 1.2f;                         // km; aerosols hug the ground far more closely
+  // Single-scattering albedo of the aerosol: what fraction of what it removes it scatters rather
+  // than absorbs. Extinction is derived from it, because that is the ratio people reason about --
+  // "how sooty is the haze" -- and because OMI carries no absorption field at all.
+  float     atmoMieAlbedo       = 0.9f;
+  glm::vec3 atmoOzoneExtinction = {0.000649717f, 0.0018809f, 8.50167e-05f};  // 1/km
+  float     atmoOzoneCenter     = 25.0f;                                     // km; peak of the ozone tent
+  float     atmoOzoneWidth      = 30.0f;                                     // km; full width of the tent, zero to zero
+  float     atmoBottomRadius    = 6360.0f;                                   // km; planet radius
+  float     atmoThickness       = 60.0f;                                     // km; atmosphere depth above the surface
+  // Applying a preset overwrites every field above. It is an action rather than a mode: nothing
+  // reads it back, and the UI works out which preset (if any) the current values match.
+  int atmoPreset = 0;  // AtmospherePresetIndex
+
+  // Authored sky parameters (glTF OMI_environment_sky). Defaults match the extension's own. When a
+  // loaded scene carries the extension it overwrites these; they are the fallback for every scene
+  // that does not, and what the user edits in the Environment panel.
+  glm::vec3 plainColor           = {0.5f, 0.5f, 0.5f};
+  glm::vec3 gradientBottomColor  = {0.2f, 0.169f, 0.133f};
+  glm::vec3 gradientHorizonColor = {0.646f, 0.656f, 0.67f};
+  glm::vec3 gradientTopColor     = {0.385f, 0.454f, 0.55f};
+  glm::vec3 gradientSunColor     = {1.0f, 1.0f, 1.0f};
+  float     gradientBottomCurve  = 0.02f;  // Horizon -> bottom falloff
+  float     gradientTopCurve     = 0.15f;  // Horizon -> top falloff
+  float     gradientSunAngleMax  = 1.74f;  // Angular extent of the sun glow (radians)
+  float     gradientSunCurve     = 0.05f;  // Disk -> sky falloff across the glow
+  // Write OMI_environment_sky when saving the scene. Off keeps the viewer non-authoring.
+  bool      envSaveToGltf           = false;
   bool      useInfinitePlane        = false;                     // Use infinite plane
   bool      isShadowCatcher         = true;                      // Infinite place only catch shadow
   float     infinitePlaneDistance   = 0;                         // Distance/height of the infinite plane
@@ -136,6 +292,15 @@ struct Settings
   bool showGridStyleWindow  = false;  // Show Grid Style debug window
   bool showGizmoStyleWindow = false;  // Show Gizmo Style debug window
 #endif
+
+  // `envRotation` as a quaternion, normalised. The stored value may not be unit -- the command line
+  // and MCP write it verbatim -- and a zero-length one is no rotation at all, so it reads as identity.
+  [[nodiscard]] glm::quat envRotationQuat() const
+  {
+    const glm::quat q(envRotation.w, envRotation.x, envRotation.y, envRotation.z);
+    const float     len = glm::length(q);
+    return (len > 1e-6f) ? q / len : glm::quat(1.0f, 0.0f, 0.0f, 0.0f);
+  }
 };
 
 
@@ -170,20 +335,41 @@ struct Resources
   const nvvkgltf::Scene* getScene() const { return scene.get(); }
 
   // Resources
-  nvvk::HdrIbl          hdrIbl;  // HDR environment map
+  nvvk::HdrIbl hdrIbl;  // HDR environment map
+
+  // The physical sky's scattering LUTs, as the shading passes see them.
+  //
+  // Both renderers build their pipeline layouts from Resources and neither should have to know
+  // which class owns the tables, so SkyBruneton publishes its runtime set here once at start-up --
+  // the same shape `hdrIbl` above already has, minus the ownership. Valid for the whole session:
+  // the images are allocated at init and only their *contents* change when the atmosphere does.
+  //
+  // Read by aerial perspective (shaders/aerial_perspective.h.slang). The bake reaches the same set
+  // directly, because EnvBaker is handed it at init.
+  VkDescriptorSetLayout skyLutDescriptorSetLayout{};
+  VkDescriptorSet       skyLutDescriptorSet{};
   nvshaders::HdrEnvDome hdrDome;
   // Main frame target (tonemapped + rendered + selection + depth). Accessor cheat sheet:
   //   raster attachment  -> getColorAttachmentView() / getDepthImageView()
   //   compute write      -> getColorStorageImageInfo()
   //   sampled read       -> getColorSampleDescriptorImageInfo(..., linearSampler)
   //   ImGui              -> getUiImageView() + tonemappedUi
-  nvvk::RenderTarget                          gBuffers;
-  nvapp::ImTexture                            tonemappedUi{};   // Viewport display (eImgTonemapped only)
-  VkSampler                                   linearSampler{};  // Linear sampler (visual helpers, etc.)
-  nvvk::Buffer                                bFrameInfo;       // Scene/Frame information
-  nvvk::Buffer                                bSkyParams;       // Sky parameters
-  shaderio::SkyPhysicalParameters             skyParams{};      // Sky parameters
-  nvshaders::Tonemapper                       tonemapper{};     // Tonemapper
+  nvvk::RenderTarget gBuffers;
+  nvapp::ImTexture   tonemappedUi{};   // Viewport display (eImgTonemapped only)
+  VkSampler          linearSampler{};  // Linear sampler (visual helpers, etc.)
+  nvvk::Buffer       bFrameInfo;       // Scene/Frame information
+  // The sky's sun. Every sky type with a sun reads it, and the light the renderer supplies for
+  // that sun aims along it. Driven by sunAzimuth/sunElevation -- themselves driven by the Time of
+  // Day widget -- unless the scene marks one of its directional lights as the sun, in which case
+  // that light owns the direction and this follows it (see GltfRenderer::syncSunFromMarkedLight).
+  // It used to live inside the MDL sky's parameter block, which is why it survived that sky's
+  // deletion while nothing else in it did.
+  //
+  // `sunYIsUp` is not a constant: it tracks the camera's up axis, because a Z-up scene has to
+  // interpret the same azimuth/elevation pair differently.
+  glm::vec3                                   sunDirection{-1.23413404e-08F, 0.707106829F, 0.707106709F};
+  bool                                        sunYIsUp{true};
+  nvshaders::Tonemapper                       tonemapper{};                       // Tonemapper
   shaderio::TonemapperData                    tonemapperData{.autoExposure = 1};  // Tonemapper data
   std::shared_ptr<nvutils::CameraManipulator> cameraManip;         // Camera manipulator (owned by GltfRenderer)
   std::filesystem::path                       headlessOutputPath;  // --output: override for headless image save path

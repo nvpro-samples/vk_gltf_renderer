@@ -37,11 +37,12 @@ static bool doDebug = false;
 #include "get_hit.h.slang"
 #include "dlss_util.h"
 #include "common.h.slang"
+#include "aerial_perspective.h.slang"
+#include "sky_bruneton_radiance.h.slang"
 
 // NVSHADERS are under: https://github.com/nvpro-samples/nvpro_core2/tree/main/nvshaders
 #include "nvshaders/functions.h.slang"
 #include "nvshaders/random.h.slang"
-#include "nvshaders/sky_functions.h.slang"
 #include "nvshaders/bsdf_types.h.slang"
 #include "nvshaders/bsdf_functions.h.slang"
 #include "nvshaders/hdr_env_sampling.h.slang"
@@ -68,6 +69,31 @@ static bool doDebug = false;
 
 // HDR Environment
 [[vk::binding(EnvBindings::eImpSamples, 2)]]    StructuredBuffer<EnvAccel> envSamplingData;
+
+// Set 3 is SkyBruneton's runtime set -- the four scattering LUTs and the atmosphere they were
+// built from -- bound for aerial perspective alone. The bake reads the same set at index 1 of its
+// own layout; a set number is a property of the pipeline, not of the resources, so the shared
+// header takes them as arguments rather than declaring them.
+[[vk::binding(0, 3)]] Sampler2D<float3>                       g_transmittance;
+[[vk::binding(1, 3)]] Sampler3D<float4>                       g_scattering;
+[[vk::binding(2, 3)]] Sampler3D<float4>                       g_singleMie;
+[[vk::binding(3, 3)]] Sampler2D<float3>                       g_irradiance;
+[[vk::binding(4, 3)]] ConstantBuffer<SkyAtmosphereParameters> g_atmosphere;
+
+// What a camera ray or a mirror bounce sees of the physical sky: its radiance, evaluated per ray
+// through the same function the bake uses, plus the solar disk. Per ray rather than read from the
+// baked image so what the camera sees does not depend on the bake resolution -- the horizon, where
+// sky meets ground in a hard edge, is what a lat-long would otherwise smear.
+float3 evalPhysicalSkyBackground(float3 worldDir, SceneFrameInfo* frameInfo)
+{
+  const float3 dir    = quatRotateInverse(frameInfo->envRotation, worldDir);
+  const float3 sunDir = quatRotateInverse(frameInfo->envRotation, frameInfo->sunDirection);
+  // observerRadius is the bake's: selecting the physical sky commits a bake at the top of the frame,
+  // before any frame that draws it is recorded (GltfRenderer::applyPendingEnvironmentRefresh).
+  const float3 sky = evalBrunetonSkyRadiance(g_atmosphere, g_transmittance, g_scattering, g_singleMie, g_irradiance,
+                                             frameInfo->sunDisk->observerRadius, dir, sunDir);
+  return sky + evalSunDiskBackground(dir, frameInfo);
+}
 
 // Specialization constants
 [[vk::constant_id(0)]]  int USE_SER = 1;
@@ -143,15 +169,49 @@ PathStepResult pathTraceOneBounce(IRaytracer raytracer, inout RayDesc ray, inout
       }
 #endif  // USE_DLSS_SHADER
 
-      // Add sky or HDR texture using refactored helper
-      float3 envColor;
-      float  envPdf;
-      sampleEnvironment(ray.Direction, frameInfo, envColor, envPdf);
+      // A ray that left a delta/specular event -- a camera ray, or a mirror bounce -- must see the
+      // *background* field, not the lighting one: a mirror has to show a sharp sun. That is safe
+      // precisely here and nowhere else -- next-event estimation cannot reach a delta lobe, so the
+      // sun cannot be counted twice. Any other bounce gets the disk-free lighting field, plus the
+      // sun disk weighted against the NEE sample that also reaches it. See sky_background.h.slang.
+      //
+      // Every sky that has a background field evaluates it per ray, so what the camera sees does
+      // not depend on the bake resolution. The physical sky's is its per-ray radiance plus the disk
+      // (sunDisk is non-null for that sky alone); the lighting field it replaces is the same
+      // function, baked, so the two agree everywhere but in sharpness.
+      float3     envColor;
+      float      envPdf = 0.0F;  // unread on a delta bounce: the MIS weight there is 1 whatever it is
+      const bool delta  = pt.lastSamplePdf == DIRAC;
+      if(delta && hasAuthoredSkyBackground(frameInfo->envSkyType))
+      {
+        const float3 bgDir = quatRotateInverse(frameInfo->envRotation, ray.Direction);
+        envColor           = evalAuthoredSkyBackground(bgDir, frameInfo) * frameInfo->envIntensity;
+      }
+      else if(delta && frameInfo->sunDisk != nullptr)
+      {
+        envColor = evalPhysicalSkyBackground(ray.Direction, frameInfo) * frameInfo->envIntensity;
+      }
+      else
+      {
+        // The lighting field: the baked image for a sky, the file for an HDR.
+        sampleEnvironment(ray.Direction, frameInfo, envColor, envPdf);
+      }
 
       // We may hit the environment twice: once via sampleLights() and once when hitting the sky while probing
       // for more indirect hits. This is the counter part of the MIS weighting in sampleLights()
       float misWeight = computeEnvHitMisWeight(pt.lastSamplePdf, envPdf);
+
       pt.radiance += pt.throughput * misWeight * envColor;
+
+      // The sun the lighting field leaves out. Without it a lobe narrower than the disk -- smooth
+      // glass, a polished mirror -- shows no sun at all, as NEE's cone samples almost never land in it.
+      if(!delta)
+      {
+        const float3 bgDir = quatRotateInverse(frameInfo->envRotation, ray.Direction);
+        const float3 disk  = evalSkySunDisk(bgDir, frameInfo);
+        if(any(disk > 0.0F))
+          pt.radiance += pt.throughput * computeSkySunHitMisWeight(pt.lastSamplePdf) * disk * frameInfo->envIntensity;
+      }
 
       return PathStepResult.eBreak;
     }
@@ -178,6 +238,10 @@ PathStepResult pathTraceOneBounce(IRaytracer raytracer, inout RayDesc ray, inout
       {
         // Propagate cone through plane bounce before potential early continue from shadow-catcher path.
         pt.cone.width = worldFoot;
+        // What the catcher shows is the environment behind it, which already carries the whole
+        // atmosphere; aerial perspective at the plane would haze it a second time.
+        if(firstRay)
+          pt.firstHitHazed = false;
         bool continuePath =
             handleShadowCatcher(raytracer, hit, pbrMat, ray, pt.radiance, pt.throughput, pt.lastSamplePdf, seed, frameInfo);
         if(!continuePath)
@@ -508,6 +572,38 @@ SampleResult pathTrace(IRaytracer raytracer, RayDesc ray, inout uint seed)
   if(pt.firstHitWireframeAlpha > 0.0)
     pt.radiance = lerp(pt.radiance, float3(0.9, 0.0, 0.0), pt.firstHitWireframeAlpha);
 #endif
+
+  // Aerial perspective, applied once to the finished path rather than per bounce: what it
+  // models is the air in the *first* segment, between the eye and whatever the camera ray
+  // hit, and every later bounce reaches the eye through exactly that same segment.
+  //
+  // `pt.solid` is the primary-hit test -- a miss saw the sky, which already integrated the whole
+  // atmosphere, and hazing it a second time would grey out the horizon it just drew.
+  if(pt.solid && pt.firstHitHazed && hasAerialPerspective(pushConst.frameInfo))
+  {
+    const float3 eye = pushConst.frameInfo->viewInv[3].xyz;
+    const float2 u   = float2(rand(seed), rand(seed));
+    AerialMarch  march =
+        evalAerialPerspective(pt.firstHitPos, eye, pushConst.frameInfo, g_atmosphere, g_transmittance, g_irradiance, u);
+
+    // The atmosphere lights every point of the segment with the sun; the scene may not. One
+    // shadow ray from a point picked in proportion to the sun's share turns that share into an
+    // unbiased estimate of what actually reaches the air -- so the air inside a helmet, a room or
+    // a canyon is dark, and shafts form where the sun gets through. Only the sun's direct term:
+    // the multiple scattering is light from the whole sky and is left unshadowed.
+    float3 inScatter = march.inScatter;
+    if(any(march.sunEstimate > 0.0F))
+    {
+      RayDesc shadowRay;
+      shadowRay.Origin        = lerp(eye, pt.firstHitPos, march.sunPoint);
+      shadowRay.Direction     = pushConst.frameInfo->sunDirection;
+      shadowRay.TMin          = 0.0F;
+      shadowRay.TMax          = INFINITE;
+      const float3 visibility = raytracer.TraceShadow(shadowRay, seed);
+      inScatter += visibility * march.sunEstimate - march.sunInScatter;
+    }
+    pt.radiance = pt.radiance * march.transmittance + inScatter;
+  }
 
   return packSampleResult(pt);
 }

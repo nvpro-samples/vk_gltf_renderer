@@ -48,6 +48,7 @@
 
 
 #include "gltf_scene_vk.hpp"
+#include "staging_config.hpp"
 
 namespace nvvkgltf {
 
@@ -65,23 +66,18 @@ static void fillPerRenderNodeInstanceLocals(const Scene& scn, std::vector<glm::m
   const auto& gpuMap = scn.getGpuInstanceLocalMatrices();
   out.assign(rns.size(), glm::mat4(1.f));
 
-  for(size_t i = 0; i < rns.size(); ++i)
+  // Walk each instanced node's render-node list once: position k in that list is instance
+  // k % count. Searching the list per render node would be quadratic in the instance count.
+  for(const auto& [nodeID, locals] : gpuMap)
   {
-    int nodeID = rns[i].refNodeID;
-    if(nodeID < 0)
+    if(locals.empty())
       continue;
-    auto it = gpuMap.find(nodeID);
-    if(it == gpuMap.end() || it->second.empty())
-      continue;
-
     const auto& rnList = reg.getRenderNodesForNode(nodeID);
     for(size_t k = 0; k < rnList.size(); ++k)
     {
-      if(rnList[k] == static_cast<int>(i))
-      {
-        out[i] = it->second[k % it->second.size()];
-        break;
-      }
+      const int rnID = rnList[k];
+      if(rnID >= 0 && static_cast<size_t>(rnID) < out.size())
+        out[rnID] = locals[k % locals.size()];
     }
   }
 }
@@ -114,6 +110,10 @@ bool canUseGpuTransformPath(const TransformComputeVk& tc, const Scene& scn, cons
   if(df.nodes.empty())
     return false;
   if(!df.materials.empty())
+    return false;
+  // Only mesh-less nodes moved (e.g. the sky's sun light): nothing for the compute pass to write and
+  // no TLAS instance to refit. The CPU path handles that frame for the cost of a light upload.
+  if(!scn.dirtyNodesReachGeometry())
     return false;
 
   const auto& rns  = scn.getRenderNodes();
@@ -274,6 +274,15 @@ void TransformComputeVk::markGpuStale()
 }
 
 //--------------------------------------------------------------------------------------------------
+// Flag just these nodes' GPU local matrices as out of date. For a CPU frame that moved only
+// mesh-less nodes: re-uploading every local on the next GPU frame (markGpuStale) would turn each
+// frame of, say, a sun drag into a full-scene upload waiting for the next mesh edit.
+void TransformComputeVk::markLocalsStale(const std::unordered_set<int>& nodes)
+{
+  m_pendingLocalUploads.insert(nodes.begin(), nodes.end());
+}
+
+//--------------------------------------------------------------------------------------------------
 // Recreate GPU buffers if the scene topology changed (node/render-node count or graph revision).
 // Returns true if the buffers were rebuilt this call (createGpuBuffers ran and already appended a
 // full local-matrix upload), so the caller can skip its own redundant per-node upload for this frame.
@@ -410,10 +419,10 @@ void TransformComputeVk::createGpuBuffers(nvvk::CmdUploaderInterface& staging, c
   const auto& topoOrder = scn.getTopoNodeOrder();
 
   NVVK_CHECK(m_alloc->createBuffer(m_bNodeParents, parents.size() * sizeof(int32_t), kSsboUsage));
-  NVVK_CHECK(staging.appendBuffer(m_bNodeParents, 0, std::span(parents)));
+  NVVK_CHECK(appendBufferChunked(staging, m_bNodeParents, 0, std::span<const int32_t>(parents)));
 
   NVVK_CHECK(m_alloc->createBuffer(m_bTopoNodeOrder, topoOrder.size() * sizeof(int32_t), kSsboUsage));
-  NVVK_CHECK(staging.appendBuffer(m_bTopoNodeOrder, 0, std::span(topoOrder)));
+  NVVK_CHECK(appendBufferChunked(staging, m_bTopoNodeOrder, 0, std::span<const int32_t>(topoOrder)));
 
   std::vector<shaderio::RenderNodeGpuMapping> mappings(numRenderNodes);
   const auto&                                 rns = scn.getRenderNodes();
@@ -423,18 +432,18 @@ void TransformComputeVk::createGpuBuffers(nvvk::CmdUploaderInterface& staging, c
   }
 
   NVVK_CHECK(m_alloc->createBuffer(m_bRenderNodeMappings, std::span(mappings).size_bytes(), kSsboUsage));
-  NVVK_CHECK(staging.appendBuffer(m_bRenderNodeMappings, 0, std::span(mappings)));
+  NVVK_CHECK(appendBufferChunked(staging, m_bRenderNodeMappings, 0, std::span<const shaderio::RenderNodeGpuMapping>(mappings)));
 
   std::vector<glm::mat4> instLocals;
   fillPerRenderNodeInstanceLocals(scn, instLocals);
   NVVK_CHECK(m_alloc->createBuffer(m_bGpuInstLocalMatrices, std::span(instLocals).size_bytes(), kSsboUsage));
-  NVVK_CHECK(staging.appendBuffer(m_bGpuInstLocalMatrices, 0, std::span(instLocals)));
+  NVVK_CHECK(appendBufferChunked(staging, m_bGpuInstLocalMatrices, 0, std::span<const glm::mat4>(instLocals)));
 
   const VkDeviceSize matBytes = numNodes * sizeof(glm::mat4);
   NVVK_CHECK(m_alloc->createBuffer(m_bLocalMatrices, matBytes, kSsboUsage));
   NVVK_CHECK(m_alloc->createBuffer(m_bWorldMatrices, matBytes, kSsboUsage));
 
-  NVVK_CHECK(staging.appendBuffer(m_bLocalMatrices, 0, std::span(scn.getNodesLocalMatrices())));
+  NVVK_CHECK(appendBufferChunked(staging, m_bLocalMatrices, 0, std::span<const glm::mat4>(scn.getNodesLocalMatrices())));
 
   NVVK_DBG_NAME(m_bNodeParents.buffer);
   NVVK_DBG_NAME(m_bTopoNodeOrder.buffer);
@@ -508,7 +517,9 @@ void TransformComputeVk::dispatchTransformUpdate(VkCommandBuffer cmd,
   }
   else
   {
-    for(int nodeID : df.nodes)
+    // This frame's dirty nodes, plus any a CPU frame changed without uploading (markLocalsStale).
+    m_pendingLocalUploads.insert(df.nodes.begin(), df.nodes.end());
+    for(int nodeID : m_pendingLocalUploads)
     {
       if(nodeID < 0 || static_cast<size_t>(nodeID) >= numNodes)
         continue;
@@ -516,6 +527,7 @@ void TransformComputeVk::dispatchTransformUpdate(VkCommandBuffer cmd,
       NVVK_CHECK(staging.appendBuffer(m_bLocalMatrices, offset, std::span(&locals[static_cast<size_t>(nodeID)], 1)));
     }
   }
+  m_pendingLocalUploads.clear();  // every branch above leaves all locals current
 
   staging.cmdUploadAppended(cmd);
   nvvk::cmdMemoryBarrier(cmd, VK_PIPELINE_STAGE_2_TRANSFER_BIT, VK_PIPELINE_STAGE_2_COMPUTE_SHADER_BIT,

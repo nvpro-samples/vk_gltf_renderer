@@ -18,6 +18,20 @@ cmake --build build --target vk_gltf_renderer_tests
 cmake --build build --target vk_gltf_renderer_benchmarks
 ```
 
+### Sample assets
+
+Many tests load models from a [glTF-Sample-Assets](https://github.com/KhronosGroup/glTF-Sample-Assets)
+checkout and **skip silently** (reported as passed/skipped, not failed) when it is absent. Point the
+build at it with the `GLTF_SAMPLE_ASSETS_PATH` CMake cache variable; the configure summary prints the
+value it picked up.
+
+```bash
+cmake -B build -DBUILD_TESTING=ON -DGLTF_SAMPLE_ASSETS_PATH=/path/to/glTF-Sample-Assets
+```
+
+The environment variable of the same name is only read when the cache entry does not exist yet, so
+setting it after the first configure has no effect — pass `-D` (or delete the cache entry) instead.
+
 ## Running Tests
 
 ### Via CTest (recommended)

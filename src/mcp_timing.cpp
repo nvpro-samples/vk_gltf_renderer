@@ -126,12 +126,13 @@ TimerMeasurement GltfRenderer::measureTimer(const std::string& name, int warmup,
   // Still loading when the wait ran out: sampling now would time a partial scene and report that
   // understatement as a result. Fail instead -- a timeout the caller can retry beats a wrong number.
   if(m_busy.isBusy())
-    return TimerMeasurement::failure("the renderer was still loading after 120 s; measuring now would time a "
-                                     "partially loaded scene. Retry once the load completes.");
+    return TimerMeasurement::failure(
+        "the renderer was still loading after 120 s; measuring now would time a "
+        "partially loaded scene. Retry once the load completes.");
 
-  uint32_t lastIndex     = 0;
-  bool     haveIndex     = false;
-  bool     timelineGone  = false;  // set when teardown released the timeline mid-measurement
+  uint32_t lastIndex    = 0;
+  bool     haveIndex    = false;
+  bool     timelineGone = false;  // set when teardown released the timeline mid-measurement
 
   const auto nextSample = [&](double& outMicroseconds) {
     // Generous per-frame budget: a heavy scene at a high sample count can take a while, and
@@ -215,6 +216,7 @@ TimerMeasurement GltfRenderer::measureTimer(const std::string& name, int warmup,
           .maximum           = *high};
 }
 
+
 //--------------------------------------------------------------------------------------------------
 // The MCP endpoint.
 
@@ -254,16 +256,15 @@ std::shared_ptr<nvmcp::Element> createTimingMcpServer(const McpTimingCreateInfo&
             auto renderer = weak.lock();
             if(!renderer)
               return nvmcp::ToolResult::error(R"({"error":"renderer is shutting down"})");
-            const auto   start    = std::chrono::steady_clock::now();
-            const bool   compiled = renderer->reloadShaders();
+            const auto start    = std::chrono::steady_clock::now();
+            const bool compiled = renderer->reloadShaders();
             const double ms = std::chrono::duration<double, std::milli>(std::chrono::steady_clock::now() - start).count();
             if(!compiled)
-              return nvmcp::ToolResult::error(
-                  Json{{"error",
-                        "shader compilation failed; the renderer is now running the build-time embedded SPIR-V, "
-                        "not the edited source. Read nvpro_get_logs for the compiler diagnostics."},
-                       {"compileMilliseconds", ms}}
-                      .dump());
+              return nvmcp::ToolResult::error(Json{
+                  {"error",
+                   "shader compilation failed; the renderer is now running the build-time embedded SPIR-V, "
+                   "not the edited source. Read nvpro_get_logs for the compiler diagnostics."},
+                  {"compileMilliseconds", ms}}.dump());
             return nvmcp::ToolResult::success(Json{{"compileMilliseconds", ms}}.dump());
           },
       // Destroys and recreates pipelines and drains the queue: application thread only.
@@ -318,7 +319,7 @@ std::shared_ptr<nvmcp::Element> createTimingMcpServer(const McpTimingCreateInfo&
             }
 
             const auto readCount = [&input](const char* key, int64_t defaultValue, int64_t low, int64_t& out) -> bool {
-              out = defaultValue;
+              out           = defaultValue;
               const auto it = input.find(key);
               if(it == input.end())
                 return true;

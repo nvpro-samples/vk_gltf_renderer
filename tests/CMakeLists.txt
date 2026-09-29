@@ -57,11 +57,22 @@ set(TEST_SOURCES
     test_interactivity_hover_select.cpp
     # AnimationPointerSystem: partial texture-extension writes preserve sibling fields
     test_animation_pointer.cpp
+    # Phase 1 (env pipeline): CPU-only unit test for nvvk::buildEnvAliasmap (Vose)
+    test_alias_table.cpp
+    # OMI_environment_sky serializer: round-trip incl. unmodelled-key passthrough
+    test_environment_sky.cpp
+    # Phase 5c: .sky.json presets -- round trip, the sun angle OMI has no field for, strangers' keys
+    test_sky_preset.cpp
+    ${CMAKE_SOURCE_DIR}/src/sky_preset.cpp
+    # Phase 5a: NOAA sun position, checked against astronomy rather than recorded output
+    test_sun_position.cpp
+    ${CMAKE_SOURCE_DIR}/src/sun_position.cpp
     # Need tinygltf implementation
     ${CMAKE_SOURCE_DIR}/src/tiny_stb_implementation.cpp
     # Optional external generation bridge
     ${CMAKE_SOURCE_DIR}/src/agentic_bridge.cpp
     # Local glTF scene implementation
+    ${CMAKE_SOURCE_DIR}/src/gltf_environment_sky.cpp
     ${CMAKE_SOURCE_DIR}/src/gltf_compact_model.cpp
     ${CMAKE_SOURCE_DIR}/src/gltf_compact_scene.cpp
     ${CMAKE_SOURCE_DIR}/src/gltf_material_cache.cpp
@@ -163,6 +174,7 @@ add_executable(${BENCHMARK_NAME}
     ${CMAKE_SOURCE_DIR}/src/tiny_stb_implementation.cpp
     # Local glTF scene implementation
     ${CMAKE_SOURCE_DIR}/src/gltf_animation_pointer.cpp
+    ${CMAKE_SOURCE_DIR}/src/gltf_environment_sky.cpp
     ${CMAKE_SOURCE_DIR}/src/gltf_compact_model.cpp
     ${CMAKE_SOURCE_DIR}/src/gltf_compact_scene.cpp
     ${CMAKE_SOURCE_DIR}/src/gltf_scene.cpp

@@ -95,7 +95,10 @@ auto main(int argc, char** argv) -> int
 
   // Global variables
   std::filesystem::path sceneFilename{};             // "shader_ball.gltf"};  // Default scene
+  std::filesystem::path saveSceneFilename{};         // --savefile: writes on change, never persisted
   std::filesystem::path hdrFilename{"std_env.hdr"};  // Default HDR
+  std::filesystem::path loadPresetFilename;          // --loadSkyPreset, applied on write
+  std::filesystem::path savePresetFilename;          // --saveSkyPreset, written on write
 #ifdef USE_AGENTIC
   std::string agenticBridgeRoot{};
   bool        agenticBridgeInit{false};
@@ -123,6 +126,20 @@ auto main(int argc, char** argv) -> int
                                }
                              }},
                         {".gltf"}, &sceneFilename);
+  // Saving is a parameter for the same reason loading is: one registration covers the command
+  // line, benchmark sequences and nvpro_set_parameters at once, and it runs on the application
+  // thread where touching the scene is legal. It is deliberately not persisted -- remembering a
+  // path that was already written would re-save on the next launch.
+  parameterRegistry.add({.name = "savefile",
+                         .help = "Write the current scene to this path (saves immediately when set at runtime)",
+                         .callbackSuccess =
+                             [&renderer, &saveSceneFilename](const nvutils::ParameterBase* const) {
+                               if(renderer && !renderer->save(saveSceneFilename))
+                               {
+                                 LOGW("savefile '%s' was not written.\n", nvutils::utf8FromPath(saveSceneFilename).c_str());
+                               }
+                             }},
+                        {".gltf", ".glb"}, &saveSceneFilename);
   parameterRegistry.add({.name = "hdrfile",
                          .help = "Input HDR filename (loads immediately when set at runtime)",
                          .callbackSuccess =
@@ -134,7 +151,27 @@ auto main(int argc, char** argv) -> int
                                       nvutils::utf8FromPath(hdrFilename).c_str());
                                }
                              }},
-                        {".hdr"}, &hdrFilename);
+                        {".hdr", ".exr"}, &hdrFilename);
+
+  // Sky presets. Actions, like hdrfile above: the value is a path and setting it does the thing,
+  // which is what makes them reachable from a benchmark sequence and from MCP without a second
+  // registration. Neither persists -- remembering "load this preset" would replay it next launch.
+  parameterRegistry.add({.name = "loadSkyPreset",
+                         .help = "Apply a .sky.json preset (loads immediately when set at runtime)",
+                         .callbackSuccess =
+                             [&renderer, &loadPresetFilename](const nvutils::ParameterBase* const) {
+                               if(renderer)
+                                 renderer->loadSkyPreset(loadPresetFilename);
+                             }},
+                        {".json"}, &loadPresetFilename);
+  parameterRegistry.add({.name = "saveSkyPreset",
+                         .help = "Write the current sky to a .sky.json",
+                         .callbackSuccess =
+                             [&renderer, &savePresetFilename](const nvutils::ParameterBase* const) {
+                               if(renderer)
+                                 renderer->saveSkyPreset(savePresetFilename);
+                             }},
+                        {".json"}, &savePresetFilename);
 #ifdef USE_AGENTIC
   parameterRegistry.add({"agenticBridgeRoot", "Root directory for the optional external generation bridge"}, &agenticBridgeRoot);
   parameterRegistry.add({"agenticBridgeInit", "Create the external generation bridge manifest/directories and exit"},
@@ -512,13 +549,44 @@ auto main(int argc, char** argv) -> int
     elemGltfRenderer->createHDR(hdrFilename);
   }
 
-  // In headless mode, prevent ImGui from writing the .ini back to disk:
-  if(appInfo.headless)
+  // Sky presets. Their parameter callbacks fire while the command line is being read, before this
+  // renderer exists, so the start-up values are handed over here -- and applied at the first frame
+  // top, not now: the ini restore and the scene's authored sky both land there and would otherwise
+  // overwrite the preset, or be missing from the one saved. At runtime the callbacks reach the
+  // renderer directly, so a benchmark sequence or an MCP write still applies immediately.
+  if(!loadPresetFilename.empty() || !savePresetFilename.empty())
+  {
+    elemGltfRenderer->queueStartupSkyPresets(loadPresetFilename, savePresetFilename);
+  }
+
+  // Do not let an automated run persist a UI layout.
+  //
+  // ImGui writes the .ini on exit, so any run that arranges the window for its own purposes
+  // leaves that arrangement behind as the user's layout. Headless was already guarded. Scripted
+  // runs were not, and they are worse: --benchmark hides the side panels and a capture script
+  // picks its own window size, so the layout that gets saved is one nobody chose -- and the next
+  // interactive session opens with panels missing and no clue why.
+  //
+  // A scripted run is not someone expressing a preference about where their panels go.
+  if(appInfo.headless || sequencerInfo.hasScript() || benchmarkOptions.enabled)
   {
     ImGui::GetIO().IniFilename = nullptr;
   }
 
   app.run();
+
+  // A start-up --savefile writes once the run is over, not during the parse: the callback above
+  // no-ops while `renderer` is still null, and even afterwards the scene is not fully set up
+  // until the first frame has applied deferred state (a glTF-authored sky among it). Saving here
+  // captures what was actually rendered. Setting savefile at runtime, from MCP or a benchmark
+  // sequence, goes through the callback and saves immediately.
+  if(!saveSceneFilename.empty() && elemGltfRenderer)
+  {
+    if(!elemGltfRenderer->save(saveSceneFilename))
+    {
+      LOGW("savefile '%s' was not written.\n", nvutils::utf8FromPath(saveSceneFilename).c_str());
+    }
+  }
 
   app.deinit();
 

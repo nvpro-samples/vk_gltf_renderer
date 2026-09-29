@@ -26,6 +26,7 @@
 
 #include "ui_inspector.hpp"
 #include "ui_xmp.hpp"
+#include "gltf_environment_sky.hpp"
 #include "undo_redo.hpp"
 #include "gltf_scene.hpp"
 #include "gltf_scene_editor.hpp"
@@ -837,8 +838,8 @@ std::string UiInspector::elementRefLabel(SceneSelection::SelectionType kind, int
         const tinygltf::Node& n = model.nodes[index];
         icon                    = n.mesh >= 0   ? ICON_MS_VIEW_IN_AR :
                                   n.camera >= 0 ? ICON_MS_CAMERA_ALT :
-                                  n.light >= 0  ? ICON_MS_LIGHTBULB :
-                                                  ICON_MS_CATEGORY;
+                                  n.light >= 0 ? (gltf_environment_sky::hasSkySunMarker(n) ? ICON_MS_CLEAR_DAY : ICON_MS_LIGHTBULB) :
+                                                 ICON_MS_CATEGORY;
         name                    = n.name;
       }
       break;
@@ -1494,6 +1495,39 @@ void UiInspector::renderLightProperties(int lightIdx)
       {
         light.intensity = intensity;
         modif           = true;
+      }
+
+      // Is this light the sky's sun?
+      //
+      // OMI_environment_sky describes a medium and leaves suns to KHR_lights_punctual, so a sky
+      // with a sun needs a light -- but nothing in a directional light says *which* one, and a
+      // scene may hold several. This is where that is stated, and the marker it sets is what
+      // travels with the file. Without it the only sun that could exist was one a save invented.
+      //
+      // One light may be instanced by several nodes, and the marker lives on a node. When the
+      // marked node is one of this light's, that is the node the checkbox speaks for; otherwise it
+      // would mark the first instance.
+      const int sunNode  = gltf_environment_sky::findSkySunNode(model);
+      int       thisNode = -1;
+      if(sunNode >= 0 && gltf_environment_sky::nodeLightIndex(model.nodes[sunNode]) == lightIdx)
+        thisNode = sunNode;
+      for(size_t n = 0; n < model.nodes.size() && thisNode < 0; ++n)
+      {
+        if(gltf_environment_sky::nodeLightIndex(model.nodes[n]) == lightIdx)
+          thisNode = static_cast<int>(n);
+      }
+      if(thisNode >= 0 && m_undoStack != nullptr)
+      {
+        bool isSun = (sunNode == thisNode);
+        if(PE::Checkbox("Sky's Sun", &isSun,
+                        "Make this light the sun of the Sky and Gradient environments.\n\n"
+                        "It then drives the sky's direction and takes the atmosphere's brightness and "
+                        "angular size, so the sun you see and the shadows it casts are one object. Turn "
+                        "it off and the renderer supplies its own sun instead, without touching this "
+                        "light."))
+        {
+          m_undoStack->executeCommand(std::make_unique<SetSkySunCommand>(*m_scene, sunNode, isSun ? thisNode : -1));
+        }
       }
     }
     else

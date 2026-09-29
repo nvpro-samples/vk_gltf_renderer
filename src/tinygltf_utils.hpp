@@ -26,9 +26,11 @@
 
 #include <algorithm>
 #include <array>
+#include <tinygltf/json.hpp>  // nlohmann::json, for the Value <-> JSON pair below
 #include <span>
 #include <sstream>
 #include <string>
+#include <string_view>
 #include <utility>
 #include <vector>
 
@@ -312,6 +314,48 @@ struct KHR_meshopt_compression
 namespace tinygltf {
 
 namespace utils {
+
+/*-------------------------------------------------------------------------------------------------
+## Function `encodePathAsUri` / `decodePathFromUri`
+> Round-trip a filesystem-path-shaped string through `tinygltf::URIDecode`.
+
+`tinygltf::URIDecode` uses `dlib::urldecode`, which treats **two** characters specially:
+`'+'` -> `' '` and `'%HH'` -> byte `HH`. Every other byte (including path separators, spaces,
+UTF-8 bytes) passes through unchanged.
+
+`encodePathAsUri` escapes exactly those two characters (`'%'` -> `"%25"`, `'+'` -> `"%2B"`)
+so a filesystem path can be safely stored in `tinygltf::Image::uri` / `tinygltf::File::uri`
+etc. and later decoded back to the same bytes by `URIDecode`.
+
+Intentionally NOT a general RFC-3986 URI encoder: it deliberately leaves `':'`, `'/'`, `'\\'`,
+whitespace, and non-ASCII UTF-8 alone, so downstream code that inspects `.uri` as a
+filesystem-path-shaped string continues to work.
+
+`decodePathFromUri` is a thin wrapper around `tinygltf::URIDecode`, provided as the paired
+inverse so both directions are discoverable at call sites.
+-------------------------------------------------------------------------------------------------*/
+inline std::string encodePathAsUri(std::string_view path)
+{
+  std::string out;
+  out.reserve(path.size() + 8);
+  for(char c : path)
+  {
+    if(c == '%')
+      out += "%25";
+    else if(c == '+')
+      out += "%2B";
+    else
+      out += c;
+  }
+  return out;
+}
+
+inline std::string decodePathFromUri(const std::string& uri)
+{
+  std::string decoded;
+  tinygltf::URIDecode(uri, &decoded, nullptr);
+  return decoded;
+}
 
 /*-------------------------------------------------------------------------------------------------
 ## Function `getValue<T>`
@@ -1424,6 +1468,23 @@ Behavior is intentionally asymmetric:
   entry anywhere) are not lost.
 -------------------------------------------------------------------------------------------------*/
 void syncExtensionsUsed(tinygltf::Model& model);
+
+
+//--------------------------------------------------------------------------------------------------
+// tinygltf::Value <-> nlohmann::json.
+//
+// The two are the same shape -- object, array, string, number, bool -- and tinygltf carries the
+// second internally, but offers no conversion: it will only serialize a Value as part of a whole
+// glTF document. Anything handling an extension's Value on its own needs these.
+//
+// Two callers so far, for opposite reasons. `sky_preset` writes one entry of an extension out as a
+// file of its own; `AnimationPointerSystem` writes a JSON mirror back over a document-level
+// extension after a pointer wrote into it.
+//
+// Integers stay integers rather than becoming doubles. An extension's counts and indices are
+// written into files people open and edit, and `4.0` where `4` belongs reads as a mistake.
+nlohmann::json  valueToJson(const tinygltf::Value& value);
+tinygltf::Value valueFromJson(const nlohmann::json& json);
 
 }  // namespace utils
 

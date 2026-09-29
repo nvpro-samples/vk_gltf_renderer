@@ -270,6 +270,15 @@ public:
   // (default) re-externalizes them (small file, keeps references), while selfContained=true bakes
   // the merged content inline and drops all external references (portable, shareable file).
   [[nodiscard]] bool save(const std::filesystem::path& filename, bool selfContained = false);
+
+  // Called by save() on the model that is actually written, just before extensionsUsed is
+  // reconciled. Lets the application add extensions it owns but the scene graph does not hold
+  // (the environment sky). Writing to the live model instead is a silent no-op whenever the
+  // scene has external assets, because save() then serializes a transformed copy.
+  void setPreSaveHook(std::function<void(tinygltf::Model&, const std::filesystem::path& destination)> hook)
+  {
+    m_preSaveHook = std::move(hook);
+  }
   // Merge another glTF into this scene. Optional maxTextureCount validates combined texture limit (e.g. GPU descriptor limit).
   [[nodiscard]] int mergeScene(const std::filesystem::path& filename, std::optional<uint32_t> maxTextureCount = std::nullopt);  // Returns wrapper node index, or -1 on failure
   // glTF 2.1: add another glTF as a referenced external asset (read-only, re-externalized on save)
@@ -467,9 +476,15 @@ public:
                                                                     bool                           includeDescendants = true,
                                                                     float                          fullUpdateRatio = kFullUpdateRatio) const;
   // Uses m_dirtyFlags.nodes to populate renderNodesVk/Rtx
-  void              updateRenderNodeDirtyFromNodes(bool includeDescendants = true);
-  [[nodiscard]] int getRenderNodeForPrimitive(int nodeIndex, int primitiveIndex) const;
-  [[nodiscard]] int getPrimitiveIndexForRenderNode(int renderNodeIndex) const;
+  void updateRenderNodeDirtyFromNodes(bool includeDescendants = true);
+  // Whether this frame's dirty state can move geometry: render nodes already marked, a visibility
+  // change, or a dirty node whose subtree holds a mesh. False when only mesh-less nodes changed --
+  // a light (the sky's sun), a camera, an empty group -- which need a light upload at most, never
+  // the transform compute or a TLAS update. Stops at the first mesh, so a large moved subtree
+  // costs no more than a light does.
+  [[nodiscard]] bool dirtyNodesReachGeometry() const;
+  [[nodiscard]] int  getRenderNodeForPrimitive(int nodeIndex, int primitiveIndex) const;
+  [[nodiscard]] int  getPrimitiveIndexForRenderNode(int renderNodeIndex) const;
 
   //--------------------------------------------------------------------------------------------------
   // Render Primitive Management
@@ -504,7 +519,7 @@ public:
     reconcileShadedNodesCache();
     return m_shadedNodesRevision;
   }
-  [[nodiscard]] int getNumTriangles() const { return m_numTriangles; }
+  [[nodiscard]] uint64_t getNumTriangles() const { return m_numTriangles; }
   // Returns cached bounds; lazily computes on first call (mutable cache, logically const).
   [[nodiscard]] nvutils::Bbox getSceneBounds() const;
 
@@ -583,6 +598,9 @@ public:
 
 private:
   friend class SceneEditor;
+
+  // Application-supplied writer run by save() on the serialized model; see setPreSaveHook.
+  std::function<void(tinygltf::Model&, const std::filesystem::path& destination)> m_preSaveHook;
 
   //--------------------------------------------------------------------------------------------------
   // Private Methods: Load and Extension Handling
@@ -767,7 +785,7 @@ private:
 
   int                   m_currentScene    = 0;
   int                   m_sceneCameraNode = -1;
-  int                   m_numTriangles    = 0;
+  uint64_t              m_numTriangles    = 0;  // 64-bit: instanced scenes exceed 2^32
   mutable nvutils::Bbox m_sceneBounds;
 
   //--------------------------------------------------------------------------------------------------

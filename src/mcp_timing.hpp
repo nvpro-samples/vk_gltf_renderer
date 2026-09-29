@@ -42,7 +42,6 @@ struct McpTimingCreateInfo
 };
 
 // Returns the element to add to the application, or nullptr if `renderer` is null.
-std::shared_ptr<nvmcp::Element> createTimingMcpServer(const McpTimingCreateInfo& info,
-                                                      const std::shared_ptr<GltfRenderer>& renderer);
+std::shared_ptr<nvmcp::Element> createTimingMcpServer(const McpTimingCreateInfo& info, const std::shared_ptr<GltfRenderer>& renderer);
 
 #endif  // USE_NVMCP

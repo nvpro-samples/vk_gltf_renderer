@@ -1287,3 +1287,65 @@ void tinygltf::utils::syncExtensionsUsed(tinygltf::Model& model)
   model.extensionsUsed     = std::move(newUsed);
   model.extensionsRequired = std::move(newRequired);
 }
+
+//--------------------------------------------------------------------------------------------------
+// tinygltf::Value <-> nlohmann::json. See the header for why these live here rather than beside
+// either caller.
+//
+nlohmann::json tinygltf::utils::valueToJson(const tinygltf::Value& value)
+{
+  switch(value.Type())
+  {
+    case tinygltf::OBJECT_TYPE: {
+      nlohmann::json out = nlohmann::json::object();
+      for(const auto& [key, child] : value.Get<tinygltf::Value::Object>())
+        out[key] = valueToJson(child);
+      return out;
+    }
+    case tinygltf::ARRAY_TYPE: {
+      nlohmann::json out = nlohmann::json::array();
+      for(size_t i = 0; i < value.ArrayLen(); ++i)
+        out.push_back(valueToJson(value.Get(int(i))));
+      return out;
+    }
+    case tinygltf::STRING_TYPE:
+      return value.Get<std::string>();
+    case tinygltf::BOOL_TYPE:
+      return value.Get<bool>();
+    case tinygltf::INT_TYPE:
+      return value.Get<int>();
+    case tinygltf::REAL_TYPE:
+      return value.Get<double>();
+    default:
+      return nullptr;
+  }
+}
+
+tinygltf::Value tinygltf::utils::valueFromJson(const nlohmann::json& json)
+{
+  if(json.is_object())
+  {
+    tinygltf::Value::Object out;
+    for(auto it = json.begin(); it != json.end(); ++it)
+      out.emplace(it.key(), valueFromJson(it.value()));
+    return tinygltf::Value(std::move(out));
+  }
+  if(json.is_array())
+  {
+    tinygltf::Value::Array out;
+    out.reserve(json.size());
+    for(const auto& child : json)
+      out.push_back(valueFromJson(child));
+    return tinygltf::Value(std::move(out));
+  }
+  if(json.is_string())
+    return tinygltf::Value(json.get<std::string>());
+  if(json.is_boolean())
+    return tinygltf::Value(json.get<bool>());
+  // Integers stay integers -- see the header.
+  if(json.is_number_integer())
+    return tinygltf::Value(json.get<int>());
+  if(json.is_number())
+    return tinygltf::Value(json.get<double>());
+  return {};
+}

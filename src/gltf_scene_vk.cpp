@@ -53,6 +53,7 @@
 #include "gltf_scene_animation.hpp"
 #include "gltf_image_loader.hpp"
 #include "ies_profile.hpp"
+#include "staging_config.hpp"
 #include "tinygltf_utils.hpp"
 #include "nvutils/parallel_work.hpp"
 #include "nvvk/helpers.hpp"
@@ -111,9 +112,92 @@ std::filesystem::path resolveImagePath(const std::filesystem::path& basedir, con
     return {};
   }
 
-  std::string uriDecoded;  // This is UTF-8, but TinyGlTF uses `char` instead of `char8_t` for it
-  tinygltf::URIDecode(img.uri, &uriDecoded, nullptr);  // ex. whitespace may be represented as %20
+  // UTF-8; TinyGlTF uses `char` instead of `char8_t`. `decodePathFromUri` reverses the encoding
+  // applied by `encodePathAsUri` (and any %20 / %HH the source .gltf itself used).
+  const std::string uriDecoded = tinygltf::utils::decodePathFromUri(img.uri);
   return basedir / nvutils::pathFromUtf8(uriDecoded);
+}
+
+// Returns the Y-axis dimension of the format's texel block (in texels): 1 for
+// uncompressed formats, 4 for BC/ETC/EAC block-compressed formats, and the ASTC
+// block height for VK_FORMAT_ASTC_*x*_*_BLOCK (4, 5, 6, 8, 10 or 12). Used to
+// keep row-strip uploads on block boundaries; see `uploadMipLevel` in
+// `SceneVk::createImage`.
+uint32_t getFormatBlockHeight(VkFormat format)
+{
+  switch(format)
+  {
+    // BC1..BC7 -- all 4x4.
+    case VK_FORMAT_BC1_RGB_UNORM_BLOCK:
+    case VK_FORMAT_BC1_RGB_SRGB_BLOCK:
+    case VK_FORMAT_BC1_RGBA_UNORM_BLOCK:
+    case VK_FORMAT_BC1_RGBA_SRGB_BLOCK:
+    case VK_FORMAT_BC2_UNORM_BLOCK:
+    case VK_FORMAT_BC2_SRGB_BLOCK:
+    case VK_FORMAT_BC3_UNORM_BLOCK:
+    case VK_FORMAT_BC3_SRGB_BLOCK:
+    case VK_FORMAT_BC4_UNORM_BLOCK:
+    case VK_FORMAT_BC4_SNORM_BLOCK:
+    case VK_FORMAT_BC5_UNORM_BLOCK:
+    case VK_FORMAT_BC5_SNORM_BLOCK:
+    case VK_FORMAT_BC6H_UFLOAT_BLOCK:
+    case VK_FORMAT_BC6H_SFLOAT_BLOCK:
+    case VK_FORMAT_BC7_UNORM_BLOCK:
+    case VK_FORMAT_BC7_SRGB_BLOCK:
+    // ETC2 / EAC -- all 4x4.
+    case VK_FORMAT_ETC2_R8G8B8_UNORM_BLOCK:
+    case VK_FORMAT_ETC2_R8G8B8_SRGB_BLOCK:
+    case VK_FORMAT_ETC2_R8G8B8A1_UNORM_BLOCK:
+    case VK_FORMAT_ETC2_R8G8B8A1_SRGB_BLOCK:
+    case VK_FORMAT_ETC2_R8G8B8A8_UNORM_BLOCK:
+    case VK_FORMAT_ETC2_R8G8B8A8_SRGB_BLOCK:
+    case VK_FORMAT_EAC_R11_UNORM_BLOCK:
+    case VK_FORMAT_EAC_R11_SNORM_BLOCK:
+    case VK_FORMAT_EAC_R11G11_UNORM_BLOCK:
+    case VK_FORMAT_EAC_R11G11_SNORM_BLOCK:
+    // ASTC with block height 4.
+    case VK_FORMAT_ASTC_4x4_UNORM_BLOCK:
+    case VK_FORMAT_ASTC_4x4_SRGB_BLOCK:
+    case VK_FORMAT_ASTC_5x4_UNORM_BLOCK:
+    case VK_FORMAT_ASTC_5x4_SRGB_BLOCK:
+      return 4;
+    // ASTC with block height 5.
+    case VK_FORMAT_ASTC_5x5_UNORM_BLOCK:
+    case VK_FORMAT_ASTC_5x5_SRGB_BLOCK:
+    case VK_FORMAT_ASTC_6x5_UNORM_BLOCK:
+    case VK_FORMAT_ASTC_6x5_SRGB_BLOCK:
+    case VK_FORMAT_ASTC_8x5_UNORM_BLOCK:
+    case VK_FORMAT_ASTC_8x5_SRGB_BLOCK:
+    case VK_FORMAT_ASTC_10x5_UNORM_BLOCK:
+    case VK_FORMAT_ASTC_10x5_SRGB_BLOCK:
+      return 5;
+    // ASTC with block height 6.
+    case VK_FORMAT_ASTC_6x6_UNORM_BLOCK:
+    case VK_FORMAT_ASTC_6x6_SRGB_BLOCK:
+    case VK_FORMAT_ASTC_8x6_UNORM_BLOCK:
+    case VK_FORMAT_ASTC_8x6_SRGB_BLOCK:
+    case VK_FORMAT_ASTC_10x6_UNORM_BLOCK:
+    case VK_FORMAT_ASTC_10x6_SRGB_BLOCK:
+      return 6;
+    // ASTC with block height 8.
+    case VK_FORMAT_ASTC_8x8_UNORM_BLOCK:
+    case VK_FORMAT_ASTC_8x8_SRGB_BLOCK:
+    case VK_FORMAT_ASTC_10x8_UNORM_BLOCK:
+    case VK_FORMAT_ASTC_10x8_SRGB_BLOCK:
+      return 8;
+    // ASTC with block height 10.
+    case VK_FORMAT_ASTC_10x10_UNORM_BLOCK:
+    case VK_FORMAT_ASTC_10x10_SRGB_BLOCK:
+    case VK_FORMAT_ASTC_12x10_UNORM_BLOCK:
+    case VK_FORMAT_ASTC_12x10_SRGB_BLOCK:
+      return 10;
+    // ASTC with block height 12.
+    case VK_FORMAT_ASTC_12x12_UNORM_BLOCK:
+    case VK_FORMAT_ASTC_12x12_SRGB_BLOCK:
+      return 12;
+    default:
+      return 1;
+  }
 }
 
 // Gets the size in bytes of the compressed data of a tinygltf::Image.
@@ -650,7 +734,7 @@ void nvvkgltf::SceneVk::uploadRenderNodes(nvvk::CmdUploaderInterface& staging,
     instanceInfo.reserve(renderNodes.size());
     for(const nvvkgltf::RenderNode& rn : renderNodes)
       instanceInfo.emplace_back(buildRenderNodeInfo(rn));
-    staging.appendBuffer(m_bRenderNode, 0, std::span(instanceInfo));
+    NVVK_CHECK(appendBufferChunked(staging, m_bRenderNode, 0, std::span<const shaderio::GltfRenderNode>(instanceInfo)));
   }
   else
   {
@@ -1151,11 +1235,18 @@ void nvvkgltf::SceneVk::createVertexBuffers(VkCommandBuffer cmd, nvvk::CmdUpload
     renderPrim[primID].vertexBuffer = vBuf;
   }
 
-  // Creating the buffer of all primitive information
-  NVVK_CHECK(m_alloc->createBuffer(m_bRenderPrim, std::span(renderPrim).size_bytes(), getBufferUsageFlags()));
-  NVVK_CHECK(staging.appendBuffer(m_bRenderPrim, 0, std::span(renderPrim)));
-  NVVK_DBG_NAME(m_bRenderPrim.buffer);
-  m_memoryTracker.track(kMemCategorySceneData, m_bRenderPrim.allocation);
+  // Creating the buffer of all primitive information.
+  // A glTF with no drawable primitives (e.g. only a camera) has none to store, and Vulkan rejects a
+  // zero-size allocation. The buffer is then simply absent -- address 0, the same contract the
+  // lights buffer follows -- which is safe because nothing can index it: render nodes are derived
+  // from primitives, so an empty primitive list means an empty render-node list too.
+  if(!renderPrim.empty())
+  {
+    NVVK_CHECK(m_alloc->createBuffer(m_bRenderPrim, std::span(renderPrim).size_bytes(), getBufferUsageFlags()));
+    NVVK_CHECK(staging.appendBuffer(m_bRenderPrim, 0, std::span(renderPrim)));
+    NVVK_DBG_NAME(m_bRenderPrim.buffer);
+    m_memoryTracker.track(kMemCategorySceneData, m_bRenderPrim.allocation);
+  }
 
   // Barrier to make sure the data is in the GPU
   VkMemoryBarrier barrier{VK_STRUCTURE_TYPE_MEMORY_BARRIER};
@@ -1309,9 +1400,8 @@ std::filesystem::path nvvkgltf::SceneVk::resolveImageDiskPath(const tinygltf::Mo
   std::filesystem::path  diskPath;
   if(!gltfImage.uri.empty() && gltfImage.bufferView < 0 && (gltfImage.uri.size() < 5 || gltfImage.uri.compare(0, 5, "data:") != 0))
   {
-    std::string uriDecoded;
-    tinygltf::URIDecode(gltfImage.uri, &uriDecoded, nullptr);
-    diskPath = nvutils::findFile(nvutils::pathFromUtf8(uriDecoded), imageSearchPaths, false);
+    const std::string uriDecoded = tinygltf::utils::decodePathFromUri(gltfImage.uri);
+    diskPath                     = nvutils::findFile(nvutils::pathFromUtf8(uriDecoded), imageSearchPaths, false);
   }
   return diskPath;
 }
@@ -1355,9 +1445,8 @@ void nvvkgltf::SceneVk::loadIesProfiles(nvvk::CmdUploaderInterface& staging, con
     }
     else if(!profile.uri.empty() && (profile.uri.size() < 5 || profile.uri.compare(0, 5, "data:") != 0))
     {
-      std::string uriDecoded;
-      tinygltf::URIDecode(profile.uri, &uriDecoded, nullptr);
-      std::filesystem::path diskPath = nvutils::findFile(nvutils::pathFromUtf8(uriDecoded), searchPaths, false);
+      const std::string     uriDecoded = tinygltf::utils::decodePathFromUri(profile.uri);
+      std::filesystem::path diskPath   = nvutils::findFile(nvutils::pathFromUtf8(uriDecoded), searchPaths, false);
 
       nvutils::FileReadMapping fileMapping;
       if(!diskPath.empty() && fileMapping.open(diskPath))
@@ -1968,7 +2057,71 @@ bool nvvkgltf::SceneVk::createImage(const VkCommandBuffer& cmd, nvvk::CmdUploade
   // Set the initial layout to TRANSFER_DST_OPTIMAL
   resultImage.descriptor.imageLayout = VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL;  // Setting this, tells the appendImage that the image is in this layout (no need to transfer)
   nvvk::cmdImageMemoryBarrier(cmd, {resultImage.image, VK_IMAGE_LAYOUT_UNDEFINED, resultImage.descriptor.imageLayout});
-  NVVK_CHECK(staging.appendImage(resultImage, std::span(image.mipData[0]), resultImage.descriptor.imageLayout));
+
+  // Upload one mip level as a full-image append when it fits, or split it into
+  // horizontal row-strips when it exceeds the staging block-size limit
+  // (nvvk::BufferCircularAllocator asserts size <= blockSize per subAllocate).
+  // Row-strip chunking keeps the pattern used by SceneVk (linear per-row layout)
+  // and works for arbitrarily large mips (e.g. 8K/16K, 16-bpc, HDR32F).
+  auto uploadMipLevel = [&](uint32_t mip, const VkExtent3D& mipExtent, std::span<const char> mipBytes) {
+    VkImageSubresourceLayers subresource{};
+    subresource.aspectMask = VK_IMAGE_ASPECT_COLOR_BIT;
+    subresource.layerCount = 1;
+    subresource.mipLevel   = mip;
+
+    // Per-append cap matches the FrameUploader block size configured in renderer.cpp
+    // (`kFrameUploaderBlockSize` in staging_config.hpp). Sharing the single symbol
+    // keeps this chunking in lock-step with the app-owned `blockSize`, so lowering
+    // that value cannot silently reintroduce the assertion at
+    // buffer_circular_allocator.cpp:236 (`size <= blockSize`).
+    constexpr size_t kAppendCap = static_cast<size_t>(kFrameUploaderBlockSize);
+
+    const size_t   mipSize     = mipBytes.size();
+    const uint32_t height      = std::max(1u, mipExtent.height);
+    const size_t   bytesPerRow = mipSize / height;
+
+    // If the mip fits in one shot, or we can't derive a clean per-row size
+    // (e.g. compressed formats with padding), fall back to a single append.
+    // Compressed KTX/DDS payloads today are far smaller than kAppendCap, so this
+    // is a safe fall-back for the current asset formats.
+    if(mipSize <= kAppendCap || bytesPerRow == 0 || bytesPerRow * height != mipSize)
+    {
+      NVVK_CHECK(staging.appendImageSub(resultImage, {0, 0, 0}, mipExtent, subresource, mipSize, mipBytes.data(),
+                                        resultImage.descriptor.imageLayout));
+      return;
+    }
+
+    // Rows per strip = as many full rows as fit under the cap, aligned down to the
+    // format's texel-block height so block-compressed formats stay on block
+    // boundaries: 1 for uncompressed, 4 for BC/ETC/EAC, and 4/5/6/8/10/12 for the
+    // various ASTC variants (see getFormatBlockHeight()). Cropping a strip mid-block
+    // would send partial blocks to vkCmdCopyBufferToImage and corrupt the upload.
+    const uint32_t blockH       = getFormatBlockHeight(image.format);
+    uint32_t       rowsPerStrip = static_cast<uint32_t>(kAppendCap / bytesPerRow);
+    rowsPerStrip -= rowsPerStrip % blockH;  // align down to a whole number of block rows
+    if(rowsPerStrip == 0)
+    {
+      // The cap can't hold even a single block row. Fall back to a single append;
+      // if the mip still exceeds the cap the underlying allocator will assert, matching
+      // the pre-existing behaviour for pathologically wide compressed mips.
+      NVVK_CHECK(staging.appendImageSub(resultImage, {0, 0, 0}, mipExtent, subresource, mipSize, mipBytes.data(),
+                                        resultImage.descriptor.imageLayout));
+      return;
+    }
+    rowsPerStrip = std::min(rowsPerStrip, height);
+
+    for(uint32_t y = 0; y < height; y += rowsPerStrip)
+    {
+      const uint32_t   stripH = std::min(rowsPerStrip, height - y);
+      const VkOffset3D offset{0, static_cast<int32_t>(y), 0};
+      const VkExtent3D extent{mipExtent.width, stripH, 1};
+      const size_t     stripBytes = static_cast<size_t>(stripH) * bytesPerRow;
+      NVVK_CHECK(staging.appendImageSub(resultImage, offset, extent, subresource, stripBytes,
+                                        mipBytes.data() + static_cast<size_t>(y) * bytesPerRow, resultImage.descriptor.imageLayout));
+    }
+  };
+
+  uploadMipLevel(0, imageCreateInfo.extent, std::span<const char>(image.mipData[0]));
   staging.cmdUploadAppended(cmd);  // Upload the first mip level
 
   // The image require to generate the mipmaps
@@ -1980,18 +2133,11 @@ bool nvvkgltf::SceneVk::createImage(const VkCommandBuffer& cmd, nvvk::CmdUploade
   {
     for(uint32_t mip = 1; mip < (uint32_t)imageCreateInfo.mipLevels; mip++)
     {
-      imageCreateInfo.extent.width  = std::max(1u, image.size.width >> mip);
-      imageCreateInfo.extent.height = std::max(1u, image.size.height >> mip);
+      const VkExtent3D mipExtent{std::max(1u, image.size.width >> mip), std::max(1u, image.size.height >> mip), 1};
 
-      VkOffset3D               offset{};
-      VkImageSubresourceLayers subresource{};
-      subresource.aspectMask = VK_IMAGE_ASPECT_COLOR_BIT;
-      subresource.layerCount = 1;
-      subresource.mipLevel   = mip;
-
-      if(imageCreateInfo.extent.width > 0 && imageCreateInfo.extent.height > 0)
+      if(mipExtent.width > 0 && mipExtent.height > 0)
       {
-        staging.appendImageSub(resultImage, offset, imageCreateInfo.extent, subresource, std::span(image.mipData[mip]));
+        uploadMipLevel(mip, mipExtent, std::span<const char>(image.mipData[mip]));
       }
     }
     // Upload all the mip levels

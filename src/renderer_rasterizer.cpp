@@ -51,15 +51,19 @@
 #include <nvvk/mipmaps.hpp>
 #include <nvvk/descriptors.hpp>
 
+#include <nvgui/property_editor.hpp>
 #include <nvshaders_host/pbr_sheen_lut.hpp>
 
 #include "renderer_rasterizer.hpp"
+#include "renderer.hpp"  // isBakedEnvironment
 
 #include "scene_shader_macros.hpp"
 
 // Pre-compiled shaders
 #include "_autogen/gltf_raster.slang.h"
-#include "_autogen/sky_physical.slang.h"
+#include <nvvk/compute_pipeline.hpp>
+
+#include "_autogen/sky_background.slang.h"
 #include "_autogen/hdr_charlie_brdf_lut.slang.h"
 
 #include "nvvk/default_structs.hpp"
@@ -94,7 +98,7 @@ void Rasterizer::onAttach(Resources& resources, nvvk::ProfilerGpuTimer* profiler
   ::BaseRenderer::onAttach(resources, profiler);
   m_device      = resources.allocator.getDevice();
   m_commandPool = resources.commandPool;
-  m_skyPhysical.init(&resources.allocator, std::span(sky_physical_slang));
+  initSkyBackground(resources);
   compileShader(resources, false);  // Compile the shader
   createOpaqueColorImage(resources);
   createSheenLut(resources);
@@ -137,6 +141,98 @@ void Rasterizer::registerParameters(SettingsRegistry* settings)
 //--------------------------------------------------------------------------------------------------
 // Clean up rasterizer resources
 // Destroys pipeline layout and shaders, and deinitializes the sky physical model
+//--------------------------------------------------------------------------------------------------
+// Compute pipeline for the authored-sky background.
+//
+// One storage-image binding plus a push constant holding the frame-info pointer and the
+// screen-to-world transform. The sky parameters themselves are read from SceneFrameInfo, which is
+// what lets this pass and the path tracer's per-ray background share one evaluator and one set of
+// numbers -- see shaders/sky_background.h.slang.
+//
+void Rasterizer::initSkyBackground(Resources& resources)
+{
+  VkDevice device = resources.allocator.getDevice();
+
+  const VkPushConstantRange pushConstant{
+      .stageFlags = VK_SHADER_STAGE_COMPUTE_BIT, .offset = 0, .size = sizeof(shaderio::SkyBackgroundPushConstant)};
+
+  m_skyBackgroundBindings.addBinding(shaderio::SkyBackgroundBindings::eSkyBackgroundOutImage,
+                                     VK_DESCRIPTOR_TYPE_STORAGE_IMAGE, 1, VK_SHADER_STAGE_COMPUTE_BIT);
+  NVVK_CHECK(m_skyBackgroundBindings.createDescriptorSetLayout(device, VK_DESCRIPTOR_SET_LAYOUT_CREATE_PUSH_DESCRIPTOR_BIT_KHR,
+                                                               &m_skyBackgroundDescLayout));
+  NVVK_DBG_NAME(m_skyBackgroundDescLayout);
+
+  const VkPipelineLayoutCreateInfo plCreateInfo{
+      .sType                  = VK_STRUCTURE_TYPE_PIPELINE_LAYOUT_CREATE_INFO,
+      .setLayoutCount         = 1,
+      .pSetLayouts            = &m_skyBackgroundDescLayout,
+      .pushConstantRangeCount = 1,
+      .pPushConstantRanges    = &pushConstant,
+  };
+  NVVK_CHECK(vkCreatePipelineLayout(device, &plCreateInfo, nullptr, &m_skyBackgroundLayout));
+  NVVK_DBG_NAME(m_skyBackgroundLayout);
+
+  VkShaderModuleCreateInfo    shaderInfo{.sType    = VK_STRUCTURE_TYPE_SHADER_MODULE_CREATE_INFO,
+                                         .codeSize = uint32_t(sky_background_slang_sizeInBytes),
+                                         .pCode    = sky_background_slang};
+  VkComputePipelineCreateInfo compInfo{VK_STRUCTURE_TYPE_COMPUTE_PIPELINE_CREATE_INFO};
+  compInfo.stage       = {VK_STRUCTURE_TYPE_PIPELINE_SHADER_STAGE_CREATE_INFO};
+  compInfo.stage.stage = VK_SHADER_STAGE_COMPUTE_BIT;
+  compInfo.stage.pName = "main";
+  compInfo.stage.pNext = &shaderInfo;
+  compInfo.layout      = m_skyBackgroundLayout;
+  NVVK_CHECK(vkCreateComputePipelines(device, nullptr, 1, &compInfo, nullptr, &m_skyBackgroundPipeline));
+  NVVK_DBG_NAME(m_skyBackgroundPipeline);
+}
+
+//--------------------------------------------------------------------------------------------------
+//
+void Rasterizer::deinitSkyBackground(Resources& resources)
+{
+  VkDevice device = resources.allocator.getDevice();
+  vkDestroyPipeline(device, m_skyBackgroundPipeline, nullptr);
+  vkDestroyPipelineLayout(device, m_skyBackgroundLayout, nullptr);
+  vkDestroyDescriptorSetLayout(device, m_skyBackgroundDescLayout, nullptr);
+  m_skyBackgroundBindings.clear();
+  m_skyBackgroundPipeline   = {};
+  m_skyBackgroundLayout     = {};
+  m_skyBackgroundDescLayout = {};
+}
+
+//--------------------------------------------------------------------------------------------------
+// Fill the colour target with the visible sky before geometry is drawn, or -- in
+// eSkyBackgroundSunDisk mode -- add the solar disk to a backdrop the dome has already written.
+//
+void Rasterizer::drawSkyBackground(VkCommandBuffer             cmd,
+                                   shaderio::SkyBackgroundMode mode,
+                                   Resources&                  resources,
+                                   const VkExtent2D&           size,
+                                   VkImageView                 colorView,
+                                   const glm::mat4&            viewMatrix,
+                                   const glm::mat4&            projMatrix)
+{
+  const VkDescriptorImageInfo outImage{.imageView = colorView, .imageLayout = VK_IMAGE_LAYOUT_GENERAL};
+
+  nvvk::WriteSetContainer writeContainer;
+  writeContainer.append(m_skyBackgroundBindings.getWriteSet(shaderio::SkyBackgroundBindings::eSkyBackgroundOutImage), outImage);
+  vkCmdPushDescriptorSetKHR(cmd, VK_PIPELINE_BIND_POINT_COMPUTE, m_skyBackgroundLayout, 0,
+                            uint32_t(writeContainer.size()), writeContainer.data());
+
+  // The pass builds its own camera ray from the frame info, with the same function the path
+  // tracer uses, so there is no screen-to-world matrix to pass or to get wrong.
+  shaderio::SkyBackgroundPushConstant push{};
+  push.frameInfo = reinterpret_cast<shaderio::SceneFrameInfo*>(resources.bFrameInfo.address);
+  push.mode      = mode;
+
+  vkCmdBindPipeline(cmd, VK_PIPELINE_BIND_POINT_COMPUTE, m_skyBackgroundPipeline);
+  vkCmdPushConstants(cmd, m_skyBackgroundLayout, VK_SHADER_STAGE_COMPUTE_BIT, 0, sizeof(push), &push);
+
+  // WORKGROUP_SIZE comes from shaderio.h, the same define the shader uses -- the dispatch and the
+  // [numthreads] declaration must not be able to disagree.
+  const VkExtent2D groups = nvvk::getGroupCounts(size, WORKGROUP_SIZE);
+  vkCmdDispatch(cmd, groups.width, groups.height, 1);
+}
+
 void Rasterizer::onDetach(Resources& resources)
 {
 #if defined(USE_DLSS)
@@ -151,7 +247,7 @@ void Rasterizer::onDetach(Resources& resources)
   vkDestroyShaderEXT(m_device, m_fragmentShader, nullptr);
   vkDestroyShaderEXT(m_device, m_wireframeShader, nullptr);
 
-  m_skyPhysical.deinit();
+  deinitSkyBackground(resources);
 }
 
 //--------------------------------------------------------------------------------------------------
@@ -357,15 +453,16 @@ void Rasterizer::onRender(VkCommandBuffer cmd, Resources& resources)
     glm::mat4 viewMatrix = resources.cameraManip->getViewMatrix();
     glm::mat4 projMatrix = resources.cameraManip->getPerspectiveMatrix();
 
-    if(resources.settings.envSystem == shaderio::EnvSystem::eSky)
+    // The authored skies have an analytic background field with their sun in it, written in one
+    // pass. The physical sky is a composite instead: the dome draws its baked image, which is the
+    // whole sky except the disk, and a second additive pass puts the disk back.
+    if(hasAuthoredSkyBackground(resources.settings.envSystem))
     {
-      auto                  timerSection = m_profiler->cmdFrameSection(cmd, "Sky Physical");
-      VkDescriptorImageInfo skyTarget{};
-      skyTarget.imageView   = targets.colorView;
-      skyTarget.imageLayout = VK_IMAGE_LAYOUT_GENERAL;
-      m_skyPhysical.runCompute(cmd, targets.extent, viewMatrix, projMatrix, resources.skyParams, skyTarget);
+      auto timerSection = m_profiler->cmdFrameSection(cmd, "Sky Background");
+      drawSkyBackground(cmd, shaderio::SkyBackgroundMode::eSkyBackgroundAuthored, resources, targets.extent,
+                        targets.colorView, viewMatrix, projMatrix);
     }
-    else if(resources.settings.envSystem == shaderio::EnvSystem::eHdr)
+    else if(resources.settings.envSystem == shaderio::EnvSystem::eHdr || resources.settings.envSystem == shaderio::EnvSystem::eSky)
     {
       auto timerSection = m_profiler->cmdFrameSection(cmd, "HDR Dome");
       // FIXME nvpro_core2: HdrEnvDome's outImage descriptor pool isn't UPDATE_AFTER_BIND, so any
@@ -381,7 +478,24 @@ void Rasterizer::onRender(VkCommandBuffer cmd, Resources& resources)
         m_lastHdrDomeView = targets.colorView;
       }
       resources.hdrDome.draw(cmd, viewMatrix, projMatrix, targets.extent, glm::vec4(resources.settings.hdrEnvIntensity),
-                             glm::radians(resources.settings.hdrEnvRotation), resources.settings.hdrBlur);
+                             resources.settings.envRotationQuat(), resources.settings.hdrBlur);
+
+      if(resources.settings.envSystem == shaderio::EnvSystem::eSky)
+      {
+        auto diskSection = m_profiler->cmdFrameSection(cmd, "Sun Disk");
+
+        // The disk pass reads back what the dome just wrote into the same image, so those writes
+        // have to be visible first. Nothing else orders the two: both are compute, both touch the
+        // same storage image, and neither changes its layout.
+        const VkMemoryBarrier domeBarrier{.sType         = VK_STRUCTURE_TYPE_MEMORY_BARRIER,
+                                          .srcAccessMask = VK_ACCESS_SHADER_WRITE_BIT,
+                                          .dstAccessMask = VK_ACCESS_SHADER_READ_BIT | VK_ACCESS_SHADER_WRITE_BIT};
+        vkCmdPipelineBarrier(cmd, VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT, VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT, 0, 1,
+                             &domeBarrier, 0, nullptr, 0, nullptr);
+
+        drawSkyBackground(cmd, shaderio::SkyBackgroundMode::eSkyBackgroundSunDisk, resources, targets.extent,
+                          targets.colorView, viewMatrix, projMatrix);
+      }
     }
   }
 
@@ -398,7 +512,8 @@ void Rasterizer::onRender(VkCommandBuffer cmd, Resources& resources)
   // solid color when enabled, or to black when the environment is disabled (eNone).
   const bool drawsEnvDome = !resources.settings.useSolidBackground
                             && (resources.settings.envSystem == shaderio::EnvSystem::eSky
-                                || resources.settings.envSystem == shaderio::EnvSystem::eHdr);
+                                || resources.settings.envSystem == shaderio::EnvSystem::eHdr
+                                || isBakedEnvironment(resources.settings.envSystem));
   const glm::vec3 clearColor = resources.settings.useSolidBackground ? resources.settings.solidBackgroundColor : glm::vec3(0.f);
   attachments[0].imageView  = targets.colorView;
   attachments[0].clearValue = {{{clearColor.x, clearColor.y, clearColor.z, 0.f}}};
@@ -468,7 +583,6 @@ void Rasterizer::onRender(VkCommandBuffer cmd, Resources& resources)
 
   // Setting up the push constant.
   m_pushConst.frameInfo  = (shaderio::SceneFrameInfo*)resources.bFrameInfo.address;
-  m_pushConst.skyParams  = (shaderio::SkyPhysicalParameters*)resources.bSkyParams.address;
   m_pushConst.gltfScene  = (shaderio::GltfScene*)resources.sceneVk.sceneDesc().address;
   m_pushConst.mouseCoord = nvapp::ElementDbgPrintf::getMouseCoord();  // Use for debugging: printf in shader
   vkCmdPushConstants(cmd, m_graphicPipelineLayout, VK_SHADER_STAGE_ALL_GRAPHICS, 0, sizeof(shaderio::RasterPushConstant), &m_pushConst);
@@ -659,7 +773,10 @@ void Rasterizer::renderNodes(VkCommandBuffer cmd, Resources& resources, const st
 void Rasterizer::createPipeline(Resources& resources)
 {
   SCOPED_TIMER(__FUNCTION__);
-  std::vector<VkDescriptorSetLayout> descriptorSetLayouts{resources.descriptorSetLayout[0]};
+  // Set 1 is the physical sky's scattering LUTs, read by aerial perspective. Always in the layout,
+  // even for a scene that never selects that sky: a layout is built once and the environment
+  // changes at runtime.
+  std::vector<VkDescriptorSetLayout> descriptorSetLayouts{resources.descriptorSetLayout[0], resources.skyLutDescriptorSetLayout};
 
   // Push constant is used to pass data to the shader at each frame
   const VkPushConstantRange pushConstantRange{
@@ -721,7 +838,10 @@ bool Rasterizer::compileShader(Resources& resources, bool fromFile)
       .size       = sizeof(shaderio::RasterPushConstant),
   };
 
-  std::vector<VkDescriptorSetLayout> descriptorSetLayouts{resources.descriptorSetLayout[0]};
+  // Set 1 is the physical sky's scattering LUTs, read by aerial perspective. Always in the layout,
+  // even for a scene that never selects that sky: a layout is built once and the environment
+  // changes at runtime.
+  std::vector<VkDescriptorSetLayout> descriptorSetLayouts{resources.descriptorSetLayout[0], resources.skyLutDescriptorSetLayout};
 
   VkShaderCreateInfoEXT shaderInfo{
       .sType                  = VK_STRUCTURE_TYPE_SHADER_CREATE_INFO_EXT,
@@ -850,6 +970,9 @@ static void cmdSetCommonRasterState(VkCommandBuffer              cmd,
                          uint32_t(attributeDescriptions.size()), attributeDescriptions.data());
 
   vkCmdBindDescriptorSets(cmd, VK_PIPELINE_BIND_POINT_GRAPHICS, layout, 0, 1, &resources.descriptorSet, 0, nullptr);
+  // Set 1: the sky LUTs, for aerial perspective. Bound whatever the environment is; the shader
+  // reads them only when the frame says the sky is the physical one.
+  vkCmdBindDescriptorSets(cmd, VK_PIPELINE_BIND_POINT_GRAPHICS, layout, 1, 1, &resources.skyLutDescriptorSet, 0, nullptr);
 }
 
 void Rasterizer::renderOpaqueOnly(VkCommandBuffer cmd, Resources& resources, VkExtent2D renderExtent)
@@ -860,7 +983,6 @@ void Rasterizer::renderOpaqueOnly(VkCommandBuffer cmd, Resources& resources, VkE
   // VUID-vkCmdWriteTimestamp-None-00830 ("query not reset") on every frame after the first.
   // The two-pass primary path opens its own section at the call site in onRender().
   m_pushConst.frameInfo  = (shaderio::SceneFrameInfo*)resources.bFrameInfo.address;
-  m_pushConst.skyParams  = (shaderio::SkyPhysicalParameters*)resources.bSkyParams.address;
   m_pushConst.gltfScene  = (shaderio::GltfScene*)resources.sceneVk.sceneDesc().address;
   m_pushConst.mouseCoord = nvapp::ElementDbgPrintf::getMouseCoord();
   vkCmdPushConstants(cmd, m_graphicPipelineLayout, VK_SHADER_STAGE_ALL_GRAPHICS, 0, sizeof(shaderio::RasterPushConstant), &m_pushConst);
@@ -956,11 +1078,11 @@ void Rasterizer::createOpaqueColorImage(Resources& resources)
   // would clamp every fetch to mip 0 and silently make rough transmission mirror-sharp.
   VkSampler                 linearSampler{};
   const VkSamplerCreateInfo linearInfo{
-      .sType     = VK_STRUCTURE_TYPE_SAMPLER_CREATE_INFO,
-      .magFilter = VK_FILTER_LINEAR,
-      .minFilter = VK_FILTER_LINEAR,
+      .sType      = VK_STRUCTURE_TYPE_SAMPLER_CREATE_INFO,
+      .magFilter  = VK_FILTER_LINEAR,
+      .minFilter  = VK_FILTER_LINEAR,
       .mipmapMode = VK_SAMPLER_MIPMAP_MODE_LINEAR,
-      .maxLod    = VK_LOD_CLAMP_NONE,
+      .maxLod     = VK_LOD_CLAMP_NONE,
   };
   NVVK_CHECK(resources.samplerPool.acquireSampler(linearSampler, linearInfo));
   m_opaqueColorImage.descriptor.sampler = linearSampler;

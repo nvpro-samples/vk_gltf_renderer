@@ -19,6 +19,7 @@
 
 #pragma once
 
+#include <filesystem>
 #include <limits>
 #include <memory>
 #include <mutex>
@@ -30,6 +31,7 @@
 #include <glm/glm.hpp>
 
 #include <nvapp/application.hpp>
+#include <nvapp/imgui_texture.hpp>
 #include <nvgui/camera.hpp>
 #include <nvshaders_host/tonemapper.hpp>
 #include <nvslang/slang.hpp>
@@ -56,6 +58,11 @@
 #include "renderer_rasterizer.hpp"
 #include "resources.hpp"
 #include "renderer_silhouette.hpp"
+#include "env_baker.hpp"
+#include "sky_bruneton.hpp"
+#include "sky_sun.hpp"
+#include "ui_environment.hpp"
+#include "gltf_environment_sky.hpp"
 #include "hover_picker.hpp"
 #include "ui_busy_window.hpp"
 #include "ui_scene_browser.hpp"
@@ -132,14 +139,191 @@ public:
   /// Application thread only: it destroys and recreates live pipelines.
   bool reloadShaders();  // false: the from-file compile failed and the embedded SPIR-V is now running
 
-  /// Mirror skyParams.sunDirection back into skySunAzimuth/skySunElevation after the sky UI moves it.
-  void syncSunAngles();
+  /// Mirror Resources::sunDirection back into sunAzimuth/sunElevation after the sky UI moves it.
+
+  /// Drive the shared sun from azimuth/elevation in degrees -- the inverse of syncSunAngles().
+
+  /// Find the light the scene marks as the sky's sun and adopt its direction, or report that
+  /// there is none. Runs at the frame top, so moving that light -- gizmo, inspector, animation --
+  /// carries the sky with it.
+  ///
+  /// Only a *marked* light qualifies. An ordinary directional light is an ordinary light: the
+  /// specification's model is that the sky is a medium and suns are lights, but nothing in a bare
+  /// directional light says which one a sky should scatter.
+
+  /// Where an authored sky arrived from. It decides exactly one thing: whether an explicit
+  /// `--envSystem` outranks the sky's own type.
+  ///
+  /// It does for a scene, because the flag is a statement about the run and the scene arrives as
+  /// part of it. It does not for a preset the user loads by hand at runtime, because that *is* the
+  /// statement, and a flag from start-up has no business overruling it.
+  enum class SkySource
+  {
+    eScene,
+    ePreset
+  };
+
+  /// Push an authored sky into the live settings, and mark the environment for a re-bake.
+  /// `uriBase` is the directory of the file that carried the sky -- the glTF or the `.sky.json` --
+  /// which is what a panorama's relative URI was written against.
+  void applySkyDescriptor(const SkyDescriptor& sky, SkySource source, const std::filesystem::path& uriBase);
+
+  /// The live settings as an authored sky, ready to serialize.
+  ///
+  /// nullopt when there is nothing to write: the active environment is not an OMI type (the
+  /// physical Sky is, None is not) *and* no scene sky was loaded to re-emit. `destination` is only
+  /// used to make a panorama's URI relative to where the file is going.
+  [[nodiscard]] EnvironmentState skyDescriptorFromSettings(const std::filesystem::path& destination) const;
+
+  /// Write the current sky to a `.sky.json`, and read one back. False / no-op on failure, having
+  /// logged it.
+  ///
+  /// The sun angle travels with the sky -- see sky_preset.hpp -- and a loaded one is aimed through
+  /// SkySun::aim(), so a scene whose sun is a marked light records the move on the undo stack like
+  /// any other transform.
+  bool saveSkyPreset(const std::filesystem::path& path) const;
+  bool loadSkyPreset(const std::filesystem::path& path);
+
+  /// The start-up `--loadSkyPreset` / `--saveSkyPreset`, applied at the first frame top rather than
+  /// now: the ini restore and the scene's authored sky both land there, and either would otherwise
+  /// overwrite a preset applied before them. Load runs before save, so a run can do both.
+  void queueStartupSkyPresets(const std::filesystem::path& load, const std::filesystem::path& save);
+
+  /// Report an environment edit: preview it this frame, commit once the edits stop.
+  ///
+  /// The preview skips the alias rebuild, the PDF write and (on the path-tracing path) the
+  /// prefilter refresh. Skipping the PDF write leaves the image's PDF at zero, so while a preview is
+  /// showing the path tracer lights the environment by BSDF sampling alone -- see
+  /// EnvBaker::preview.
+  ///
+  /// The commit is owed rather than immediate, and onRender pays it on the first frame that asks
+  /// for no preview. "The edits stopped" is deliberately not "ImGui has no active item": the sun
+  /// also moves from the transform gizmo on its light, from an animation and from an MCP
+  /// parameter write, none of which ImGui knows about.
+  ///
+  /// A no-op while a full rebuild is already pending: that rebuild reads the current settings, so
+  /// a preview would only add a second commit behind it.
+  void requestEnvironmentPreview()
+  {
+    if(m_envBakeDirty)
+      return;
+    m_envPreviewPending = true;
+    m_envCommitOwed     = true;
+  }
+
+  /// Set the firefly clamp from the current environment, and record which environment that was.
+  ///
+  /// Every site that wants to recalibrate goes through here, so the "what was it calibrated for"
+  /// bookkeeping cannot drift from the value itself -- switching sky -> HDR -> sky has to
+  /// recalibrate, and it only does if each hop updates both.
+  void calibrateFireflyClamp();
+
+  /// Illuminance of the sun *above* the atmosphere, in the units the renderer works in.
+  ///
+  /// Deliberately unattenuated. Two callers want exactly that and for the same reason: it is the
+  /// property of the star rather than of this moment, so it does not change as the sun sets.
+  [[nodiscard]] glm::vec3 skySunIlluminanceAboveAtmosphere() const;
+
+  /// Height above the planet's surface, in km, that aerial perspective puts the eye at.
+  ///
+  /// Not the sky's observer altitude, and deliberately so. That one is fixed because a moving
+  /// observer would invalidate the baked image every frame; this one is evaluated per pixel and has
+  /// no image to invalidate, so it can afford to be true. It has to be: aerial perspective places
+  /// the scene *relative* to the eye, so an eye 300 m up with a camera two kilometres above the
+  /// terrain puts the whole landscape under the ground, where the lookup degenerates and the haze
+  /// stops at the horizon line.
+  ///
+  /// So the scene's lowest point is placed at the observer altitude and the eye goes wherever the
+  /// camera stands above it. Y-up, like everything else the sky does.
+  [[nodiscard]] float aerialPerspectiveEyeAltitudeKm() const;
+
+  /// Mark the baked lighting environment stale. Cheap and safe to call from a parameter callback
+  /// or an ImGui handler: the bake itself runs on the application thread at the top of the next
+  /// frame, because it submits and waits on the queue.
+  void onEnvironmentChanged() { m_envBakeDirty = true; }
+
+  /// The active renderer changed. A baked sky committed under the path tracer skipped the prefilter,
+  /// so the rasterizer arriving would light from cubemaps of an older environment.
+  void onRenderSystemChanged()
+  {
+    if(m_resources.settings.renderSystem == RenderingMode::eRasterizer && isBakedEnvironment(m_resources.settings.envSystem))
+      onEnvironmentChanged();
+    resetFrame();
+  }
+
+  /// Copy the current sky settings into EnvBaker. Cheap and safe mid-frame, so both the preview
+  /// and the commit call it; the resolution is not part of it, since changing that reallocates.
+  void updateBakerParameters();
+
+  /// Re-run EnvBaker against the current settings and rebind the shared environment. Application
+  /// thread only. No-op unless the active envSystem is a baked one.
+  void refreshBakedEnvironment();
+
+  /// The physical sky's atmosphere: the Earth defaults with the panel's settings laid over them.
+  /// One builder, for the same reason buildSkyOmiParameters() is one: the LUT
+  /// precompute and the bake must never disagree about which atmosphere they are describing.
+  shaderio::SkyAtmosphereParameters buildAtmosphereParameters() const;
+
+  /// The authored sky parameters as the shaders see them, built from the current settings plus the
+  /// scene's sun. One builder feeds both consumers -- the bake (lighting field, sun excluded) and
+  /// the per-ray background (sun included) -- so the two can never disagree about the same sky.
+  shaderio::SkyOmiParameters buildSkyOmiParameters() const;
+
+  /// Resources::sunDirection, which is world space, expressed in the environment's own frame --
+  /// the frame the lat-long image and the analytic sky are evaluated in, turned by envRotation.
+  /// Everything that places the sun *in the sky* (the bake, the gradient's glow and disk) wants
+  /// this; everything that lights the scene with it wants the world-space direction.
+  [[nodiscard]] glm::vec3 sunInEnvironmentFrame() const;
+
+  /// Settings::envRotation was edited: north moved, so a sky's sun is placed again from Time of Day.
+  void onEnvironmentRotated();
+
+  /// Illuminance of the gradient sky's sun, before `envIntensity`.
+  ///
+  /// Unlike the physical sky's, it is not measured: `sunColor` says what the disk is drawn in, not
+  /// how bright it is, so this scales the sun against the dome it sits under. Three callers need
+  /// the same answer -- the frame the renderer lights, the file a save writes, and the firefly
+  /// clamp -- which is why it is one function.
+  [[nodiscard]] glm::vec3 gradientSunIlluminance() const;
+
+  /// Frame-top consumer of onEnvironmentChanged(). Called from onUIRender, not onRender: it waits
+  /// on the device and rewrites descriptors, which is unsafe mid-command-buffer.
+  void applyPendingEnvironmentRefresh();
+
+  /// Parse the sky a freshly loaded scene authors, if it has one, and queue it for the next frame
+  /// top. Does not touch settings directly -- see applyPendingAuthoredSky for why.
+  void applyEnvironmentSkyFromScene();
+
+  /// Apply the queued authored sky to the live settings. Runs after the ini restore so that glTF
+  /// wins over ini; scenes without the extension leave the settings untouched.
+  void applyPendingAuthoredSky();
+
+  /// Apply the presets queued by queueStartupSkyPresets(). Runs right after applyPendingAuthoredSky.
+  void applyPendingSkyPresets();
+
+  /// URI to record for an environment image on save: relative to the glTF when the image lives
+  /// under it, absolute otherwise.
+  std::string relativeUriForSave(const std::filesystem::path& asset, const std::filesystem::path& destination) const;
+
+  /// Pre-save hook body: write the current sky into the model being serialized, or strip any
+  /// stale extension when the save toggle is off.
+  void writeEnvironmentSky(tinygltf::Model& outModel, const std::filesystem::path& destination) const;
+
+  /// Write, update, or remove the directional light that carries the sky's sun, so a saved sky is
+  /// complete for a renderer that only reads the extension. Marked, so a reload identifies it and
+  /// a later save manages the same one instead of adding another.
+  void writeSkySunLight(tinygltf::Model& outModel) const;
 
   /// Load an environment map / scene by path; these back --hdrfile / --scenefile, which load on
   /// change. False if the file does not exist or the renderer is not attached yet (the start-up
   /// parse, where main() does the load itself). Application thread only.
   [[nodiscard]] bool loadHdrEnvironment(const std::filesystem::path& filename);
   [[nodiscard]] bool loadSceneFile(const std::filesystem::path& filename);
+
+  /// Write the current scene to `filename`; backs --savefile, so it is reachable from the command
+  /// line, a benchmark sequence and nvpro_set_parameters through the same single registration the
+  /// load parameters use. Application thread only: it reads scene and model state.
+  bool save(const std::filesystem::path& filename, bool selfContained = false);
 
 #ifdef USE_NVMCP
   /// Automation surface for the optional MCP endpoint (src/mcp_timing.cpp), which is where both
@@ -160,7 +344,6 @@ private:
   void onUIMenu() override;
   void onUIRender() override;
 
-  bool save(const std::filesystem::path& filename, bool selfContained = false);
   bool updateFrameCounter();
 
   void clearGbuffer(VkCommandBuffer cmd);
@@ -250,6 +433,7 @@ private:
   void updateSceneChanges_NodeTransforms(VkCommandBuffer cmd, nvvkgltf::Scene* scene, const nvvkgltf::Scene::DirtyFlags& df);
   uint32_t updateSceneChanges_SyncGpuBuffers(VkCommandBuffer cmd, nvvkgltf::Scene* scene);
   void     updateSceneChanges_TlasUpdate(VkCommandBuffer cmd, nvvkgltf::Scene* scene);
+  void     markGpuTransformStaleAfterCpuSync(const nvvkgltf::Scene& scene);
   void     updateSceneChanges_RasterizerInvalidate(bool renderNodeOrNodeDirty);
   void     updateSceneChanges_TangentUpload(VkCommandBuffer cmd, nvvkgltf::Scene* scene, bool& changed);
   void     updateSceneChanges_Finalize(VkCommandBuffer cmd, bool changed, bool stagingFlushed, nvvkgltf::Scene* scene);
@@ -285,7 +469,6 @@ private:
   void onUndoRedo();
   void renderMenuToolbarAndGizmos();
   void renderMemoryStatistics();
-  void renderEnvironmentWindow();
   void renderTonemapperWindow();
   void renderStatisticsWindow();
   void addToRecentFiles(const std::filesystem::path& filePath, int historySize = 20);
@@ -308,6 +491,9 @@ private:
   void          applyGltfCamera(int cameraIndex);
   void          setGltfCameraFromView(int cameraIndex);
   void          loadHdrFileDialog();
+  /// The `.sky.json` pickers behind the Environment panel's two preset buttons.
+  void loadSkyPresetDialog();
+  void saveSkyPresetDialog();
 
   // Opens an image file dialog for the inspector's "Load from file" texture action. Returns the chosen
   // path, or an empty path if cancelled.
@@ -337,6 +523,7 @@ private:
   // File dialog directories
   std::filesystem::path m_lastSceneDirectory;
   std::filesystem::path m_lastHdrDirectory;
+  std::filesystem::path m_lastSkyPresetDirectory;  // where the last preset was read or written
   std::filesystem::path m_lastImageDirectory;
   // Default filename offered by the Save Image / Save Screen Image dialogs: the loaded scene's
   // name (.jpg) until the user saves under a different name, reset on New Scene / new scene load.
@@ -377,13 +564,35 @@ private:
   // New Scene Browser system (parallel implementation)
   SceneSelection m_sceneSelection;  // Shared selection state
   UiSceneBrowser m_sceneBrowser;    // New scene browser
+  UiEnvironment  m_uiEnvironment;   // Environment panel
+  SkySun         m_skySun;          // Who the sun is, and where it points
   UiInspector    m_inspector;       // New inspector
   ThumbnailCache m_thumbnailCache;  // Bounded ImGui thumbnails for scene textures/images
-  UiToasts       m_toasts;          // Transient error/info notifications (e.g. failed image import)
-  BusyWindow     m_busy;
-  Silhouette     m_silhouette;     // Silhouette renderer
-  VisualHelpers  m_visualHelpers;  // Grid + transform gizmo overlay
-  HoverPicker    m_hoverPicker;    // KHR_interactivity hover detection (docs/interactivity.md Phase E)
+
+  UiToasts      m_toasts;  // Transient error/info notifications (e.g. failed image import)
+  BusyWindow    m_busy;
+  Silhouette    m_silhouette;     // Silhouette renderer
+  VisualHelpers m_visualHelpers;  // Grid + transform gizmo overlay
+  HoverPicker   m_hoverPicker;    // KHR_interactivity hover detection (docs/interactivity.md Phase E)
+  EnvBaker      m_envBaker;       // Bakes analytic skies into the shared lighting environment
+  SkyBruneton   m_skyBruneton;    // Precomputed atmospheric scattering LUTs
+  // Which environment the firefly clamp was last calibrated for, as an int so it can hold a
+  // "none yet" sentinel. The clamp is a starting point the user is free to override, so it is
+  // recalibrated when the environment changes *kind* and not on every re-bake.
+  int  m_fireflyClampCalibratedFor{-1};
+  bool m_envBakeDirty{true};  // Baked environment needs rebuilding before the next frame
+  // Set when a Time of Day value arrives from outside the UI -- the command line, a benchmark
+  // sequence or MCP. It decides a precedence question the ini restore would otherwise settle
+  // wrongly: see the post-restore hook beside the tod* declarations.
+  bool                  m_todDrivesSun{false};
+  bool                  m_envPreviewPending{false};  // Record a colour-only re-bake into this frame
+  bool                  m_envCommitOwed{false};      // Previewed at least once; owes a commit once the edits stop
+  bool                  m_envOwnedByBaker{false};    // hdrIbl currently points at EnvBaker's image, not a loaded file
+  std::filesystem::path m_lastHdrFile;               // Last HDR handed to createHDR, replayed when returning to eHdr
+  EnvironmentState      m_environmentSky;            // Sky the loaded scene authors, preserved verbatim for save
+  bool                  m_environmentSkyPending{false};  // Authored sky parsed but not yet pushed to settings
+  std::filesystem::path m_pendingLoadSkyPreset;          // Start-up --loadSkyPreset, applied at the frame top
+  std::filesystem::path m_pendingSaveSkyPreset;          // Start-up --saveSkyPreset, written after the load
 
   // Undo/Redo
   UndoStack m_undoStack;
@@ -453,8 +662,8 @@ private:
   const nvutils::ParameterParser* m_parameterParser{};  // CLI parameter parser, for INI load filtering (see wasParsed)
   // ImGui.ini restore runs in Application::run() *after* onAttach and writes storage directly, so
   // it bypasses the per-setting callbackSuccess. Run any opted-in post-restore hooks once on the
-  // first frame to refresh derived state (e.g. skyParams.sunDirection from the restored
-  // skySunAzimuth/Elevation).
+  // first frame to refresh derived state (e.g. Resources::sunDirection from the restored
+  // sunAzimuth/Elevation).
   bool m_pendingRestoreCallbacks{true};
 
   // Requested from the Windows menu, consumed by applyPendingResets() at the top of the UI pass.

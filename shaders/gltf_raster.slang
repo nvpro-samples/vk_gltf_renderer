@@ -37,6 +37,9 @@
 #include "nvshaders/functions.h.slang"
 #include "nvshaders/hdr_env_sampling.h.slang"
 #include "nvshaders/light_contrib.h.slang"
+
+#include "sky_background.h.slang"  // makeSkySunLight
+#include "aerial_perspective.h.slang"
 #include "gltf_light_ies.h.slang"
 #include "nvshaders/pbr_ggx_microfacet.h.slang"
 #include "nvshaders/pbr_direct_eval.h.slang"
@@ -52,6 +55,16 @@
 [[vk::binding(BindingPoints::eSamplers, 0)]]                SamplerState                        allSamplers[];
 [[vk::binding(BindingPoints::eTexturesHdr, 0)]]             Sampler2D                           texturesHdr[];
 [[vk::binding(BindingPoints::eTexturesCube, 0)]]            SamplerCube                         texturesCube[];
+
+// Set 1 is SkyBruneton's runtime set -- the scattering LUTs and the atmosphere they were built
+// from -- bound for aerial perspective alone. The path tracer binds the same set at index 3 of its
+// own layout; a set number belongs to the pipeline, not to the resources, which is why the shared
+// header takes them as arguments rather than declaring them.
+[[vk::binding(0, 1)]] Sampler2D<float3>                       g_transmittance;
+[[vk::binding(1, 1)]] Sampler3D<float4>                       g_scattering;
+[[vk::binding(2, 1)]] Sampler3D<float4>                       g_singleMie;
+[[vk::binding(3, 1)]] Sampler2D<float3>                       g_irradiance;
+[[vk::binding(4, 1)]] ConstantBuffer<SkyAtmosphereParameters> g_atmosphere;
 // clang-format on
 
 
@@ -151,7 +164,7 @@ float3 evalKhronosIBLMRM(PbrMaterial mat,
                          SamplerCube glossyCube,
                          Sampler2D   lut,
                          Sampler2D   sheenLUT,
-                         float       envRotation,
+                         float4      envRotation,
                          float       envIntensity,
                          float       dttThickness,
                          float3      f_specular_transmission,
@@ -402,7 +415,11 @@ PixelOutput fragmentMain(VertexOutput input, uint primitiveID: SV_PrimitiveID, f
   }
 #endif
 
-  // Indirect (IBL or sky-fallback) lighting.
+  // Indirect lighting. Every sky type goes through the same prefiltered cubemaps: the analytic
+  // skies are baked into them by EnvBaker and a loaded HDR fills them on load. This used to branch, with a hardcoded hemispherical ambient
+  // plus a punctual sun standing in whenever the environment was not an HDR -- which meant raster
+  // sky lighting never matched the path tracer, for any sky. There is now one path and no
+  // stand-in.
   if(hasFlag(pushConst.frameInfo.flags, SceneFrameInfoFlags::eSceneUseNoEnvironment))
   {
     // No environment: no indirect lighting. Only punctual/emissive scene lights contribute.
@@ -413,34 +430,9 @@ PixelOutput fragmentMain(VertexOutput input, uint primitiveID: SV_PrimitiveID, f
       contribution = lerp(contribution, f_specular_transmission, pbrMat.transmission);
 #endif
   }
-  else if(!hasFlag(pushConst.frameInfo.flags, SceneFrameInfoFlags::eSceneUseHdrEnvironment))
-  {
-    // Sky mode: cheap hemispherical ambient + sun-as-directional. The sun is fed through the
-    // Khronos-faithful punctual evaluator so the BRDF math matches the IBL composite layer.
-    float3 ambientColor = lerp(float3(0.4F), float3(0.17F, 0.37F, 0.65F), pbrMat.N.y * 0.5 + 0.5) * 0.3;
-    // Hemisphere ambient drives both the diffuse term (via baseColor) and a tiny specular
-    // floor for metals so they don't go pitch black under sun-only lighting.
-    float3 metalFloor = lerp(float3(0.04), pbrMat.baseColor, pbrMat.metallic);
-    contribution += ambientColor * lerp(pbrMat.baseColor, metalFloor, pbrMat.metallic);
-
-    // Sun direction is the unit vector "toward sun" (directional-light convention). Pass
-    // unshifted; the evaluator applies `transmissionRay` internally for the BTDF lobe only.
-#if GLTF_USE_RETROREFLECTION
-    contribution += bsdfEvalPunctualKhronosMRM(pbrMat, V, pushConst.skyParams.sunDirection, pushConst.skyParams.sunDiskIntensity,
-                                               transmissionRay, dttThickness, texturesHdr[HDR_SHEEN_INDEX]);
-#else
-    contribution += bsdfEvaluatePunctualKhronos(pbrMat, V, pushConst.skyParams.sunDirection, pushConst.skyParams.sunDiskIntensity,
-                                                transmissionRay, dttThickness, texturesHdr[HDR_SHEEN_INDEX]);
-#endif
-
-#if GLTF_USE_TRANSMISSION
-    if(haveTransmissionSample)
-      contribution = lerp(contribution, f_specular_transmission, pbrMat.transmission);
-#endif
-  }
   else
   {
-    // HDR IBL mode: single-call Khronos split-sum evaluator (matches `pbr.frag:162-228`).
+    // Single-call Khronos split-sum evaluator (matches `pbr.frag:162-228`).
     // Handles diffuse, specular (isotropic/anisotropic), sheen, clearcoat, iridescence,
     // diffuse-transmission volume attenuation, and optional screen-space transmission mixing.
 #if GLTF_USE_RETROREFLECTION
@@ -472,9 +464,14 @@ PixelOutput fragmentMain(VertexOutput input, uint primitiveID: SV_PrimitiveID, f
   // `bsdfEvaluatePunctualKhronos` (VdotH Schlick + height-correlated Smith + Khronos composite).
   // Intensity is computed once per light at the front-surface position; only the BTDF lobe gets
   // the transmission-ray shift applied internally (intentional fix vs. `pbr.frag:316`).
-  for(int i = 0; i < pushConst.gltfScene.numLights; i++)
+  // One past the scene's lights when the sky supplies its own sun, matching the path tracer's
+  // punctualLightCount(); getSkySunLightRaster() returns it for that last index.
+  const int rasterLightCount = pushConst.gltfScene.numLights + (pushConst.frameInfo->rendererSunLight != 0 ? 1 : 0);
+  for(int i = 0; i < rasterLightCount; i++)
   {
-    GltfLight    light   = pushConst.gltfScene.lights[i];
+    GltfLight light =
+        (i >= pushConst.gltfScene.numLights) ? makeSkySunLight(pushConst.frameInfo) : pushConst.gltfScene.lights[i];
+    applySkySunLight(light, i, pushConst.frameInfo);  // no-op unless this is the marked sun
     LightContrib contrib = singleLightContribution(light, hit.pos, pbrMat.N);
     contrib.intensity *= evalIesFactor(pushConst.gltfScene, light, hit.pos);  // EXT_lights_ies
     if(all(contrib.intensity == 0.0))
@@ -517,6 +514,17 @@ PixelOutput fragmentMain(VertexOutput input, uint primitiveID: SV_PrimitiveID, f
   if(pbrMat.transmission > 0.0 && !haveTransmissionSample)
     finalAlpha *= (1.0 - pbrMat.transmission);
 #endif
+
+  // Aerial perspective: the air between the eye and this fragment. The same function the path
+  // tracer calls, on the same inputs, so the two paths' haze cannot drift. Unshadowed -- the
+  // rasterizer has no acceleration structure, so it cannot ask whether the sun is visible from a
+  // point in the air; light shafts are a path-tracer capability and a phase of their own.
+  if(hasAerialPerspective(pushConst.frameInfo))
+  {
+    const float3 eye =
+        float3(pushConst.frameInfo.viewInv[3].x, pushConst.frameInfo.viewInv[3].y, pushConst.frameInfo.viewInv[3].z);
+    contribution = applyAerialPerspective(contribution, hit.pos, eye, pushConst.frameInfo, g_atmosphere, g_transmittance, g_irradiance);
+  }
 
   output.color = float4(contribution, finalAlpha);
 

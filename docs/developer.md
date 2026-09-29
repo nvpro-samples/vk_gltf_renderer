@@ -119,6 +119,10 @@ src/
 ├── renderer_pathtracer.cpp/hpp # Monte Carlo path tracer (Vulkan ray tracing + ray query)
 ├── renderer_rasterizer.cpp/hpp # Forward PBR rasterizer
 ├── renderer_silhouette.cpp/hpp # Selection highlight (compute shader)
+├── env_image_loader.cpp/hpp    # Decodes .hdr / .exr lat-longs to float RGBA for HdrIbl
+├── env_baker.cpp/hpp           # Bakes an analytic sky into the lat-long image + importance buffer
+│                               #   that HdrIbl / HdrEnvDome consume (preview vs. commit)
+├── gltf_environment_sky.cpp/hpp# OMI_environment_sky parse/write/strip, raw-value passthrough
 ├── mcp_timing.cpp/hpp          # Optional MCP endpoint (--mcp): recompile shaders, time a
 │                               #   GPU pass over a window (docs/mcp.md)
 ├── hover_picker.cpp/hpp        # Async G-buffer readback for KHR_interactivity hover detection
@@ -151,7 +155,14 @@ src/
 │                               #   generic list renderer (icon tabs, columns, toolbar, sort, filter)
 ├── ui_element_registry.hpp     # ElementTypeDesc / ElementColumn / ElementAddVariant (data-driven list)
 ├── ui_gltf_labels.cpp/hpp      # Shared image-name + sampler wrap/filter labels (list + inspector)
-├── ui_renderer.cpp             # Viewport UI and mouse interaction
+├── ui_renderer.cpp             # Viewport UI, menus and mouse interaction
+├── ui_environment.cpp/hpp      # UiEnvironment: the Environment panel. Environment type, HDR file,
+│                               #   the authored skies, the atmosphere folds, Sun & Time of Day.
+│                               #   Takes what it needs through setters, like UiInspector
+├── sky_sun.cpp/hpp             # SkySun: who the sun is (renderer state, or a scene light marked
+│                               #   as the sky's) and every path that aims it
+├── sun_position.cpp/hpp        # NOAA solar position: (place, UTC instant) -> bearing + altitude.
+│                               #   Pure, self-contained, nothing else links against it
 ├── ui_dock_layout.cpp/hpp      # Default docking arrangement, shared by start-up (main.cpp's
 │                               #   dockSetup) and Windows > Reset UI Layout
 ├── ui_xmp.cpp/hpp              # KHR_xmp_json_ld metadata display
@@ -207,6 +218,12 @@ shaders/
 ├── gizmo_visuals_shaderio.h.slang # Gizmo shader I/O
 ├── optix_image_to_buffer.slang # OptiX denoiser buffer conversion
 ├── gltf_light_ies.h.slang      # EXT_lights_ies: photometric-profile falloff lookup
+├── sky_background.h.slang      # Background (sun-bearing) field for authored skies; shared by both paths
+├── sky_background.slang        # Rasterizer background pass that draws it
+├── sky_omi_shaderio.h.slang    # SkyType + the per-type OMI_environment_sky parameter blocks
+├── sky_gradient.h.slang        # OMI `gradient` evaluator (bands + sun), shared by bake and background
+├── env_bake.slang              # Bakes any sky into the lat-long image + importance buffer; one
+│                               #   switch, with the physical case reading SkyBruneton's LUTs
 │
 │   # Local material fork (see "Material System" below)
 ├── gltf_material_config.h      # MAT_EXT_* compile-time feature flags
@@ -412,17 +429,110 @@ inspector UI.
 
 ## Environment Lighting
 
-`Settings::envSystem` (`shaderio::EnvSystem`) selects one of a fixed set of environment sources;
-both render paths read the same `Resources` fields so a mode switch behaves identically either way:
+`Settings::envSystem` (`shaderio::EnvSystem`) selects the environment source. The shaders do not
+branch on it: every mode but `eNone` reaches them as **one lat-long image plus its alias table**
+(`Resources::hdrIbl`) and, for the rasterizer, the prefiltered cubes derived from it
+(`Resources::hdrDome`). That is the whole point of the design — sampling, MIS and raster IBL stay
+free of per-sky-type code, and adding a sky type adds no shader branches.
 
-| Mode | Rasterizer | Path tracer |
-|---|---|---|
-| `eSky` | `nvgui`-driven procedural sky compute pass | Same procedural sky, evaluated per ray |
-| `eHdr` | `Resources::hdrDome` cubes (runtime GGX/Lambert-prefiltered from `Resources::hdrIbl`'s lat-long image) via `texturesCube[HDR_DIFFUSE_INDEX/GLOSSY_INDEX]` | `Resources::hdrIbl`'s lat-long image + CDF, sampled directly (`texturesHdr[HDR_IMAGE_INDEX]`, `envSamplingData`) |
-| `eNone` | Black backdrop, no IBL term | Black backdrop, no IBL term |
+An HDR file arrives there by being loaded. The analytic types — the physical sky and the
+`OMI_environment_sky` types — arrive there by being **baked**: [`src/env_baker.*`](../src/env_baker.hpp)
+dispatches [`shaders/env_bake.slang`](../shaders/env_bake.slang) — one switch over every sky type
+— into a lat-long image and an importance buffer, then hands the pair to
+`nvvk::HdrIbl::updateFromGpuImage` and `nvshaders::HdrEnvDome::updateEnvironment`. The bake's
+bindings and push constant are ours ([`shaders/env_bake_io.h.slang`](../shaders/env_bake_io.h.slang));
+what nvpro_core2 fixes is the lat-long mapping and texel weighting (`latlongToDir`,
+`texelSolidAngle` in `nvshaders/functions.h.slang`), next to the functions that read the image back.
+What a sky *is* stays in this repository, next to the glTF loader that reads it.
 
-`GltfRenderer::updateHdrImages()` is the single place that writes the `texturesCube[]` /
-`texturesHdr[HDR_IMAGE_INDEX]` descriptors.
+The bake size is fixed (`kEnvBakeSize` in `src/env_baker.hpp`), and the alias table is **not**
+built at it. The bake sums its importance per cell of a coarser sampling grid (`kEnvSamplingGrid`,
+same header) — a shared-memory reduction inside each workgroup, so it costs next to nothing — and
+`updateFromGpuImage` builds the table over the cells, so its cost is the grid's, not the image's. A sample picks a cell and then a
+direction uniformly in solid angle within it, and the PDF written into the image's alpha is the
+cell's, so sampling and MIS agree. That suits a baked sky, whose lighting field is smooth because its
+sun is a light of its own; an HDR file keeps one entry per texel, since a photographed sun is a few
+texels wide. Shaders therefore sample with the grid (`SceneFrameInfo::envSamplingGridWidth/Height`),
+never the image size.
+`EnvBaker` splits that into a cheap `preview()` (colour only, while something is moving) and a full
+`commit()`. Which one runs is decided by `GltfRenderer::requestEnvironmentPreview()`: every edit
+source reports through it, and the commit is paid on the first frame that asks for no preview. That
+settle test, rather than an ImGui "is a control held" question, is what keeps a sun driven by the
+gizmo or by an animation from committing once per frame. `GltfRenderer::updateHdrImages()` remains the single place that writes the
+`texturesCube[]` / `texturesHdr[HDR_IMAGE_INDEX]` descriptors.
+
+The image, its alias table and the cubes are all stored in the **environment's own frame**. One
+orientation, `SceneFrameInfo::envRotation` — a unit quaternion, `OMI_environment_sky`'s `rotation`
+verbatim — takes that frame to world. Every lookup brings a world direction into it with
+`quatRotateInverse` (`nvshaders/functions.h.slang`), and nvpro_core2's raster IBL (`evalKhronosIBL`)
+and `HdrEnvDome::draw` take the same quaternion. Rotating the environment therefore never re-bakes;
+only the physical sky does, when the sun moves relative to it.
+
+### Two fields: lighting and background
+
+The environment is **two** fields, and which one a ray reads is the part that has to be right:
+
+- **Lighting field** — the baked lat-long image, deliberately **sun-free**. The sun is a directional
+  `KHR_lights_punctual` that next-event estimation samples directly; baking it into the image too
+  would light every rough surface with roughly two suns.
+- **Background field** — evaluated analytically per ray, sun included. Per-ray evaluation is also
+  what keeps a half-degree sun disk sharp, which no practical bake resolution could. The authored
+  sky types evaluate it in [`shaders/sky_background.h.slang`](../shaders/sky_background.h.slang).
+  The physical sky's background is evaluated per ray in the path tracer too
+  (`evalPhysicalSkyBackground` in `shaders/gltf_pathtrace.slang`), through the same function the
+  bake uses (`shaders/sky_bruneton_radiance.h.slang`), plus the half-degree disk
+  (`evalSunDiskBackground` in the same header, fed by a radiance the bake publishes). What the
+  camera sees is then independent of the bake resolution — the horizon, where sky meets ground in a
+  hard edge, is what a lat-long would otherwise smear. The rasterizer still draws the baked image for
+  this sky and adds the disk, so its horizon keeps the bake's resolution.
+
+A camera ray, and an escaped ray whose last bounce was delta/specular, read the background field;
+any other escaped ray reads the lighting field **plus the sun disk** (`evalSkySunDisk`),
+MIS-weighted against the sun's NEE sample. The disk is needed there because a glTF roughness of 0
+is clamped to a tiny but finite lobe, not a delta: NEE's cone samples almost never land in it, so
+without the disk smooth glass or a mirror shows no sun. The header states the rule at its
+definition because getting it wrong is silent and off by roughly 2x. Both render paths include that same
+header — the path tracer from `gltf_pathtrace.slang`, the rasterizer from its background compute
+pass `shaders/sky_background.slang` — so the two can never drift.
+
+### Panorama: where the image URI lives
+
+OMI's `panorama.equirectangular` is an index into the glTF's `textures[]`, not a path. An `.hdr`
+or `.exr` is not a standard glTF image mime type, and putting one into `images[]`/`buffers[]` to
+satisfy that would bloat every scene that has a sky — so this renderer stores a URI in a sibling
+`NV_environment_sky_panorama` block on the same sky entry:
+
+```json
+"skies": [{
+  "type": "panorama",
+  "extensions": { "NV_environment_sky_panorama": { "uri": "../env/studio.exr" } }
+}]
+```
+
+The interop gap is deliberate and worth stating: a reader that understands only OMI sees
+`type: "panorama"` with no source and falls back to its own default. That is a visible gap rather
+than a silent wrong answer, which is the better failure. An authored `equirectangular` index is
+never invented but always preserved, since index 0 is a valid texture — inventing one would load
+the wrong image rather than fall back.
+
+The URI resolves against **the glTF that named it**, like every other external asset
+([external_assets.md](external_assets.md)), not against the resources directories — two scenes
+naming the same file must not load each other's environment. On save it is written relative to the
+file being written when the image lives under it, and absolute when it does not, so a scene and
+its environment move together without a chain of `..` that breaks at the first move.
+
+Decoding is `src/env_image_loader.{cpp,hpp}`, which is also the single place that decides which
+formats can be an environment. It dispatches on content rather than file extension, and covers
+both `.hdr` and `.exr` — see that header for why EXR cannot live inside `nvvk`.
+
+### Where the sky lives in the scene
+
+`OMI_environment_sky` is scene data, not a viewer preference.
+[`src/gltf_environment_sky.*`](../src/gltf_environment_sky.hpp) parses the extension into a
+`SkyDescriptor` and writes it back on save, keeping the raw `tinygltf::Value` so sky types and keys
+the renderer does not model survive a round trip untouched. `GltfRenderer` applies a parsed sky at
+the top of the frame *after* the settings-restore hooks have run, so a scene that carries a sky wins
+over the persisted `.ini`.
 
 ## Agentic Workflow Bridge
 
@@ -495,3 +605,26 @@ See [tests/README.md](../tests/README.md) for details.
 This project uses the [Developer Certificate of Origin](https://developercertificate.org/) (DCO). By contributing, you certify that you have the right to submit the work under the project's open source license.
 
 Please open issues for bug reports and feature requests. Pull requests should target the `main` branch and include a clear description of the change.
+
+### Line endings
+
+All text files are stored in the repository with LF. This is enforced by `.gitattributes`
+(`* text=auto`), with binary asset extensions pinned explicitly so they are never
+EOL-rewritten.
+
+`* text=auto` normalizes to LF on commit but sets no working-tree `eol` attribute, so what
+you get on checkout is governed by your own Git configuration rather than by your platform:
+
+| Setting | Working tree |
+|---|---|
+| `core.autocrlf=true` (Git for Windows default) | CRLF |
+| `core.autocrlf=input` | LF |
+| `core.autocrlf=false` | follows `core.eol`, default `native` — CRLF on Windows, LF elsewhere |
+| `core.eol=lf` | LF, on any platform |
+
+You do not need to change whichever you use: every combination round-trips cleanly, so
+editing a file produces a diff of only the lines you actually changed.
+
+The one-time renormalization that established this is listed in `.git-blame-ignore-revs`,
+so `git blame` skips it (GitHub and GitLab apply that file automatically).
+

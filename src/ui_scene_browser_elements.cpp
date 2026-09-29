@@ -30,12 +30,14 @@
 // only on-screen rows do any work - the list stays cheap into the millions of nodes.
 //
 
+#include "gltf_environment_sky.hpp"
 #include "ui_scene_browser.hpp"
 #include "undo_redo.hpp"
 #include "gltf_scene.hpp"
 #include "gltf_scene_editor.hpp"
 #include "tinygltf_utils.hpp"
 #include "ui_gltf_labels.hpp"
+#include "ui_helpers.hpp"
 
 #include <imgui.h>
 #include <imgui_internal.h>
@@ -62,7 +64,7 @@ const char* nodeResourceIcon(const tinygltf::Node& node)
   if(node.camera >= 0)
     return ICON_MS_CAMERA_ALT;
   if(node.light >= 0)
-    return ICON_MS_LIGHTBULB;
+    return gltf_environment_sky::hasSkySunMarker(node) ? ICON_MS_CLEAR_DAY : ICON_MS_LIGHTBULB;
   if(tinygltf::utils::getNodeIesLight(node).light >= 0)
     return ICON_MS_FLASHLIGHT_ON;  // pure EXT_lights_ies (no KHR_lights_punctual)
   return ICON_MS_CATEGORY;         // empty / pure transform group
@@ -88,14 +90,7 @@ void cellRightInt(int value)
 // Right-aligned compact count (e.g. 92.4K, 1.2M) so large values (triangles) fit a narrow cell.
 void cellRightCompact(long long value)
 {
-  char buf[32];
-  if(value >= 1000000)
-    std::snprintf(buf, sizeof(buf), "%.1fM", double(value) / 1e6);
-  else if(value >= 10000)
-    std::snprintf(buf, sizeof(buf), "%.1fK", double(value) / 1e3);
-  else
-    std::snprintf(buf, sizeof(buf), "%lld", value);
-  cellRightText(buf);
+  cellRightText(formatCompact(uint64_t(std::max(value, 0LL))).c_str());
 }
 
 // A small non-interactive color swatch (clicks fall through to the row selectable).
@@ -141,33 +136,6 @@ float animationDuration(const tinygltf::Model& model, const tinygltf::Animation&
       duration = std::max(duration, float(mx[0]));
   }
   return duration;
-}
-
-// Compact human counts for footer aggregates.
-std::string formatTriangleCount(long long tris)
-{
-  char buf[64];
-  if(tris >= 1000000)
-    std::snprintf(buf, sizeof(buf), "%.1fM triangles", double(tris) / 1e6);
-  else if(tris >= 1000)
-    std::snprintf(buf, sizeof(buf), "%.1fK triangles", double(tris) / 1e3);
-  else
-    std::snprintf(buf, sizeof(buf), "%lld triangles", tris);
-  return buf;
-}
-
-std::string formatBytes(long long bytes)
-{
-  char buf[64];
-  if(bytes >= (1LL << 30))
-    std::snprintf(buf, sizeof(buf), "%.1f GB", double(bytes) / double(1LL << 30));
-  else if(bytes >= (1LL << 20))
-    std::snprintf(buf, sizeof(buf), "%.1f MB", double(bytes) / double(1LL << 20));
-  else if(bytes >= (1LL << 10))
-    std::snprintf(buf, sizeof(buf), "%.1f KB", double(bytes) / double(1LL << 10));
-  else
-    std::snprintf(buf, sizeof(buf), "%lld B", bytes);
-  return buf;
 }
 
 // Draw a small square thumbnail (or a placeholder) sized to the row height, then keep the cursor on the
@@ -310,7 +278,7 @@ void UiSceneBrowser::ensureElementRegistry()
       long long tris = 0;
       for(int t : m_meshTriangles)
         tris += t;
-      return formatTriangleCount(tris);
+      return std::string(formatCompact(uint64_t(tris)).c_str()) + " triangles";
     };
     d.rename = [this](int i, const std::string& n) {
       m_undoStack->executeCommand(std::make_unique<RenameMeshCommand>(*m_scene, i, m_scene->getModel().meshes[i].name, n));
@@ -720,7 +688,7 @@ void UiSceneBrowser::ensureElementRegistry()
       for(const tinygltf::Image& img : m_scene->getModel().images)
         if(img.width > 0 && img.height > 0)
           bytes += static_cast<long long>(img.width) * img.height * 4;
-      return formatBytes(bytes);
+      return std::string(formatBytes(uint64_t(bytes)).c_str());
     };
     // An image is deletable only when no texture references it (refcount 0).
     d.canDelete = [this](int i) {

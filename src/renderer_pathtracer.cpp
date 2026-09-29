@@ -133,6 +133,8 @@ void PathTracer::registerParameters(SettingsRegistry* settings)
                 &m_pushConst.texGradScale, Persist::eYes, 0.0F, 1.0F);
   settings->add({"ptAperture", "PathTracer: Camera aperture"}, &m_pushConst.aperture, Persist::eYes, 0.0F, 1.0F);
   settings->add({"ptFocalDistance", "PathTracer: Focal distance"}, &m_pushConst.focalDistance, Persist::eYes);
+  settings->add({"ptShadowTransmission", "PathTracer: Let shadow rays pass through transmissive surfaces (biased approximation)"},
+                &m_shadowTransmission, Persist::eYes);
   settings->add({"ptAutoFocus", "PathTracer: Enable auto focus"}, &m_autoFocus, Persist::eYes);
   settings->add({"ptTechnique", "PathTracer: Rendering technique [RayQuery:0, RayTracing:1]"}, (int*)&m_renderTechnique,
                 Persist::eYes, 0, 1);
@@ -297,6 +299,12 @@ bool PathTracer::onUIRender(Resources& resources)
                                "Ray-footprint gradient scale for texture LOD.\n"
                                "0 = always mip 0 (default: sharpest, relies on MC accumulation for AA).\n"
                                "1 = full physically-derived LOD (may look soft at distance).");
+    changed |= PE::Checkbox("Shadow Transmission", &m_shadowTransmission,
+                            "Let shadow rays pass straight through transmissive surfaces (KHR_materials_transmission).\n"
+                            "Biased approximation: brightens what lies behind glass but ignores refraction,\n"
+                            "so caustics are not focused. When disabled, transmissive surfaces block shadow rays\n"
+                            "and light through them comes only from BSDF sampling: no approximation, but caustics\n"
+                            "from small or punctual lights (sun, point, spot, directional) are missing.");
     PE::end();
   }
 
@@ -770,8 +778,13 @@ void PathTracer::pushDescriptorSet(VkCommandBuffer cmd, Resources& resources, Vk
 void PathTracer::createPipeline(Resources& resources)
 {
   SCOPED_TIMER(__FUNCTION__);
+  // Set 3 is the physical sky's scattering LUTs, read by aerial perspective. Always in the layout,
+  // even for a scene that never selects that sky: a pipeline layout is built once and the
+  // environment changes at runtime, so making the layout depend on it would mean rebuilding the
+  // pipeline every time someone switched to an HDR.
   std::vector<VkDescriptorSetLayout> descriptorSetLayouts{resources.descriptorSetLayout[0], resources.descriptorSetLayout[1],
-                                                          resources.hdrIbl.getDescriptorSetLayout()};
+                                                          resources.hdrIbl.getDescriptorSetLayout(),
+                                                          resources.skyLutDescriptorSetLayout};
 
   // Creating the pipeline layout
   VkPushConstantRange        pushConstant{VK_SHADER_STAGE_ALL, 0, sizeof(shaderio::PathtracePushConstant)};
@@ -1132,8 +1145,13 @@ bool PathTracer::compileShader(Resources& resources, bool fromFile)
 
   VkPushConstantRange pushConstant{VK_SHADER_STAGE_ALL, 0, sizeof(shaderio::PathtracePushConstant)};
 
+  // Set 3 is the physical sky's scattering LUTs, read by aerial perspective. Always in the layout,
+  // even for a scene that never selects that sky: a pipeline layout is built once and the
+  // environment changes at runtime, so making the layout depend on it would mean rebuilding the
+  // pipeline every time someone switched to an HDR.
   std::vector<VkDescriptorSetLayout> descriptorSetLayouts{resources.descriptorSetLayout[0], resources.descriptorSetLayout[1],
-                                                          resources.hdrIbl.getDescriptorSetLayout()};
+                                                          resources.hdrIbl.getDescriptorSetLayout(),
+                                                          resources.skyLutDescriptorSetLayout};
 
   VkShaderCreateInfoEXT shaderInfo{
       .sType                  = VK_STRUCTURE_TYPE_SHADER_CREATE_INFO_EXT,
@@ -1503,6 +1521,10 @@ void PathTracer::renderRayQuery(VkCommandBuffer cmd, VkExtent2D renderingSize, R
   VkDescriptorSet hdrDescSet = resources.hdrIbl.getDescriptorSet();
   vkCmdBindDescriptorSets(cmd, VK_PIPELINE_BIND_POINT_COMPUTE, m_pipelineLayout, 2, 1, &hdrDescSet, 0, nullptr);
 
+  // Set the Descriptor for the physical sky's LUTs (Set: 3) -- aerial perspective. Bound whatever
+  // the environment is; the shader reads it only when the frame says the sky is the physical one.
+  vkCmdBindDescriptorSets(cmd, VK_PIPELINE_BIND_POINT_COMPUTE, m_pipelineLayout, 3, 1, &resources.skyLutDescriptorSet, 0, nullptr);
+
   pushDescriptorSet(cmd, resources, VK_PIPELINE_BIND_POINT_COMPUTE);
 
   // Dispatch the compute shader
@@ -1529,6 +1551,10 @@ void PathTracer::renderRayTrace(VkCommandBuffer cmd, VkExtent2D& renderingSize, 
   // Set the Descriptor for HDR (Set: 2)
   VkDescriptorSet hdrDescSet = resources.hdrIbl.getDescriptorSet();
   vkCmdBindDescriptorSets(cmd, VK_PIPELINE_BIND_POINT_RAY_TRACING_KHR, m_pipelineLayout, 2, 1, &hdrDescSet, 0, nullptr);
+
+  // Set the Descriptor for the physical sky's LUTs (Set: 3) -- aerial perspective.
+  vkCmdBindDescriptorSets(cmd, VK_PIPELINE_BIND_POINT_RAY_TRACING_KHR, m_pipelineLayout, 3, 1,
+                          &resources.skyLutDescriptorSet, 0, nullptr);
 
   pushDescriptorSet(cmd, resources, VK_PIPELINE_BIND_POINT_RAY_TRACING_KHR);
 
@@ -1620,6 +1646,7 @@ void PathTracer::setupPushConstant(VkCommandBuffer cmd, Resources& resources, Vk
   // every reset (camera/scene change). The local frameCount can be overridden to a Halton index when DLSS
   // is on and never resets; using it for ePtFirstFrame would only write depth once and break selection/depth.
   m_pushConst.flags = (resources.frameCount == 0 ? shaderio::ePtFirstFrame : 0);
+  m_pushConst.flags |= m_shadowTransmission ? shaderio::ePtShadowTransmission : 0;
 #if defined(USE_DLSS)
   m_pushConst.flags |= useDlss ? shaderio::ePtUseDlss : 0;
 #endif
@@ -1628,7 +1655,6 @@ void PathTracer::setupPushConstant(VkCommandBuffer cmd, Resources& resources, Vk
 #endif
   m_pushConst.totalSamples = m_totalSamplesAccumulated;
   m_pushConst.frameInfo    = (shaderio::SceneFrameInfo*)resources.bFrameInfo.address;
-  m_pushConst.skyParams    = (shaderio::SkyPhysicalParameters*)resources.bSkyParams.address;
   m_pushConst.gltfScene    = (shaderio::GltfScene*)resources.sceneVk.sceneDesc().address;
   m_pushConst.mouseCoord   = nvapp::ElementDbgPrintf::getMouseCoord();  // Use for debugging: printf in shader
 

@@ -159,6 +159,8 @@ For the architecture, bridge directory layout, and request/response protocol beh
 
 ### Extensions
 
+✅ Supported · 🧪 Implemented against a specification outside the [official glTF extension registry](https://github.com/KhronosGroup/glTF/tree/main/extensions/2.0) (draft, third-party, or specific to this renderer); it may change
+
 - ✅ [KHR_accessor_float64](https://github.com/KhronosGroup/glTF/tree/main/extensions/2.0/Khronos/KHR_accessor_float64)
 - ✅ [KHR_animation_pointer](https://github.com/KhronosGroup/glTF/tree/main/extensions/2.0/Khronos/KHR_animation_pointer)
 - ✅ [KHR_draco_mesh_compression](https://github.com/KhronosGroup/glTF/tree/main/extensions/2.0/Khronos/KHR_draco_mesh_compression)
@@ -172,8 +174,8 @@ For the architecture, bridge directory layout, and request/response protocol beh
 - ✅ [KHR_materials_ior](https://github.com/KhronosGroup/glTF/tree/main/extensions/2.0/Khronos/KHR_materials_ior)
 - ✅ [KHR_materials_iridescence](https://github.com/KhronosGroup/glTF/tree/main/extensions/2.0/Khronos/KHR_materials_iridescence)
 - ✅ [KHR_materials_pbrSpecularGlossiness](https://github.com/KhronosGroup/glTF/tree/main/extensions/2.0/Archived/KHR_materials_pbrSpecularGlossiness)
-- ✅ [KHR_materials_retroreflection](https://github.com/KhronosGroup/glTF/pull/2610)
-- ✅ [KHR_materials_scatter](https://github.com/KhronosGroup/glTF/pull/2579)
+- 🧪 [KHR_materials_retroreflection](https://github.com/KhronosGroup/glTF/pull/2610)
+- 🧪 [KHR_materials_scatter](https://github.com/KhronosGroup/glTF/pull/2579)
 - ✅ [KHR_materials_sheen](https://github.com/KhronosGroup/glTF/tree/main/extensions/2.0/Khronos/KHR_materials_sheen)
 - ✅ [KHR_materials_specular](https://github.com/KhronosGroup/glTF/tree/main/extensions/2.0/Khronos/KHR_materials_specular)
 - ✅ [KHR_materials_transmission](https://github.com/KhronosGroup/glTF/tree/main/extensions/2.0/Khronos/KHR_materials_transmission)
@@ -190,10 +192,13 @@ For the architecture, bridge directory layout, and request/response protocol beh
 - ✅ [KHR_xmp_json_ld](https://github.com/KhronosGroup/glTF/tree/main/extensions/2.0/Khronos/KHR_xmp_json_ld)
 - ✅ [EXT_lights_ies](https://github.com/KhronosGroup/glTF/tree/main/extensions/2.0/Vendor/EXT_lights_ies)
 - ✅ [EXT_mesh_gpu_instancing](https://github.com/KhronosGroup/glTF/tree/main/extensions/2.0/Vendor/EXT_mesh_gpu_instancing)
-- ✅ [EXT_mesh_opacity_micromap](https://github.com/pixeljetstream/glTF/tree/EXT_mesh_opacity_micromap/extensions/2.0/Vendor/EXT_mesh_opacity_micromap)
+- 🧪 [EXT_mesh_opacity_micromap](https://github.com/pixeljetstream/glTF/tree/EXT_mesh_opacity_micromap/extensions/2.0/Vendor/EXT_mesh_opacity_micromap)
 - ✅ [EXT_meshopt_compression](https://github.com/KhronosGroup/glTF/tree/main/extensions/2.0/Vendor/EXT_meshopt_compression)
 - ✅ [EXT_texture_webp](https://github.com/KhronosGroup/glTF/tree/main/extensions/2.0/Vendor/EXT_texture_webp)
 - ✅ [MSFT_texture_dds](https://github.com/KhronosGroup/glTF/tree/main/extensions/2.0/Vendor/MSFT_texture_dds)
+- 🧪 [OMI_environment_sky](https://github.com/omigroup/gltf-extensions/tree/main/extensions/2.0/OMI_environment_sky) — `plain`, `gradient` and `physical` are rendered and round-trip on save; `panorama` needs a URI, which the extension does not define, so it is read from the sibling `NV_environment_sky_panorama` below
+- 🧪 `NV_environment_sky_panorama` — vendor sibling carrying the panorama image URI for `OMI_environment_sky`
+- 🧪 `NV_environment_sky_atmosphere` — vendor sibling carrying the rest of the physical sky's atmosphere (solar spectrum, planet size, scale heights, aerosol albedo, ozone layer), which `OMI_environment_sky` has no fields for
 
 ### glTF 2.1 (Complex Scenes — preview)
 

@@ -257,18 +257,19 @@ struct TraditionalRaytracer : IRaytracer
 
     if(USE_SER == 1 && AVAILABLE_SER == 1)
     {
+      // Any-hit (rahitShadow) still runs during HitObject traversal and accumulates transmission;
+      // only closest-hit/miss are deferred, so a committed hit means the ray was blocked.
       HitObject hitObj = HitObject::TraceRay(topLevelAS, RAY_FLAG_NONE, 0xFF, 1, 0, 1, ray, shadowPayload);
-
       if(hitObj.IsHit())
       {
-        return float3(0.0);
+        shadowPayload.totalTransmission = float3(0.0);
       }
     }
     else
     {
       TraceRay(topLevelAS, RAY_FLAG_NONE, 0xFF, 1, 0, 1, ray, shadowPayload);
     }
-    seed = shadowPayload.seed;
+    seed = shadowPayload.seed;  // any-hit consumed random numbers; propagate on every path
 
     return shadowPayload.totalTransmission;
   }

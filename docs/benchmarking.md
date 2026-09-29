@@ -137,6 +137,11 @@ Three traps worth knowing, each of which produces confident-looking numbers that
 - **Persisted settings.** `_bin/<config>/vk_gltf_renderer.ini` stores `ptOptimalShader`, `ptTechnique`
   and `ptAdaptiveSampling` between runs, so a previous session silently changes what you measure.
   Set every knob that matters explicitly in the script rather than relying on defaults.
+
+  The reverse no longer happens: a scripted or benchmark run does **not** write that file back.
+  It used to, which meant a measurement run left its own window size and hidden side panels behind
+  as the layout for the next interactive session — panels missing, with nothing to explain it.
+  Windows > Reset Layout was the only way out.
 - **Stale shader search paths.** The path tracer compiles Slang at runtime from the directories baked
   in at build time. If those point somewhere stale, it falls back to the SPIR-V embedded at build
   time and a shader-swap A/B silently measures nothing. Verify a swap actually took effect (via a

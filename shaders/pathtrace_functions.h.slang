@@ -9,6 +9,8 @@
 
 #include "gltf_eval_config.h"
 #include "gltf_light_ies.h.slang"
+#include "camera_ray.h.slang"
+#include "sky_background.h.slang"
 
 //-----------------------------------------------------------------------
 // Types and tuning constants
@@ -188,12 +190,20 @@ float3 safeOffsetRay(float3 worldPosition, float3 offsetDirection)
       asfloat(asint(worldPosition.y) + ((worldPosition.y < 0) ? -scaleInt.y : scaleInt.y)),
       asfloat(asint(worldPosition.z) + ((worldPosition.z < 0) ? -scaleInt.z : scaleInt.z)));
 
+  // A component near zero gets a fixed step instead of an ulp step, which the paper sizes for a
+  // point near the origin. It is not enough when only *that* component is near zero: the
+  // intersection test's error follows the triangle's largest coordinate, not this one. A lake at
+  // y = 0 viewed kilometres from the origin has an exact y = 0 hit, a 1.5e-5 step up, and an
+  // intersection error around 5e-4 -- so reflected rays re-hit the water they left, in horizontal
+  // bands that step with the rounding. Scaling that step by the largest coordinate keeps it
+  // proportionate to the error; at the origin (largest coordinate below 1) nothing changes.
   const float origin     = 1.0f / 32.0f;
   const float floatScale = 1.0f / 65536.0f;
+  const float nearZero = floatScale * max(1.0f, max(abs(worldPosition.x), max(abs(worldPosition.y), abs(worldPosition.z))));
   return float3(  //
-      abs(worldPosition.x) < origin ? worldPosition.x + floatScale * offsetDirection.x : offsetPosition.x,
-      abs(worldPosition.y) < origin ? worldPosition.y + floatScale * offsetDirection.y : offsetPosition.y,
-      abs(worldPosition.z) < origin ? worldPosition.z + floatScale * offsetDirection.z : offsetPosition.z);
+      abs(worldPosition.x) < origin ? worldPosition.x + nearZero * offsetDirection.x : offsetPosition.x,
+      abs(worldPosition.y) < origin ? worldPosition.y + nearZero * offsetDirection.y : offsetPosition.y,
+      abs(worldPosition.z) < origin ? worldPosition.z + nearZero * offsetDirection.z : offsetPosition.z);
 }
 
 
@@ -285,6 +295,12 @@ float3 getShadowTransmission(GltfRenderNode      renderNode,
 #if !GLTF_USE_TRANSMISSION
   return float3(0.0);
 #else
+  // Straight-through shadow transmission ignores refraction, so it is biased (and double-counts
+  // with BSDF-sampled paths that reach an env/area light through the surface). When disabled the
+  // surface is opaque to shadow rays; stochastic alpha in the callers is unaffected.
+  if(!hasFlag(pushConst.flags, PathtracerFlags::ePtShadowTransmission))
+    return float3(0.0);
+
   uint               matIndex  = max(0, renderNode.materialID);
   GltfShadeMaterial* materials = pushConst.gltfScene->materials;
   GltfShadeMaterial  mat       = materials[matIndex];
@@ -376,11 +392,39 @@ float3 getShadowTransmission(GltfRenderNode      renderNode,
 // Direct lighting and environment
 //-----------------------------------------------------------------------
 
+// Punctual lights the sampler can choose from: the scene's, plus the sky's own sun when the
+// renderer is supplying one. Every count and every index has to agree with this, or the selection
+// pdf stops matching what was actually sampled.
+int punctualLightCount()
+{
+  return pushConst.gltfScene.numLights + (pushConst.frameInfo->rendererSunLight != 0 ? 1 : 0);
+}
+
+// Index into that set. The scene's lights come first, so the sky's sun is the last one.
+GltfLight getPunctualLight(int index)
+{
+  if(index >= pushConst.gltfScene.numLights)
+    return makeSkySunLight(pushConst.frameInfo);
+
+  GltfLight light = pushConst.gltfScene.lights[index];
+  applySkySunLight(light, index, pushConst.frameInfo);  // no-op unless this is the marked sun
+  return light;
+}
+
+// Index of the sky's sun in that set, or -1: the renderer's own, else the scene's marked one. It is
+// the one punctual light a BSDF ray can also reach, because its disk is drawn in the sky.
+int skySunPunctualIndex()
+{
+  if(pushConst.frameInfo->rendererSunLight != 0)
+    return pushConst.gltfScene.numLights;
+  return pushConst.frameInfo->sunLightIndex;
+}
+
 LightingTechniqueProbabilities getDirectLightingTechniqueProbabilities()
 {
   LightingTechniqueProbabilities probs;
 
-  bool  hasPunctual = pushConst.gltfScene.numLights > 0;
+  bool  hasPunctual = punctualLightCount() > 0;
   bool  hasEmissive = pushConst.gltfScene.numEmissiveTriangles > 0;
   float lightWeight = (hasPunctual || hasEmissive) ? 0.5f : 0.0f;
   bool  hasEnv      = !hasFlag(pushConst.frameInfo->flags, SceneFrameInfoFlags::eSceneUseNoEnvironment)
@@ -588,10 +632,10 @@ void sampleLights(in float3       pos,
 
     if(!pickEmissive)
     {
-      int       numPunctual  = pushConst.gltfScene.numLights;
+      int       numPunctual  = punctualLightCount();
       float     selectionPdf = probs.punctualWeight / numPunctual;
       int       lightIndex   = min(int(rand(seed) * numPunctual), numPunctual - 1);
-      GltfLight light        = pushConst.gltfScene.lights[lightIndex];
+      GltfLight light        = getPunctualLight(lightIndex);
 
       // singleLightContribution() drops any punctual light below the hemisphere of the normal it
       // is given. When the shading point is lit from both sides, hand it a normal pointing at the
@@ -608,7 +652,12 @@ void sampleLights(in float3       pos,
       directLight.distance  = contrib.distance;
       radiance              = contrib.intensity / (selectionPdf * lightWeight);
 
-      directLight.pdf = (contrib.pdf == DIRAC) ? DIRAC : selectionPdf * contrib.pdf;
+      // DIRAC even for a sphere light sampled over a cone: no BSDF ray can reach it, so this is
+      // the only technique that produces its radiance and its MIS weight is 1. The sky's sun is
+      // the exception -- a BSDF ray that escapes onto its disk sees it -- so it carries a pdf, the
+      // same one skySunNeePdf() gives computeSkySunHitMisWeight().
+      const float sunSolidAngle = (lightIndex == skySunPunctualIndex()) ? skySunSolidAngle(pushConst.frameInfo) : 0.0F;
+      directLight.pdf           = (sunSolidAngle > 0.0F) ? selectionPdf / sunSolidAngle : DIRAC;
     }
     else
     {
@@ -627,53 +676,33 @@ void sampleLights(in float3       pos,
     }
   }
 
-  if(envWeight > 0 && directLight.pdf != DIRAC)
+  if(!sampleLight && envWeight > 0)
   {
-    if(!hasFlag(pushConst.frameInfo->flags, SceneFrameInfoFlags::eSceneUseHdrEnvironment))
+    // One environment representation, whatever the sky is. Every EnvSystem that reaches this point
+    // is a lat-long image by now: the HDR file is one, and the analytic skies are baked into one
+    // (see GltfRenderer::isBakedEnvironment). eNone returns before here.
+    float3 rand_val = float3(rand(seed), rand(seed), rand(seed));
+    // The alias table may be coarser than the image (a baked sky), so sample on its own grid.
+    const uint2 samplingGrid = uint2(pushConst.frameInfo->envSamplingGridWidth, pushConst.frameInfo->envSamplingGridHeight);
+    float4 radiance_pdf =
+        environmentSample(texturesHdr[HDR_IMAGE_INDEX], envSamplingData, samplingGrid, rand_val, directLight.direction);
+    envPdf = radiance_pdf.w;
+    if(envPdf > 0.0)
     {
-      if(!sampleLight)
-      {
-        float2            random_sample = float2(rand(seed), rand(seed));
-        SkySamplingResult skySample     = samplePhysicalSky(*pushConst.skyParams, random_sample);
-        directLight.direction           = skySample.direction;
-        envPdf                          = skySample.pdf;
-        radiance                        = skySample.radiance / (envPdf * envWeight);
-      }
-      else
-      {
-        envPdf = samplePhysicalSkyPDF(*pushConst.skyParams, directLight.direction);
-      }
-    }
-    else
-    {
-      if(!sampleLight)
-      {
-        float3 rand_val = float3(rand(seed), rand(seed), rand(seed));
-        float4 radiance_pdf = environmentSample(texturesHdr[HDR_IMAGE_INDEX], envSamplingData, rand_val, directLight.direction);
-        envPdf                = radiance_pdf.w;
-        radiance              = radiance_pdf.xyz * pushConst.frameInfo->envIntensity / (envPdf * envWeight);
-        directLight.direction = rotate(directLight.direction, float3(0, 1, 0), pushConst.frameInfo->envRotation);
-      }
-      else
-      {
-        float3 dir          = rotate(directLight.direction, float3(0, 1, 0), -pushConst.frameInfo->envRotation);
-        float2 uv           = getSphericalUv(dir);
-        float4 radiance_pdf = texturesHdr[HDR_IMAGE_INDEX].SampleLevel(uv, 0);
-        envPdf              = radiance_pdf.w;
-      }
+      radiance              = radiance_pdf.xyz * pushConst.frameInfo->envIntensity / (envPdf * envWeight);
+      directLight.direction = quatRotate(pushConst.frameInfo->envRotation, directLight.direction);
+      directLight.pdf       = envPdf;  // left as 0 otherwise -> caller skips NEE
     }
   }
 
-  float misWeight = 1.0f;
+  // The pdf the caller weighs against the BSDF, which is the only other technique that can produce
+  // this sample's radiance: a BSDF ray can hit the emitter or escape to the environment, but the
+  // light and environment techniques never produce each other's radiance, so they are not weighted
+  // against each other. These are the same pdfs computeEmitterHitMisWeight and
+  // computeEnvHitMisWeight use on the BSDF side. Punctual lights stay DIRAC (weight 1), all but
+  // the sky's sun, whose BSDF side is computeSkySunHitMisWeight.
   if(directLight.pdf != DIRAC)
-  {
-    float pdfSum = lightWeight * directLight.pdf + envWeight * envPdf;
-    if(pdfSum > 0.0)
-      misWeight = (sampleLight ? lightWeight * directLight.pdf : envWeight * envPdf) / pdfSum;
-
-    directLight.pdf = pdfSum;
-  }
-  radiance *= misWeight;
+    directLight.pdf *= sampleLight ? lightWeight : envWeight;
 
   directLight.radianceOverPdf = radiance;
 }
@@ -688,19 +717,12 @@ void sampleEnvironment(float3 direction, SceneFrameInfo* frameInfo, out float3 e
     return;
   }
 
-  if(!hasFlag(frameInfo->flags, SceneFrameInfoFlags::eSceneUseHdrEnvironment))
-  {
-    envColor = evalPhysicalSky(*pushConst.skyParams, direction);
-    envPdf   = samplePhysicalSkyPDF(*pushConst.skyParams, direction);
-  }
-  else
-  {
-    float3 dir = rotate(direction, float3(0, 1, 0), -frameInfo->envRotation);
-    float2 uv  = getSphericalUv(dir);
-    float4 env = texturesHdr[HDR_IMAGE_INDEX].SampleLevel(uv, 0);
-    envColor   = env.rgb * frameInfo->envIntensity;
-    envPdf     = env.w;
-  }
+  // Same as the sampling branch above: by the time a ray escapes, every sky is a lat-long image.
+  float3 dir = quatRotateInverse(frameInfo->envRotation, direction);
+  float2 uv  = getSphericalUv(dir);
+  float4 env = texturesHdr[HDR_IMAGE_INDEX].SampleLevel(uv, 0);
+  envColor   = env.rgb * frameInfo->envIntensity;
+  envPdf     = env.w;
 }
 
 float computeEnvHitMisWeight(float lastSamplePdf, float envPdf)
@@ -712,6 +734,22 @@ float computeEnvHitMisWeight(float lastSamplePdf, float envPdf)
   float                          envWeight = probs.envWeight;
 
   return lastSamplePdf / (lastSamplePdf + envWeight * envPdf);
+}
+
+// Solid-angle pdf with which sampleLights() lands on the sky's sun: its selection terms over the
+// disk's solid angle, exactly as it computes them. Only called where the disk exists, so the
+// solid angle is not zero.
+float skySunNeePdf()
+{
+  const LightingTechniqueProbabilities probs = getDirectLightingTechniqueProbabilities();
+  return probs.lightWeight * (probs.punctualWeight / punctualLightCount()) / skySunSolidAngle(pushConst.frameInfo);
+}
+
+// MIS weight for a BSDF ray that escaped onto the sky's sun disk, against the sun's NEE sample.
+// Never called after a delta bounce: the caller adds the disk unweighted there.
+float computeSkySunHitMisWeight(float lastSamplePdf)
+{
+  return lastSamplePdf / (lastSamplePdf + skySunNeePdf());
 }
 
 //-----------------------------------------------------------------------
@@ -1056,27 +1094,6 @@ float2 sampleGaussian(float2 u)
   return r * float2(cos(theta), sin(theta));
 }
 
-RayDesc getRay(float2 samplePos, float2 offset, float2 imageSize, float4x4 projMatrixI, float4x4 viewMatrixI, bool isOrthographic)
-{
-  const float2 clipCoords = (samplePos + offset) / imageSize * 2.0 - 1.0;
-  float4       viewCoords = mul(float4(clipCoords, -1.0, 1.0), projMatrixI);
-  viewCoords /= viewCoords.w;
-
-  RayDesc ray;
-  if(isOrthographic)
-  {
-    ray.Origin    = mul(viewCoords, viewMatrixI).xyz;
-    ray.Direction = normalize(mul(float4(0, 0, -1, 0), viewMatrixI).xyz);
-  }
-  else
-  {
-    ray.Origin    = viewMatrixI[3].xyz;
-    ray.Direction = normalize(mul(viewCoords, viewMatrixI).xyz - ray.Origin);
-  }
-  ray.TMin = 0.0;
-  ray.TMax = INFINITE;
-  return ray;
-}
 
 uint traceSelectionRay(IRaytracer raytracer, float2 samplePos, float2 imageSize)
 {
@@ -1123,6 +1140,7 @@ struct PathTracerState
   float   lastSamplePdf = DIRAC;
   float2  maxRoughness  = float2(0.0);
   bool    solid         = true;
+  bool    firstHitHazed = true;  // false when the camera ray landed on the shadow catcher
   RayCone cone          = {0.0F, pushConst.pixelAngle};
   int     surfaceDepth  = 0;
 #if GLTF_USE_TRANSMISSION || GLTF_USE_VOLUME
@@ -1227,11 +1245,23 @@ bool tryPrimaryMissBackplate(RayDesc ray, SceneFrameInfo* frameInfo, inout PathT
     return true;
   }
 
+  // Authored sky: the visible background is evaluated analytically, sun and all. Sampling the
+  // baked lat-long here instead would show a sky with no sun in it -- see sky_background.h.slang.
+  if(hasAuthoredSkyBackground(frameInfo->envSkyType))
+  {
+    const float3 dir = quatRotateInverse(frameInfo->envRotation, ray.Direction);
+    pt.radiance      = evalAuthoredSkyBackground(dir, frameInfo) * frameInfo->envIntensity;
+    return true;
+  }
+
   if(hasFlag(frameInfo->flags, SceneFrameInfoFlags::eSceneUseHdrEnvironment) && frameInfo->envBlur > 0)
   {
-    float3 dir  = rotate(ray.Direction, float3(0, 1, 0), -frameInfo->envRotation);
-    float2 uv   = getSphericalUv(dir);
-    pt.radiance = smoothHDRBlur(texturesHdr[HDR_IMAGE_INDEX], uv, frameInfo->envBlur).xyz * frameInfo->envIntensity;
+    float3 dir = quatRotateInverse(frameInfo->envRotation, ray.Direction);
+    float2 uv  = getSphericalUv(dir);
+    // The physical sky's disk is not in its baked image, so it is added here as on the unblurred
+    // path; a no-op for every other environment.
+    const float3 blurred = smoothHDRBlur(texturesHdr[HDR_IMAGE_INDEX], uv, frameInfo->envBlur).xyz;
+    pt.radiance          = (blurred + evalSunDiskBackground(dir, frameInfo)) * frameInfo->envIntensity;
     return true;
   }
 

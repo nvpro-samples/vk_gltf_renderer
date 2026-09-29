@@ -36,6 +36,7 @@
 #include <nvgui/axis.hpp>
 #include <nvgui/file_dialog.hpp>
 #include <nvgui/fonts.hpp>
+#include <nvgui/property_editor.hpp>
 #include <nvgui/hover_scrolling.hpp>
 #include <nvgui/tonemapper.hpp>
 #include <nvgui/tooltip.hpp>
@@ -45,6 +46,7 @@
 
 #include <nvapp/elem_camera.hpp>
 
+#include "env_image_loader.hpp"
 #include "renderer.hpp"
 #include "gltf_create_tangent.hpp"
 #include "gltf_scene_editor.hpp"
@@ -52,8 +54,8 @@
 #include "tinygltf_utils.hpp"
 #include "ui_animation.hpp"
 #include "ui_dock_layout.hpp"
+#include "ui_helpers.hpp"
 #include "ui_interactivity.hpp"
-#include "ui_linear_color.hpp"
 #include "ui_mouse_state.hpp"
 #include "version.hpp"
 
@@ -409,12 +411,61 @@ void GltfRenderer::windowTitle()
 // Helper function to load HDR files
 void GltfRenderer::loadHdrFileDialog()
 {
+  // "hdr,exr" -> "Environment Image|*.hdr;*.exr". Derived from the loader's own list so a newly
+  // supported format cannot end up unofferable in the dialog.
+  const std::string      extensions = envImageExtensions();
+  std::string            filter     = "Environment Image|";
+  std::string::size_type start      = 0;
+  while(start < extensions.size())
+  {
+    const std::string::size_type comma = extensions.find(',', start);
+    if(start != 0)
+      filter += ";";
+    filter += "*." + extensions.substr(start, comma - start);
+    start = (comma == std::string::npos) ? extensions.size() : comma + 1;
+  }
+
   std::filesystem::path filename =
-      nvgui::windowOpenFileDialog(m_app->getWindowHandle(), "Load HDR Environment", "HDR Image|*.hdr", m_lastHdrDirectory);
+      nvgui::windowOpenFileDialog(m_app->getWindowHandle(), "Load Environment Image", filter.c_str(), m_lastHdrDirectory);
   if(!filename.empty())
   {
     onFileDrop(filename.c_str());
   }
+}
+
+//--------------------------------------------------------------------------------------------------
+// The two `.sky.json` pickers. Thin on purpose: the work is in sky_preset, and these only decide
+// where the file goes.
+//
+void GltfRenderer::loadSkyPresetDialog()
+{
+  const std::filesystem::path filename = nvgui::windowOpenFileDialog(m_app->getWindowHandle(), "Load Sky Preset",
+                                                                     "Sky Preset|*.sky.json;*.json", m_lastSkyPresetDirectory);
+  if(filename.empty())
+    return;
+
+  if(loadSkyPreset(filename))
+    m_lastSkyPresetDirectory = filename.parent_path();
+}
+
+void GltfRenderer::saveSkyPresetDialog()
+{
+  std::filesystem::path suggested = m_lastSkyPresetDirectory;
+  suggested /= "sky.sky.json";
+
+  std::filesystem::path filename =
+      nvgui::windowSaveFileDialog(m_app->getWindowHandle(), "Save Sky Preset", "Sky Preset|*.sky.json;*.json", suggested);
+  if(filename.empty())
+    return;
+
+  // The double extension is the convention the drop handler recognises, so a file saved without it
+  // would not come back by being dragged in -- worth fixing up rather than explaining.
+  const std::string name = nvutils::utf8FromPath(filename.filename());
+  if(!name.ends_with(".sky.json"))
+    filename.replace_extension(".sky.json");
+
+  if(saveSkyPreset(filename))
+    m_lastSkyPresetDirectory = filename.parent_path();
 }
 
 // Image picker for the inspector's "Load from file" texture action (see UiInspector import hooks).
@@ -571,7 +622,8 @@ void GltfRenderer::renderUI()
           if(PE::Combo("Active Renderer", &currentItem, rendererItems, IM_ARRAYSIZE(rendererItems)))
           {
             m_resources.settings.renderSystem = static_cast<RenderingMode>(currentItem);
-            changed                           = true;  // Reset frame counter when switching renderers
+            onRenderSystemChanged();
+            changed = true;
           }
           changed |= PE::Combo("Visualization", (int32_t*)(&m_resources.settings.visualization),
                                "Rendered\0BaseColor\0Metallic\0Roughness\0NormalShd\0NormalGeo\0Tangent\0Bitangent\0Emissive\0Opacity\0TexCoord0\0TexCoord1\0Clay\0TriangleID\0FaceOrientation\0"
@@ -674,6 +726,30 @@ void GltfRenderer::renderUI()
         if(ui::animation::hasPlayableAnimation(m_resources.getScene()))
           m_resources.animationControl.togglePlay();
       }
+
+      // Ctrl+Shift+L: hold and move the mouse to swing the sun, the way Unreal's Ctrl+L does.
+      // Ctrl+L alone is taken -- it is the shader hot-reload -- hence the extra modifier.
+      //
+      // No mouse button: the modifier *is* the gesture, so there is nothing to conflict with
+      // orbiting, and the camera is already held off while Ctrl is down. Horizontal motion turns the
+      // sun, vertical raises and lowers it, at a degree per pixel; elevation is clamped rather than
+      // wrapped so pushing past the zenith parks the sun there instead of flipping the sky over.
+      //
+      // The undo stack coalesces this by itself: every frame of the drag pushes a SetTransformCommand
+      // on the same node, and pushExecuted merges consecutive compatible commands inside its window,
+      // so a drag is one history entry rather than a hundred.
+      if(ImGui::IsKeyDown(ImGuiMod_Ctrl) && ImGui::IsKeyDown(ImGuiMod_Shift) && ImGui::IsKeyDown(ImGuiKey_L))
+      {
+        const ImVec2 drag = ImGui::GetIO().MouseDelta;
+        if(drag.x != 0.0F || drag.y != 0.0F)
+        {
+          Settings& st = m_resources.settings;
+          m_skySun.setAngles(st.sunAzimuth + drag.x, std::clamp(st.sunElevation - drag.y, -90.0F, 90.0F));
+        }
+        // A hint, because an invisible modifier gesture is undiscoverable and easy to trigger by
+        // accident. It also reports the angles, which is what makes the drag usable for an exact one.
+        ImGui::SetTooltip("Sun  %.0f deg az  %.0f deg elev", m_resources.settings.sunAzimuth, m_resources.settings.sunElevation);
+      }
     }
 
     // Display the tonemapped viewport image. The Animation Strip below is an
@@ -735,7 +811,7 @@ void GltfRenderer::renderUI()
   renderMemoryStatistics();
 
   // Display environment, tonemapper, and statistics windows
-  renderEnvironmentWindow();
+  m_uiEnvironment.render();
   renderTonemapperWindow();
   renderStatisticsWindow();
 
@@ -1746,17 +1822,6 @@ void GltfRenderer::renderMemoryStatistics()
     return;
   }
 
-  // Helper function to format bytes
-  auto formatBytes = [](uint64_t bytes) -> std::string {
-    if(bytes >= 1024ULL * 1024ULL * 1024ULL)
-      return fmt::format("{:.2f} GB", bytes / (1024.0 * 1024.0 * 1024.0));
-    if(bytes >= 1024ULL * 1024ULL)
-      return fmt::format("{:.2f} MB", bytes / (1024.0 * 1024.0));
-    if(bytes >= 1024ULL)
-      return fmt::format("{:.2f} KB", bytes / 1024.0);
-    return fmt::format("{} B", bytes);
-  };
-
   // Get memory trackers from subsystems
   const auto& vkTracker        = m_resources.sceneVk.getMemoryTracker();
   const auto& rtxTracker       = m_resources.sceneRtx.getMemoryTracker();
@@ -1985,72 +2050,6 @@ void GltfRenderer::renderMemoryStatistics()
   ImGui::End();
 }
 
-//--------------------------------------------------------------------------------------------------
-// Environment window - controls for environment settings (HDR, Sky, Solid Color)
-//
-void GltfRenderer::renderEnvironmentWindow()
-{
-  if(!m_resources.settings.showEnvironmentWindow)
-    return;
-
-  if(!ImGui::Begin("Environment", &m_resources.settings.showEnvironmentWindow))
-  {
-    ImGui::End();
-    return;
-  }
-  nvgui::tooltip("Press F5 to toggle this window");
-  bool changed = false;
-  namespace PE = nvgui::PropertyEditor;
-
-  if(PE::begin())
-  {
-    if(PE::Combo("Environment Type", (int*)&m_resources.settings.envSystem, "Sky\0HDR\0None\0\0"))  // 0: Sky, 1: HDR, 2: None
-    {
-      m_pathTracer.m_pushConst.fireflyClampThreshold = defaultFireflyClamp();
-      changed |= true;
-    }
-    changed |= PE::Checkbox("Solid Color", &m_resources.settings.useSolidBackground);
-    if(m_resources.settings.useSolidBackground)
-    {
-      changed |= uicolor::colorEdit3Linear("Background Color", glm::value_ptr(m_resources.settings.solidBackgroundColor),
-                                           "Solid background color (shown/edited in linear; swatch/wheel perceptual).");
-    }
-    PE::end();
-  }
-
-  if(m_resources.settings.envSystem == shaderio::EnvSystem::eHdr)
-  {
-    if(PE::begin("HDR"))
-    {
-      if(PE::entry("", [&] { return ImGui::SmallButton("load"); }, "Load HDR Image"))
-      {
-        loadHdrFileDialog();
-        changed = true;
-      }
-      changed |= PE::SliderFloat("Intensity", &m_resources.settings.hdrEnvIntensity, 0, 100, "%.3f",
-                                 ImGuiSliderFlags_Logarithmic, "HDR intensity");
-      changed |= PE::SliderFloat("Rotation", &m_resources.settings.hdrEnvRotation, -180.0F, 180.0F, "%.0f deg", 0,
-                                 "Rotating the environment");  // degrees; SliderAngle would expect radians
-      changed |= PE::SliderFloat("Blur", &m_resources.settings.hdrBlur, 0, 1, "%.3f", 0, "Blur the environment");
-      PE::end();
-    }
-  }
-  else if(m_resources.settings.envSystem == shaderio::EnvSystem::eSky)
-  {
-    if(nvgui::skyPhysicalParameterUI(m_resources.skyParams))
-    {
-      changed = true;
-      // The sliders write sunDirection; mirror it back so skySunAzimuth/skySunElevation report
-      // what is actually on screen (and persist it) rather than the last value set by name.
-      syncSunAngles();
-    }
-  }
-
-  if(changed)
-    resetFrame();
-
-  ImGui::End();
-}
 
 //--------------------------------------------------------------------------------------------------
 // Tonemapper window - controls for tone mapping settings
@@ -2098,16 +2097,16 @@ void GltfRenderer::renderStatisticsWindow()
   if(ImGui::BeginTable("StatisticsTable", 2, ImGuiTableFlags_Borders | ImGuiTableFlags_RowBg))
   {
     ImGui::TableSetupColumn("Property", ImGuiTableColumnFlags_WidthStretch);
-    ImGui::TableSetupColumn("Value", ImGuiTableColumnFlags_WidthFixed, 80.0f);
+    ImGui::TableSetupColumn("Value", ImGuiTableColumnFlags_WidthFixed);  // auto-fit: counts can be long
     ImGui::TableHeadersRow();
 
     // Lambda function to add table rows
-    auto addStatRow = [](const char* icon, const char* label, size_t value) {
+    auto addStatRow = [](const char* icon, const char* label, uint64_t value) {
       ImGui::TableNextRow();
       ImGui::TableSetColumnIndex(0);
       ImGui::Text("%s %s", icon, label);
       ImGui::TableSetColumnIndex(1);
-      ImGui::Text("%zu", value);
+      ImGui::TextUnformatted(formatThousands(value).c_str());
     };
 
     // Scene Structure
@@ -2134,15 +2133,18 @@ void GltfRenderer::renderStatisticsWindow()
   {
     ImGui::LogToClipboard();
     // Log all statistics to clipboard
+    auto logStat = [](const char* label, uint64_t value) {
+      ImGui::LogText("%s: %s\n", label, formatThousands(value).c_str());
+    };
     ImGui::LogText("Scene Statistics:\n");
-    ImGui::LogText("Nodes: %zu\n", tiny.nodes.size());
-    ImGui::LogText("Render Nodes: %zu\n", m_resources.getScene()->getRenderNodes().size());
-    ImGui::LogText("Render Primitives: %zu\n", m_resources.getScene()->getNumRenderPrimitives());
-    ImGui::LogText("Materials: %zu\n", tiny.materials.size());
-    ImGui::LogText("Triangles: %d\n", m_resources.getScene()->getNumTriangles());
-    ImGui::LogText("Lights: %zu\n", tiny.lights.size());
-    ImGui::LogText("Textures: %zu\n", tiny.textures.size());
-    ImGui::LogText("Images: %zu\n", tiny.images.size());
+    logStat("Nodes", tiny.nodes.size());
+    logStat("Render Nodes", m_resources.getScene()->getRenderNodes().size());
+    logStat("Render Primitives", m_resources.getScene()->getNumRenderPrimitives());
+    logStat("Materials", tiny.materials.size());
+    logStat("Triangles", m_resources.getScene()->getNumTriangles());
+    logStat("Lights", tiny.lights.size());
+    logStat("Textures", tiny.textures.size());
+    logStat("Images", tiny.images.size());
     ImGui::LogFinish();
   }
   if(ImGui::IsItemHovered())

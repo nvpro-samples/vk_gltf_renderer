@@ -249,6 +249,13 @@ Device — sample a light at each surface hit (`sampleLights`):
 9. Separately, when a normal bounce ray **hits an emitter directly** (`gltf_pathtrace.slang`, the
    emissive add), its glow is added but **MIS-weighted**, so the "sampled via NEE" and "hit by chance"
    paths combine without double-counting.
+   The weights on the two sides agree only because the NEE pdf includes the probability of picking
+   the category in step 7, which is what the hit side recomputes. Punctual lights are the exception:
+   no bounce ray can hit one, so their samples take no MIS weight at all. All but the sky's sun,
+   whose disk a bounce ray *can* see when it escapes: its cone sample is MIS-weighted against the
+   BSDF like an emitter (`skySunNeePdf` / `computeSkySunHitMisWeight` in
+   `shaders/pathtrace_functions.h.slang`). Without that, a lobe narrower than the disk — smooth
+   glass, a polished mirror — would never show the sun.
 
 **Details / why it's shaped this way**
 
@@ -430,12 +437,27 @@ On next frame, updateSceneChanges(cmd):
        → updates TLAS instances with new transforms (rebuild or update)
 ```
 
-**Note:** Animation updates follow a similar but separate path inline in the animation
-processing block (not via `updateSceneChanges`). The same functions are called
+**Note:** Animation updates follow a similar but separate path, `GltfRenderer::reconcileAnimationGpuState`
+(not via `updateSceneChanges`). The same functions are called
 (`updateNodeWorldMatrices`, `syncFromScene`, `syncTopLevelAS`)
 but within the animation frame section, which also handles morph/skin GPU uploads.
 
 **Optimization:** Only changed RenderNodes uploaded, not entire buffer.
+
+**GPU transform path.** The steps above are the CPU path. When `SceneGpu::shouldUseGpuTransform`
+allows it (the "GPU Compute Transformation" toggle plus `canUseGpuTransformPath` in
+`gltf_scene_transform_vk.cpp`), both flows instead upload only the dirty local matrices and let
+`TransformComputeVk::dispatchTransformUpdate` propagate world matrices level by level, write the
+render-node and TLAS instance transforms, and refit the TLAS, all on the GPU. The CPU world-matrix
+mirror is then stale for the moved nodes (`Scene::addGpuStaleNodes`) until a later CPU frame
+reconciles them.
+
+The GPU path is only taken when the change can move geometry: `Scene::dirtyNodesReachGeometry`
+says whether any dirty node's subtree holds a mesh (or render nodes are already dirty). A node with
+no mesh below it -- a light, such as the sky's sun on every frame of a Time of Day drag, a camera,
+an empty group -- takes the CPU path, which uploads the light and leaves the TLAS alone. That frame
+flags just those nodes' GPU locals as stale (`markLocalsStale`) rather than forcing a full re-upload
+(`markGpuStale`).
 
 ---
 

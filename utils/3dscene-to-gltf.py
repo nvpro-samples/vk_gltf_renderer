@@ -1,4 +1,4 @@
-"""Convert FBX / OBJ / USD to glTF using Blender as the conversion backend.
+"""Convert FBX / OBJ / USD / BLEND to glTF using Blender as the conversion backend.
 
 Run with no arguments to launch a Tk GUI with a live Blender log; pass
 both input and output positional arguments for headless CLI mode.
@@ -36,7 +36,7 @@ from typing import Callable, Iterator, Optional
 # Module constants
 # --------------------------------------------------------------------------------------
 
-SUPPORTED_INPUTS = (".fbx", ".obj", ".usd", ".usda", ".usdc", ".usdz")
+SUPPORTED_INPUTS = (".fbx", ".obj", ".usd", ".usda", ".usdc", ".usdz", ".blend")
 GLTF_OUTPUTS = (".gltf", ".glb")
 STAGE_MARKERS = (
     ("[stage] importing", 1, "Importing"),
@@ -189,7 +189,7 @@ def prepare_job(
     :class:`JobError` message verbatim.
     """
     if not input_str:
-        raise JobError("Select an input file (FBX, OBJ, or USD).")
+        raise JobError("Select an input file (FBX, OBJ, USD, or BLEND).")
     if not output_str:
         raise JobError("Select an output file.")
 
@@ -251,38 +251,42 @@ input_path, output_path, export_format, apply_transform, y_up, textures_dir = ar
 apply_transform = apply_transform == "1"
 y_up = y_up == "1"
 
-bpy.ops.wm.read_factory_settings(use_empty=True)
-
 ext = os.path.splitext(input_path)[1].lower()
 print("[stage] importing %s: %s" % (ext, input_path), flush=True)
-if ext == ".fbx":
-    bpy.ops.import_scene.fbx(filepath=input_path, use_image_search=True)
-elif ext == ".obj":
-    if hasattr(bpy.ops.wm, "obj_import"):
-        bpy.ops.wm.obj_import(filepath=input_path)
-    else:
-        try:
-            bpy.ops.preferences.addon_enable(module="io_scene_obj")
-        except Exception:
-            pass
-        bpy.ops.import_scene.obj(filepath=input_path)
-elif ext in (".usd", ".usda", ".usdc", ".usdz"):
-    if not hasattr(bpy.ops.wm, "usd_import"):
-        raise SystemExit(
-            "This Blender build has no wm.usd_import (USD I/O). "
-            "Use Blender 3.2+ with USD enabled."
-        )
-    # Default Blender USD import uses import_all_materials=False; many stages then get no Blender materials.
-    try:
-        bpy.ops.wm.usd_import(
-            filepath=input_path,
-            import_materials=True,
-            import_all_materials=True,
-        )
-    except TypeError:
-        bpy.ops.wm.usd_import(filepath=input_path)
+if ext == ".blend":
+    # A .blend is already a Blender scene: open it instead of importing into an empty one.
+    # load_ui=False keeps the file's saved window layout out of this background session.
+    bpy.ops.wm.open_mainfile(filepath=input_path, load_ui=False)
 else:
-    raise SystemExit("Unsupported input format: " + ext)
+    bpy.ops.wm.read_factory_settings(use_empty=True)
+    if ext == ".fbx":
+        bpy.ops.import_scene.fbx(filepath=input_path, use_image_search=True)
+    elif ext == ".obj":
+        if hasattr(bpy.ops.wm, "obj_import"):
+            bpy.ops.wm.obj_import(filepath=input_path)
+        else:
+            try:
+                bpy.ops.preferences.addon_enable(module="io_scene_obj")
+            except Exception:
+                pass
+            bpy.ops.import_scene.obj(filepath=input_path)
+    elif ext in (".usd", ".usda", ".usdc", ".usdz"):
+        if not hasattr(bpy.ops.wm, "usd_import"):
+            raise SystemExit(
+                "This Blender build has no wm.usd_import (USD I/O). "
+                "Use Blender 3.2+ with USD enabled."
+            )
+        # Default Blender USD import uses import_all_materials=False; many stages then get no Blender materials.
+        try:
+            bpy.ops.wm.usd_import(
+                filepath=input_path,
+                import_materials=True,
+                import_all_materials=True,
+            )
+        except TypeError:
+            bpy.ops.wm.usd_import(filepath=input_path)
+    else:
+        raise SystemExit("Unsupported input format: " + ext)
 
 def try_find_textures(path):
     if path and os.path.isdir(path):
@@ -660,12 +664,13 @@ class ConverterGui:
 
     def _choose_input(self) -> None:
         path = self.filedialog.askopenfilename(
-            title="Select FBX / OBJ / USD file",
+            title="Select FBX / OBJ / USD / BLEND file",
             filetypes=[
-                ("FBX / OBJ / USD", "*.fbx *.obj *.usd *.usda *.usdc *.usdz"),
+                ("FBX / OBJ / USD / BLEND", "*.fbx *.obj *.usd *.usda *.usdc *.usdz *.blend"),
                 ("FBX", "*.fbx"),
                 ("OBJ", "*.obj"),
                 ("USD", "*.usd *.usda *.usdc *.usdz"),
+                ("Blender", "*.blend"),
                 ("All files", "*.*"),
             ],
         )
@@ -957,7 +962,7 @@ def show_gui(theme: str = "dark", blender_override: Optional[str] = None) -> boo
 def _build_arg_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(
         description=(
-            "Convert FBX, OBJ, or USD to glTF using Blender (free, no license fee). "
+            "Convert FBX, OBJ, USD, or a .blend file to glTF using Blender (free, no license fee). "
             "USD requires Blender 3.2+ with USD import (wm.usd_import). "
             "Requires Blender installed or BLENDER_BIN set."
         ),
@@ -965,6 +970,7 @@ def _build_arg_parser() -> argparse.ArgumentParser:
             "Examples:\n"
             "  %(prog)s model.fbx out/model.glb --format glb\n"
             "  %(prog)s Rover.usdc Rover.gltf --textures path/to/textures\n"
+            "  %(prog)s scene.blend scene.gltf\n"
             "  %(prog)s   # launch GUI (live Blender log) when args omitted\n"
             "\n"
             "Optional theme dependency for the GUI:\n"
@@ -975,7 +981,7 @@ def _build_arg_parser() -> argparse.ArgumentParser:
     parser.add_argument(
         "input_path",
         nargs="?",
-        help="Path to the input FBX, OBJ, or USD (.usd/.usda/.usdc/.usdz)",
+        help="Path to the input FBX, OBJ, USD (.usd/.usda/.usdc/.usdz), or .blend",
     )
     parser.add_argument("output_path", nargs="?", help="Path to the output .gltf or .glb file")
     parser.add_argument(

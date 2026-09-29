@@ -22,6 +22,7 @@
 #include "gltf_scene_editor.hpp"
 #include "common/test_utils.hpp"
 #include <filesystem>
+#include <fstream>
 
 using namespace gltf_test;
 
@@ -84,6 +85,79 @@ TEST_F(DirtyFlagsTest, MarkNodeDirtySetsNodesAndRenderNodes)
     EXPECT_FALSE(scene.getDirtyFlags().renderNodesVk.empty()) << "At least one render node should be marked for Vk";
     EXPECT_FALSE(scene.getDirtyFlags().renderNodesRtx.empty()) << "At least one render node should be marked for Rtx";
   }
+}
+
+// Scene with a light node, an empty group whose grandchild is a mesh, and a camera node:
+//   0 "Sun"    (light 0)
+//   1 "Group"  -> 2 "Inner" -> 3 "Mesh" (mesh 0)
+//   4 "Camera" (camera 0)
+// Used to check that only dirty nodes whose subtree places geometry count as moving geometry.
+static std::filesystem::path writeLightAndMeshScene(const std::filesystem::path& dir)
+{
+  const auto path = dir / "light_and_mesh.gltf";
+  std::ofstream(path) << R"({
+  "asset": {"version": "2.0"},
+  "extensionsUsed": ["KHR_lights_punctual"],
+  "extensions": {"KHR_lights_punctual": {"lights": [{"type": "directional"}]}},
+  "scene": 0,
+  "scenes": [{"nodes": [0, 1, 4]}],
+  "nodes": [
+    {"name": "Sun", "extensions": {"KHR_lights_punctual": {"light": 0}}},
+    {"name": "Group", "children": [2]},
+    {"name": "Inner", "children": [3]},
+    {"name": "Mesh", "mesh": 0},
+    {"name": "Camera", "camera": 0}
+  ],
+  "cameras": [{"type": "perspective", "perspective": {"yfov": 0.8, "znear": 0.1}}],
+  "meshes": [{"primitives": [{"attributes": {"POSITION": 0}}]}],
+  "accessors": [{"bufferView": 0, "componentType": 5126, "count": 3, "type": "VEC3",
+                 "min": [0, 0, 0], "max": [1, 1, 0]}],
+  "bufferViews": [{"buffer": 0, "byteLength": 36}],
+  "buffers": [{"byteLength": 36,
+               "uri": "data:application/octet-stream;base64,AAAAAAAAAAAAAAAAAACAPwAAAAAAAAAAAAAAAAAAgD8AAAAA"}]
+})";
+  return path;
+}
+
+TEST_F(DirtyFlagsTest, DirtyNodesReachGeometryOnlyWhenASubtreeHoldsAMesh)
+{
+  nvvkgltf::Scene scene;
+  ASSERT_TRUE(scene.load(writeLightAndMeshScene(tempDir)));
+  scene.setCurrentScene(0);
+
+  scene.clearDirtyFlags();
+  EXPECT_FALSE(scene.dirtyNodesReachGeometry()) << "nothing dirty";
+
+  // The sky's sun on every frame of a Time of Day drag: a light moved, no geometry did.
+  scene.markNodeDirty(0);
+  EXPECT_FALSE(scene.dirtyNodesReachGeometry()) << "light-only node";
+
+  scene.clearDirtyFlags();
+  scene.markNodeDirty(4);
+  EXPECT_FALSE(scene.dirtyNodesReachGeometry()) << "camera-only node";
+
+  // An empty group moves the mesh two levels below it.
+  scene.clearDirtyFlags();
+  scene.markNodeDirty(1);
+  EXPECT_TRUE(scene.dirtyNodesReachGeometry()) << "group with a mesh descendant";
+
+  // One mesh among several dirty nodes is enough, and overlapping dirty subtrees must not hide it.
+  scene.clearDirtyFlags();
+  scene.markNodeDirty(0);
+  scene.markNodeDirty(2);
+  scene.markNodeDirty(1);
+  EXPECT_TRUE(scene.dirtyNodesReachGeometry()) << "light plus a mesh-bearing subtree";
+
+  // Render nodes already marked (as skinning does from the animation path) count, even when the
+  // dirty nodes themselves hold no mesh.
+  scene.clearDirtyFlags();
+  scene.markNodeDirty(0);
+  scene.getDirtyFlags().renderNodesRtx.insert(0);
+  EXPECT_TRUE(scene.dirtyNodesReachGeometry()) << "render nodes already dirty";
+
+  scene.clearDirtyFlags();
+  scene.getDirtyFlags().tlasVisibilityNeedsCpuSync = true;
+  EXPECT_TRUE(scene.dirtyNodesReachGeometry()) << "visibility change";
 }
 
 TEST_F(DirtyFlagsTest, MarkMaterialDirtySetsMaterials)

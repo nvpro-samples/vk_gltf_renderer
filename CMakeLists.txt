@@ -298,6 +298,10 @@ set(SHADER_SHARED_SLANG_FILES
   ${NVSHADERS_DIR}/nvshaders/hdr_dome.slang
   ${NVSHADERS_DIR}/nvshaders/hdr_integrate_brdf.slang
   ${NVSHADERS_DIR}/nvshaders/hdr_charlie_brdf_lut.slang
+  # Environment-image consumer, driven by HdrIbl::updateFromGpuImage: writes the sampling PDF into
+  # the baked image's alpha. The bake that feeds it is ours (shaders/env_bake.slang), picked up by
+  # the glob above.
+  ${NVSHADERS_DIR}/nvshaders/env_write_pdf.slang
 )
 
 set(SHADER_SLANG_FILES ${SHADER_SRC_SLANG_FILES} ${SHADER_SHARED_SLANG_FILES})

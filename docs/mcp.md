@@ -18,11 +18,19 @@ that download and drop the feature entirely.
 ```
 
 The server listens on `http://127.0.0.1:7671/mcp` (Streamable HTTP). Use `--mcpPort` for a
-different port. Point your agent's MCP client at that URL.
+different port. Point your agent's MCP client at that URL — for Claude Code, `claude mcp add
+--scope local --transport http vk_gltf_renderer http://127.0.0.1:7671/mcp`, which keeps the
+registration on your machine rather than in the repository.
+
+**Run the interactive app, not `--headless`.** Headless renders its frame budget as fast as it can
+and then exits, taking the endpoint with it — the tools are for driving a session that keeps
+drawing. Note the flip side: the timings you get are those of a live window, so leave it alone
+while measuring, and treat numbers taken while the window was occluded, resized or interacted with
+as void.
 
 ## What it exposes
 
-Three tools of its own — see the `registerTool(...)` calls in `src/mcp_timing.cpp` for the
+A handful of tools of its own — see the `registerTool(...)` calls in `src/mcp_timing.cpp` for the
 authoritative names, schemas and descriptions:
 
 | Tool | Purpose |
@@ -42,12 +50,17 @@ output for a successful swap. `nvpro_set_parameters` still reports the write its
 Everything else comes from nvmcp for free: reading and writing parameters, logs, application
 state, screenshots, and shutdown.
 
-**Every registered command-line parameter is settable at runtime.** That is
+**Every registered command-line parameter is settable at runtime**, except triggers (flags that
+take no value, such as the benchmark script's reset and fit actions) and custom-parsed ones, which
+nvmcp treats as actions rather than state and does not expose. That is
 `NVPRO2_ENABLE_MCP_AUTO_PARAMETER_REGISTRY`, on by default here, so the parameter registry is the
-single place to add a setting — register it for the command line and the agent can reach it.
+single place to add a setting — register it for the command line and the agent can reach it. To
+restart accumulation without a trigger, `vk_gltf_reload_shaders` resets it.
 
-Names are grouped by prefix: `pt*` path tracer, `tm*` tonemapper, `hdr*` and `sky*` environment,
-`dlss*`/`optix*` denoisers, `dbg*` debug views, `ui*` panels and gizmo.
+Names are grouped by prefix: `pt*` path tracer, `tm*` tonemapper, `hdr*`, `sky*`, `plain*`,
+`gradient*` and `env*` environment (plus `sunAzimuth` / `sunElevation`, unprefixed because the sun
+is shared by every sky type), `dlss*`/`optix*` denoisers, `dbg*` debug views, `ui*` panels and
+gizmo.
 
 A parameter that names *state* the renderer reads each frame takes effect immediately. A parameter
 that names an *action* needs a `callbackSuccess` to do anything — `scenefile` and `hdrfile` have
@@ -93,6 +106,17 @@ the profiler's own running average, which spans the whole session.
   does not run until the pipeline it needs is live, so the first sample is also the first
   correct sample. Anything else reading timers straight after a load is on its own — insert a
   short delay or call `vk_gltf_list_timers` in a loop until it lists what you plan to measure.
+- **`--mcp` needs the interactive application.** Under `--headless` the app renders its frame
+  budget as fast as it can and exits, taking the endpoint with it.
+- **One bad value rejects the whole write.** `nvpro_set_parameters` validates every entry first
+  (unknown name, out-of-range value) and applies none if any fails, so check the response — a
+  batch that mixes a rejected name with good ones silently changes nothing.
+- **Parameter writes persist.** They land in the `.ini` on shutdown like any other setting, so a
+  measurement session leaves its configuration behind for the next run, including a headless one.
+- **The environment rebuild is not a profiler section.** `EnvBaker::commit()` records into its
+  own single-time command buffers and submits them outside the frame, so no `vk_gltf_measure`
+  timer covers it. It prints its own wall-clock breakdown to the log instead; wall-clock is
+  faithful there because each stage submits and waits.
 - **Timings are per view and per environment.** The cost depends on what the camera frames, at
   what resolution, and under which HDR, so a number is only comparable against another taken under
   the same conditions.

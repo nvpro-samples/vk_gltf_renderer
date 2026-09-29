@@ -23,6 +23,7 @@
 // reliable undo of structural operations (delete, duplicate, add node).
 //
 
+#include "gltf_environment_sky.hpp"
 #include "undo_redo.hpp"
 #include "gltf_scene_editor.hpp"
 #include "scene_selection.hpp"
@@ -367,6 +368,81 @@ void SetNodeExtensionCommand::apply(const tinygltf::Value& value)
   if(m_extensionName == KHR_NODE_VISIBILITY_EXTENSION_NAME)
     m_scene.editor().updateVisibility(m_nodeIndex);
   m_scene.markNodeDirty(m_nodeIndex);
+}
+
+//--------------------------------------------------------------------------------------------------
+// SetSkySunCommand
+//--------------------------------------------------------------------------------------------------
+
+SetSkySunCommand::SetSkySunCommand(nvvkgltf::Scene& scene, int oldNodeIndex, int newNodeIndex)
+    : m_scene(scene)
+    , m_oldNodeIndex(oldNodeIndex)
+    , m_newNodeIndex(newNodeIndex)
+{
+  // Remember what the old node was, so undo restores it rather than an approximation of it.
+  if(m_oldNodeIndex >= 0)
+  {
+    const tinygltf::Node& node = m_scene.getModel().nodes[m_oldNodeIndex];
+    m_oldOwner      = gltf_environment_sky::isRendererOwnedSun(node) ? gltf_environment_sky::kSkySunOwnerRenderer :
+                                                                       gltf_environment_sky::kSkySunOwnerScene;
+    m_oldLightIndex = node.light;
+  }
+}
+
+void SetSkySunCommand::detach(int nodeIndex)
+{
+  if(nodeIndex < 0)
+    return;
+
+  tinygltf::Node& node = m_scene.editor().getNodeForEdit(nodeIndex);
+  const bool      ours = gltf_environment_sky::isRendererOwnedSun(node);
+
+  if(node.extras.IsObject())
+  {
+    tinygltf::Value::Object obj = node.extras.Get<tinygltf::Value::Object>();
+    obj.erase(gltf_environment_sky::kSkySunMarkerKey);
+    node.extras = tinygltf::Value(std::move(obj));
+  }
+
+  if(ours)
+  {
+    // Same rule the save path follows: withdraw the light, leave the node. Erasing the node would
+    // renumber every index in the file, and an empty node lights nothing.
+    node.light = -1;
+    node.extensions.erase("KHR_lights_punctual");
+  }
+  m_scene.markNodeDirty(nodeIndex);
+}
+
+void SetSkySunCommand::attach(int nodeIndex, const std::string& owner, int lightIndex)
+{
+  if(nodeIndex < 0)
+    return;
+
+  tinygltf::Node& node = m_scene.editor().getNodeForEdit(nodeIndex);
+  gltf_environment_sky::setSkySunMarker(node, owner.c_str());
+  if(owner == gltf_environment_sky::kSkySunOwnerRenderer && lightIndex >= 0)
+  {
+    node.light = lightIndex;
+    tinygltf::Value::Object obj;
+    obj["light"]                           = tinygltf::Value(lightIndex);
+    node.extensions["KHR_lights_punctual"] = tinygltf::Value(std::move(obj));
+  }
+  m_scene.markNodeDirty(nodeIndex);
+}
+
+void SetSkySunCommand::execute()
+{
+  detach(m_oldNodeIndex);
+  // A light the user picked is the scene's, never this renderer's -- only the save path creates
+  // one it owns.
+  attach(m_newNodeIndex, gltf_environment_sky::kSkySunOwnerScene, -1);
+}
+
+void SetSkySunCommand::undo()
+{
+  detach(m_newNodeIndex);
+  attach(m_oldNodeIndex, m_oldOwner, m_oldLightIndex);
 }
 
 //--------------------------------------------------------------------------------------------------

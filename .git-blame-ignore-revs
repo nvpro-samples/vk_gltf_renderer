@@ -1,0 +1,12 @@
+# Revisions that only reformat, never change behaviour. Ignore them in blame:
+#
+#   git blame --ignore-revs-file .git-blame-ignore-revs <file>
+#
+# Or configure it once for this clone:
+#
+#   git config blame.ignoreRevsFile .git-blame-ignore-revs
+#
+# (GitHub and GitLab apply this file automatically in their blame views.)
+
+# Normalize line endings to LF via .gitattributes -- pure CRLF->LF, no content change.
+9e3b0baeeeb4029bb84e3a495a57e3722ab9e0c8

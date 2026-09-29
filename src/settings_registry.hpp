@@ -41,7 +41,7 @@
  * restore (e.g. --ptSamples disables adaptive sampling, but restoring ptSamples from a session
  * where the user had adaptive sampling on must not clobber the equally-restored ptAdaptiveSampling).
  * For the few cases where a persisted value drives derived state that must be recomputed after
- * restore (e.g. skySunAzimuth/Elevation drive skyParams.sunDirection), callers explicitly opt in
+ * restore (e.g. sunAzimuth/Elevation drive Resources::sunDirection), callers explicitly opt in
  * with addPostRestoreHook() and we replay those hooks in runPostRestoreHooks() once ImGui has
  * finished loading the ini (see GltfRenderer::onUIRender).
  */
@@ -113,7 +113,7 @@ public:
 
   // Register a hook that should run once after ImGui has finished loading the ini. Use this for
   // derived state that a persisted value drives but that ini restore does not itself refresh
-  // (e.g. recompute skyParams.sunDirection from the restored skySunAzimuth/Elevation). Prefer
+  // (e.g. recompute Resources::sunDirection from the restored sunAzimuth/Elevation). Prefer
   // this over reusing ParameterBase::callbackSuccess, whose semantics are CLI/UI edits, not
   // full-session restore.
   //

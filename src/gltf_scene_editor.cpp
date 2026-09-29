@@ -1277,8 +1277,11 @@ bool buildImageFromFile(const std::filesystem::path& path, tinygltf::Image& out,
   if(!nvvkgltf::loadFromMemory(decoded, bytes.data(), bytes.size(), /*srgb*/ false))
     return fail("Unsupported or corrupt image: " + nvutils::utf8FromPath(path));
 
-  out            = tinygltf::Image{};
-  out.uri        = nvutils::utf8FromPath(std::filesystem::absolute(path, ec));
+  out = tinygltf::Image{};
+  // Store as a valid URI (percent-encoded) so tinygltf::URIDecode round-trips the path through
+  // resolveImageDiskPath -> findFile. Without this, a directory name like `Jungle+Mountain` gets
+  // URI-decoded to `Jungle Mountain` and the image lookup fails.
+  out.uri        = tinygltf::utils::encodePathAsUri(nvutils::utf8FromPath(std::filesystem::absolute(path, ec)));
   out.name       = path.stem().string();
   out.width      = static_cast<int>(decoded.size.width);
   out.height     = static_cast<int>(decoded.size.height);

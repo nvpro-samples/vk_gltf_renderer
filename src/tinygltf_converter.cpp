@@ -26,6 +26,8 @@
 
 #include "tinygltf_converter.hpp"
 
+#include "tinygltf_utils.hpp"
+
 
 void TinyConverter::convert(tinygltf::Model& gltf, const tinyobj::ObjReader& reader)
 {
@@ -324,11 +326,17 @@ int TinyConverter::convertTexture(tinygltf::Model& gltf, const std::string& diff
   if(diffuse_texname.empty())
     return -1;
 
-  int sourceImg = findImage(gltf, diffuse_texname);
+  // `diffuse_texname` is a filesystem-path-shaped string coming from the OBJ material data.
+  // Encode it so tinygltf::URIDecode (dlib::urldecode) round-trips characters like `+` / `%`
+  // in later lookups. Encode once and use the encoded form for both the dedup search and the
+  // stored `.uri`, so identical inputs still collapse to the same image entry.
+  const std::string encodedUri = tinygltf::utils::encodePathAsUri(diffuse_texname);
+
+  int sourceImg = findImage(gltf, encodedUri);
   if(sourceImg < 0)
   {
     tinygltf::Image img;
-    img.uri = diffuse_texname;
+    img.uri = encodedUri;
     gltf.images.emplace_back(img);
     sourceImg = (int)gltf.images.size() - 1;
   }

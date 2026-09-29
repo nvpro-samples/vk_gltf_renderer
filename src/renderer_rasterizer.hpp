@@ -98,7 +98,25 @@ private:
   VkShaderEXT m_fragmentShader{};   // Fragment shader
   VkShaderEXT m_wireframeShader{};  // Wireframe shader
 
-  nvshaders::SkyPhysical m_skyPhysical;  // Sky physical
+
+  // Background pass for authored (OMI_environment_sky) sky types. Not nvshaders::SkyBase: that
+  // template pushes its whole parameter block, and SkyOmiParameters plus a matrix overruns the
+  // 128-byte push-constant guarantee. The parameters travel in SceneFrameInfo instead.
+  VkPipeline               m_skyBackgroundPipeline{};
+  VkPipelineLayout         m_skyBackgroundLayout{};
+  VkDescriptorSetLayout    m_skyBackgroundDescLayout{};
+  nvvk::DescriptorBindings m_skyBackgroundBindings;
+
+  void initSkyBackground(Resources& resources);
+  void deinitSkyBackground(Resources& resources);
+  // Fills `targets.colorView` with the analytic background for the active authored sky.
+  void drawSkyBackground(VkCommandBuffer             cmd,
+                         shaderio::SkyBackgroundMode mode,
+                         Resources&                  resources,
+                         const VkExtent2D&           size,
+                         VkImageView                 colorView,
+                         const glm::mat4&            viewMatrix,
+                         const glm::mat4&            projMatrix);
 
   std::vector<uint32_t> m_sortedBlendNodes;     // Transparent (blend) draw ordering. Sorted back-to-front
   glm::mat4             m_lastViewMatrix{0.f};  // Last view matrix used to sort blend nodes.

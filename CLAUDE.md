@@ -27,6 +27,8 @@ C++20. Host and device share structs via `shaders/shaderio.h`.
 | Scene data flow: Model → RenderNodes → GPU SSBO / BLAS / TLAS | [docs/RENDERING_ARCHITECTURE.md](docs/RENDERING_ARCHITECTURE.md) |
 | glTF 2.1 multi-file scenes, read-only flagging, re-externalize on save | [docs/external_assets.md](docs/external_assets.md) |
 | KHR_interactivity behavior graphs: node execution, event wiring, coverage status | [docs/interactivity.md](docs/interactivity.md) |
+| Sky models: physical atmosphere, gradient, units and calibration, the sun, glTF mapping | [docs/sky.md](docs/sky.md) |
+| Environment *pipeline*: the analytic bake, lighting vs background fields, preview/commit | [docs/developer.md](docs/developer.md) (§ Environment Lighting) |
 | MCP shader timing: enabling `--mcp`, the tool surface, measuring a change | [docs/mcp.md](docs/mcp.md) |
 | Runtime behavior, editor workflows, features | [docs/user-guide.md](docs/user-guide.md) |
 | DLSS / OptiX denoising, motion vectors, jitter/reset (incl. why animated meshes ghost) | [docs/denoising.md](docs/denoising.md) |
@@ -48,6 +50,7 @@ with the code, the code wins (fix the doc — see "Keep the docs true").
 |---|---|
 | Supported glTF extensions | `m_supportedExtensions` in `src/gltf_scene.cpp` |
 | Visualization / debug modes | `enum Visualization` in `shaders/shaderio.h` |
+| Environment types | `enum EnvSystem` in `shaders/shaderio.h`, and the picker in `src/ui_renderer.cpp` |
 | Command-line / MCP / persisted settings (names, defaults, whether they persist) | `m_settings.add(...)` in `src/renderer*.cpp`, plus `parameterRegistry.add(...)` in `src/main.cpp` and `src/benchmarking.cpp` |
 | Menu labels, keyboard shortcuts, UI panels | menu/UI builders in `src/ui_renderer.cpp` (and other `src/ui_*`) |
 | Elements-list categories, columns, CRUD | `ensureElementRegistry()` (the `ElementTypeDesc` array) in `src/ui_scene_browser_elements.cpp` |
@@ -64,8 +67,18 @@ with the code, the code wins (fix the doc — see "Keep the docs true").
   `renderer.cpp` (`GltfRenderer`).
 - `src/gltf_scene*.{cpp,hpp}` — scene loading, GPU upload (`SceneVk`),
   acceleration structures (`SceneRtx`), editing, animation, merge, compaction.
-- `src/ui_*` — ImGui panels (inspector, scene browser, animation); viewport and
-  menus live in `ui_renderer.cpp`. The Scene Browser's **Elements** tab is
+- `src/env_baker.*`, `src/gltf_environment_sky.*` — the analytic sky bake (an authored or
+  physical sky becomes the same lat-long image + alias table an HDR file would) and
+  `OMI_environment_sky` load/save.
+- `src/sky_bruneton.*` — the Bruneton precomputed-atmospheric-scattering LUTs and the six compute
+  passes that build them. The only physical sky; the older MDL one was deleted from this repo (it
+  stays in `nvpro_core2` for other samples).
+- `src/sun_position.*` — NOAA solar position, behind the Environment panel's Time of Day widget.
+  A pure function with no dependency on the rest of the renderer; nothing else links against it.
+- `src/sky_preset.*` — `.sky.json`: one sky as a file of its own. The text layer only; the
+  serializer is `gltf_environment_sky`'s, so a preset and a glTF cannot drift.
+- `src/ui_*` — ImGui panels (inspector, scene browser, animation, environment);
+  viewport and menus live in `ui_renderer.cpp`. One panel per file. The Scene Browser's **Elements** tab is
   data-driven: one `ElementTypeDesc` per glTF collection
   (`ui_scene_browser_elements.cpp`) feeds a single generic list renderer.
 - `src/mcp_timing.{cpp,hpp}` — the optional MCP endpoint (`--mcp`): recompile
@@ -167,6 +180,8 @@ you are expected to keep them that way:
 | App lifecycle, source layout, material fork, build/test | [docs/developer.md](docs/developer.md) + this file |
 | A user-facing feature, menu, or shortcut | [docs/user-guide.md](docs/user-guide.md) |
 | DLSS/OptiX, motion-vector / jitter / reset behavior | [docs/denoising.md](docs/denoising.md) |
+| A sky model, its units, the sun, or the `OMI_environment_sky` mapping | [docs/sky.md](docs/sky.md) |
+| Environment sources, the sky bake, or the lighting/background split | [docs/developer.md](docs/developer.md) + [docs/user-guide.md](docs/user-guide.md) |
 | glTF 2.1 external-asset load/save/edit behavior | [docs/external_assets.md](docs/external_assets.md) |
 | KHR_interactivity node coverage, execution model, event wiring | [docs/interactivity.md](docs/interactivity.md) |
 | MCP tools or the timing measurement | [docs/mcp.md](docs/mcp.md) |
@@ -183,6 +198,13 @@ you are expected to keep them that way:
   `*_vk` for Vulkan-resource owners, `ui_*` for panels, `gltf_scene_*` for
   scene subsystems).
 - Slang shaders, not GLSL. Shader hot-reload is **Ctrl+Shift+R** at runtime.
+- **Text files are stored as LF**, enforced by `.gitattributes` (`* text=auto`).
+  Your working tree follows your own `core.autocrlf` / `core.eol`, not your OS:
+  `autocrlf=true` gives CRLF, `input` gives LF, and `false` defers to `core.eol`
+  (default `native` — CRLF on Windows). All of them round-trip cleanly, so keep
+  whichever you use; set `core.eol=lf` if you want LF locally. Never commit
+  a file with CRLF and never use `* -text`; both reintroduce the whole-file diffs
+  that renormalization removed.
 
 ## Build / run / test
 

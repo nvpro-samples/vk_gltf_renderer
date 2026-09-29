@@ -20,7 +20,7 @@ A glTF scene is a tree of nodes. Each node has a local transform (position/rotat
 The three-step GPU pipeline
 
 1. Upload dirty locals
-Every frame, only the changed local matrices are uploaded (sparse patch). If markGpuStale() was called (e.g. after a CPU-side upload), all matrices are re-uploaded.
+Every frame, only the changed local matrices are uploaded (sparse patch), plus any a CPU frame flagged with markLocalsStale(). If markGpuStale() was called (e.g. after a CPU-side upload), all matrices are re-uploaded.
 
 2. Propagate world matrices — world_matrix_propagate.comp
 The scene graph is pre-sorted in BFS (breadth-first) topological order, level by level. The shader runs one dispatch per level:
@@ -106,6 +106,8 @@ public:
 
   // Call when the renderer used the CPU upload path — next GPU frame must re-upload all locals.
   void markGpuStale();
+  // Narrower form: only these nodes' locals changed on the CPU; the next GPU frame re-uploads just them.
+  void markLocalsStale(const std::unordered_set<int>& nodes);
 
   void dispatchTransformUpdate(VkCommandBuffer cmd, nvvk::CmdUploaderInterface& staging, Scene& scn, const SceneVk& scnVk, SceneRtx& scnRtx);
 
@@ -130,7 +132,8 @@ private:
   nvvk::ResourceAllocator*  m_alloc = nullptr;
   SceneVk::DeferredFreeFunc m_deferredFree;
   VkQueue                   m_graphicsQueue{};
-  bool                      m_gpuNeedsFullSync         = false;
+  bool                      m_gpuNeedsFullSync = false;
+  std::unordered_set<int>   m_pendingLocalUploads;  // see markLocalsStale
   uint64_t                  m_cachedSceneGraphRevision = 0;
   size_t                    m_cachedNumRenderNodes     = 0;
   size_t                    m_cachedNumNodes           = 0;

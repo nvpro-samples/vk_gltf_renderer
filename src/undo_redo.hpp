@@ -284,6 +284,40 @@ private:
 };
 
 //--------------------------------------------------------------------------------------------------
+// SetSkySunCommand - Undo/redo for "this light is the sky's sun"
+//
+// Moves the NV_sky_sun marker (gltf_environment_sky.hpp) from one node to another, which is the
+// whole operation: at most one light is the sun, so choosing a new one always means clearing the
+// old. Either index may be -1 -- "no light", i.e. the renderer supplies the sun itself.
+//--------------------------------------------------------------------------------------------------
+
+class SetSkySunCommand : public ICommand
+{
+public:
+  SetSkySunCommand(nvvkgltf::Scene& scene, int oldNodeIndex, int newNodeIndex);
+
+  void                      execute() override;
+  void                      undo() override;
+  [[nodiscard]] std::string description() const override { return "Set sky sun"; }
+
+private:
+  // Stop a node being the sun. A node this renderer created to carry the sun has its light
+  // detached as well: it exists only to be the sun, so leaving it behind would light the scene
+  // twice over -- once from it, once from the sun the renderer then supplies. A light the scene
+  // authored keeps its light and merely stops being the sun.
+  void detach(int nodeIndex);
+  void attach(int nodeIndex, const std::string& owner, int lightIndex);
+
+  nvvkgltf::Scene& m_scene;
+  int              m_oldNodeIndex;
+  int              m_newNodeIndex;
+
+  // Enough of the old node to put it back exactly as it was.
+  std::string m_oldOwner;
+  int         m_oldLightIndex = -1;
+};
+
+//--------------------------------------------------------------------------------------------------
 // EditMaterialCommand - Undo/redo for material property changes
 //
 // Uses full tinygltf::Material snapshots (before/after) so a single command

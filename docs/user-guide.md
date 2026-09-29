@@ -42,7 +42,10 @@ A Monte Carlo path tracer with global illumination, progressive accumulation, an
 |---|---|
 | **Rendering Pipeline** | Choice between **Compute / Ray Query** (compute shader) and **Ray Tracing Pipeline** (hardware RT pipeline with SBT). Both produce identical results; Ray Query avoids pipeline overhead on some workloads. |
 | **Use SER** | Enable [Shader Execution Reorder](https://developer.nvidia.com/blog/improving-ray-tracing-performance-with-shader-execution-reorder/) for the Ray Tracing pipeline. Can improve coherence on RTX 40-series GPUs. |
+| **Max Depth** | Maximum number of bounces per path. |
 | **FireFly Clamp** | Clamps high-intensity samples to reduce firefly artifacts in early frames. |
+| **Texture LOD** | Ray-footprint gradient scale for texture mip selection: 0 always samples mip 0, 1 uses the full physically derived LOD. |
+| **Shadow Transmission** | Lets shadow rays pass straight through transmissive surfaces (`KHR_materials_transmission`), tinted by base color, Fresnel, and volume absorption. On by default: it brightens what lies behind glass and gives colored shadows, but it is a **biased approximation**, since it ignores refraction (no focused caustics) and adds to the light BSDF-sampled paths already carry through the surface. Turned off, every transmissive surface (thin-walled included) blocks shadow rays and light through it comes only from BSDF sampling. Nothing is approximated, but caustics from small or punctual lights (sun, point, spot, directional) are effectively missing: plain path tracing cannot sample light that reaches a diffuse surface through perfectly specular transmission. Alpha coverage is unaffected. |
 | **Max Iterations** | Maximum number of frames accumulated before the renderer stops. |
 | **Samples** | Number of samples per pixel per frame. Higher = cleaner but slower per frame. |
 | **Auto SPP** | Adaptive sampling: automatically adjusts samples-per-pixel to maintain a target frame rate. Choose between Interactive, Balanced, Quality, and Max Quality presets. |
@@ -147,15 +150,325 @@ Wireframe mode can be toggled for mesh inspection.
 
 ## Environment
 
-### Sun & Sky
+**Environment Type** picks what lights the scene and what shows behind it. The list is built in
+`UiEnvironment::render` (`src/ui_environment.cpp`) and each entry carries its own tooltip; the
+sections below cover the ones with settings of their own.
 
-A built-in physically based Sun & Sky shader module simulates atmospheric scattering. Adjust sun direction, turbidity, and ground albedo for different times of day and weather conditions.
+Whatever the type, the renderer consumes it the same way: everything except **None** ends up as a
+lat-long environment with an importance-sampling table behind it, so the path tracer, the
+rasterizer's image-based lighting, and the background dome all share one code path. The analytic
+types (**Plain**, **Gradient**, **Sky**) get there by being *baked* into that image — see
+[Authored skies](#authored-skies) and, for the mechanics,
+[developer.md § Environment Lighting](developer.md#environment-lighting).
+
+**Reset** at the top of the panel restores the *selected* environment type to its defaults and
+leaves everything else alone — the other sky types, the loaded HDR file, and the background color
+all survive. Use **Windows > Reset All to Default** for the whole application.
+The same action is available as `--envResetDefaults` for scripts.
+
+**Orientation** turns the environment, and it is one control for every type that can be turned — the
+HDR image, **Sky** and **Gradient** (a **Plain** sky looks the same from every direction, so it has
+none). **Rotation** turns it about the Y axis, in degrees. It edits the quaternion the extension
+stores, so what you see is exactly what a save writes. A tilt that a glTF's `OMI_environment_sky`
+`rotation` carries is rendered and kept — the slider changes only the heading — and
+`--envRotation x y z w` sets the full quaternion from the command line, in the same glTF order.
+
+The rotation is also where north is: turning a sky places its sun again from Time of Day, on the
+turned compass — see [Sun & Time of Day](#sun--time-of-day). A sun you aimed by hand is re-placed
+the same way, as the old North Offset did. **Reset** puts the orientation back to none along with the
+rest of the selected type.
+
+### Authored skies
+
+**Plain** and **Gradient** are the two sky types of the
+[OMI_environment_sky](https://github.com/omigroup/gltf-extensions/tree/main/extensions/2.0/OMI_environment_sky)
+glTF extension that this renderer evaluates. They are *scene* data, not viewer preferences: a scene
+that carries the extension selects its own sky on load, and **Save with scene** writes the current
+sky back out when the scene is saved.
+
+- **Plain** — one solid color. It lights the scene and shows as the background. A plain sky at
+  black renders like **None** but keeps the sky in the glTF; pick **None** when you actually want
+  the no-environment fast path.
+- **Gradient** — bottom / horizon / top colors with a curve on each half, plus a sun disk and glow.
+  Each curve controls how sharply its band fades into the horizon color; 1.0 is a linear ramp and
+  smaller values tighten the transition toward a hard horizon.
+
+**The sun is never in the baked image.** The bake is the field that lights the scene, and a sun in
+it would be counted twice — once when a ray happens to hit it, once when the renderer samples the
+sun as a light. So the sky is baked without it and the sun is always a light, which also keeps the
+disk sharp: a half-degree sun is about one texel of a 1024×512 lat-long.
+
+The **Sky** type works the same way, for the same reason, though it gets there differently: its
+baked image is a real atmosphere simulation and already contains the glow around the sun, so only
+the disk itself is drawn on top. Expect it to redden as you lower the sun — that colour is the
+sunlight's path through the atmosphere, not a tint.
+
+Below the horizon the Sky type shows lit ground rather than black: a Lambertian surface at the
+planet's own albedo, fading into haze toward the horizon. It lights the scene from below like any
+other part of the environment, so expect warm bounce on downward-facing surfaces.
+
+### Editing the atmosphere
+
+The **Sky** and **Gradient** types split into two tabs — **Sun & Time** for aiming the sun over
+the day, **Physical Sky** / **Gradient Sky** for what the sky itself looks like. They share the
+same sun but nothing else, so scrolling past the group you weren't editing was the old panel's
+main friction.
+
+One collapsible group per physical concept, the same shape the Unreal Engine sky component uses.
+Each atmospheric component owns *everything* about it — the strength coefficient, the tint, and
+the shape of its density profile — rather than scattering those across a "simple" list and an
+"advanced" fold. A scale height is not more advanced than a strength; it answers a different
+question about the same substance.
+
+**Preset** at the top applies a whole atmosphere at once — Earth, Mars, or a deliberately unearthly
+one. Edit any slider afterwards and it reads **Custom**. Mars and Alien are plausible starting
+points, not authoritative data.
+
+The three atmospheric components, in the order light meets them on its way down:
+
+- **Rayleigh** — scattering by the air molecules themselves. **Scattering** is the /km coefficient,
+  **Tint** is which wavelengths it scatters hardest (blue on Earth), **Scale Height** is how fast
+  the air thins with altitude (8 km on Earth).
+- **Mie** — scattering by aerosols: haze, dust, smoke. Same **Scattering** + **Tint** pair, plus
+  **Anisotropy** (how tight the glow around the sun is — 0.8 on Earth), **Albedo** (how much of
+  what the aerosol removes it scatters vs absorbs), and **Scale Height** (1.2 km on Earth — haze
+  hugs the ground far more closely than air does).
+- **Ozone** — a high layer that *absorbs* without scattering, which is why its coefficient row is
+  called **Absorption** rather than Scattering. **Center** is where the layer peaks (25 km on
+  Earth), **Thickness** is how far it spreads.
+
+Then the scene-scale bridge:
+
+- **Aerial Perspective** — how much haze accumulates between the camera and what it is looking at;
+  see the next section for how it scales with scene size.
+
+And the world-shape facts most sessions leave alone:
+
+- **Planet** — **Ground Radius**, **Ground Albedo** (what the ground reflects, and lights the
+  lower half of the sky), **Atmosphere Thickness**, and **Observer Altitude** (how high the sky is
+  baked from — fixed rather than following the camera, which is what makes one baked image valid
+  for the whole scene).
+- **Sun** — the star's own properties, not its position (that lives in the Sun & Time tab):
+  **Angular Radius** (0.004675 rad ≈ half a degree on Earth; wider softens shadows) and
+  **Irradiance** (what reaches the top of the atmosphere, per channel).
+
+Most of these change only the scattering tables, which take about a tenth of a second to rebuild.
+So a drag rebuilds them at reduced quality — enough to see the colour and shape move with the
+slider — and the full rebuild happens once you let go. Expect the sky to settle slightly brighter
+when you release. Ground albedo, sun angular radius and observer altitude are read directly by the
+bake besides, so those respond immediately.
+
+### Sky presets
+
+**Preset → Save… / Load…** at the bottom of the Environment panel captures the current sky as a
+`.sky.json`, or applies one. You can also drag a `.sky.json` straight onto the viewport.
+
+It saves the whole sky -- type, colours, the full atmosphere -- plus the sun's angle, so a preset
+restores the look and not merely the ingredients. A preset that was saved without a sun (a plain sky
+has none) leaves your sun where it is rather than moving it.
+
+The file is one entry of the `OMI_environment_sky` extension, which is the same thing a scene
+carries, written on its own. It is plain indented JSON meant to be opened, diffed and hand-edited,
+and a preset written by a newer build keeps whatever it knew that this one does not.
+
+Scriptable as `--loadSkyPreset` / `--saveSkyPreset`:
+
+```bash
+vk_gltf_renderer --scenefile scene.gltf --loadSkyPreset presets/blue_hour.sky.json
+```
+
+A start-up preset is applied on the first frame, after the saved settings and the scene's own sky,
+so it wins over both; `--saveSkyPreset` then writes the sky that is actually showing.
+
+Loading a preset is **not** undoable -- like every other environment control. The exception is the
+sun: if a light in your scene is marked as the sky's sun, aiming it is a scene edit and Ctrl+Z takes
+it back.
+
+### Aerial perspective
+
+The air between the camera and what you are looking at — why distant ridges go pale and blue while
+near ones stay crisp. **Sky → Aerial Perspective** says how many metres of air one scene unit is
+worth; 1.0 is glTF's own answer, since the format specifies metres, and 0 turns it off.
+
+It is a **distance**, not an opacity. Raising it says the scene is bigger, which keeps the result
+inside the atmosphere model rather than tinting its output. A 10 km terrain authored 100 units
+across wants 100.
+
+Expect nothing on a small asset — and that is correct. Two metres of clear air does nothing, and a
+shader ball has two metres of it. The effect needs a scene with real distance in it.
+
+For a hazier day, raise **Mie Scattering**: that is the aerosol, and it is the knob with no
+geometric side effect. Pushing Aerial Perspective far enough instead will eventually sink the scene
+below the observer altitude in the Planet group, where there is no air left to model.
+
+Both renderers show it. The path tracer's is the reference, and it is **shadowed**: air the scene
+hides from the sun — inside a helmet, a room, a canyon — does not glow with sunlight, and shafts
+form where the sun gets through a gap. Only the sun's own scattering is shadowed; the soft light the
+rest of the sky adds stays. The rasterizer's haze is unshadowed, which is all it can be — it cannot
+ask whether the sun reaches a point in mid-air — so at large scales the two can disagree inside
+enclosed spaces.
+
+**Exposure.** The Sky type is calibrated to sit where a loaded HDR sits, so it is usable at
+exposure 1.0 without reaching for the tonemapper. Only ratios in an atmosphere model are physical;
+the absolute scale is a unit choice, and the one this renderer uses is set by the HDR files people
+load. A low sun is genuinely dimmer than midday, so expect the scene to darken as the sun sets —
+that is the model, not a miscalibration.
+
+**The sun is a light, and the sky says which one.** The extension describes an atmosphere, not a
+light source, so a sky with a sun needs a directional light next to it — and the renderer marks
+that light rather than guessing at one.
+
+**Sun Source** under **Sun & Time of Day → Advanced** shows which light that is, and lets you
+change it — pick *Renderer* for a sun the sky carries itself, or any of the scene's directional
+lights to make that one the sun. The same switch is on a selected directional light in the
+Inspector, as **Sky's Sun**. Choosing is undoable, and the choice travels with the file. Whichever
+light is the sun draws with a **sun icon** in the Scene Browser instead of the usual lightbulb.
+
+When a scene has exactly one directional light and nothing has said whether it is the sun, the
+Advanced fold offers it — one click adopts it. With several lights it does not guess: pick the one
+you mean.
+
+Until you choose one, the renderer supplies the sun itself, so choosing an environment never edits
+your scene. **Saving with Save with scene on writes it**, because a sky
+saved without a sun renders unlit anywhere else. Save again and the same light is updated, not
+duplicated; save a sky that has no sun and the light goes away with it.
+
+Once the light exists it *is* the sun — moving it in the viewport moves the sky, and the panel's
+angle sliders move it back, undoably. Because it is a real sun it has a diameter, so its shadows
+carry a penumbra: widen **Angular Radius** under **Physical Sky → Sun** and the shadow edges
+soften.
+
+How much that sun actually *lights* depends on the sky. The **Sky** type's is a real sun and
+dominates the scene the way daylight does. A gradient sky's is a drawn disk rather than a
+measurement: its radiance is **Sun Color**, and spread over a half-degree disk that comes to a tiny
+fraction of what the sky itself contributes — visible, but not a light you can work by. Add a
+directional light if a gradient sky needs to cast real sunlight.
+
+A scene's own directional lights are **ordinary lights and are left exactly as authored**. A
+`KHR_lights_punctual` directional light is a delta light by specification — no angular extent, so
+hard-edged shadows — and a scene may contain several; none of that makes one of them the sun. If
+you want a soft-edged directional light of your own, give it a `radius` in its `extras` and the
+renderer will sample it as an area light.
+
+So a scene with a directional light under a sky that has a sun is lit by both: its own light, and
+the sky's.
+
+A scene authoring `physical` opens on the **Sky** type with that atmosphere applied: the
+extension's Rayleigh and Mie coefficients, its Mie anisotropy and its ground colour all take
+effect, and saving writes them back. Everything the extension does not describe — planet radii,
+the ozone layer, the solar spectrum — stays at Earth values.
+
+Sun angular radius and observer altitude are **not** written to the glTF. The extension has no
+field for either, and both are viewer settings rather than descriptions of the scene's atmosphere,
+so they persist in the .ini like blur does.
+
+`panorama` is preserved through a load/save round trip and loads as an HDR environment when it
+names an image.
+
+#### Baking and refresh
+
+Analytic skies are baked into a lat-long image of a fixed size (`kEnvBakeSize` in
+`src/env_baker.hpp`). There is no setting for it, because nothing you would pick it for depends on
+it: the sky is smooth and its sun is sampled as a light rather than looked up in the image, so the
+sampling table is built at a coarser fixed size still, and the path tracer evaluates what the camera
+sees per ray. The size only sets the sharpness of rough reflections, and of the physical sky's
+horizon in the rasterizer.
+
+Moving the sky previews with a cheap color-only re-bake and commits the full rebuild a frame after
+the movement stops -- whether it came from a slider, from the transform gizmo on the sun light, or
+from an animation driving that light. The rasterizer pays more for that preview than the path
+tracer does, because it also has to refresh its prefiltered cubemaps; the path tracer reads the
+lat-long image directly and updates essentially immediately.
+
+### Sun & Time of Day
+
+One sun serves every sky that has one, and this tab is where it is aimed. It sits next to the
+look tab (**Physical Sky** or **Gradient Sky**) for the **Sky** and **Gradient** types; the other
+three have no sun to point.
+
+Simple first — the widgets are ordered by how often people reach for them.
+
+**Time** is the fastest way to change what the sky looks like: drag it and the sun goes where it
+really was at that moment, for the place and date under **Advanced → Location & Date**. The four
+tick marks under the slider are that day's solar midnight, sunrise, noon and sunset, so a reading
+of 06:00 has something to mean against.
+
+**Jump To** offers the named moments — sunrise, both golden hours, noon, sunset, blue hour,
+midnight. It *sets* Time, so it sits below the slider it drives rather than above. They are not
+fixed clock times: each is an altitude the sun passes through, solved for your latitude and date,
+which is why they move through the year and why most of them are greyed out inside the polar
+circles. The sun does not rise at Tromsø in December, and the menu says so rather than picking a
+plausible hour.
+
+Which way north points is the environment's **Rotation**, at the top of the panel, rather than a
+row of its own here. Everything in this tab is astronomy and speaks compass bearings; the rotation
+is what ties them to your model's axes, so a building modelled facing any direction can still be lit
+by the real sun — and the sky turns with the compass instead of disagreeing with it.
+
+With no rotation, in a Y-up scene, north is **−Z** — the direction a glTF camera faces:
+
+| Compass | Axis |
+|---|---|
+| North | −Z |
+| East | +X |
+| South | +Z |
+| West | −X |
+
+A Z-up scene rotates the same rule: north −Y, east +X, south +Y, west −X. Turning the environment
+turns the compass around the scene, and the sun is placed again on it.
+
+**Ctrl+Shift+L** in the viewport, held while moving the mouse, swings the sun directly: sideways
+turns it, up and down raises and lowers it. A tooltip reports the angles while you drag, and the
+whole drag is one undo step. (`Ctrl+L` alone is shader hot-reload.)
+
+Under **Advanced** sit the widgets most sessions never touch, in order: **Sun Source** (which light
+is the sun), **Azimuth** and **Elevation** in degrees for typing an exact angle (they are what the
+command line carries and what a marked light stores), a **Gizmo on sun light** button that selects
+the marked light and switches the transform gizmo on so it can be aimed in the viewport (needs a
+marked light — with *Sun Source* on *Renderer* there is no node for a gizmo to hold, and the button
+says so), and a nested **Location & Date** tree. That tree opens with a **Now** button — one click
+fills the date, clock and UTC offset from this machine, the place left alone since it is the one
+thing the computer cannot tell us — then **City**, **Latitude** and **Longitude** in degrees, then
+**Date** as `yyyy-mm-dd`, and a **UTC Offset** in hours (a raw number rather than a named time
+zone, since no zone database ships with the renderer). The panel opens on today and on your own
+offset the first time it runs.
+
+The city list runs north to south — the axis the sun cares about — and is chosen for spread rather
+than for size: two inside the Arctic Circle, three near the equator, five in the southern
+hemisphere, one on a half-hour offset. Picking one sets all three values. The name shown is
+derived from the coordinates rather than remembered, so nudging either slider drops it to
+*Custom*, and a scene already set at Tokyo's latitude reads as Tokyo.
+
+**The offsets are standard time.** There is no daylight-saving rule, so a summer date at most of
+these is an hour off until you nudge **UTC Offset** — a smaller lie than shipping a zone table
+that goes stale. `--todCity` takes the name from the command line and forgives case and spacing:
+`--todCity "new york"` and `--todCity NewYork` are the same place.
+
+None of this is written to the glTF. `OMI_environment_sky` describes an atmosphere, not a moment,
+and has no field for a place or a date; what travels with a saved scene is the sun light's
+rotation, which captures the same thing. Location, date and time persist in the `.ini` so the
+widget reopens where you left it, and every one of them is also a command-line flag — see
+[benchmarking.md](benchmarking.md) for scripting a run:
+
+```bash
+vk_gltf_renderer --envSystem 0 --todCity Tokyo --todDate 2026-06-21 --todHour 16.5
+
+# or spell the place out, which is what --todCity fills in
+vk_gltf_renderer --envSystem 0 --todLatitude 47.37 --todLongitude 8.54 \
+  --todDate 2026-06-21 --todUtcOffset 2 --todHour 19.5
+```
 
 ![](images/sky_1.jpg) ![](images/sky_2.jpg) ![](images/sky_3.jpg)
 
 ### HDR Environment
 
-Lighting can come from HDR environment maps (`.hdr` files). Drag and drop an HDR file onto the viewport, or load via **File > Load HDR Environment** (`Ctrl+Shift+O`).
+Lighting can come from environment maps — Radiance `.hdr` or OpenEXR `.exr`. Drag and drop one onto
+the viewport, or load via **File > Load HDR Environment** (`Ctrl+Shift+O`). The format is detected
+from the file's contents, so a mis-spelled extension still loads.
+
+With **Save with scene** enabled, the environment is written into the glTF as an
+`OMI_environment_sky` `panorama` and reloads with the scene — the image itself stays an external
+file, referenced by a URI relative to the glTF.
 
 ![](images/hdr_1.jpg) ![](images/hdr_2.jpg) ![](images/hdr_3.jpg) ![](images/hdr_4.jpg) <br> ![](images/hdr_5.jpg) ![](images/hdr_6.jpg) ![](images/hdr_7.jpg) ![](images/hdr_8.jpg)
 
@@ -163,13 +476,13 @@ The environment can be **blurred** to soften reflections and lighting:
 
 ![](images/hdr_1.jpg) ![](images/hdr_blur_1.jpg) ![](images/hdr_blur_2.jpg) ![](images/hdr_blur_3.jpg)
 
-And **rotated** to position the light source where you need it:
+And **rotated** — with the panel's **Orientation**, shared by every environment — to position the light source where you need it:
 
 ![](images/hdr_1.jpg) ![](images/hdr_rot_1.jpg)
 
 ### No Environment
 
-Setting the **Environment Type** to **None** disables the sky and HDR entirely: the scene receives no environment lighting (only its own punctual and emissive lights contribute), and unless a **Solid Color** background is enabled the backdrop is black. Prefer this over dialing HDR intensity to zero — it also skips environment importance sampling and the dome pass.
+Setting the **Environment Type** to **None** disables every environment type entirely: the scene receives no environment lighting (only its own punctual and emissive lights contribute), and unless a **Solid Color** background is enabled the backdrop is black. Prefer this over dialing HDR intensity to zero — it also skips environment importance sampling and the dome pass.
 
 If **None** is selected while the scene has neither punctual lights nor emissive materials, nothing is lit. With no **Solid Color** background the frame is then fully black, so the viewport shows a warning banner in that case so the empty result isn't mistaken for a bug.
 
@@ -658,10 +971,12 @@ The bridge is also driven from the **Agentic** window (press F7, or open it from
 | `--ptMaxDepth <N>` | Maximum ray bounce depth |
 | `--ptSamples <N>` | Samples per pixel per frame |
 | `--ptFireflyClamp <val>` | Firefly clamp threshold |
+| `--ptTexGradScale <val>` | Texture LOD ray-footprint scale (0-1) |
+| `--ptShadowTransmission <0\|1>` | Shadow rays pass through transmissive surfaces (biased approximation) |
 | `--ptAperture <val>` | Depth-of-field aperture |
 | `--ptFocalDistance <val>` | Focal distance |
-| `--ptAutoFocus` | Enable auto-focus |
-| `--ptAdaptiveSampling` | Enable adaptive SPP to meet FPS target |
+| `--ptAutoFocus <0\|1>` | Enable auto-focus |
+| `--ptAdaptiveSampling <0\|1>` | Enable adaptive SPP to meet FPS target |
 | `--ptPerformanceTarget <0-3>` | Interactive (0), Balanced (1), Quality (2), Max Quality (3) |
 
 **Rasterizer**
@@ -686,7 +1001,7 @@ The bridge is also driven from the **Agentic** window (press F7, or open it from
 |---|---|
 | `--tmMethod <0-5>` | Filmic (0), Uncharted (1), Clip (2), ACES (3), AgX (4), Khronos PBR (5) |
 | `--tmActive <0-1>` | Enable tone mapping |
-| `--tmExposure <0.1-200>` | Exposure multiplier |
+| `--tmExposure <0.01-200>` | Exposure multiplier |
 | `--tmContrast <0-2>` | Contrast |
 | `--tmBrightness <0-2>` | Brightness (was `--tmGamma`) |
 | `--tmSaturation <0-2>` | Saturation |
@@ -706,25 +1021,29 @@ The bridge is also driven from the **Agentic** window (press F7, or open it from
 
 | Parameter | Description |
 |---|---|
-| `--envSystem <0-2>` | Sky (0), HDR (1), None (2) |
+| `--envSystem <n>` | Which environment source; the values are `shaderio::EnvSystem` and the flag's own `--help` text lists them |
 | `--hdrfile <path>` | HDR to load; loads immediately when set at runtime |
 | `--hdrIntensity <0-100>` | HDR environment intensity |
-| `--hdrRotation <-180..180>` | HDR environment rotation, **degrees** |
+| `--envRotation <x> <y> <z> <w>` | Environment orientation as a unit quaternion, glTF order — `OMI_environment_sky`'s `rotation`. Turns the HDR, every sky, and the Time of Day compass |
 | `--hdrBlur <0-1>` | HDR environment blur |
 
-**Sun & Sky** (used when `--envSystem 0`)
+**The sun** (shared by every sky type that has one)
 
 | Parameter | Description |
 |---|---|
-| `--skySunAzimuth <-180..180>` | Sun azimuth, degrees |
-| `--skySunElevation <-90..90>` | Sun elevation, degrees — the "time of day" control |
-| `--skyMultiplier <0-10>` | Overall sky brightness |
-| `--skyHaze <0-15>` | Haze |
-| `--skyRedBlueShift <-1..1>` | Red/blue shift |
-| `--skySaturation <0-1>` | Saturation |
-| `--skyHorizonHeight <-1..1>`, `--skyHorizonBlur <0-5>` | Horizon placement and softness |
-| `--skyGroundColor <R> <G> <B>`, `--skyNightColor <R> <G> <B>` | Ground and night tints |
-| `--skySunDiskScale <0-10>`, `--skySunDiskIntensity <0-5>`, `--skySunGlowIntensity <0-5>` | Sun disk and glow |
+| `--sunAzimuth <-180..180>` | Sun azimuth, degrees |
+| `--sunElevation <-90..90>` | Sun elevation, degrees — the "time of day" control |
+
+**Physical sky atmosphere** — `--atmo*`; run `--help` for the current list and ranges. Everything
+else about the atmosphere stays at Earth values for now.
+
+**Physical sky** (the **Sky** environment type) is the `atmo*` group — one flag per row of the
+**Physical Sky** tab, e.g. `--atmoPreset`, `--atmoMieScattering <R> <G> <B>` — described in
+[Editing the atmosphere](#editing-the-atmosphere) above.
+
+The authored skies add a `plain*`, `gradient*` and `env*` group of their own (colors, curves, bake
+resolution, save-with-scene). Rather than repeat them here, run `--help`: every setting is declared
+once and the command line is generated from those declarations, so `--help` cannot drift.
 
 **Headless / Batch Rendering Example:**
 

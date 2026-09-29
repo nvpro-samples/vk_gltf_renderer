@@ -49,11 +49,15 @@
   }
 #define IMGUI_DEFINE_MATH_OPERATORS
 
+#include <glm/gtx/quaternion.hpp>  // glm::rotation
 #include <cmath>
 #include <cstdio>
+#include <ctime>
+#include <chrono>
 #include <fstream>
 #include <iterator>
 #include <span>
+#include <sstream>
 #include <thread>
 #include <unordered_set>
 #include <utility>
@@ -78,6 +82,8 @@
 #include "_autogen/hdr_integrate_brdf.slang.h"
 #include "_autogen/hdr_prefilter_diffuse.slang.h"
 #include "_autogen/hdr_prefilter_glossy.slang.h"
+#include "_autogen/env_write_pdf.slang.h"
+#include "_autogen/sky_bruneton_precompute.slang.h"
 
 //
 #include <backends/imgui_impl_vulkan.h>
@@ -98,7 +104,12 @@
 #include <glm/gtc/quaternion.hpp>
 
 #include "renderer.hpp"
+#include "env_image_loader.hpp"
+#include "gltf_environment_sky.hpp"
+#include "sun_position.hpp"
+#include "sky_preset.hpp"
 #include "scene_descriptor.hpp"
+#include "staging_config.hpp"
 #include "tinygltf_utils.hpp"
 #include "utils.hpp"
 #include "tinyobjloader/tiny_obj_loader.h"
@@ -138,25 +149,37 @@ bool webPLoadCallback(nvvkgltf::SceneVk::SceneImage& image, const void* data, si
 }
 
 
-// Sun direction <-> azimuth/elevation. The UI derives the angles from skyParams.sunDirection on the
-// fly (nvgui::azimuthElevationSliders), so the direction stays the single source of truth and these
-// two convert in both directions: the command line and MCP set angles, the UI sliders set the
-// direction, and syncSunAngles() keeps the reported angles honest after the UI moves it.
-glm::vec3 sunDirectionFromAngles(float azimuthDegrees, float elevationDegrees, bool yIsUp)
-{
-  const float azimuth   = glm::radians(azimuthDegrees);
-  const float elevation = glm::radians(elevationDegrees);
-  const float cosE      = std::cos(elevation);
-  if(yIsUp)
-    return {cosE * std::cos(azimuth), std::sin(elevation), cosE * std::sin(azimuth)};
-  return {cosE * std::cos(azimuth), cosE * std::sin(azimuth), std::sin(elevation)};
-}
+// Angular radius of the disk the gradient sky draws. The extension has no field for it, so this is
+// the sun's true radius as seen from Earth (~0.27 deg) -- enough for the disk to read as a sun.
+// Authored decoration rather than a measurement, unlike the physical sky's, which comes from the
+// atmosphere. One constant because three places need the same number: the drawn disk, the light's
+// angular size, and what a save writes.
+constexpr float kGradientSunAngularRadius = 0.00465f;
 
-void anglesFromSunDirection(const glm::vec3& direction, bool yIsUp, float& azimuthDegrees, float& elevationDegrees)
+// How much brighter the gradient sky's sun is than the dome it sits under, as illuminance on a
+// surface facing each.
+//
+// A number this file has to invent, because the gradient sky never measured anything: its colours
+// are authored in arbitrary linear units where the dome sits near 1, and nothing in them says how
+// bright a sun should be. So it is fitted to the real thing instead, against the clear-day
+// direct:diffuse band a measured clear day gives -- which makes it checkable rather than merely
+// plausible.
+//
+// Fitted across the whole band rather than at one sun angle, because this sky cannot follow its
+// shape. A real sky's diffuse half dims as the sun drops, so direct:diffuse climbs faster than the
+// sun's own cosine; the gradient's dome does not move with the sun at all (its bake excludes the
+// sun entirely), so the modelled ratio is exactly proportional to sin(elevation). That leaves one
+// free scale, and only 5.2-8.0 keeps every reference elevation from 15 to 80 degrees inside the
+// band. 6.5 sits in the middle of that window: measured 1.8 / 3.4 / 4.8 / 5.8 / 6.6 against
+// 1.0-2.2 / 2.2-4.0 / 3.5-6.5 / 4.5-8.0 / 5.0-9.0.
+constexpr float kGradientSunToSkyRatio = 6.5f;
+
+// Host-side twin of skyGradientBandWeight() in shaders/sky_gradient.h.slang. The two must agree:
+// the sun's illuminance is scaled against the dome's, and the dome is this curve.
+float gradientBandWeight(float c, float curve)
 {
-  const glm::vec3 d = glm::normalize(direction);
-  azimuthDegrees    = glm::degrees(yIsUp ? std::atan2(d.z, d.x) : std::atan2(d.y, d.x));
-  elevationDegrees  = glm::degrees(std::asin(yIsUp ? d.y : d.z));
+  const float safeCurve = std::max(curve, 1e-3f);
+  return glm::clamp(1.0f - std::pow(1.0f - glm::clamp(c, 0.0f, 1.0f), 1.0f / safeCurve), 0.0f, 1.0f);
 }
 
 }  // namespace
@@ -184,14 +207,30 @@ GltfRenderer::GltfRenderer(nvutils::ParameterRegistry* paramReg, const nvutils::
   // Every user-settable value is declared once here (see settings_registry.hpp): the command line,
   // benchmark sequences, MCP, and ImGui.ini all follow from this one call. Persist says whether the
   // value is remembered between runs.
-  m_settings.add({"envSystem", "Environment: [Sky:0, HDR:1, None:2]"}, (int*)&m_resources.settings.envSystem, Persist::eYes, 0, 2);
-  m_settings.add({"renderSystem", "Renderer [Path tracer:0, Rasterizer:1]"}, (int*)&m_resources.settings.renderSystem,
-                 Persist::eYes, 0, 1);
+  m_settings.add({.name            = "envSystem",
+                  .help            = "Environment: [Sky:0, HDR:1, None:2, Plain:3, Gradient:4]",
+                  .callbackSuccess = [this](const nvutils::ParameterBase* const) { onEnvironmentChanged(); }},
+                 (int*)&m_resources.settings.envSystem, Persist::eYes, 0, 4);
+  m_settings.add({.name            = "renderSystem",
+                  .help            = "Renderer [Path tracer:0, Rasterizer:1]",
+                  .callbackSuccess = [this](const nvutils::ParameterBase* const) { onRenderSystemChanged(); }},
+                 (int*)&m_resources.settings.renderSystem, Persist::eYes, 0, 1);
   m_settings.add({"uiShowAxis", "Show Axis"}, &m_resources.settings.showAxis, Persist::eYes);
   m_settings.add({"uiShowMemStats", "Show Memory Statistics"}, &m_resources.settings.showMemStats, Persist::eYes);
   m_settings.add({"hdrIntensity", "HDR Environment Intensity"}, &m_resources.settings.hdrEnvIntensity, Persist::eYes, 0.0F, 100.0F);
-  m_settings.add({"hdrRotation", "HDR Environment Rotation (degrees, -180..180)"}, &m_resources.settings.hdrEnvRotation,
-                 Persist::eYes, -180.0F, 180.0F);
+  // One orientation for every environment -- OMI_environment_sky's `rotation`, in its own form. It
+  // is also where north is, so like the Time of Day settings, an edit from outside the UI re-places
+  // the sun after the ini restore (see m_todDrivesSun).
+  m_settings.addVector({.name = "envRotation",
+                        .help = "Environment rotation: unit quaternion x y z w (glTF order); turns the HDR, "
+                                "every sky, and the compass the sun is placed with",
+                        .callbackSuccess =
+                            [this](const nvutils::ParameterBase* const) {
+                              if(skyHasSun(m_resources.settings.envSystem))
+                                m_todDrivesSun = true;
+                              onEnvironmentRotated();
+                            }},
+                       &m_resources.settings.envRotation, Persist::eYes);
   m_settings.add({"hdrBlur", "HDR Environment Blur"}, &m_resources.settings.hdrBlur, Persist::eYes, 0.0F, 1.0F);
   m_settings.addVector({"silhouetteColor", "Color of the silhouette"}, &m_resources.settings.silhouetteColor, Persist::eYes);
   m_settings.add({"dbgVisualization", "Visualization Mode"}, (int*)&m_resources.settings.visualization, Persist::eYes);
@@ -213,7 +252,12 @@ GltfRenderer::GltfRenderer(nvutils::ParameterRegistry* paramReg, const nvutils::
                  &m_resources.tonemapperData.method, Persist::eYes, 0, 5);
   m_settings.add({"tmActive", "Tonemapper: Enable tone mapping [Off:0, On:1]"}, &m_resources.tonemapperData.isActive,
                  Persist::eYes, 0, 1);
-  m_settings.add({"tmExposure", "Tonemapper: Exposure multiplier"}, &m_resources.tonemapperData.exposure, Persist::eYes, 0.1F, 200.0F);
+  // Floor below the UI slider's 0.1, which is not enough headroom for a bright environment with
+  // auto-exposure off -- what a reproducible capture wants. Out-of-range values are clamped rather
+  // than refused, so too high a floor is silent: the run succeeds and the image is simply not the
+  // one that was asked for.
+  m_settings.add({"tmExposure", "Tonemapper: Exposure multiplier"}, &m_resources.tonemapperData.exposure, Persist::eYes,
+                 0.01F, 200.0F);
   m_settings.add({"tmContrast", "Tonemapper: Contrast"}, &m_resources.tonemapperData.contrast, Persist::eYes, 0.0F, 2.0F);
   m_settings.add({"tmBrightness", "Tonemapper: Brightness"}, &m_resources.tonemapperData.brightness, Persist::eYes, 0.0F, 2.0F);
   m_settings.add({"tmSaturation", "Tonemapper: Saturation"}, &m_resources.tonemapperData.saturation, Persist::eYes, 0.0F, 2.0F);
@@ -265,19 +309,28 @@ GltfRenderer::GltfRenderer(nvutils::ParameterRegistry* paramReg, const nvutils::
   m_settings.add({"uiShowGridSettings", "Show the Grid & Snap settings window"},
                  &m_resources.settings.showGridSettingsWindow, Persist::eYes);
 
-  // Sun & sky. Previously the only environment the command line could not touch at all.
-  // Angles drive skyParams.sunDirection through the callback; everything else is direct.
+  // The sun. One direction is shared by every sky type that has a sun, which is why these are not
+  // named sky*: Resources::sunDirection is the single source of truth and the angles drive it
+  // through the callback. Everything else below is direct.
+  //
+  // SkySun is initialized here, not in onAttach: the command line is parsed between construction
+  // and onAttach, and these callbacks fire during that parse.
+  m_skySun.init(&m_resources, &m_undoStack,
+                {
+                    .resetFrame         = [this] { resetFrame(); },
+                    .environmentPreview = [this] { requestEnvironmentPreview(); },
+                });
+  // SkySun::aim() reports the consequences: a re-bake for the physical sky (the only one whose image
+  // depends on the sun) and an accumulation reset.
   const auto applySunAngles = [this](const nvutils::ParameterBase* const) {
-    m_resources.skyParams.sunDirection = sunDirectionFromAngles(m_resources.settings.skySunAzimuth, m_resources.settings.skySunElevation,
-                                                                m_resources.skyParams.yIsUp != 0);
-    resetFrame();
+    m_skySun.setAngles(m_resources.settings.sunAzimuth, m_resources.settings.sunElevation);
   };
-  m_settings.add({.name = "skySunAzimuth", .help = "Sky: Sun azimuth (degrees)", .callbackSuccess = applySunAngles},
-                 &m_resources.settings.skySunAzimuth, Persist::eYes, -180.0F, 180.0F);
-  m_settings.add({.name = "skySunElevation", .help = "Sky: Sun elevation (degrees)", .callbackSuccess = applySunAngles},
-                 &m_resources.settings.skySunElevation, Persist::eYes, -90.0F, 90.0F);
-  // ImGui.ini restore writes skySunAzimuth/Elevation directly and never runs applySunAngles, so
-  // skyParams.sunDirection -- the value rendering and the sky UI actually use -- would stay at
+  m_settings.add({.name = "sunAzimuth", .help = "Sun azimuth (degrees); shared by every sky type", .callbackSuccess = applySunAngles},
+                 &m_resources.settings.sunAzimuth, Persist::eYes, -180.0F, 180.0F);
+  m_settings.add({.name = "sunElevation", .help = "Sun elevation (degrees); shared by every sky type", .callbackSuccess = applySunAngles},
+                 &m_resources.settings.sunElevation, Persist::eYes, -90.0F, 90.0F);
+  // ImGui.ini restore writes sunAzimuth/Elevation directly and never runs applySunAngles, so
+  // Resources::sunDirection -- the value rendering and the sky UI actually use -- would stay at
   // its default and the remembered sun position would silently not be restored. Re-run the
   // conversion once, after Application::run() has reloaded the ini (see onUIRender's one-shot).
   //
@@ -287,20 +340,201 @@ GltfRenderer::GltfRenderer(nvutils::ParameterRegistry* paramReg, const nvutils::
   // where the user overrode it, ini value otherwise), which is exactly the intended
   // CLI-wins-per-key behavior.
   m_settings.addPostRestoreHook([this, applySunAngles]() { applySunAngles(nullptr); });
-  m_settings.add({"skyMultiplier", "Sky: Overall brightness multiplier"}, &m_resources.skyParams.multiplier,
-                 Persist::eYes, 0.0F, 10.0F);
-  m_settings.add({"skyHaze", "Sky: Haze"}, &m_resources.skyParams.haze, Persist::eYes, 0.0F, 15.0F);
-  m_settings.add({"skyRedBlueShift", "Sky: Red/blue shift"}, &m_resources.skyParams.redblueshift, Persist::eYes, -1.0F, 1.0F);
-  m_settings.add({"skySaturation", "Sky: Saturation"}, &m_resources.skyParams.saturation, Persist::eYes, 0.0F, 1.0F);
-  m_settings.add({"skyHorizonHeight", "Sky: Horizon height"}, &m_resources.skyParams.horizonHeight, Persist::eYes, -1.0F, 1.0F);
-  m_settings.add({"skyHorizonBlur", "Sky: Horizon blur"}, &m_resources.skyParams.horizonBlur, Persist::eYes, 0.0F, 5.0F);
-  m_settings.addVector({"skyGroundColor", "Sky: Ground color"}, &m_resources.skyParams.groundColor, Persist::eYes);
-  m_settings.addVector({"skyNightColor", "Sky: Night color"}, &m_resources.skyParams.nightColor, Persist::eYes);
-  m_settings.add({"skySunDiskScale", "Sky: Sun disk scale"}, &m_resources.skyParams.sunDiskScale, Persist::eYes, 0.0F, 10.0F);
-  m_settings.add({"skySunDiskIntensity", "Sky: Sun disk intensity"}, &m_resources.skyParams.sunDiskIntensity,
-                 Persist::eYes, 0.0F, 5.0F);
-  m_settings.add({"skySunGlowIntensity", "Sky: Sun glow intensity"}, &m_resources.skyParams.sunGlowIntensity,
-                 Persist::eYes, 0.0F, 5.0F);
+
+  // Time of Day: the same sun, said differently. These do not add a second source of truth -- each
+  // one recomputes sunAzimuth/sunElevation through m_skySun.applyTimeOfDay(), so the sun still has exactly
+  // one owner and the two angles remain what is persisted, scripted and written to a marked light.
+  //
+  // Persisted so the widget reopens where it was left; the callback is what makes a command-line
+  // --todHour actually move the sun. ini restore deliberately does not fire it: the sun's direction
+  // is restored from its own persisted angles, and re-deriving it here would overwrite a sun that
+  // had since been moved by hand.
+  // Open on today and on this machine's clock, rather than on an arbitrary epoch somebody has to
+  // correct before the widget says anything true. Read here, before the declarations below, so it
+  // is the value SettingsRegistry captures as the default -- and therefore what "Reset All to
+  // Default" comes back to.
+  if(const sun_position::LocalClock now = sun_position::systemLocalClock(); now.valid)
+  {
+    m_resources.settings.todDate      = now.date;
+    m_resources.settings.todHour      = now.hour;
+    m_resources.settings.todUtcOffset = now.utcOffsetHours;
+  }
+  const auto applyTod = [this](const nvutils::ParameterBase* const) {
+    m_todDrivesSun = true;
+    m_skySun.applyTimeOfDay();
+  };
+  m_settings.add({.name = "todHour", .help = "Time of day, in local clock hours (0..24) at --todUtcOffset", .callbackSuccess = applyTod},
+                 &m_resources.settings.todHour, Persist::eYes, 0.0F, 24.0F);
+  m_settings.add({.name = "todDate", .help = "Date the sun is computed for, yyyy-mm-dd", .callbackSuccess = applyTod},
+                 &m_resources.settings.todDate, Persist::eYes);
+  m_settings.add({.name = "todLatitude", .help = "Observer latitude in degrees, positive north", .callbackSuccess = applyTod},
+                 &m_resources.settings.todLatitude, Persist::eYes, -90.0F, 90.0F);
+  m_settings.add({.name = "todLongitude", .help = "Observer longitude in degrees, positive east", .callbackSuccess = applyTod},
+                 &m_resources.settings.todLongitude, Persist::eYes, -180.0F, 180.0F);
+  m_settings.add({.name = "todUtcOffset", .help = "Hours the local clock runs ahead of UTC", .callbackSuccess = applyTod},
+                 &m_resources.settings.todUtcOffset, Persist::eYes, -12.0F, 14.0F);
+
+  // A city is an action, not a mode: it writes latitude, longitude and the offset, and nothing
+  // reads it back -- the same shape as atmoPreset, and not persisted for the same reason.
+  //
+  // Named rather than indexed, unlike atmoPreset. Twenty-odd entries make an index unreadable in a
+  // script, and worse, inserting a city would silently move every script and saved sequence that
+  // used one. A name survives the list growing.
+  m_settings.add({.name = "todCity",
+                  .help = "Set latitude, longitude and UTC offset from a named city (see the Environment panel "
+                          "for the list); standard time, no daylight saving",
+                  .callbackSuccess =
+                      [this](const nvutils::ParameterBase* const) {
+                        const int index = sun_position::findCity(m_resources.settings.todCity);
+                        if(index < 0)
+                        {
+                          LOGW("--todCity: '%s' is not one of the listed cities; the location is unchanged.\n",
+                               m_resources.settings.todCity.c_str());
+                          return;
+                        }
+                        const sun_position::City& city    = sun_position::kCities[index];
+                        m_resources.settings.todLatitude  = city.latitudeDeg;
+                        m_resources.settings.todLongitude = city.longitudeDeg;
+                        m_resources.settings.todUtcOffset = city.utcOffsetHours;
+                        m_todDrivesSun                    = true;
+                        m_skySun.applyTimeOfDay();
+                      }},
+                 &m_resources.settings.todCity, Persist::eNo);
+
+  // Precedence, and the one place it has to be stated.
+  //
+  // The command line is parsed before the ini is read, so `--todHour 20` computes a sun and then
+  // the sunAzimuth/sunElevation hook above puts the *remembered* sun back over it -- those two keys
+  // were not on the command line, so the ini is allowed to supply them, and the hook that re-derives
+  // the direction from them cannot tell it is undoing an explicit instruction. Silently: the run
+  // simply renders yesterday's sun, which looks exactly like the widget not working.
+  //
+  // So if anything asked for a time of day from outside the UI, it asks again here, after the
+  // restore. Registered after that hook, and hooks run in order, so it wins. With no such request
+  // the flag is false and the remembered angles stand, which is what reopening the app should do.
+  m_settings.addPostRestoreHook([this]() {
+    if(m_todDrivesSun)
+      m_skySun.applyTimeOfDay();
+  });
+  // Authored sky types (glTF OMI_environment_sky). Every one of these invalidates the baked
+  // lighting environment, so they share one callback that marks it for a re-bake; the bake itself
+  // runs on the application thread at the top of the next frame, never inside a parameter write.
+  const auto invalidateBake = [this](const nvutils::ParameterBase* const) { onEnvironmentChanged(); };
+  m_settings.add({.name = "envSaveToGltf", .help = "Write OMI_environment_sky into the glTF when saving the scene"},
+                 &m_resources.settings.envSaveToGltf, Persist::eYes);
+  m_settings.addVector({.name = "plainColor", .help = "Plain sky: solid color (linear)", .callbackSuccess = invalidateBake},
+                       &m_resources.settings.plainColor, Persist::eYes);
+  m_settings.addVector({.name = "gradientBottomColor", .help = "Gradient sky: nadir color (linear)", .callbackSuccess = invalidateBake},
+                       &m_resources.settings.gradientBottomColor, Persist::eYes);
+  m_settings.addVector({.name = "gradientHorizonColor", .help = "Gradient sky: horizon color (linear)", .callbackSuccess = invalidateBake},
+                       &m_resources.settings.gradientHorizonColor, Persist::eYes);
+  m_settings.addVector({.name = "gradientTopColor", .help = "Gradient sky: zenith color (linear)", .callbackSuccess = invalidateBake},
+                       &m_resources.settings.gradientTopColor, Persist::eYes);
+  m_settings.addVector({.name = "gradientSunColor", .help = "Gradient sky: sun color (linear)", .callbackSuccess = invalidateBake},
+                       &m_resources.settings.gradientSunColor, Persist::eYes);
+  m_settings.add({.name = "gradientBottomCurve", .help = "Gradient sky: horizon-to-nadir falloff", .callbackSuccess = invalidateBake},
+                 &m_resources.settings.gradientBottomCurve, Persist::eYes, 0.0F, 1.0F);
+  m_settings.add({.name = "gradientTopCurve", .help = "Gradient sky: horizon-to-zenith falloff", .callbackSuccess = invalidateBake},
+                 &m_resources.settings.gradientTopCurve, Persist::eYes, 0.0F, 1.0F);
+  m_settings.add({.name = "gradientSunAngleMax", .help = "Gradient sky: angular extent of the sun glow (radians)", .callbackSuccess = invalidateBake},
+                 &m_resources.settings.gradientSunAngleMax, Persist::eYes, 0.0F, 3.1416F);
+  m_settings.add({.name = "gradientSunCurve", .help = "Gradient sky: sun-to-sky falloff across the glow", .callbackSuccess = invalidateBake},
+                 &m_resources.settings.gradientSunCurve, Persist::eYes, 0.0F, 1.0F);
+
+  // The physical sky's atmosphere.
+  //
+  // Every one of these goes through the same preview-then-settle path a sky colour does. Most of
+  // them change nothing but the scattering tables, so the drag rebuilds those at preview quality
+  // and the commit rebuilds them at full -- see SkyBruneton::Quality. Ground albedo, sun angular
+  // radius and altitude are the exceptions that the bake also reads directly, so they move even
+  // before the tables catch up.
+  const auto invalidateAtmosphere = [this](const nvutils::ParameterBase* const) { requestEnvironmentPreview(); };
+  m_settings.add({.name = "atmoSunAngularRadius", .help = "Physical sky: angular radius of the sun disk (radians)", .callbackSuccess = invalidateAtmosphere},
+                 &m_resources.settings.atmoSunAngularRadius, Persist::eYes, 0.0F, 0.2F);
+  m_settings.addVector({.name = "atmoGroundAlbedo", .help = "Physical sky: ground reflectance, linear RGB", .callbackSuccess = invalidateAtmosphere},
+                       &m_resources.settings.atmoGroundAlbedo, Persist::eYes);
+  // Altitude changes no LUT -- it is a bake input only -- so it is the cheap one of the three.
+  m_settings.add({.name            = "atmoObserverAltitude",
+                  .help            = "Physical sky: observer height above the ground (metres)",
+                  .callbackSuccess = invalidateAtmosphere},
+                 &m_resources.settings.atmoObserverAltitude, Persist::eYes, 0.0F, 60000.0F);
+
+  // Aerial perspective. Both shading paths read it straight out of SceneFrameInfo, so unlike every
+  // other atmosphere setting it needs no re-bake and no LUT rebuild: it changes what a frame does
+  // with the tables, not the tables. Hence resetFrame() alone.
+  m_settings.add({.name            = "atmoAerialPerspectiveScale",
+                  .help            = "Aerial perspective: metres of air per scene unit (0 disables)",
+                  .callbackSuccess = [this](const nvutils::ParameterBase* const) { resetFrame(); }},
+                 &m_resources.settings.atmoAerialPerspectiveScale, Persist::eYes, 0.0F, 1000.0F);
+
+  m_settings.addVector({.name            = "atmoSolarIrradiance",
+                        .help            = "Physical sky: solar irradiance at the top of the atmosphere (W/m^2)",
+                        .callbackSuccess = invalidateAtmosphere},
+                       &m_resources.settings.atmoSolarIrradiance, Persist::eYes);
+
+  // Rayleigh -- the air itself.
+  m_settings.addVector({.name            = "atmoRayleighScattering",
+                        .help            = "Physical sky: Rayleigh scattering at the surface (1/km, linear RGB)",
+                        .callbackSuccess = invalidateAtmosphere},
+                       &m_resources.settings.atmoRayleighScattering, Persist::eYes);
+  m_settings.add({.name            = "atmoRayleighScaleHeight",
+                  .help            = "Physical sky: height over which the air thins by 1/e (km)",
+                  .callbackSuccess = invalidateAtmosphere},
+                 &m_resources.settings.atmoRayleighScaleHeight, Persist::eYes, 0.1F, 100.0F);
+
+  // Mie -- the aerosol.
+  m_settings.addVector({.name            = "atmoMieScattering",
+                        .help            = "Physical sky: Mie scattering at the surface (1/km, linear RGB)",
+                        .callbackSuccess = invalidateAtmosphere},
+                       &m_resources.settings.atmoMieScattering, Persist::eYes);
+  m_settings.add({.name            = "atmoMieScaleHeight",
+                  .help            = "Physical sky: height over which the aerosol thins by 1/e (km)",
+                  .callbackSuccess = invalidateAtmosphere},
+                 &m_resources.settings.atmoMieScaleHeight, Persist::eYes, 0.1F, 100.0F);
+  m_settings.add({.name            = "atmoMieAnisotropy",
+                  .help            = "Physical sky: Cornette-Shanks asymmetry; > 0 scatters forward",
+                  .callbackSuccess = invalidateAtmosphere},
+                 &m_resources.settings.atmoMieAnisotropy, Persist::eYes, -0.99F, 0.99F);
+  m_settings.add({.name            = "atmoMieAlbedo",
+                  .help            = "Physical sky: aerosol single-scattering albedo; 1 scatters all it removes",
+                  .callbackSuccess = invalidateAtmosphere},
+                 &m_resources.settings.atmoMieAlbedo, Persist::eYes, 0.05F, 1.0F);
+
+  // Ozone -- an absorbing layer well above the ground, and what keeps a clear zenith blue rather
+  // than grey at low sun.
+  m_settings.addVector({.name            = "atmoOzoneExtinction",
+                        .help            = "Physical sky: absorption at the peak of the ozone layer (1/km, linear RGB)",
+                        .callbackSuccess = invalidateAtmosphere},
+                       &m_resources.settings.atmoOzoneExtinction, Persist::eYes);
+  m_settings.add({.name = "atmoOzoneCenter", .help = "Physical sky: altitude of the ozone peak (km)", .callbackSuccess = invalidateAtmosphere},
+                 &m_resources.settings.atmoOzoneCenter, Persist::eYes, 0.0F, 200.0F);
+  m_settings.add({.name = "atmoOzoneWidth", .help = "Physical sky: full thickness of the ozone layer (km)", .callbackSuccess = invalidateAtmosphere},
+                 &m_resources.settings.atmoOzoneWidth, Persist::eYes, 0.1F, 400.0F);
+
+  // The planet.
+  m_settings.add({.name = "atmoBottomRadius", .help = "Physical sky: planet radius (km)", .callbackSuccess = invalidateAtmosphere},
+                 &m_resources.settings.atmoBottomRadius, Persist::eYes, 100.0F, 20000.0F);
+  m_settings.add({.name = "atmoThickness", .help = "Physical sky: atmosphere depth above the surface (km)", .callbackSuccess = invalidateAtmosphere},
+                 &m_resources.settings.atmoThickness, Persist::eYes, 1.0F, 500.0F);
+
+  // A preset is an action, not a mode: its callback overwrites every field above and nothing reads
+  // it back. That is also why it does not persist -- restoring it after the individual values
+  // would undo them.
+  m_settings.add({.name = "atmoPreset",
+                  .help = "Physical sky: apply an atmosphere preset [Earth:0, Mars:1, Alien:2]",
+                  .callbackSuccess =
+                      [this](const nvutils::ParameterBase* const) {
+                        applyAtmospherePreset(m_resources.settings, m_resources.settings.atmoPreset);
+                        requestEnvironmentPreview();
+                      }},
+                 &m_resources.settings.atmoPreset, Persist::eNo, 0, eAtmospherePresetCount - 1);
+
+  // The MDL sky's eleven knobs (skyMultiplier, skyHaze, skyRedBlueShift, skySaturation,
+  // skyHorizonHeight, skyHorizonBlur, skyGroundColor, skyNightColor, skySunDiskScale,
+  // skySunDiskIntensity, skySunGlowIntensity) were registered here until that sky was deleted.
+  // They are deliberately not re-registered under new names: the Bruneton atmosphere is not a
+  // renaming of those parameters, it is a different model. A persisted .ini still carrying them
+  // is handled by SettingsRegistry, which ignores keys it does not know.
 
   // Gizmo, grid and snap: previously persisted but unreachable from the command line or MCP.
   m_settings.add({"uiShowGrid", "Show the infinite grid"}, &m_resources.settings.showGrid, Persist::eYes);
@@ -323,6 +557,13 @@ GltfRenderer::GltfRenderer(nvutils::ParameterRegistry* paramReg, const nvutils::
                          m_pendingResetSettings = true;
                          m_pendingResetLayout   = true;
                        });
+  // Narrower sibling of the above, and the same action the Environment panel's Reset button runs.
+  // Registered rather than left UI-only so a benchmark sequence or an agent can put one sky type
+  // back to a known state without resetting the whole application.
+  m_settings.addAction({"envResetDefaults", "Restore the selected environment type's settings to their defaults"}, [this]() {
+    m_uiEnvironment.resetDefaults();
+    resetFrame();
+  });
 
   // Register PathTracer-specific command line parameters
   m_pathTracer.registerParameters(&m_settings);
@@ -419,7 +660,7 @@ void GltfRenderer::onAttach(nvapp::Application* app)
   // is larger than the library default so scene-create can stage large meshes/textures.
   NVVK_CHECK(m_resources.staging.init({
       .allocator = &m_resources.allocator,
-      .blockSize = 256ull * 1024 * 1024,
+      .blockSize = kFrameUploaderBlockSize,  // shared with SceneVk::createImage row-strip chunking
       .debugName = "frameUploads",
   }));
 
@@ -434,6 +675,11 @@ void GltfRenderer::onAttach(nvapp::Application* app)
 
   // IBL environment map
   m_resources.hdrIbl.init(&m_resources.allocator, &m_resources.samplerPool);
+  // Required before HdrIbl::updateFromGpuImage: the file-load path writes the per-texel PDF into
+  // the image alpha on the CPU, but a GPU-baked environment is never read back, so the PDF write
+  // is a compute pass that has to be created up front. Without it EnvBaker::commit dispatches a
+  // null pipeline -- caught only by an assert, so a release build simply crashes.
+  m_resources.hdrIbl.initGpuWriter(std::span(env_write_pdf_slang));
   m_resources.hdrDome.init(&m_resources.allocator, &m_resources.samplerPool, m_app->getQueue(0));
 
   // Application-level memory tracker (frame targets, DLSS, OptiX images)
@@ -474,6 +720,30 @@ void GltfRenderer::onAttach(nvapp::Application* app)
 
   // Async G-buffer readback for KHR_interactivity hover detection (docs/interactivity.md Phase E)
   m_hoverPicker.init(m_resources);
+
+  // Producer for analytic skies. Its lat-long image feeds the same HdrIbl / HdrEnvDome pair the
+  // HDR file path uses, so both render paths consume one environment regardless of sky type.
+  // Allocated here but only dispatched once a baked sky type is selected.
+
+  // Bruneton atmosphere LUTs. Built once here from the Earth defaults; they depend only on the
+  // atmosphere, never on the sun or the camera, so moving the sun later costs nothing.
+  m_skyBruneton.init(m_resources, SkyBruneton::Shaders{.precompute = std::span(sky_bruneton_precompute_slang)});
+  // Seed from the settings, not from the Earth defaults init() installs. Otherwise the first
+  // refreshBakedEnvironment() finds the parameters changed and rebuilds the whole set immediately
+  // -- two full precomputes, every startup, even when nothing was customised.
+  m_skyBruneton.setParameters(buildAtmosphereParameters());
+  m_skyBruneton.precompute(m_resources);
+
+  // After SkyBruneton: EnvBaker takes its descriptor-set layout to build a pipeline layout that
+  // covers both producers.
+  m_envBaker.init(m_resources, m_skyBruneton.getDescriptorSetLayout(), m_skyBruneton.getDescriptorSet());
+  m_envBaker.setResolution(m_resources, kEnvBakeSize);
+
+  // Publish the same set to the two renderers, which read the tables directly for aerial
+  // perspective. Here rather than in each of them: they build their pipeline layouts from
+  // Resources, and neither needs to know which class owns the LUTs.
+  m_resources.skyLutDescriptorSetLayout = m_skyBruneton.getDescriptorSetLayout();
+  m_resources.skyLutDescriptorSet       = m_skyBruneton.getDescriptorSet();
 
   // ===== Scene & Acceleration Structure =====
   m_resources.sceneGpu.init(&m_resources.allocator, &m_resources.samplerPool, m_app->getQueue(0).queue,
@@ -548,6 +818,26 @@ void GltfRenderer::onAttach(nvapp::Application* app)
   // it stands up an empty, UI-wired scene on demand (wireSceneToUi re-sets this same hook later).
   m_sceneBrowser.setBeforeCreateCallback([this] { ensureEmptyScene(); });
 
+  // The Environment panel. It edits Settings through m_resources directly; everything below is a
+  // consequence an edit has for the renderer, which the panel has no business knowing how to do.
+  m_uiEnvironment.setResources(&m_resources);
+  m_uiEnvironment.setSelection(&m_sceneSelection);
+  m_uiEnvironment.setActions({
+      .environmentChanged    = [this] { onEnvironmentChanged(); },
+      .requestPreview        = [this] { requestEnvironmentPreview(); },
+      .resetFrame            = [this] { resetFrame(); },
+      .applyTimeOfDay        = [this] { m_skySun.applyTimeOfDay(); },
+      .environmentRotated    = [this] { onEnvironmentRotated(); },
+      .setSunAngles          = [this](float az, float el) { m_skySun.setAngles(az, el); },
+      .aimSun                = [this](const glm::vec3& toSun) { m_skySun.aim(toSun); },
+      .sunLightNode          = [this] { return m_skySun.lightNode(); },
+      .setSkySunNode         = [this](int node) { m_skySun.setSunNode(node); },
+      .directionalLightNodes = [this] { return m_skySun.candidateLights(); },
+      .loadHdrFileDialog     = [this] { loadHdrFileDialog(); },
+      .loadSkyPresetDialog   = [this] { loadSkyPresetDialog(); },
+      .saveSkyPresetDialog   = [this] { saveSkyPresetDialog(); },
+  });
+
   // ===== Visual Helpers (Grid + Transform Gizmo) =====
   {
     VkFormat depthFormat = m_resources.gBuffers.getDepthFormat();
@@ -609,8 +899,8 @@ void GltfRenderer::onAttach(nvapp::Application* app)
       .applyHdri =
           [this](const std::filesystem::path& path) {
             createHDR(path);
-            m_resources.settings.envSystem                 = shaderio::EnvSystem::eHdr;
-            m_pathTracer.m_pushConst.fireflyClampThreshold = defaultFireflyClamp();
+            m_resources.settings.envSystem = shaderio::EnvSystem::eHdr;
+            calibrateFireflyClamp();
           },
       .resetFrame     = [this]() { resetFrame(); },
       .runTonemapPass = [this](VkCommandBuffer cmd,
@@ -858,7 +1148,7 @@ void GltfRenderer::onUIRender()
   // Run any post-restore hooks now that Application::run() has reloaded the ini (which happens
   // between onAttach and the first frame, in both windowed and headless paths). ImGui writes
   // restored values straight into storage without firing the parameter's callbackSuccess, so
-  // derived state (e.g. skyParams.sunDirection from the restored skySunAzimuth/Elevation) would
+  // derived state (e.g. Resources::sunDirection from the restored sunAzimuth/Elevation) would
   // otherwise stay stale until the user touched a UI slider.
   if(m_pendingRestoreCallbacks)
   {
@@ -866,6 +1156,9 @@ void GltfRenderer::onUIRender()
     m_settings.runPostRestoreHooks();
   }
 
+  applyPendingAuthoredSky();         // frame-top: adopt a loaded scene's OMI sky, after the ini restore above
+  applyPendingSkyPresets();          // frame-top: start-up presets, after the scene's sky so they win over it
+  applyPendingEnvironmentRefresh();  // frame-top: re-bake / rebind the environment after a sky change (see method)
   applyPendingTextureRebuild();   // frame-top: full GPU texture rebuild for a prior-frame structural edit (see method)
   applyPendingTextureTailSync();  // frame-top: incremental append/remove for a prior-frame import/undo/redo (see method)
   applyPendingSamplerUpdate();    // frame-top: in-place VkSampler update for a prior-frame sampler wrap/filter edit
@@ -912,6 +1205,9 @@ void GltfRenderer::onRender(VkCommandBuffer cmd)
 {
   NVVK_DBG_SCOPE(cmd);  // <-- Helps to debug in NSight
   m_profilerTimeline->frameAdvance();
+  // Before anything reads the sun: if the scene marks a light as the sky's sun, that light owns
+  // its direction.
+  m_skySun.syncFromMarkedLight();
   // Don't do anything if the busy window is open
   if(m_busy.isBusy())
   {
@@ -930,6 +1226,63 @@ void GltfRenderer::onRender(VkCommandBuffer cmd)
     m_loadPipeline.drain();
   else if(m_loadPipeline.poll())
     return;  // Still loading -- give control back to the UI
+
+  // Preview re-bake for a control that is being dragged. Unlike the commit path this records into
+  // the frame's own command buffer and waits on nothing, so it belongs here rather than in
+  // onUIRender: it is per-frame work, not a frame-boundary rebuild.
+  if(m_envPreviewPending)
+  {
+    m_envPreviewPending = false;
+    if(isBakedEnvironment(m_resources.settings.envSystem))
+    {
+      // Only the rasterizer reads the prefiltered cubemaps, so the path tracer skips the prefilter
+      // and a drag costs it little more than the bake itself.
+      const bool refreshDome = m_resources.settings.renderSystem == RenderingMode::eRasterizer;
+
+      // Nothing waits here, so order explicitly: the LUTs, the lat-long image and the sun-disk
+      // buffer are still being read by frames in flight, and are read again by this frame's
+      // ray-tracing and graphics passes after the rewrite.
+      nvvk::cmdMemoryBarrier(cmd, VK_PIPELINE_STAGE_2_ALL_COMMANDS_BIT, VK_PIPELINE_STAGE_2_COMPUTE_SHADER_BIT);
+
+      // Most of the atmosphere controls -- Rayleigh, Mie, ozone, the planet radii -- change
+      // nothing except the LUTs, so without a preview rebuild they look like dead sliders until
+      // the mouse comes up. Preview quality is what makes that affordable: a sixteenth of the
+      // directions and two bounces instead of four (see SkyBruneton::Quality), and recorded into this
+      // frame rather than submitted and waited on. The commit that follows restores full quality.
+      if(m_resources.settings.envSystem == shaderio::EnvSystem::eSky)
+      {
+        const shaderio::SkyAtmosphereParameters wanted = buildAtmosphereParameters();
+        if(!m_skyBruneton.lutsSatisfy(wanted, SkyBruneton::kQualityPreview))
+        {
+          m_skyBruneton.setParameters(wanted);
+          m_skyBruneton.recordPrecompute(cmd, SkyBruneton::kQualityPreview);
+        }
+      }
+
+      // The baker holds the parameters from the last commit; refresh them or the preview re-bakes
+      // the image it already has. Invisible for the authored skies -- their background is drawn
+      // per-ray from settings, so only the lighting lagged -- but the Bruneton sky *is* its baked
+      // image, so without this a drag showed nothing until the mouse came up.
+      updateBakerParameters();
+      m_envBaker.preview(cmd, m_resources, refreshDome);
+      nvvk::cmdMemoryBarrier(cmd, VK_PIPELINE_STAGE_2_COMPUTE_SHADER_BIT | VK_PIPELINE_STAGE_2_TRANSFER_BIT,
+                             VK_PIPELINE_STAGE_2_ALL_COMMANDS_BIT);
+      resetFrame();
+    }
+  }
+  else if(m_envCommitOwed && !ImGui::IsAnyItemActive())
+  {
+    // First frame since the edits stopped: pay for the full rebuild the previews skipped.
+    //
+    // "Stopped" also means the control has been let go. A slider reports a change only on frames
+    // where the mouse moved, so a drag held still for one frame used to commit mid-drag -- a device
+    // wait and a full-quality rebuild -- and the next movement dropped back to preview quality. The
+    // physical sky flickered between the two, worst under heavy Mie, whose haze is mostly the
+    // multiple scattering a preview trims. Drivers that are not ImGui controls (the gizmo, an
+    // animated sun) still settle as before: when they stop requesting previews.
+    m_envCommitOwed = false;
+    onEnvironmentChanged();
+  }
 
   // Recycle staging from completed frames, then tag new uploads with this frame's signal.
   m_resources.staging.releaseCompletedAllocations();
@@ -993,7 +1346,8 @@ void GltfRenderer::onRender(VkCommandBuffer cmd)
     // an animation/start-driven pose this tick) already cleared DirtyFlags::nodes as its own tail, so
     // `df.nodes`/`allRenderNodesDirty` can't see that motion here - interactivityAnimationApplied
     // carries it through explicitly, the same way it's OR'd into `changed` below.
-    const bool nodesDirty                = !df.nodes.empty() || df.allRenderNodesDirty || interactivityAnimationApplied;
+    // dirtyNodesReachGeometry, not merely a dirty node: a moved light or camera moves no instance.
+    const bool nodesDirty                = scn->dirtyNodesReachGeometry() || interactivityAnimationApplied;
     m_resources.dlssInstanceMotionActive = animActive || nodesDirty;
 
     if(m_resources.dlssInstanceMotionActive)
@@ -1025,6 +1379,7 @@ void GltfRenderer::onRender(VkCommandBuffer cmd)
     // Update the scene frame information uniform buffer
     const glm::mat4          viewProj = m_cameraManip->getPerspectiveMatrix() * m_cameraManip->getViewMatrix();
     const VkExtent2D         gbufSize = m_resources.gBuffers.getSize();
+    const glm::quat          envRot   = m_resources.settings.envRotationQuat();  // normalised
     shaderio::SceneFrameInfo finfo{
         .viewMatrix     = m_cameraManip->getViewMatrix(),
         .projInv        = glm::inverse(m_cameraManip->getPerspectiveMatrix()),
@@ -1033,14 +1388,19 @@ void GltfRenderer::onRender(VkCommandBuffer cmd)
         .prevMVP        = m_prevMVP,
         .jitter         = {0.0f, 0.0f},
         .imageSize      = {float(gbufSize.width), float(gbufSize.height)},
-        .flags = ((m_cameraManip->getProjectionType() == nvutils::CameraManipulator::Orthographic) ? shaderio::eSceneIsOrthographic : 0)
-                 | (m_resources.settings.useSolidBackground ? shaderio::eSceneUseSolidBackground : 0)
-                 | ((m_resources.settings.envSystem == shaderio::EnvSystem::eHdr) ? shaderio::eSceneUseHdrEnvironment : 0)
-                 | ((m_resources.settings.envSystem == shaderio::EnvSystem::eNone) ? shaderio::eSceneUseNoEnvironment : 0)
-                 | (m_resources.settings.useInfinitePlane ? shaderio::eSceneUseInfinitePlane : 0)
-                 | ((m_resources.settings.useInfinitePlane && m_resources.settings.isShadowCatcher) ? shaderio::eSceneInfinitePlaneShadowCatcher :
-                                                                                                      0),
-        .envRotation               = glm::radians(m_resources.settings.hdrEnvRotation),  // stored in degrees
+        .flags =
+            ((m_cameraManip->getProjectionType() == nvutils::CameraManipulator::Orthographic) ? shaderio::eSceneIsOrthographic : 0)
+            | (m_resources.settings.useSolidBackground ? shaderio::eSceneUseSolidBackground : 0)
+            // A baked analytic sky IS an environment image by the time the shaders see it:
+            // same lat-long texture, same alias table, same prefiltered cubes. Flagging it as
+            // such is what keeps sampling, MIS and raster IBL free of per-sky-type branches.
+            | ((m_resources.settings.envSystem == shaderio::EnvSystem::eHdr || isBakedEnvironment(m_resources.settings.envSystem)) ?
+                   shaderio::eSceneUseHdrEnvironment :
+                   0)
+            | ((m_resources.settings.envSystem == shaderio::EnvSystem::eNone) ? shaderio::eSceneUseNoEnvironment : 0)
+            | (m_resources.settings.useInfinitePlane ? shaderio::eSceneUseInfinitePlane : 0)
+            | ((m_resources.settings.useInfinitePlane && m_resources.settings.isShadowCatcher) ? shaderio::eSceneInfinitePlaneShadowCatcher : 0),
+        .envRotation               = {envRot.x, envRot.y, envRot.z, envRot.w},
         .envBlur                   = m_resources.settings.hdrBlur,
         .envIntensity              = m_resources.settings.hdrEnvIntensity,
         .backgroundColor           = m_resources.settings.solidBackgroundColor,
@@ -1050,14 +1410,38 @@ void GltfRenderer::onRender(VkCommandBuffer cmd)
         .infinitePlaneMetallic     = m_resources.settings.infinitePlaneMetallic,
         .infinitePlaneRoughness    = m_resources.settings.infinitePlaneRoughness,
         .shadowCatcherDarkenAmount = std::max(m_resources.settings.shadowCatcherDarkness, 0.0f),
+        // Only the physical sky has a disk to draw; a null pointer is how every other environment
+        // tells the background passes there is nothing to add. Declaration order matters here --
+        // these sit before envSkyType in SceneFrameInfo.
+        .sunDisk      = (m_resources.settings.envSystem == shaderio::EnvSystem::eSky) ?
+                            reinterpret_cast<shaderio::SkySunDisk*>(m_envBaker.sunDiskAddress()) :
+                            nullptr,
+        .sunDirection = m_resources.sunDirection,
+        // The sky's own sun, supplied only while the scene has no marked one. Selecting an
+        // environment must not edit the user's scene, so nothing is added to the graph until a
+        // save asks for it; from then on the marked light is the sun and this stays off.
+        .rendererSunLight = (skyHasSun(m_resources.settings.envSystem) && m_skySun.lightIndex() < 0) ? 1 : 0,
+        .sunLightIndex    = skyHasSun(m_resources.settings.envSystem) ? m_skySun.lightIndex() : -1,
+        .envSkyType       = authoredSkyType(m_resources.settings.envSystem),
+        .skyOmi           = buildSkyOmiParameters(),
+        // Aerial perspective. Physical sky only (the sunDisk gate above says which), and the
+        // altitude is the same fixed observer the bake uses -- metres in the settings because that
+        // is what a person types, kilometres here because that is what the atmosphere works in.
+        .aerialPerspectiveScale = m_resources.settings.atmoAerialPerspectiveScale,
+        .observerAltitudeKm     = aerialPerspectiveEyeAltitudeKm(),
+        // The gradient sky's sun. Zero for every other environment: the physical sky's sun comes
+        // from `sunDisk` above, and no other sky has one.
+        .skySunIlluminance = (m_resources.settings.envSystem == shaderio::EnvSystem::eGradient) ? gradientSunIlluminance() :
+                                                                                                  glm::vec3(0.0F),
+        .envSamplingGridWidth  = m_resources.hdrIbl.getSamplingGrid().width,
+        .envSamplingGridHeight = m_resources.hdrIbl.getSamplingGrid().height,
     };
     // Update the camera information
     m_prevMVP = finfo.viewProjMatrix;
 
     vkCmdUpdateBuffer(cmd, m_resources.bFrameInfo.buffer, 0, sizeof(shaderio::SceneFrameInfo), &finfo);
     // Update the sky
-    m_resources.skyParams.yIsUp = m_cameraManip->getUp().y > 0.5f;
-    vkCmdUpdateBuffer(cmd, m_resources.bSkyParams.buffer, 0, sizeof(shaderio::SkyPhysicalParameters), &m_resources.skyParams);
+    m_resources.sunYIsUp = m_cameraManip->getUp().y > 0.5f;
     // Make sure buffer is ready to be used
     nvvk::cmdMemoryBarrier(cmd, VK_PIPELINE_STAGE_2_TRANSFER_BIT, VK_PIPELINE_STAGE_2_COMPUTE_SHADER_BIT);
 
@@ -1232,6 +1616,17 @@ void GltfRenderer::onReferenceScene(const std::filesystem::path& filename)
 //
 void GltfRenderer::onFileDrop(const std::filesystem::path& filename)
 {
+  // Sky presets first: a `.sky.json` is also a `.json`, and the descriptor test below is a suffix
+  // match. Cheap and self-contained -- no scene teardown, so no queue wait (a panorama preset goes
+  // through createHDR, which waits for itself) -- but still refused while a worker load is in
+  // flight, since that load will apply its own sky when it lands.
+  if(sky_preset::isPresetPath(filename))
+  {
+    if(!m_busy.isBusy())
+      loadSkyPreset(filename);
+    return;
+  }
+
   // SYNC NOTE: User-initiated file load/merge — wait ensures GPU is idle before scene teardown/rebuild.
   vkQueueWaitIdle(m_app->getQueue(0).queue);
 
@@ -1296,12 +1691,12 @@ void GltfRenderer::onFileDrop(const std::filesystem::path& filename)
       }).detach();
     }
   }
-  else if(nvutils::extensionMatches(filename, ".hdr"))
+  else if(isEnvImageExtension(filename))
   {
     m_lastHdrDirectory = filename.parent_path();
     createHDR(filename);
-    m_resources.settings.envSystem                 = shaderio::EnvSystem::eHdr;
-    m_pathTracer.m_pushConst.fireflyClampThreshold = defaultFireflyClamp();
+    m_resources.settings.envSystem = shaderio::EnvSystem::eHdr;
+    calibrateFireflyClamp();
   }
 
   resetFrame();
@@ -1338,6 +1733,12 @@ bool GltfRenderer::save(const std::filesystem::path& filename, bool selfContaine
       // Set all cameras
       m_resources.getScene()->setSceneCameras(cameras);
     }
+
+    // Install the environment-sky writer for this save. Done here rather than at scene creation
+    // so that no load path can forget it -- there is exactly one place a scene is saved.
+    m_resources.getScene()->setPreSaveHook([this](tinygltf::Model& outModel, const std::filesystem::path& destination) {
+      writeEnvironmentSky(outModel, destination);
+    });
 
     // Saving the scene
     return m_resources.getScene()->save(filename, selfContained);
@@ -1380,14 +1781,924 @@ bool GltfRenderer::dlssGuideRequired() const
 }
 
 //--------------------------------------------------------------------------------------------------
+// Adopt the sky authored by the scene that was just loaded.
+//
+// Precedence is glTF over ini, and only for the sky itself: a file that carries
+// OMI_environment_sky is stating what its environment is, so it overwrites the corresponding
+// settings and they persist to the ini as usual (reopening the same file lands where the user
+// left off). A file without the extension changes nothing.
+//
+// Only plain and gradient are adopted as the active mode. A panorama or physical sky is parsed --
+// and, importantly, kept verbatim so a later save does not drop it -- but the renderer stays on
+// whatever environment it was showing, because neither type is produced by the baker yet.
+//
+void GltfRenderer::applyEnvironmentSkyFromScene()
+{
+  nvvkgltf::Scene* scene = m_resources.getScene();
+  if(scene == nullptr || !scene->valid())
+    return;
+
+  const tinygltf::Model& model      = scene->getModel();
+  const int              sceneIndex = model.defaultScene >= 0 ? model.defaultScene : 0;
+
+  // Parse now, apply at the next frame top. The settings cannot be written here: on start-up the
+  // ini is restored *after* the command-line scene load, and the restore writes envSystem
+  // straight into storage -- so anything set here is silently overwritten and the file's sky
+  // loses to the ini, which is backwards. applyPendingAuthoredSky() runs after the restore hooks
+  // and re-asserts it.
+  m_environmentSky        = gltf_environment_sky::parse(model, sceneIndex);
+  m_environmentSkyPending = m_environmentSky.has_value();
+}
+
+//--------------------------------------------------------------------------------------------------
+// Push the authored sky into the live settings. Runs at the frame top, after the ini restore, so
+// that "glTF wins over ini" holds regardless of which order the two landed in.
+//
+void GltfRenderer::applyPendingAuthoredSky()
+{
+  if(!m_environmentSkyPending || !m_environmentSky.has_value())
+    return;
+  m_environmentSkyPending      = false;
+  const nvvkgltf::Scene* scene = m_resources.getScene();
+  applySkyDescriptor(*m_environmentSky, SkySource::eScene, scene ? scene->getFilename().parent_path() : std::filesystem::path{});
+}
+
+//--------------------------------------------------------------------------------------------------
+// Push an authored sky into the live settings. See the declaration for what `source` decides.
+//
+void GltfRenderer::applySkyDescriptor(const SkyDescriptor& sky, SkySource source, const std::filesystem::path& uriBase)
+{
+  Settings& settings = m_resources.settings;
+
+  // An explicit `--envSystem` is a statement about this run, and it outranks the file: the same
+  // rule the .ini already follows, extended to the place it should have reached first. Without
+  // this a script that forces an environment silently gets whatever the scene authored instead,
+  // and the measurement it was taking is of something else.
+  //
+  // Only the *selection* is suppressed. The sky's parameters are still applied, so forcing the
+  // mode a scene authored still picks up its colours, and `m_environmentSky` keeps the descriptor
+  // either way so a later save preserves it.
+  //
+  // A preset is the exception, and obviously so: loading one by hand at runtime *is* the statement,
+  // and a flag from start-up has no business overruling it.
+  // OMI's `rotation` is the renderer's own, quaternion for quaternion, tilt included.
+  //
+  // Only applied when the file actually states one. The rotation is viewer state -- the user, the
+  // command line or MCP may have set it -- and loadScene() leaves viewer state alone on purpose; a
+  // scene that says nothing about orientation must not silently reset it. A scene that does state
+  // one is making a statement about its own sky, and that wins, like every other authored sky value
+  // here. The sun is left where it is: a file's sun is its marked light and a preset's is its
+  // sunRotation, both already in world space.
+  if(sky.rotationAuthored)
+    settings.envRotation = {sky.rotation.x, sky.rotation.y, sky.rotation.z, sky.rotation.w};
+
+  const bool forcedOnCommandLine = source == SkySource::eScene && m_parameterParser && m_parameterParser->wasParsed("envSystem");
+  const auto selectEnvironment = [&](shaderio::EnvSystem env) {
+    if(forcedOnCommandLine)
+    {
+      if(settings.envSystem != env)
+      {
+        LOGI("OMI_environment_sky: scene authors a different environment; --envSystem wins for this run.\n");
+      }
+      return;
+    }
+    settings.envSystem = env;
+  };
+
+  switch(sky.type)
+  {
+    case SkyDescriptor::Type::ePlain:
+      settings.plainColor = sky.plain.color;
+      selectEnvironment(shaderio::EnvSystem::ePlain);
+      break;
+    case SkyDescriptor::Type::eGradient:
+      settings.gradientBottomColor  = sky.gradient.bottomColor;
+      settings.gradientHorizonColor = sky.gradient.horizonColor;
+      settings.gradientTopColor     = sky.gradient.topColor;
+      settings.gradientBottomCurve  = sky.gradient.bottomCurve;
+      settings.gradientTopCurve     = sky.gradient.topCurve;
+      settings.gradientSunAngleMax  = sky.gradient.sunAngleMax;
+      settings.gradientSunCurve     = sky.gradient.sunCurve;
+      selectEnvironment(shaderio::EnvSystem::eGradient);
+      break;
+    case SkyDescriptor::Type::ePanorama: {
+      // The image is an external asset, so the URI resolves against the file that named it -- the
+      // glTF or the preset, the same rule every other external asset follows
+      // (docs/external_assets.md), and NOT against the resources directories, which would silently
+      // load someone else's environment when two scenes name the same file.
+      if(sky.panorama.uri.empty())
+      {
+        LOGW("OMI_environment_sky: panorama sky has no NV_environment_sky_panorama.uri%s; keeping the current environment.\n",
+             sky.panorama.equirectangular >= 0 ? " (its `equirectangular` texture index is not supported)" : "");
+        break;
+      }
+      const std::filesystem::path resolved =
+          uriBase.empty() ? std::filesystem::path(sky.panorama.uri) : uriBase / std::filesystem::path(sky.panorama.uri);
+      if(!std::filesystem::exists(resolved))
+      {
+        LOGW("OMI_environment_sky: panorama image not found: %s\n", nvutils::utf8FromPath(resolved).c_str());
+        break;
+      }
+      createHDR(resolved);
+      selectEnvironment(shaderio::EnvSystem::eHdr);
+      break;
+    }
+    case SkyDescriptor::Type::ePhysical:
+      // The inverse of the split on save: colour times coefficient, m^-1 back to km^-1.
+      settings.atmoRayleighScattering = sky.physical.rayleighColor * (sky.physical.rayleighCoefficient * 1000.0F);
+      settings.atmoMieScattering      = sky.physical.mieColor * (sky.physical.mieCoefficient * 1000.0F);
+      settings.atmoMieAnisotropy      = sky.physical.mieAnisotropy;
+      settings.atmoGroundAlbedo       = sky.physical.groundColor;
+
+      // Then the NV overlay, for everything OMI cannot say. Only when the file carried one: a
+      // scene with just the OMI block has not said what its planet is, so leaving the current
+      // values alone is more honest than forcing Earth on it.
+      if(sky.atmosphere.present)
+      {
+        const SkyDescriptor::Atmosphere& a = sky.atmosphere;
+        settings.atmoSolarIrradiance       = a.solarIrradiance;
+        settings.atmoSunAngularRadius      = a.sunAngularRadius;
+        settings.atmoMieAlbedo             = a.mieAlbedo;
+        // Metres in the file, kilometres in the model. Divided rather than multiplied by 0.001:
+        // the reciprocal is not representable in binary, so scaling by it loses a few ulps on
+        // every load, and a scene saved and reopened repeatedly would creep. Dividing by an exact
+        // power-of-ten float keeps radii like 3389.5 km landing back on themselves.
+        settings.atmoOzoneExtinction     = a.ozoneExtinction * 1000.0F;
+        settings.atmoRayleighScaleHeight = a.rayleighScaleHeight / 1000.0F;
+        settings.atmoMieScaleHeight      = a.mieScaleHeight / 1000.0F;
+        settings.atmoOzoneCenter         = a.ozoneCenter / 1000.0F;
+        settings.atmoOzoneWidth          = a.ozoneWidth / 1000.0F;
+        settings.atmoBottomRadius        = a.planetRadius / 1000.0F;
+        settings.atmoThickness           = a.atmosphereThickness / 1000.0F;
+      }
+      selectEnvironment(shaderio::EnvSystem::eSky);
+      break;
+    default:
+      assert(false && "unhandled SkyDescriptor::Type");
+      break;
+  }
+
+  // No calibrateFireflyClamp() here: hdrIbl still describes the previous environment until the
+  // refresh at the next frame top, which calibrates when the environment kind changed.
+  onEnvironmentChanged();
+  resetFrame();
+}
+
+//--------------------------------------------------------------------------------------------------
+// The URI to record for an environment image, relative to the glTF being written when that is
+// possible and absolute when it is not.
+//
+// Relative is what makes a scene and its environment movable as a pair, which is the common case.
+// It stops being the right answer once the image lives outside the glTF's tree -- on another
+// drive, or in a shared asset library -- where a relative path would be a long chain of "..\"
+// that breaks the moment either end moves. Absolute is honest there.
+//
+std::string GltfRenderer::relativeUriForSave(const std::filesystem::path& asset, const std::filesystem::path& destination) const
+{
+  const std::filesystem::path base = destination.parent_path();
+  if(base.empty())
+    return nvutils::utf8FromPath(asset);
+
+  std::error_code             ec;
+  const std::filesystem::path rel = std::filesystem::relative(asset, base, ec);
+  if(ec || rel.empty() || *rel.begin() == "..")
+    return nvutils::utf8FromPath(asset);
+
+  // glTF URIs use forward slashes regardless of platform.
+  std::string uri = nvutils::utf8FromPath(rel);
+  std::replace(uri.begin(), uri.end(), '\\', '/');
+  return uri;
+}
+
+//--------------------------------------------------------------------------------------------------
+// Write the current sky into the model being serialized. Runs from Scene::save, on the copy that
+// is actually written to disk.
+//
+// With the toggle off we strip rather than skip: a scene loaded with a sky and saved with the
+// toggle off should not keep an extension that no longer matches what the user is looking at.
+//
+// Reconcile the scene's marked sun light with the sky being written.
+//
+// OMI_environment_sky describes a medium and says to add suns with KHR_lights_punctual, so a sky
+// with a sun is only half-written without one: another renderer would build the atmosphere, find
+// nothing to light it, and show an unlit sky. That failure is invisible here, because this
+// renderer supplies its own sun when the scene has none -- which is exactly why it has to be
+// fixed at the point of writing.
+//
+// The light is marked (gltf_environment_sky.hpp) so a reload knows which light is the sky's
+// rather than guessing, and so this function knows which light is its own to manage. Any other
+// light in the file is untouched.
+//
+// Intensity is the solar illuminance *above* the atmosphere, not the attenuated value this
+// renderer shows. The atmosphere travels in the same file; a reader that applies it to an already
+// attenuated sun would attenuate twice.
+//
+void GltfRenderer::writeSkySunLight(tinygltf::Model& outModel) const
+{
+  const int  existingNode = gltf_environment_sky::findSkySunNode(outModel);
+  const bool wantSun      = m_resources.settings.envSaveToGltf && skyHasSun(m_resources.settings.envSystem);
+
+  if(!wantSun)
+  {
+    // The sky being written has no sun, so nothing should still claim to be one.
+    if(existingNode >= 0)
+    {
+      tinygltf::Node& node = outModel.nodes[existingNode];
+      const bool      ours = gltf_environment_sky::isRendererOwnedSun(node);
+
+      tinygltf::Value::Object extras = node.extras.Get<tinygltf::Value::Object>();
+      extras.erase(gltf_environment_sky::kSkySunMarkerKey);
+      node.extras = tinygltf::Value(std::move(extras));
+
+      if(ours)
+      {
+        // A sun this renderer invented for an earlier save. Withdrawing it is what keeps the file
+        // describing what is on screen.
+        //
+        // The node is emptied rather than erased: deleting it would renumber every node index in
+        // the file. The light entry is left too, for the same reason -- compaction collects both
+        // if the user asks for it.
+        LOGI("OMI_environment_sky: withdrawing the sun light this renderer added; the sky being saved has none.\n");
+        node.light = -1;
+        node.extensions.erase("KHR_lights_punctual");
+      }
+      else
+      {
+        // Someone else's light that was chosen as the sun. It stops being the sun and stays
+        // exactly as it was -- unpicking it is not the same as deleting it.
+        LOGI("OMI_environment_sky: '%s' is no longer the sky's sun; the light itself is unchanged.\n", node.name.c_str());
+      }
+    }
+    return;
+  }
+
+  // Colour and illuminance of the sun this sky implies, in the units the light carries.
+  const shaderio::SkyAtmosphereParameters atmosphere = buildAtmosphereParameters();
+  glm::vec3                               illuminance(0.0F);
+  float                                   angularRadius = atmosphere.sunAngularRadius;
+  if(m_resources.settings.envSystem == shaderio::EnvSystem::eSky)
+  {
+    // Above the atmosphere on purpose -- see the note below on double attenuation. Shared with the
+    // firefly clamp, which wants the same number for its own reasons.
+    illuminance = skySunIlluminanceAboveAtmosphere();
+  }
+  else
+  {
+    // The gradient sky's sun is drawn rather than measured, so there is no disk radiance to
+    // convert; the illuminance is scaled against the dome instead. Same number the renderer lights
+    // with, so the file describes what is on screen.
+    angularRadius = kGradientSunAngularRadius;
+    illuminance   = gradientSunIlluminance() * m_resources.settings.hdrEnvIntensity;
+  }
+
+  const float     peak  = std::max({illuminance.x, illuminance.y, illuminance.z});
+  const glm::vec3 color = (peak > 0.0F) ? illuminance / peak : glm::vec3(1.0F);
+
+  // Rotation taking +Z to the sun: glTF aims a light down -Z, and the renderer's sunDirection
+  // points at it. A world rotation; turned into the node's local one below.
+  const glm::vec3 toSun = glm::normalize(m_resources.sunDirection);
+  const glm::quat rot   = glm::rotation(glm::vec3(0.0F, 0.0F, 1.0F), toSun);
+
+  int nodeIdx = existingNode;
+  if(nodeIdx < 0)
+  {
+    tinygltf::Node node;
+    node.name = "Sun";
+    gltf_environment_sky::setSkySunMarker(node, gltf_environment_sky::kSkySunOwnerRenderer);
+    outModel.nodes.push_back(node);
+    nodeIdx = static_cast<int>(outModel.nodes.size()) - 1;
+
+    const int sceneIndex = outModel.defaultScene >= 0 ? outModel.defaultScene : 0;
+    if(sceneIndex < static_cast<int>(outModel.scenes.size()))
+      outModel.scenes[sceneIndex].nodes.push_back(nodeIdx);
+  }
+
+  // A sun the user picked may sit under a rotated parent; the one created above is a root.
+  const glm::quat local = gltf_environment_sky::localRotationForWorld(outModel, nodeIdx, rot);
+  tinygltf::Node& node  = outModel.nodes[nodeIdx];
+  if(!node.matrix.empty())
+  {
+    // A matrix would win over the TRS set below, so keep its translation and scale as TRS.
+    glm::vec3 t, s;
+    glm::quat r;
+    tinygltf::utils::getNodeTRS(node, t, r, s);
+    node.translation = {t.x, t.y, t.z};
+    node.scale       = {s.x, s.y, s.z};
+    node.matrix.clear();
+  }
+  node.rotation = {local.x, local.y, local.z, local.w};
+
+  // Reuse the light this node already points at, so a re-save does not add one per save.
+  //
+  // `node.light` rather than the extensions map: that is the canonical reference in this codebase
+  // -- tinygltf mirrors the extension into it on load and serialises from it on save, which is why
+  // SceneEditor::addLightNode writes only this field.
+  int        lightIdx    = node.light;
+  const bool createdHere = (lightIdx < 0 || lightIdx >= static_cast<int>(outModel.lights.size()));
+  if(createdHere)
+  {
+    outModel.lights.push_back({});
+    lightIdx = static_cast<int>(outModel.lights.size()) - 1;
+  }
+  node.light = lightIdx;
+
+  tinygltf::Light& light = outModel.lights[lightIdx];
+  // Name only what we create. Adopting someone's "Directional Light" and calling it "Sun" is
+  // their scene being edited by a viewer, which is the thing this whole design avoids.
+  if(createdHere)
+    light.name = "Sun";
+  light.type      = "directional";
+  light.color     = {color.x, color.y, color.z};
+  light.intensity = peak;
+
+  tinygltf::utils::syncExtensionsUsed(outModel);
+}
+
+void GltfRenderer::writeEnvironmentSky(tinygltf::Model& outModel, const std::filesystem::path& destination) const
+{
+  if(!m_resources.settings.envSaveToGltf)
+  {
+    gltf_environment_sky::strip(outModel);
+    writeSkySunLight(outModel);  // drops the sun too: the environment is not part of this file
+    return;
+  }
+
+  const EnvironmentState state = skyDescriptorFromSettings(destination);
+  if(!state.has_value())
+  {
+    gltf_environment_sky::strip(outModel);
+    writeSkySunLight(outModel);  // no sky, so no sun either: withdraw the marker it would leave behind
+    return;
+  }
+
+  const int sceneIndex = outModel.defaultScene >= 0 ? outModel.defaultScene : 0;
+  gltf_environment_sky::write(outModel, sceneIndex, *state);
+  writeSkySunLight(outModel);
+}
+
+//--------------------------------------------------------------------------------------------------
+// Capture the current sky as a `.sky.json`, and apply one.
+//
+// The sun angle travels with it, because a sky and the angle of its sun are one look. On the way
+// out it is read from the direction the renderer is actually using, whichever of the four things
+// set it; on the way in it is applied through m_skySun.aim(), so a scene whose sun is a marked light
+// records the move on its undo stack exactly as a slider drag would.
+//
+// Note what is *not* undoable: everything else a preset changes is viewer state -- the atmosphere,
+// the ambient terms, the environment type -- and no environment control in this renderer is on the
+// undo stack. Putting presets there alone would mean a settings-snapshot command unlike anything
+// else in undo_redo, for a consistency the panel does not otherwise have.
+//
+bool GltfRenderer::saveSkyPreset(const std::filesystem::path& path) const
+{
+  const EnvironmentState sky = skyDescriptorFromSettings(path);
+  if(!sky.has_value())
+  {
+    LOGW("Sky preset: the current environment is not a sky that can be written (%s).\n", nvutils::utf8FromPath(path).c_str());
+    return false;
+  }
+
+  sky_preset::Preset preset{.sky = *sky};
+  if(skyHasSun(m_resources.settings.envSystem))
+  {
+    // glTF aims a light down -Z, so the rotation that takes +Z to the sun is what a node would
+    // store -- the same convention SkySun::setMarkedDirection writes.
+    preset.sunRotation = glm::rotation(glm::vec3(0.0F, 0.0F, 1.0F), glm::normalize(m_resources.sunDirection));
+  }
+  return sky_preset::save(path, preset);
+}
+
+bool GltfRenderer::loadSkyPreset(const std::filesystem::path& path)
+{
+  const std::optional<sky_preset::Preset> preset = sky_preset::load(path);
+  if(!preset.has_value())
+    return false;
+
+  // A preset loaded after a scene supersedes that scene's sky, even one still waiting for the frame
+  // top -- otherwise the scene's would land a frame later and silently undo this.
+  m_environmentSkyPending = false;
+  applySkyDescriptor(preset->sky, SkySource::ePreset, path.parent_path());
+
+  // Absent means "leave the sun alone", which is why this is not an else.
+  if(preset->sunRotation.has_value())
+  {
+    m_skySun.aim(*preset->sunRotation * glm::vec3(0.0F, 0.0F, 1.0F));
+    m_skySun.syncAngles();
+  }
+
+  // The preset is now what a save would write, so a scene saved after loading one carries it.
+  m_environmentSky = preset->sky;
+  return true;
+}
+
+void GltfRenderer::queueStartupSkyPresets(const std::filesystem::path& load, const std::filesystem::path& save)
+{
+  m_pendingLoadSkyPreset = load;
+  m_pendingSaveSkyPreset = save;
+}
+
+void GltfRenderer::applyPendingSkyPresets()
+{
+  if(!m_pendingLoadSkyPreset.empty())
+    loadSkyPreset(std::exchange(m_pendingLoadSkyPreset, {}));
+  if(!m_pendingSaveSkyPreset.empty())
+    saveSkyPreset(std::exchange(m_pendingSaveSkyPreset, {}));
+}
+
+//--------------------------------------------------------------------------------------------------
+// The live settings as an authored sky. See the declaration for what nullopt means.
+//
+EnvironmentState GltfRenderer::skyDescriptorFromSettings(const std::filesystem::path& destination) const
+{
+  const Settings& settings = m_resources.settings;
+
+  // Start from the descriptor the scene was loaded with, so unmodelled keys and any sky type this
+  // build does not render survive the round trip. A scene that authored nothing starts fresh.
+  SkyDescriptor sky = m_environmentSky.value_or(SkyDescriptor{});
+
+  // The environment's orientation is the sky's, the same quaternion, so it is written exactly.
+  sky.rotation         = settings.envRotationQuat();
+  sky.rotationAuthored = true;
+
+  switch(settings.envSystem)
+  {
+    case shaderio::EnvSystem::ePlain:
+      // A sky type this build does not recognize loads as this plain fallback (see
+      // SkyDescriptor::unknownType). While the fallback is still on screen untouched, the file's
+      // own sky is the truer thing to save; every branch that authors a sky of its own drops it.
+      if(settings.plainColor != sky.plain.color)
+        sky.unknownType.clear();
+      sky.type        = SkyDescriptor::Type::ePlain;
+      sky.plain.color = settings.plainColor;
+      break;
+    case shaderio::EnvSystem::eGradient:
+      sky.unknownType.clear();
+      sky.type                  = SkyDescriptor::Type::eGradient;
+      sky.gradient.bottomColor  = settings.gradientBottomColor;
+      sky.gradient.horizonColor = settings.gradientHorizonColor;
+      sky.gradient.topColor     = settings.gradientTopColor;
+      sky.gradient.bottomCurve  = settings.gradientBottomCurve;
+      sky.gradient.topCurve     = settings.gradientTopCurve;
+      sky.gradient.sunAngleMax  = settings.gradientSunAngleMax;
+      sky.gradient.sunCurve     = settings.gradientSunCurve;
+      break;
+    case shaderio::EnvSystem::eSky: {
+      // OMI describes the atmosphere as a magnitude plus a colour, and in m^-1; the model keeps a
+      // per-channel coefficient in km^-1. Splitting on the largest channel is what makes the pair
+      // reproduce the extension's own defaults in shape -- its rayleighColor is (0.3, 0.5, 1.0),
+      // blue-dominant and normalised to 1 -- and it is exactly invertible, which is the property
+      // the round trip depends on.
+      const auto split = [](const glm::vec3& perChannelPerKm, float& outCoefficient, glm::vec3& outColor) {
+        const float peak = std::max({perChannelPerKm.x, perChannelPerKm.y, perChannelPerKm.z});
+        // Divided, not scaled by 0.001: the reciprocal is not representable in binary, so scaling
+        // by it costs a few ulps and the value no longer lands back on itself when the file is
+        // reopened and saved again.
+        outCoefficient = peak / 1000.0F;  // km^-1 -> m^-1, as the extension specifies
+        outColor       = (peak > 0.0F) ? perChannelPerKm / peak : glm::vec3(1.0F);
+      };
+
+      sky.unknownType.clear();
+      sky.type = SkyDescriptor::Type::ePhysical;
+      split(settings.atmoRayleighScattering, sky.physical.rayleighCoefficient, sky.physical.rayleighColor);
+      split(settings.atmoMieScattering, sky.physical.mieCoefficient, sky.physical.mieColor);
+      sky.physical.mieAnisotropy = settings.atmoMieAnisotropy;
+      sky.physical.groundColor   = settings.atmoGroundAlbedo;
+
+      // Everything OMI has no field for, in the sibling NV block. Kilometres in the model, metres
+      // in the file.
+      sky.atmosphere.present             = true;
+      sky.atmosphere.solarIrradiance     = settings.atmoSolarIrradiance;
+      sky.atmosphere.sunAngularRadius    = settings.atmoSunAngularRadius;
+      sky.atmosphere.mieAlbedo           = settings.atmoMieAlbedo;
+      sky.atmosphere.ozoneExtinction     = settings.atmoOzoneExtinction / 1000.0F;
+      sky.atmosphere.rayleighScaleHeight = settings.atmoRayleighScaleHeight * 1000.0F;
+      sky.atmosphere.mieScaleHeight      = settings.atmoMieScaleHeight * 1000.0F;
+      sky.atmosphere.ozoneCenter         = settings.atmoOzoneCenter * 1000.0F;
+      sky.atmosphere.ozoneWidth          = settings.atmoOzoneWidth * 1000.0F;
+      sky.atmosphere.planetRadius        = settings.atmoBottomRadius * 1000.0F;
+      sky.atmosphere.atmosphereThickness = settings.atmoThickness * 1000.0F;
+      break;
+    }
+    case shaderio::EnvSystem::eHdr: {
+      // eHdr *is* OMI's `panorama`; the enumerator kept its name and value because both the .ini
+      // and the glTF store it as an integer.
+      if(m_lastHdrFile.empty())
+      {
+        // Nothing loaded (the start-up dummy). Writing `panorama` with no source would describe an
+        // environment that does not exist, so fall through to the preserve-or-strip rule below.
+        if(!m_environmentSky.has_value())
+          return std::nullopt;
+        break;
+      }
+      sky.unknownType.clear();
+      sky.type = SkyDescriptor::Type::ePanorama;
+      // Relative to the glTF being written, so the pair moves together. An image outside that
+      // tree keeps an absolute path rather than a chain of "..\" that only works from here.
+      sky.panorama.uri = relativeUriForSave(m_lastHdrFile, destination);
+      break;
+    }
+    default:
+      // The active mode is not an authored OMI type (None). If the scene came with a sky,
+      // re-emit it unchanged rather than inventing one or silently discarding the author's data;
+      // if it did not, there is nothing to write.
+      if(!m_environmentSky.has_value())
+        return std::nullopt;
+      break;
+  }
+
+  return sky;
+}
+
+//--------------------------------------------------------------------------------------------------
+// Frame-top hook for a pending environment change, paired with onEnvironmentChanged().
+//
+// Runs from onUIRender rather than onRender for the same reason applyPendingTextureRebuild does:
+// rebuilding the environment waits on the device and rewrites descriptors that in-flight frames
+// are reading, which is not safe in the middle of recording a frame's command buffer. onUIRender
+// is the frame-top point this renderer already uses for deferred GPU rebuilds, and it runs in the
+// headless and benchmark paths too.
+//
+void GltfRenderer::applyPendingEnvironmentRefresh()
+{
+  if(!m_envBakeDirty)
+    return;
+
+  if(isBakedEnvironment(m_resources.settings.envSystem))
+  {
+    refreshBakedEnvironment();
+    return;
+  }
+
+  m_envBakeDirty = false;
+
+  if(m_envOwnedByBaker && m_resources.settings.envSystem == shaderio::EnvSystem::eHdr)
+  {
+    // Leaving a baked sky for the HDR path: hdrIbl still points at EnvBaker's image and holds an
+    // alias table built over it, so the file has to be reloaded to take ownership back.
+    createHDR(m_lastHdrFile);
+  }
+  // eNone samples neither hdrIbl nor the prefiltered cubes, so a stale binding is harmless -- and
+  // re-selecting a baked sky re-commits before anything reads it.
+
+  // Same rule as refreshBakedEnvironment: calibrate on the first refresh after the kind changes.
+  if(m_fireflyClampCalibratedFor != int(m_resources.settings.envSystem))
+    calibrateFireflyClamp();
+  resetFrame();
+}
+
+//--------------------------------------------------------------------------------------------------
+// Assemble the authored sky parameters the shaders read.
+//
+// Built in one place because two consumers need the same numbers for different purposes: the bake
+// evaluates them with the sun excluded (that image is the lighting field, and the sun is a
+// directional light NEE samples), while the per-ray background evaluates them with the sun in.
+// Splitting the fill would let the visible sky and the sky that lights the scene drift apart.
+//
+shaderio::SkyOmiParameters GltfRenderer::buildSkyOmiParameters() const
+{
+  const Settings&            settings = m_resources.settings;
+  shaderio::SkyOmiParameters params{};
+
+  params.plain.color = settings.plainColor;
+
+  params.gradient.bottomColor  = settings.gradientBottomColor;
+  params.gradient.horizonColor = settings.gradientHorizonColor;
+  params.gradient.topColor     = settings.gradientTopColor;
+  params.gradient.sunColor     = settings.gradientSunColor;
+  params.gradient.bottomCurve  = settings.gradientBottomCurve;
+  params.gradient.topCurve     = settings.gradientTopCurve;
+  params.gradient.sunAngleMax  = settings.gradientSunAngleMax;
+  params.gradient.sunCurve     = settings.gradientSunCurve;
+
+  // Resources::sunDirection is the one sun the whole renderer shares -- the sky UI, the physical
+  // sky and next-event estimation all read it -- so the visible disk lands exactly where the light
+  // that casts the shadows is. The gradient is evaluated in the environment's frame, so the sun
+  // is handed over in that frame too.
+  params.gradient.sunDirection = sunInEnvironmentFrame();
+
+  params.gradient.sunAngularRadius = kGradientSunAngularRadius;
+
+  return params;
+}
+
+glm::vec3 GltfRenderer::sunInEnvironmentFrame() const
+{
+  // The same conversion the shaders apply before an environment lookup (quatRotateInverse).
+  return glm::inverse(m_resources.settings.envRotationQuat()) * m_resources.sunDirection;
+}
+
+//--------------------------------------------------------------------------------------------------
+// Settings::envRotation was edited. The rotation is where north is, so a sky's sun is placed again
+// from Time of Day on the turned compass -- what North Offset used to do. That goes through aim(),
+// which also re-bakes the physical sky and reaches a marked sun light. An HDR has no sun to place.
+//
+void GltfRenderer::onEnvironmentRotated()
+{
+  if(skyHasSun(m_resources.settings.envSystem))
+    m_skySun.applyTimeOfDay();
+  resetFrame();
+}
+
+//--------------------------------------------------------------------------------------------------
+// Illuminance of the gradient sky's sun, before `envIntensity`.
+//
+// The physical sky measures its sun: the bake reports a disk radiance, and radiance times the solid
+// angle the disk subtends is an illuminance. The gradient sky measures nothing. `sunColor` is the
+// colour the disk is *drawn* in, and running it through that same product is what left this sun
+// visible but dark -- a half-degree disk subtends 6.8e-5 sr, so a `sunColor` of 1 became 7e-5 lux
+// under a dome delivering about 1.5. Forty thousand times too dim, and silently so: the disk was
+// still there to look at.
+//
+// So the number is scaled against the sky instead of derived from the disk. The dome's own
+// illuminance is the one quantity the gradient sky does define -- it is those authored colours over
+// a hemisphere -- and `kGradientSunToSkyRatio` puts the sun where a clear day puts it relative to
+// that. `sunColor` keeps its job as the sun's colour *and* its relative brightness, so brightening
+// it in the UI now brightens the light as well as the disk.
+//
+// The sky half only: the ground half of the gradient lights nothing that faces up, and including it
+// would make the sun follow the ground colour.
+//
+glm::vec3 GltfRenderer::gradientSunIlluminance() const
+{
+  const Settings& settings = m_resources.settings;
+
+  // Illuminance the dome alone puts on an up-facing surface:
+  //   E = 2*PI * integral(0..PI/2) L(v) cos(v) sin(v) dv
+  // with L the same horizon -> top band the shader evaluates, and v measured from the zenith.
+  // Numeric because the band shape is a free exponent; 256 steps settle this to well under a
+  // percent, and it is evaluated once per frame on the CPU.
+  constexpr int kSteps = 256;
+  glm::vec3     dome(0.0f);
+  for(int i = 0; i < kSteps; ++i)
+  {
+    const float     v = (static_cast<float>(i) + 0.5f) / static_cast<float>(kSteps) * glm::half_pi<float>();
+    const float     c = 1.0f - v / glm::half_pi<float>();
+    const glm::vec3 L =
+        glm::mix(settings.gradientHorizonColor, settings.gradientTopColor, gradientBandWeight(c, settings.gradientTopCurve));
+    dome += L * std::cos(v) * std::sin(v);
+  }
+  dome *= glm::two_pi<float>() * glm::half_pi<float>() / static_cast<float>(kSteps);
+
+  // One scalar for the dome: the ratio is a brightness, and letting it run per channel would tint
+  // the sun by the inverse of the sky it stands against.
+  const float domeIlluminance = (dome.x + dome.y + dome.z) / 3.0f;
+  return settings.gradientSunColor * (kGradientSunToSkyRatio * domeIlluminance);
+}
+
+//--------------------------------------------------------------------------------------------------
+// The atmosphere the physical sky is built from: Earth, with the panel's settings laid over it.
+//
+shaderio::SkyAtmosphereParameters GltfRenderer::buildAtmosphereParameters() const
+{
+  const Settings& s = m_resources.settings;
+
+  // Starts from the Earth defaults for the two fields no setting covers: muSMin, which is LUT
+  // coverage rather than physics, and the zero padding layer every density profile needs.
+  shaderio::SkyAtmosphereParameters p = skyBrunetonEarthDefaults();
+
+  p.solarIrradiance    = s.atmoSolarIrradiance;
+  p.sunAngularRadius   = s.atmoSunAngularRadius;
+  p.groundAlbedo       = s.atmoGroundAlbedo;
+  p.rayleighScattering = s.atmoRayleighScattering;
+  p.mieScattering      = s.atmoMieScattering;
+  p.miePhaseFunctionG  = s.atmoMieAnisotropy;
+
+  // Extinction is what the aerosol removes; scattering is the part it gives back. The albedo is
+  // the ratio, and it is what the setting exposes -- OMI has no absorption field, so a scene that
+  // sets mieScattering keeps the ratio rather than inheriting an unrelated extinction.
+  p.mieExtinction = s.atmoMieScattering / std::max(s.atmoMieAlbedo, 1e-3F);
+
+  p.absorptionExtinction = s.atmoOzoneExtinction;
+  p.bottomRadius         = s.atmoBottomRadius;
+  p.topRadius            = s.atmoBottomRadius + s.atmoThickness;
+
+  // Both gases fall off exponentially, so a scale height is the whole profile. Layer 0 stays the
+  // zero padding upstream inserts -- see skyBrunetonEarthDefaults().
+  p.rayleighDensity.layers[1].expTerm  = 1.0F;
+  p.rayleighDensity.layers[1].expScale = -1.0F / std::max(s.atmoRayleighScaleHeight, 1e-3F);
+  p.mieDensity.layers[1].expTerm       = 1.0F;
+  p.mieDensity.layers[1].expScale      = -1.0F / std::max(s.atmoMieScaleHeight, 1e-3F);
+
+  // Ozone is a tent: zero at centre-width/2, one at the centre, zero again at centre+width/2.
+  // Layer 0 covers the rise and layer 1 the fall, so the split is at the centre.
+  const float halfWidth                      = std::max(s.atmoOzoneWidth, 1e-3F) * 0.5F;
+  const float slope                          = 1.0F / halfWidth;
+  p.absorptionDensity.layers[0].width        = s.atmoOzoneCenter;
+  p.absorptionDensity.layers[0].expTerm      = 0.0F;
+  p.absorptionDensity.layers[0].expScale     = 0.0F;
+  p.absorptionDensity.layers[0].linearTerm   = slope;
+  p.absorptionDensity.layers[0].constantTerm = 1.0F - s.atmoOzoneCenter * slope;
+  p.absorptionDensity.layers[1].expTerm      = 0.0F;
+  p.absorptionDensity.layers[1].expScale     = 0.0F;
+  p.absorptionDensity.layers[1].linearTerm   = -slope;
+  p.absorptionDensity.layers[1].constantTerm = 1.0F + s.atmoOzoneCenter * slope;
+
+  return p;
+}
+
+//--------------------------------------------------------------------------------------------------
+// Push the current settings into EnvBaker -- the parameters both the preview and the commit bake
+// from.
+//
+// Separate from refreshBakedEnvironment because the preview path needs it too, and needs only
+// this: these are member assignments, uploaded by the bake through the command buffer, so they
+// are safe in the middle of recording a frame. setResolution is deliberately *not* here -- it
+// reallocates the image, which is a frame-boundary operation and belongs to the commit alone.
+//
+// The atmosphere block is not here either: the bake reads it for ground albedo and the sun's
+// angular size, but any change to it also fails SkyBruneton::lutsSatisfy, and the rebuild that
+// follows uploads it.
+//
+void GltfRenderer::updateBakerParameters()
+{
+  // Metres in the UI, kilometres in the model.
+  m_envBaker.setObserverAltitude(m_resources.settings.atmoObserverAltitude * 0.001F);
+
+  m_envBaker.skyParams() = buildSkyOmiParameters();
+  m_envBaker.setSkyType(shaderio::SkyType(bakeSkyType(m_resources.settings.envSystem)));
+  m_envBaker.setSunDirection(sunInEnvironmentFrame());
+}
+
+//--------------------------------------------------------------------------------------------------
+// Rebuild the baked lighting environment from the current settings.
+//
+// This is the single point where an analytic sky becomes the environment every renderer path
+// samples. After it runs, hdrIbl and hdrDome hold a lat-long image, an alias table and prefiltered
+// cubemaps built from EnvBaker's output instead of from an HDR file -- which is why the path
+// tracer and the rasterizer need no per-sky-type branch to light a scene.
+//
+// Application thread only: EnvBaker::commit submits and waits.
+//
+void GltfRenderer::refreshBakedEnvironment()
+{
+  m_envBakeDirty = false;
+  // A full commit supersedes any preview raised before it, and the commit that preview would owe.
+  m_envPreviewPending = false;
+  m_envCommitOwed     = false;
+  if(!isBakedEnvironment(m_resources.settings.envSystem))
+    return;
+
+  // Both the bake and the descriptor rewrite below touch resources that in-flight frames are
+  // still reading: the bake overwrites the lat-long image, and updateHdrImages() rewrites set 0
+  // while a previously submitted frame may still be sampling it. createHDR() opens with
+  // the same wait for the same reason -- without it this crashes, not merely trips validation.
+  NVVK_CHECK(vkDeviceWaitIdle(m_device));
+
+  const Settings& settings = m_resources.settings;
+
+  // Rebuild the LUTs unless they already hold this atmosphere at full quality. Compared by value
+  // rather than tracked with a dirty flag so that an .ini restore, a benchmark script and an MCP
+  // write are all covered without each having to remember to raise one -- and so that a settle
+  // that changed nothing does not pay for a full precompute.
+  //
+  // Quality is part of the test, not just the parameters: a drag leaves the LUTs holding the right
+  // atmosphere at preview quality, and this is the moment that owes the upgrade.
+  if(settings.envSystem == shaderio::EnvSystem::eSky)
+  {
+    const shaderio::SkyAtmosphereParameters wanted = buildAtmosphereParameters();
+    if(!m_skyBruneton.lutsSatisfy(wanted, SkyBruneton::kQualityFinal))
+    {
+      m_skyBruneton.setParameters(wanted);
+      m_skyBruneton.precompute(m_resources);
+    }
+  }
+
+  updateBakerParameters();
+
+  // Only the rasterizer reads the prefiltered cubemaps; skipping them on the path-tracing path
+  // saves ~28 ms of prefilter work per commit for an image nothing would sample.
+  const bool refreshDome = m_resources.settings.renderSystem == RenderingMode::eRasterizer;
+  m_envBaker.commit(m_resources, refreshDome);
+  m_envOwnedByBaker = true;
+
+  // Rebind the environment into the renderer's own descriptor set. HdrIbl::updateFromGpuImage
+  // repoints HdrIbl's internal set, which is what the path tracer binds for the alias table --
+  // but `texturesHdr[HDR_IMAGE_INDEX]` lives in set 0 here and still names whichever image was
+  // bound last (at start-up, the dummy from createHDR("")). Without this the scene is lit and
+  // backed by that stale image and the authored sky is silently ignored.
+  //
+  // Only that one element is rewritten. The BRDF LUT and the prefiltered cubes in the same
+  // binding are owned by HdrEnvDome and keep their identity across an update -- rewriting them
+  // per commit is the descriptor churn the design explicitly warns against.
+  {
+    nvvk::WriteSetContainer    write{};
+    const VkWriteDescriptorSet hdrTexture =
+        m_resources.descriptorBinding[0].getWriteSet(shaderio::BindingPoints::eTexturesHdr, m_resources.descriptorSet,
+                                                     HDR_IMAGE_INDEX, 1U);
+    write.append(hdrTexture, m_resources.hdrIbl.getHdrImage());
+    vkUpdateDescriptorSets(m_device, write.size(), write.data(), 0, nullptr);
+  }
+
+  // A baked environment has its own luminance integral, exactly like a loaded HDR -- but this runs
+  // on every commit, and a commit happens every time the sun moves or an atmosphere slider settles.
+  //
+  // So calibrate once, on the first commit after the environment changes kind, and then leave it
+  // alone. Two reasons, and the second is the important one:
+  //
+  //   - The value would otherwise swing with the sun, because the sky's integral does.
+  //   - It is a *starting point*, not a derived quantity. The clamp has to accommodate every light
+  //     in the scene -- emissive materials, punctual lights, a bright HDR backplate -- and the
+  //     environment integral knows about none of them. Once the user has adjusted it, recomputing
+  //     from the environment alone throws that away, and does so on a gesture as ordinary as
+  //     dragging the sun.
+  //
+  // This is where the calibration belongs rather than at the switch itself: hdrIbl's integral does
+  // not describe the new environment until the bake above has run.
+  if(m_fireflyClampCalibratedFor != int(settings.envSystem))
+  {
+    calibrateFireflyClamp();
+  }
+  resetFrame();
+}
+
+//--------------------------------------------------------------------------------------------------
 // Returns the scene-appropriate firefly clamp threshold:
-//   - HDR environment → use its luminance integral (already calibrated to the environment's range)
+//   - HDR or baked analytic environment → use its luminance integral (already calibrated to the
+//     environment's range; a baked sky populates the same integral through updateFromGpuImage)
 //   - Otherwise → a fixed baseline high enough to preserve legitimately bright highlights
+void GltfRenderer::calibrateFireflyClamp()
+{
+  m_fireflyClampCalibratedFor                    = int(m_resources.settings.envSystem);
+  m_pathTracer.m_pushConst.fireflyClampThreshold = defaultFireflyClamp();
+}
+
+//--------------------------------------------------------------------------------------------------
+// Where aerial perspective stands the eye. See the declaration for why this is not the sky's
+// observer altitude.
+//
+float GltfRenderer::aerialPerspectiveEyeAltitudeKm() const
+{
+  const float liftKm = m_resources.settings.atmoObserverAltitude * 0.001F;
+
+  const nvvkgltf::Scene* scene = m_resources.getScene();
+  if(scene == nullptr || !scene->valid() || m_cameraManip == nullptr)
+    return liftKm;
+
+  const nvutils::Bbox bounds = scene->getSceneBounds();
+  if(!bounds.isEmpty())
+  {
+    // The scene's floor goes `liftKm` above the planet's surface, so nothing in it is ever
+    // underground however the camera moves; the eye then stands wherever it stands above that
+    // floor. A camera below the floor -- inside the terrain, or under a ground plane -- would
+    // otherwise push itself under the surface instead, so the lift is the floor for that too.
+    const float kmPerSceneUnit = 0.001F * m_resources.settings.atmoAerialPerspectiveScale;
+    // The camera manipulator works in doubles; the difference is a scene-scale number, so it fits a
+    // float long before it is turned into kilometres.
+    const float aboveFloor = static_cast<float>(m_cameraManip->getEye().y - bounds.min().y) * kmPerSceneUnit;
+    return liftKm + std::max(aboveFloor, 0.0F);
+  }
+  return liftKm;
+}
+
+glm::vec3 GltfRenderer::skySunIlluminanceAboveAtmosphere() const
+{
+  // The constant is written in shader types; float3 is an alias that lives in `shaderio`.
+  using shaderio::float3;
+  // The sun's factor set, not the sky's -- this is the sun. See SUN_SPECTRAL_TO_LUMINANCE.
+  const glm::vec3 radianceToLuminance = SUN_RADIANCE_TO_LUMINANCE;
+  return buildAtmosphereParameters().solarIrradiance * radianceToLuminance * m_resources.settings.hdrEnvIntensity;
+}
+
 float GltfRenderer::defaultFireflyClamp() const
 {
-  if(m_resources.settings.envSystem == shaderio::EnvSystem::eHdr)
-    return m_resources.hdrIbl.getIntegral();
-  return 30.0f;
+  const shaderio::EnvSystem env = m_resources.settings.envSystem;
+  if(env != shaderio::EnvSystem::eHdr && !isBakedEnvironment(env))
+    return 30.0f;
+
+  // The environment's own integral: the sum of max(R,G,B) over solid angle.
+  float clamp = m_resources.hdrIbl.getIntegral();
+
+  // The physical sky keeps its sun *out* of that image -- the sun is a directional light so that
+  // its disk stays sharp and next-event estimation can sample it -- so the integral measures the
+  // sky alone, and for a daylit scene the sky is the smaller half by a wide margin. An .hdr file
+  // has its sun baked in and needs no correction, which is why this only surfaced once the
+  // analytic skies grew a sun of their own.
+  //
+  // Added in the integral's own units: a disk of radiance L covering solid angle W contributes
+  // max(L) * W to that sum, and radiance times solid angle is illuminance. So the term is the
+  // largest channel of the sun's illuminance.
+  //
+  // Which sun, though -- the one above the atmosphere, not the one currently shining. The
+  // attenuated sun is the physically honest answer to "how much light is there right now", and it
+  // is the wrong answer here, because it goes to zero at dusk and takes the clamp with it: at 2
+  // degrees below the horizon this threshold was 0.34, at 5 degrees 0.03, and at 10 degrees it
+  // reached exactly 0 -- which the shader reads as "disabled", so the clamp flipped from crushing
+  // every sample to not clamping at all. A clamp is a safety net against outliers, and a safety
+  // net that scales itself to nothing at night is worse than a fixed one.
+  //
+  // The unattenuated value is a property of the star rather than of the hour, so it is stable
+  // across a whole time-of-day scrub, and it still follows the atmosphere: Mars' sun is dimmer
+  // than Earth's, and editing the solar irradiance moves it.
+  //
+  // The gradient sky keeps its sun out of the bake for the same reason and needs the same
+  // correction; there is just no atmosphere to ask, so the term is the sun this sky implies.
+  glm::vec3 sun(0.0f);
+  if(env == shaderio::EnvSystem::eSky)
+    sun = skySunIlluminanceAboveAtmosphere();
+  else if(env == shaderio::EnvSystem::eGradient)
+    sun = gradientSunIlluminance() * m_resources.settings.hdrEnvIntensity;
+  clamp += std::max({sun.x, sun.y, sun.z});
+  return clamp;
 }
 
 //--------------------------------------------------------------------------------------------------
@@ -1747,7 +3058,7 @@ void GltfRenderer::finalizeSceneSetup(const std::filesystem::path& filename)
 
   // Calibrate the firefly clamp to the scene: retroreflective materials can produce legitimately
   // high peak radiance that the default clamp of 10 would clip, visibly suppressing the effect.
-  m_pathTracer.m_pushConst.fireflyClampThreshold = defaultFireflyClamp();
+  calibrateFireflyClamp();
 
   wireSceneToUi();  // Scene Browser + Inspector pointers, callbacks, bounds
 
@@ -1757,9 +3068,15 @@ void GltfRenderer::finalizeSceneSetup(const std::filesystem::path& filename)
   // Set camera from scene
   nvvkgltf::addSceneCamerasToWidget(m_cameraManip, filename, scene->getRenderCameras(), scene->getSceneBounds());
 
-  // The sky is an environment setting, not a scene property -- glTF carries none -- so a scene
-  // load leaves it alone, matching how hdrEnvIntensity/hdrEnvRotation already behave. Resetting it
-  // here used to discard whatever the user, the command line, or MCP had set.
+  // Viewer-side environment controls (hdrEnvIntensity, envRotation, the backplate override)
+  // are deliberately left alone by a scene load -- resetting them used to discard whatever the
+  // user, the command line, or MCP had set. The *authored* sky is different: a glTF carrying
+  // OMI_environment_sky is stating what the scene's sky is, and that wins over the ini.
+  //
+  // The one place the two meet is `rotation`, which is both. It is applied only when the file
+  // states it -- see applySkyDescriptor -- so an authored orientation wins while a scene that is
+  // silent about it leaves the user's rotation where they left it.
+  applyEnvironmentSkyFromScene();
 
   // Need to update (push) all textures
   if(!updateTextures())
@@ -1906,7 +3223,7 @@ void GltfRenderer::createSceneFromDescriptor(const std::filesystem::path& descri
   // can specialize its shader when settings.optimalShader is on.
   m_resources.recomputeSceneFeatures(dlssGuideRequired());
 
-  m_pathTracer.m_pushConst.fireflyClampThreshold = defaultFireflyClamp();
+  calibrateFireflyClamp();
 
   wireSceneToUi();
 
@@ -2249,12 +3566,8 @@ void GltfRenderer::clearGbuffer(VkCommandBuffer cmd)
 }
 
 //--------------------------------------------------------------------------------------------------
-// Create the uniform buffers for frame-specific data
-// This function initializes two key uniform buffers:
-// 1. bFrameInfo - Contains per-frame camera matrices, environment settings, and debug information
-//    Updated each frame with current view/projection matrices and rendering settings
-// 2. bSkyParams - Contains physical parameters for the procedural sky simulation
-//    Used when environment type is set to Sky instead of HDR
+// Create the uniform buffer for frame-specific data: per-frame camera matrices, environment
+// settings and debug information, updated each frame.
 //
 void GltfRenderer::createResourceBuffers()
 {
@@ -2263,11 +3576,6 @@ void GltfRenderer::createResourceBuffers()
                                                 VK_BUFFER_USAGE_2_UNIFORM_BUFFER_BIT | VK_BUFFER_USAGE_2_TRANSFER_DST_BIT,
                                                 VMA_MEMORY_USAGE_CPU_TO_GPU));
   NVVK_DBG_NAME(m_resources.bFrameInfo.buffer);
-  // Create the buffer of sky parameters, updated at each frame
-  NVVK_CHECK(m_resources.allocator.createBuffer(m_resources.bSkyParams, sizeof(shaderio::SkyPhysicalParameters),
-                                                VK_BUFFER_USAGE_2_UNIFORM_BUFFER_BIT | VK_BUFFER_USAGE_2_TRANSFER_DST_BIT,
-                                                VMA_MEMORY_USAGE_CPU_TO_GPU));
-  NVVK_DBG_NAME(m_resources.bSkyParams.buffer);
 }
 
 //--------------------------------------------------------------------------------------------------
@@ -2384,7 +3692,7 @@ bool GltfRenderer::loadHdrEnvironment(const std::filesystem::path& filename)
   // eHdr. Refresh the path-tracer clamp in lock-step -- matching the pattern in onFileDrop, the
   // Agentic applyHdri callback, and the HDR-picker UI -- so a --hdrfile change from a benchmark
   // sequence or MCP write doesn't keep clamping against the previous HDR's integral.
-  m_pathTracer.m_pushConst.fireflyClampThreshold = defaultFireflyClamp();
+  calibrateFireflyClamp();
   resetFrame();
   return true;
 }
@@ -2418,15 +3726,6 @@ bool GltfRenderer::loadSceneFile(const std::filesystem::path& filename)
   // above, we want the return to describe what the *new* attempt did, not accidentally report
   // success just because some scene pointer happens to be non-null.
   return createScene(filename);
-}
-
-//--------------------------------------------------------------------------------------------------
-// Mirror skyParams.sunDirection back into the reported azimuth/elevation. Called after the sky UI
-// moves the sun, so reading skySunAzimuth/skySunElevation tells the truth.
-void GltfRenderer::syncSunAngles()
-{
-  anglesFromSunDirection(m_resources.skyParams.sunDirection, m_resources.skyParams.yIsUp != 0,
-                         m_resources.settings.skySunAzimuth, m_resources.settings.skySunElevation);
 }
 
 //--------------------------------------------------------------------------------------------------
@@ -2687,8 +3986,38 @@ void GltfRenderer::createHDR(const std::filesystem::path& hdrFilename)
     else
       filename = nvutils::findFile(hdrFilename, nvsamples::getResourcesDirs(), false);
   }
+  // Decode here rather than through HdrIbl's path overload, so .hdr and .exr take one route --
+  // see env_image_loader.hpp for why EXR cannot live inside nvvk. An empty or failed decode hands
+  // over an empty span, which is what produces the dummy environment at start-up.
+  EnvImage envImage = loadEnvImage(filename);
+
+  // Say which file this is, or that there is none. A request that does not resolve, or an image
+  // that does not decode, silently becomes the dummy environment above -- and a dummy is easy to
+  // mistake for a real one, because plenty of studio HDRs genuinely are flat and achromatic.
+  // Without a line here the only way to tell them apart is to know what the file looks like.
+  if(hdrFilename.empty())
+  {
+    LOGI("HDR environment: none (dummy)\n");
+  }
+  else if(envImage.pixels.empty())
+  {
+    LOGW("HDR environment: %s could not be %s; using the dummy environment\n",
+         nvutils::utf8FromPath(hdrFilename).c_str(), filename.empty() ? "found" : "decoded");
+  }
+  else
+  {
+    LOGI("HDR environment: %s (%ux%u)\n", nvutils::utf8FromPath(filename).c_str(), envImage.size.width, envImage.size.height);
+  }
+
   m_resources.hdrIbl.destroyEnvironment();
-  m_resources.hdrIbl.loadEnvironment(cmd, uploader, filename, true);
+  m_resources.hdrIbl.loadEnvironment(cmd, uploader, std::span<float>(envImage.pixels), envImage.size, true);
+  // Remembered so that switching to a baked sky and back to eHdr can rebind hdrIbl to this file:
+  // EnvBaker::commit repoints hdrIbl at its own image, and only a reload undoes that. The resolved
+  // path, not the request: a bare name found through the resources directories would otherwise be
+  // saved as a panorama URI that resolves nowhere. Empty when nothing decoded -- the dummy is not a
+  // panorama, and saving it as one would describe an environment that does not exist.
+  m_lastHdrFile     = envImage.pixels.empty() ? std::filesystem::path{} : filename;
+  m_envOwnedByBaker = false;
 
   uploader.cmdUploadAppended(cmd);
 
@@ -2731,7 +4060,6 @@ void GltfRenderer::destroyResources()
   m_loadPipeline.destroy();
 
   m_resources.allocator.destroyBuffer(m_resources.bFrameInfo);
-  m_resources.allocator.destroyBuffer(m_resources.bSkyParams);
   if(m_resources.bSelectionBitMask.buffer != VK_NULL_HANDLE)
     m_resources.allocator.destroyBuffer(m_resources.bSelectionBitMask);
 
@@ -2752,6 +4080,8 @@ void GltfRenderer::destroyResources()
   }
   m_silhouette.deinit(m_resources);
   m_hoverPicker.deinit(m_resources);
+  m_skyBruneton.deinit(m_resources);
+  m_envBaker.deinit(m_resources);
 
   m_resources.tonemapper.deinit();
   m_resources.appMemoryTracker.untrack("GBuffers", m_resources.gBuffers, Resources::eImgCount);
@@ -2851,7 +4181,7 @@ void GltfRenderer::reconcileAnimationGpuState(VkCommandBuffer cmd)
       // the CPU sync sources render-node / TLAS transforms from the CPU mirror.
       if(scn.mergeGpuStaleNodesIntoDirty())
         scn.updateNodeWorldMatrices();
-      m_resources.transformCompute.markGpuStale();
+      markGpuTransformStaleAfterCpuSync(scn);
       (void)scnVk.syncFromScene(m_resources.staging, scn);
     }
   }
@@ -3079,6 +4409,25 @@ uint32_t GltfRenderer::updateSceneChanges_SyncGpuBuffers(VkCommandBuffer cmd, nv
   return synced;
 }
 
+//--------------------------------------------------------------------------------------------------
+// After a CPU transform sync, tell the GPU transform path what it no longer holds. Call once the CPU
+// world-matrix walk has run, so the render-node dirty sets say whether geometry moved.
+//
+// A frame that moved only mesh-less nodes -- the sky's sun on every frame of a Time of Day drag --
+// changed those nodes' locals and nothing else, so only they are re-uploaded on the next GPU frame.
+// Anything else keeps the full re-upload, the conservative choice this path always made.
+//
+void GltfRenderer::markGpuTransformStaleAfterCpuSync(const nvvkgltf::Scene& scene)
+{
+  const auto& df = scene.getDirtyFlags();
+  if(df.isEmpty())
+    return;
+  if(!df.nodes.empty() && !scene.dirtyNodesReachGeometry())
+    m_resources.transformCompute.markLocalsStale(df.nodes);
+  else
+    m_resources.transformCompute.markGpuStale();
+}
+
 void GltfRenderer::updateSceneChanges_TlasUpdate(VkCommandBuffer cmd, nvvkgltf::Scene* scene)
 {
   auto timerSection = m_profilerGpuTimer.cmdFrameSection(cmd, "SyncTopLevelAS");
@@ -3156,7 +4505,8 @@ bool GltfRenderer::updateSceneChanges(VkCommandBuffer cmd)
   bool        changed        = !df.isEmpty();
   bool        stagingFlushed = false;
 
-  bool renderNodeOrNodeDirty = df.allRenderNodesDirty || !df.renderNodesVk.empty() || !df.nodes.empty();
+  // A mesh-less node (a light, a camera) moving changes nothing the recorded draws depend on.
+  bool renderNodeOrNodeDirty = df.allRenderNodesDirty || !df.renderNodesVk.empty() || scene->dirtyNodesReachGeometry();
 
   // Material edit may have added or removed a KHR_materials_* extension; refresh the
   // scene feature set so optimal-mode shader rebuild picks it up. Cheap check (walk
@@ -3235,9 +4585,7 @@ bool GltfRenderer::updateSceneChanges(VkCommandBuffer cmd)
       renderNodeOrNodeDirty = true;  // moved-node transforms changed -> invalidate rasterizer accumulation
 
     updateSceneChanges_NodeTransforms(cmd, scene, df);
-
-    if(!df.isEmpty())
-      m_resources.transformCompute.markGpuStale();
+    markGpuTransformStaleAfterCpuSync(*scene);
 
     uint32_t synced = updateSceneChanges_SyncGpuBuffers(cmd, scene);
     stagingFlushed  = (synced != nvvkgltf::SceneVk::eSyncNone);

@@ -37,6 +37,7 @@
 #include "gltf_scene_rtx.hpp"
 #include "gltf_scene_vk.hpp"
 #include "gltf_scene_animation.hpp"
+#include "staging_config.hpp"
 #include "tinygltf_utils.hpp"
 
 // GPU memory category names for RTX resources
@@ -236,6 +237,11 @@ bool nvvkgltf::SceneRtx::cmdBuildBottomLevelAccelerationStructure(VkCommandBuffe
 
   destroyScratchBuffers();
 
+  // A scene with no drawable primitives (e.g. only a camera) has no BLAS to build, and a zero-size
+  // scratch allocation is rejected by Vulkan.
+  if(m_blasBuildData.empty())
+    return true;
+
   // 1) finding the largest scratch size
   VkDeviceSize scratchSize = m_blasBuilder->getScratchSize(hintMaxBudget, m_blasBuildData);
 
@@ -353,7 +359,7 @@ void nvvkgltf::SceneRtx::cmdCreateBuildTopLevelAccelerationStructure(VkCommandBu
                                    VK_BUFFER_USAGE_2_SHADER_DEVICE_ADDRESS_BIT | VK_BUFFER_USAGE_2_ACCELERATION_STRUCTURE_BUILD_INPUT_READ_ONLY_BIT_KHR
                                        | VK_BUFFER_USAGE_2_STORAGE_BUFFER_BIT,
                                    VMA_MEMORY_USAGE_AUTO, instanceAllocFlags, instanceMinAlignment));
-  NVVK_CHECK(staging.appendBuffer(m_instancesBuffer, 0, buildInstances));
+  NVVK_CHECK(appendBufferChunked(staging, m_instancesBuffer, 0, std::span<const VkAccelerationStructureInstanceKHR>(buildInstances)));
   NVVK_DBG_NAME(m_instancesBuffer.buffer);
   m_memoryTracker.track(kMemCategoryInstances, m_instancesBuffer.allocation);
 
@@ -462,7 +468,7 @@ void nvvkgltf::SceneRtx::rebuildTopLevelAS(VkCommandBuffer             cmd,
   {
     for(size_t i = 0; i < drawObjects.size(); i++)
       anyActiveStateChanged |= updateInstance(static_cast<int>(i));
-    staging.appendBuffer(m_instancesBuffer, 0, std::span(m_tlasInstances));
+    NVVK_CHECK(appendBufferChunked(staging, m_instancesBuffer, 0, std::span<const VkAccelerationStructureInstanceKHR>(m_tlasInstances)));
   }
   else
   {

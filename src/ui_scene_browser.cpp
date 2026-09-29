@@ -24,6 +24,7 @@
 // integration with the selection and animation systems.
 //
 
+#include "gltf_environment_sky.hpp"
 #include "ui_scene_browser.hpp"
 #include "ui_xmp.hpp"
 #include "undo_redo.hpp"
@@ -851,7 +852,7 @@ void UiSceneBrowser::renderNodeHierarchy(int nodeIdx, float rowHeight, bool canV
     // Render light
     if(node.light >= 0)
     {
-      renderLightInHierarchy(node.light);
+      renderLightInHierarchy(node.light, nodeIdx);
     }
 
     // Render camera
@@ -865,8 +866,7 @@ void UiSceneBrowser::renderNodeHierarchy(int nodeIdx, float rowHeight, bool canV
     // is re-read from the model on every row because a row can edit it inline (context-menu
     // Duplicate / Add, drag-drop reparent), which reallocates model.nodes and would dangle a
     // reference taken before the loop.
-    const bool virtualizeChildren =
-        canVirtualizeChildren && !m_doScroll && node.children.size() > kSceneGraphVirtualizeThreshold;
+    const bool virtualizeChildren = canVirtualizeChildren && !m_doScroll && node.children.size() > kSceneGraphVirtualizeThreshold;
     walkSiblingRows(node.children.size(), virtualizeChildren, [&](size_t i, float childRowHeight) {
       const std::vector<int>& children = m_scene->getModel().nodes[nodeIdx].children;
       if(i < children.size())
@@ -1008,7 +1008,7 @@ void UiSceneBrowser::renderPrimitiveInHierarchy(int primIdx, int meshIdx, int no
 // LIGHT/CAMERA HIERARCHY RENDERING
 //==================================================================================================
 
-void UiSceneBrowser::renderLightInHierarchy(int lightIdx)
+void UiSceneBrowser::renderLightInHierarchy(int lightIdx, int nodeIdx)
 {
   if(!m_scene)
     return;
@@ -1022,7 +1022,12 @@ void UiSceneBrowser::renderLightInHierarchy(int lightIdx)
   ImGui::TableNextRow();
   ImGui::TableNextColumn();
 
-  std::string label = std::string(ICON_MS_LIGHTBULB) + " Light: " + light.name;
+  // A sun icon when this light is the sky's sun, so it reads as one at a glance rather than as
+  // one more lightbulb. The marker is on the node, and one light may be instanced by several
+  // nodes, so only the row under the marked node gets it.
+  const bool isSkySun = gltf_environment_sky::hasSkySunMarker(model.nodes[nodeIdx]);
+
+  std::string label = std::string(isSkySun ? ICON_MS_CLEAR_DAY : ICON_MS_LIGHTBULB) + " Light: " + light.name;
   if(ImGui::Selectable(label.c_str(), false, ImGuiSelectableFlags_SpanAllColumns))
   {
     if(m_selection)
