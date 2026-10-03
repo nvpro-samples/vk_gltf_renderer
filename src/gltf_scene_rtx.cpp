@@ -235,23 +235,26 @@ bool nvvkgltf::SceneRtx::cmdBuildBottomLevelAccelerationStructure(VkCommandBuffe
   nvutils::ScopedTimer st(__FUNCTION__);
   assert(m_blasBuilder);
 
-  destroyScratchBuffers();
-
   // A scene with no drawable primitives (e.g. only a camera) has no BLAS to build, and a zero-size
   // scratch allocation is rejected by Vulkan.
   if(m_blasBuildData.empty())
     return true;
 
-  // 1) finding the largest scratch size
-  VkDeviceSize scratchSize = m_blasBuilder->getScratchSize(hintMaxBudget, m_blasBuildData);
-
-  // 2) allocating the scratch buffer
-  NVVK_CHECK(m_alloc->createBuffer(m_blasScratchBuffer, scratchSize,
-                                   VK_BUFFER_USAGE_2_SHADER_DEVICE_ADDRESS_BIT | VK_BUFFER_USAGE_2_STORAGE_BUFFER_BIT
-                                       | VK_BUFFER_USAGE_2_ACCELERATION_STRUCTURE_STORAGE_BIT_KHR,
-                                   VMA_MEMORY_USAGE_AUTO, {}, m_blasBuilder->getScratchAlignment()));
-  NVVK_DBG_NAME(m_blasScratchBuffer.buffer);
-  m_memoryTracker.track(kMemCategoryScratch, m_blasScratchBuffer.allocation);
+  // Allocate the scratch buffer on the first pass only and reuse it for every later pass. The passes
+  // are recorded back to back and only executed afterwards, so freeing the scratch here would leave
+  // the earlier, still-pending passes writing into released memory (device lost). getScratchSize()
+  // is never below the largest single BLAS scratch, so the first pass's buffer fits every pass.
+  // createBottomLevelAccelerationStructure() -> destroy() releases it before the next build.
+  if(m_blasScratchBuffer.buffer == VK_NULL_HANDLE)
+  {
+    const VkDeviceSize scratchSize = m_blasBuilder->getScratchSize(hintMaxBudget, m_blasBuildData);
+    NVVK_CHECK(m_alloc->createBuffer(m_blasScratchBuffer, scratchSize,
+                                     VK_BUFFER_USAGE_2_SHADER_DEVICE_ADDRESS_BIT | VK_BUFFER_USAGE_2_STORAGE_BUFFER_BIT
+                                         | VK_BUFFER_USAGE_2_ACCELERATION_STRUCTURE_STORAGE_BIT_KHR,
+                                     VMA_MEMORY_USAGE_AUTO, {}, m_blasBuilder->getScratchAlignment()));
+    NVVK_DBG_NAME(m_blasScratchBuffer.buffer);
+    m_memoryTracker.track(kMemCategoryScratch, m_blasScratchBuffer.allocation);
+  }
 
   std::span<nvvk::AccelerationStructureBuildData> blasBuildData(m_blasBuildData);
   std::span<nvvk::AccelerationStructure>          blasAccel(m_blasAccel);

@@ -62,7 +62,7 @@ namespace nvvkgltf {
 namespace {
 
 // After images are decoded for upload, mirror width/height into tinygltf::Image for UI/tools (same
-// path as loadFromMemory: DDS, KTX, WebP callback, stb, etc.).
+// path as loadFromMemory: DDS, KTX, WebP, stb, etc.).
 void syncTinyGltfImageDimensionsFromLoadedImages(tinygltf::Model& model, const std::vector<SceneVk::SceneImage>& images)
 {
   if(model.images.size() != images.size())
@@ -1979,7 +1979,7 @@ bool nvvkgltf::SceneVk::loadImage(const std::filesystem::path& diskPath, const t
 
 //--------------------------------------------------------------------------------------------------
 // Load image from memory (e.g. embedded glTF buffer). Fills m_images[imageID] size, format, mipData.
-// Custom callback is tried first; then ImageLoader decodes DDS, KTX, or stb_image formats.
+// Custom callback is tried first; then ImageLoader decodes DDS, KTX, WebP, or stb_image formats.
 void nvvkgltf::SceneVk::loadImageFromMemory(uint64_t imageID, const void* data, size_t byteLength)
 {
   SceneImage& image = m_images[imageID];

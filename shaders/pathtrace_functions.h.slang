@@ -85,7 +85,9 @@ struct GuideOutput
   float16_t3 specularAlbedo  = float16_t3(0);
   float      specularHitDist = 0.0f;  // Distance to reflected surface (0=no reflection, 65504=sky reflection)
   float16_t4 nrMask          = float16_t4(1, 1, 1, 1);
-#endif  // USE_DLSS_SHADER
+  bool       psrValid        = false;      // The primary hit is clear glass with a surface behind it
+  float3     psrPos          = float3(0);  // Virtual position of that surface (DLSS depth + motion)
+#endif                                     // USE_DLSS_SHADER
 };
 
 //-----------------------------------------------------------------------
@@ -100,7 +102,9 @@ struct GuideScratch
   float16_t  specularHitDist    = float16_t(0);
   bool       captureSpecularHit = false;
   float16_t4 nrMask             = float16_t4(1, 1, 1, 1);
-#endif  // USE_DLSS_SHADER
+  bool       psrValid           = false;      // See GuideOutput
+  float3     psrPos             = float3(0);  // See GuideOutput
+#endif                                        // USE_DLSS_SHADER
 };
 #endif  // USE_GUIDE_SHADER
 
@@ -1000,56 +1004,181 @@ bool dlssIsClearGlass(PbrMaterial pbrMat)
   return (pbrMat.transmission > 0.9f) && (pbrMat.roughness.x < 0.05f) && (pbrMat.opacity >= 0.99f);
 }
 
-float3 dlssGetClearGlassGuideAlbedo(IRaytracer      raytracer,
-                                    PbrMaterial     pbrMat,
-                                    HitState        hit,
-                                    float3          viewDir,
-                                    SceneFrameInfo* frameInfo,
-                                    inout uint      seed,
-                                    bool            isInside,
-                                    float3          specularAlbedo)
+// Clear-glass test from the material factors alone, without sampling a texture: 1 = clear glass,
+// 0 = not, -1 = a texture decides (evaluate the material). Textures only scale the factors down,
+// so a low transmission factor or an already-smooth roughness factor is final. Mirrors
+// dlssIsClearGlass; opacity is checked separately (getOpacity). Scatter and anisotropy change
+// the evaluated transmission / roughness, so they defer to the evaluation too.
+int dlssClearGlassFromFactors(GltfShadeMaterial* mat)
 {
-  float3 bgAlbedo = float3(0.5f);
-  float3 refrDir  = refract(viewDir, pbrMat.N, (pbrMat.ior1 / pbrMat.ior2));
-  if(dot(refrDir, refrDir) > 0.0f)
+  if(mat.pbrModel != PbrModel::ePbrModelMetallicRoughness || mat.transmissionFactor <= 0.9f)
+    return 0;
+  if(isTexturePresent(mat.transmissionTexture) || mat.scatterStrengthFactor > 0.0f || mat.anisotropyStrength > 0.0f)
+    return -1;
+  if(mat.pbrRoughnessFactor * mat.pbrRoughnessFactor < 0.05f)
+    return 1;
+  return isTexturePresent(mat.pbrMetallicRoughnessTexture) ? -1 : 0;
+}
+
+bool dlssIsThinWalled(GltfShadeMaterial* mat)
+{
+#if GLTF_USE_VOLUME
+  return mat.thicknessFactor <= 0.0f;
+#else
+  return true;
+#endif
+}
+
+// One traversal to the next surface the clear-glass chain has to look at. Thin clear glass and
+// cut-out texels are rejected inside the traversal itself, so a stack of glass panes costs a
+// single ray; alpha-blend texels count as a surface from half opacity, which keeps the result
+// deterministic. FORCE_NON_OPAQUE makes the (opaque-flagged) glass report candidates.
+//
+// `glassCount` grows by the panes skipped in front of the hit. Candidates arrive in no set order,
+// so a pane is counted when it is nearer than the hit committed so far; one found before a nearer
+// commit is still counted, which only errs toward too many (see dlssTraceClearGlass).
+HitPayload dlssTraceSkipThinGlass(RayDesc ray, inout int glassCount)
+{
+  GltfShadeMaterial*   materials        = pushConst.gltfScene->materials;
+  GltfRenderNode*      renderNodes      = pushConst.gltfScene->renderNodes;
+  GltfRenderPrimitive* renderPrimitives = pushConst.gltfScene->renderPrimitives;
+
+  HitPayload payload = {};
+  payload.hitT       = INFINITE;
+
+  float    committedT = INFINITE;
+  RayQuery rayQuery;
+  rayQuery.TraceRayInline(topLevelAS, RAY_FLAG_FORCE_NON_OPAQUE | RAY_FLAG_CULL_BACK_FACING_TRIANGLES, 0xFF, ray);
+  while(rayQuery.Proceed())
   {
-    RayDesc    guideRay;
-    HitPayload guidePayload = {};
-    guideRay.Origin         = safeOffsetRay(hit.pos, refrDir);
-    guideRay.Direction      = refrDir;
-    guideRay.TMin           = 0.0;
-    guideRay.TMax           = INFINITE;
-    raytracer.Trace(guideRay, guidePayload, seed);
-
-    if(guidePayload.hitT != INFINITE)
+    GltfRenderNode     node       = renderNodes[rayQuery.CandidateInstanceIndex()];
+    GltfShadeMaterial* mat        = materials + max(0, node.materialID);
+    const float        candidateT = rayQuery.CandidateTriangleRayT();
+    const bool         clearGlass = dlssClearGlassFromFactors(mat) == 1 && dlssIsThinWalled(mat);
+    float              opacity    = 1.0f;
+    if(!clearGlass || mat.alphaMode != AlphaMode::eAlphaModeOpaque)
     {
-      GltfShadeMaterial*   materials       = pushConst.gltfScene->materials;
-      GltfRenderNode*      renderNodes     = pushConst.gltfScene->renderNodes;
-      GltfRenderPrimitive* renderPrimitive = pushConst.gltfScene->renderPrimitives;
-      GltfTextureInfo*     texInfos        = pushConst.gltfScene->textureInfos;
-      GltfRenderNode       guideNode       = renderNodes[guidePayload.rnodeID];
-      GltfRenderPrimitive  guidePrim       = renderPrimitive[guidePayload.rprimID];
-      int                  guideMatIndex   = max(0, guideNode.materialID);
-      GltfShadeMaterial    guideMat        = materials[guideMatIndex];
+      const float2 bary = rayQuery.CandidateTriangleBarycentrics();
+      opacity = getOpacity(node, renderPrimitives[rayQuery.CandidateInstanceID()], rayQuery.CandidatePrimitiveIndex(),
+                           float3(1.0 - bary.x - bary.y, bary.x, bary.y));
+    }
 
-      float3 guideBarys = float3(1.0 - guidePayload.bary.x - guidePayload.bary.y, guidePayload.bary.x, guidePayload.bary.y);
-
-      HitState guideHit = getHitState(guidePrim, guideBarys, guideNode.worldToObject, guideNode.objectToWorld,
-                                      guidePayload.primitiveID, guideRay.Direction);
-
-      guideMat.pbrBaseColorFactor *= guideHit.color;
-      MeshState guideMesh =
-          MeshState(guideHit.nrm, guideHit.tangent, guideHit.bitangent, guideHit.geonrm, guideHit.uv, isInside, 0.0f);
-      PbrMaterial guidePbrMat = evaluateMaterial(guideMat, guideMesh, allImages, allSamplers, texInfos);
-      bgAlbedo                = guidePbrMat.baseColor.xyz;
+    if(clearGlass && opacity >= 0.99f)
+    {
+      if(candidateT < committedT)
+        glassCount++;  // Skipped pane in front of the hit so far
+    }
+    else if(opacity >= 0.5f)
+    {
+      rayQuery.CommitNonOpaqueTriangleHit();
+      committedT = candidateT;
     }
   }
 
-  float  ndotv    = saturate(dot(pbrMat.N, -viewDir));
-  float  iorRatio = (pbrMat.ior2 > 0.0f) ? (pbrMat.ior2 / pbrMat.ior1) : 1.5f;
-  float  fresnel  = schlickFresnel(iorRatio, ndotv);
-  float3 albedo   = lerp(bgAlbedo, pbrMat.baseColor.xyz, fresnel);
-  return dlssEnforceMinAlbedo(albedo, specularAlbedo);
+  if(rayQuery.CommittedStatus() == COMMITTED_TRIANGLE_HIT)
+  {
+    payload.hitT        = rayQuery.CommittedRayT();
+    payload.rprimID     = rayQuery.CommittedInstanceID();
+    payload.rnodeID     = rayQuery.CommittedInstanceIndex();
+    payload.primitiveID = rayQuery.CommittedPrimitiveIndex();
+    payload.bary        = rayQuery.CommittedTriangleBarycentrics();
+  }
+  return payload;
+}
+
+// Primary surface replacement (PSR) through clear glass. Follows the specular transmission
+// direction -- straight through a thin-walled surface, refracted through a volume -- across every
+// clear-glass layer, and returns the first surface that is not clear glass. DLSS-RR then gets the
+// guides of what the camera actually sees through the glass: its albedo, normal, roughness, and a
+// virtual position along the camera ray at the full path length, whose depth and motion move with
+// the content behind the glass rather than with the glass itself.
+//
+// The chain is deterministic, so the guides do not flicker from frame to frame: alpha is resolved
+// by a fixed threshold instead of the path's stochastic test. Thin clear glass costs nothing
+// beyond the one traversal (dlssTraceSkipThinGlass); only refracting glass, or glass whose
+// clarity depends on a texture, starts another one.
+//
+// The guides must agree with the noisy color. The path spends one bounce per glass surface, so
+// when the chain crosses as many surfaces as the path has bounces (maxDepth), the path never
+// reached the surface behind and the pixel is dark there; the glass keeps its own guides.
+static const int DLSS_MAX_GLASS_LAYERS = 8;
+
+struct DlssGlassPsr
+{
+  bool   valid      = false;         // A non-glass surface was found behind the glass
+  float3 albedo     = float3(0.5f);  // Its base color (0.5 grey when the chain left the scene)
+  float3 normal     = float3(0.0f);  // Its shading normal
+  float  roughness  = 0.0f;          // Its roughness
+  float  pathLength = 0.0f;          // Distance from the first glass hit to it, along the chain
+  float3 posDelta   = float3(0.0f);  // Its instance motion: previous-frame position minus current position
+};
+
+DlssGlassPsr dlssTraceClearGlass(PbrMaterial glassMat, HitState glassHit, float3 dir, bool isInside)
+{
+  GltfShadeMaterial*   materials       = pushConst.gltfScene->materials;
+  GltfRenderNode*      renderNodes     = pushConst.gltfScene->renderNodes;
+  GltfRenderPrimitive* renderPrimitive = pushConst.gltfScene->renderPrimitives;
+  GltfTextureInfo*     texInfos        = pushConst.gltfScene->textureInfos;
+
+  DlssGlassPsr result = {false, float3(0.5f), float3(0.0f), 0.0f, 0.0f, float3(0.0f)};
+
+  PbrMaterial mat        = glassMat;
+  float3      origin     = glassHit.pos;
+  int         glassCount = 1;  // Glass surfaces crossed, the primary hit included
+  for(int layer = 0; layer < DLSS_MAX_GLASS_LAYERS; layer++)
+  {
+    // Smooth thin-walled transmission does not bend the ray (see bsdfSample); a volume refracts,
+    // or reflects on total internal reflection.
+    if(mat.thickness > 0.0f)
+    {
+      const float3 N       = dot(mat.N, dir) < 0.0f ? mat.N : -mat.N;
+      const float3 refrDir = refract(dir, N, mat.ior1 / mat.ior2);
+      if(dot(refrDir, refrDir) > 0.0f)
+      {
+        dir      = refrDir;
+        isInside = !isInside;
+      }
+      else
+        dir = reflect(dir, N);
+    }
+
+    RayDesc guideRay;
+    guideRay.Origin    = safeOffsetRay(origin, dir);
+    guideRay.Direction = dir;
+    guideRay.TMin      = 0.0f;
+    guideRay.TMax      = INFINITE;
+    HitPayload payload = dlssTraceSkipThinGlass(guideRay, glassCount);
+    if(payload.hitT == INFINITE || glassCount >= pushConst.maxDepth)
+      return result;
+    result.pathLength += payload.hitT;
+
+    GltfRenderNode      node  = renderNodes[payload.rnodeID];
+    GltfRenderPrimitive prim  = renderPrimitive[payload.rprimID];
+    float3              barys = float3(1.0 - payload.bary.x - payload.bary.y, payload.bary.x, payload.bary.y);
+    HitState  hit  = getHitState(prim, barys, node.worldToObject, node.objectToWorld, payload.primitiveID, dir);
+    MeshState mesh = MeshState(hit.nrm, hit.tangent, hit.bitangent, hit.geonrm, hit.uv, isInside, 0.0f);
+    mesh.baseColorVertexMul = hit.color;
+    mat    = evaluateMaterial(max(0, node.materialID), mesh, allImages, allSamplers, texInfos, materials);
+    origin = hit.pos;
+
+    if(dlssIsClearGlass(mat))
+    {
+      glassCount++;
+      continue;  // Refracting glass, or glass only a texture showed to be clear
+    }
+
+    result.valid     = true;
+    result.albedo    = mat.baseColor.xyz;
+    result.normal    = mat.N;
+    result.roughness = mat.roughness.x;
+    if(pushConst.prevRenderNodeObjectToWorld != nullptr)
+    {
+      float3 objPos   = mul(float4(hit.pos, 1.0), node.worldToObject).xyz;
+      result.posDelta = mul(float4(objPos, 1.0), pushConst.prevRenderNodeObjectToWorld[payload.rnodeID]).xyz - hit.pos;
+    }
+    return result;
+  }
+  return result;  // Too many layers: keep the glass's own guides
 }
 #endif  // USE_DLSS_SHADER
 
@@ -1283,6 +1412,8 @@ SampleResult packSampleResult(PathTracerState pt)
 #if MAT_EXT_DLSS_NR
   sampleResult.guideOutput.nrMask = pt.guide.nrMask;
 #endif  // MAT_EXT_DLSS_NR
+  sampleResult.guideOutput.psrValid = pt.guide.psrValid;
+  sampleResult.guideOutput.psrPos   = pt.guide.psrPos;
 #endif  // USE_DLSS_SHADER
 #endif  // USE_GUIDE_SHADER
   return sampleResult;

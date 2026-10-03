@@ -37,7 +37,7 @@ struct LoadedImageData
 };
 
 // Decodes raw image bytes into LoadedImageData. Dispatches by magic bytes:
-// DDS, KTX (1/2), or falls back to stb_image (PNG, JPEG, etc.).
+// DDS, KTX (1/2), WebP, or falls back to stb_image (PNG, JPEG, etc.).
 // srgb: when true, format may be forced to an sRGB variant where applicable.
 // imageIDForLog: used only for log messages (e.g. "image 3").
 // Returns true if decoding succeeded and out is filled; false on failure or unsupported format.

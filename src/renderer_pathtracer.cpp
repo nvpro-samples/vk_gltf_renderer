@@ -99,6 +99,9 @@ void PathTracer::onAttach(Resources& resources, nvvk::ProfilerGpuTimer* profiler
   // capability only ever turns it off.
   m_useSER         = m_useSER && m_supportSER;
   m_pipelineUseSER = m_useSER;  // no pipelines exist yet; keep the first frame from invalidating
+#if defined(USE_DLSS)
+  m_pipelineDlssTransparency = static_cast<int>(m_dlss->getTransparencyMode());
+#endif
 
   // If SER is not supported, force recompiling without SER
   compileShader(resources, (m_supportSER == true) ? false : true);
@@ -405,7 +408,6 @@ bool PathTracer::onUIRender(Resources& resources)
   if(ImGui::CollapsingHeader("AI Denoisers", ImGuiTreeNodeFlags_DefaultOpen))
   {
 #if defined(USE_DLSS)
-    bool oldTransp   = m_dlss->useDlssTransparency();
     bool dlssChanged = m_dlss->onUiActivation(resources);
 #if defined(USE_DLSSNR)
     dlssChanged |= m_dlss->onUiNrActivation();
@@ -430,12 +432,6 @@ bool PathTracer::onUIRender(Resources& resources)
     dlssChanged |= m_dlss->onUiNrSettings();
 #endif
     changed |= dlssChanged;
-    if(oldTransp != m_dlss->useDlssTransparency())
-    {
-      // SYNC NOTE: DLSS transparency toggle — wait before destroying pipelines compiled with old specialization.
-      NVVK_CHECK(vkQueueWaitIdle(resources.app->getQueue(0).queue));
-      destroyPipelines();
-    }
 #endif
 #if defined(USE_OPTIX_DENOISER)
     changed |= m_optix->onUiSettings(resources);
@@ -458,7 +454,7 @@ PathTracer::CompileStateSnapshot PathTracer::getCompileStateSnapshot()
   std::lock_guard<std::mutex> lock(m_compileMutex);
   return {
       m_compiledWireframe, m_compiledVisualize, m_compiledOptimal, m_compiledDlss, m_compiledDlssGuide,
-      m_compiledFeatures,  m_pipelineUseSER,    m_rqPipeline,      m_rtxPipeline,
+      m_compiledFeatures,  m_pipelineUseSER,    m_rqPipeline,      m_rtxPipeline,  m_pipelineDlssTransparency,
   };
 }
 
@@ -495,11 +491,17 @@ void PathTracer::ensureShadersAndPipelines(Resources& resources)
     state = getCompileStateSnapshot();
   }
 
-  // SER (--ptUseSER / the UI checkbox) is a pipeline specialization constant, not a shader macro,
-  // so it needs no recompile -- only the pipelines built with the old value have to go. The SBT is
-  // generated from the RTX pipeline, so it goes with it.
+  // SER (--ptUseSER / the UI checkbox) and the DLSS transparency mode (--dlssTransparency / the
+  // UI combo) are pipeline specialization constants, not shader macros, so they need no recompile --
+  // only the pipelines built with the old values have to go. The SBT is generated from the RTX
+  // pipeline, so it goes with it.
   m_useSER = m_useSER && m_supportSER;  // a device without SER support can never turn it on
-  if(m_useSER != m_pipelineUseSER)
+#if defined(USE_DLSS)
+  const int wantDlssTransparency = static_cast<int>(m_dlss->getTransparencyMode());
+#else
+  const int wantDlssTransparency = 0;
+#endif
+  if(m_useSER != state.pipelineUseSER || wantDlssTransparency != state.pipelineDlssTransparency)
   {
     // SYNC NOTE: pipelines may still be in use by the previous frame.
     NVVK_CHECK(vkQueueWaitIdle(resources.app->getQueue(0).queue));
@@ -507,9 +509,11 @@ void PathTracer::ensureShadersAndPipelines(Resources& resources)
       std::lock_guard<std::mutex> lock(m_compileMutex);
       vkDestroyPipeline(m_device, m_rqPipeline, nullptr);
       vkDestroyPipeline(m_device, m_rtxPipeline, nullptr);
-      m_rqPipeline     = VK_NULL_HANDLE;
-      m_rtxPipeline    = VK_NULL_HANDLE;
-      m_pipelineUseSER = m_useSER;
+      m_rqPipeline               = VK_NULL_HANDLE;
+      m_rtxPipeline              = VK_NULL_HANDLE;
+      m_pipelineUseSER           = m_useSER;
+      m_pipelineDlssTransparency = wantDlssTransparency;
+      m_compiledDlssTransparency = wantDlssTransparency;  // the variant key names the live pipelines
       resources.allocator.destroyBuffer(m_sbtBuffer);
       m_sbtBuffer  = {};
       m_sbtRegions = {};
@@ -571,11 +575,16 @@ void PathTracer::onRender(VkCommandBuffer cmd, Resources& resources)
   const bool guideChanged      = (state.dlssGuide != wantDlssGuide);
   const bool featureSetChanged = wantOptimal && (state.features != resources.currentFeatureSet);
   const bool needRecompile = wireframeChanged || visualizeChanged || optimalChanged || dlssChanged || guideChanged || featureSetChanged;
-  // SER toggle only needs a pipeline rebuild (it's a specialization constant, not a macro),
-  // but the live pipeline still needs to be replaced — detect that here.
+  // SER and DLSS-transparency toggles only need a pipeline rebuild (they are specialization
+  // constants, not macros), but the live pipeline still needs to be replaced — detect that here.
   // Use the mutex-protected snapshot value to avoid racing with the compile worker.
-  const bool serChanged   = (m_useSER && m_supportSER) != state.pipelineUseSER;
-  const bool needPipeline = serChanged
+  const bool serChanged = (m_useSER && m_supportSER) != state.pipelineUseSER;
+#if defined(USE_DLSS)
+  const bool transparencyChanged = static_cast<int>(m_dlss->getTransparencyMode()) != state.pipelineDlssTransparency;
+#else
+  const bool transparencyChanged = false;
+#endif
+  const bool needPipeline = serChanged || transparencyChanged
                             || ((m_renderTechnique == RenderTechnique::RayQuery) ? (state.rqPipeline == VK_NULL_HANDLE) :
                                                                                    (state.rtxPipeline == VK_NULL_HANDLE));
 
@@ -809,7 +818,7 @@ void PathTracer::createRqPipeline(Resources& /*resources*/)
   nvvk::Specialization specialization;
   specialization.add(0, m_useSER ? 1 : 0);  // USE_SER
 #if defined(USE_DLSS)
-  specialization.add(1, m_dlss->useDlssTransparency() ? 1 : 0);  // USE_DLSS_TRANSP
+  specialization.add(1, static_cast<int32_t>(m_dlss->getTransparencyMode()));  // USE_DLSS_TRANSP
 #endif
 
   VkPipelineShaderStageCreateInfo shaderStage{
@@ -941,7 +950,7 @@ void PathTracer::createRtxPipeline(Resources& resources)
   nvvk::Specialization specialization;
   specialization.add(0, m_useSER ? 1 : 0);  // USE_SER
 #if defined(USE_DLSS)
-  specialization.add(1, m_dlss->useDlssTransparency() ? 1 : 0);  // USE_DLSS_TRANSP
+  specialization.add(1, static_cast<int32_t>(m_dlss->getTransparencyMode()));  // USE_DLSS_TRANSP
 #endif
   stages[eRaygen].pSpecializationInfo = specialization.getSpecializationInfo();
 
@@ -1130,9 +1139,9 @@ bool PathTracer::compileShader(Resources& resources, bool fromFile)
         resources.currentFeatureSet.has(nvvkgltf::SceneFeatureSet::eDlssGuide),
         resources.settings.optimalShader ? resources.currentFeatureSet : nvvkgltf::SceneFeatureSet{},
 #if defined(USE_DLSS)
-        m_dlss ? m_dlss->useDlssTransparency() : false,
+        m_dlss ? static_cast<int>(m_dlss->getTransparencyMode()) : 0,
 #else
-        false,
+        0,
 #endif
     };
     if(swapVariant(resources, targetKey))
@@ -1252,7 +1261,7 @@ bool PathTracer::compileShader(Resources& resources, bool fromFile)
     m_compiledDlss               = compiledFromFile ? isDlssEnabled() : kEmbeddedDlss;
     m_compiledDlssGuide = compiledFromFile ? resources.currentFeatureSet.has(nvvkgltf::SceneFeatureSet::eDlssGuide) : kEmbeddedDlssGuide;
 #if defined(USE_DLSS)
-    m_compiledDlssTransparency = (compiledFromFile && m_dlss) ? m_dlss->useDlssTransparency() : false;
+    m_compiledDlssTransparency = (compiledFromFile && m_dlss) ? static_cast<int>(m_dlss->getTransparencyMode()) : 0;
 #endif
 
     // Destroy pipeline since there is a new shader
@@ -1268,12 +1277,6 @@ void PathTracer::destroyPipelinesLocked()
   m_rtxPipeline = VK_NULL_HANDLE;
   vkDestroyPipeline(m_device, m_rqPipeline, nullptr);
   m_rqPipeline = VK_NULL_HANDLE;
-}
-
-void PathTracer::destroyPipelines()
-{
-  std::lock_guard<std::mutex> lock(m_compileMutex);
-  destroyPipelinesLocked();
 }
 
 //--------------------------------------------------------------------------------------------------
@@ -1375,6 +1378,7 @@ bool PathTracer::swapVariant(Resources& resources, const VariantKey& newKey)
       m_compiledDlssGuide        = newKey.dlssGuide;
       m_compiledFeatures         = newKey.features;
       m_compiledDlssTransparency = newKey.dlssTransparency;
+      m_pipelineDlssTransparency = newKey.dlssTransparency;
       m_variantCache.erase(it);
       return true;
     }
@@ -1400,7 +1404,7 @@ bool PathTracer::swapVariant(Resources& resources, const VariantKey& newKey)
 
 //--------------------------------------------------------------------------------------------------
 // Destroy every cached variant (called from onDetach). Live handles are NOT touched here -
-// destroyPipelines() / explicit vkDestroyShaderModule cover the active slots; the active SBT
+// onDetach's explicit vkDestroyPipeline / vkDestroyShaderModule cover the active slots; the active SBT
 // is freed in onDetach via resources.allocator.destroyBuffer(m_sbtBuffer).
 void PathTracer::destroyVariantCache(Resources& resources)
 {

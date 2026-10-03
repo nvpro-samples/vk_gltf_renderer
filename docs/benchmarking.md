@@ -36,6 +36,7 @@ BENCHMARK_JSON {"schema":1,"type":"headless_summary",...}
 
 - **app_frame** — headless loop index (`--frames`).
 - In headless mode, `main()` raises `--ptMaxFrames` to at least `--frames` if you set it lower, so every app frame can accumulate samples during timing runs.
+- Animations don't play in headless mode unless `--animPlay 1` is given: an advancing animation resets the path tracer's accumulation every frame, leaving the output at about one sample per pixel. A scene with a `KHR_interactivity` behavior graph never autoplays, whatever `--animPlay` says.
 - **wall_ms** — measured post-warmup render time. The first completed frame is excluded so one-time setup such as shader specialization is not charged to throughput.
 - **total_wall_ms** — full headless render-loop wall time, including warmup and any synchronous setup.
 - **ms_per_frame** — `wall_ms / measured_frames`.
@@ -134,14 +135,18 @@ Three traps worth knowing, each of which produces confident-looking numbers that
   check `samples` in the block you quote: it should be close to the `--sequenceaverages` you asked
   for. This is the same rule the [UI inspection](#ui-inspection-windowed-panel-capture) workflow
   states, and it applies just as much to timing.
-- **Persisted settings.** `_bin/<config>/vk_gltf_renderer.ini` stores `ptOptimalShader`, `ptTechnique`
-  and `ptAdaptiveSampling` between runs, so a previous session silently changes what you measure.
-  Set every knob that matters explicitly in the script rather than relying on defaults.
+- **Persisted settings (no longer a trap).** `_bin/<config>/vk_gltf_renderer.ini` stores
+  `ptOptimalShader`, `ptTechnique`, `ptAdaptiveSampling`, the tonemapper (including auto-exposure)
+  and the layout between interactive sessions. Headless, scripted (`--sequencefile`) and benchmark
+  runs neither read nor write it, so they start from the built-in defaults plus the command line and
+  the same command gives the same result on any machine. To reuse an interactive setup on purpose,
+  pass it explicitly with `--iniFile path/to/settings.ini`; a path that cannot be read aborts the
+  run rather than silently falling back to the defaults. Still state every knob that matters in the
+  script: defaults can change between builds.
 
-  The reverse no longer happens: a scripted or benchmark run does **not** write that file back.
-  It used to, which meant a measurement run left its own window size and hidden side panels behind
-  as the layout for the next interactive session — panels missing, with nothing to explain it.
-  Windows > Reset Layout was the only way out.
+  (Scripted runs used to write that file back, leaving a measurement run's window size and hidden
+  side panels behind as the next interactive layout. They used to read it too, so a previous
+  session silently changed what you measured.)
 - **Stale shader search paths.** The path tracer compiles Slang at runtime from the directories baked
   in at build time. If those point somewhere stale, it falls back to the SPIR-V embedded at build
   time and a shader-swap A/B silently measures nothing. Verify a swap actually took effect (via a

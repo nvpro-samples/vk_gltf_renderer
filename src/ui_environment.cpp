@@ -1056,7 +1056,7 @@ bool UiEnvironment::sunGizmoButton()
          hasSunNode ? "Select the sun's light and switch the transform gizmo on, so it can be aimed from the "
                       "viewport." :
                       "No light in this scene is the sun, so there is no node for a gizmo to hold. Pick one in Sun "
-                      "Source above, or hold Ctrl+Shift+L in the viewport and drag."))
+                      "Source above."))
   {
     m_selection->selectNode(m_actions.sunLightNode());
     st.showGizmo = true;

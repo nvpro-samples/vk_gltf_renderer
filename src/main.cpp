@@ -25,6 +25,7 @@
 #include <fmt/format.h>
 #include <stb/stb_image.h>
 #include <GLFW/glfw3.h>
+#include <fstream>
 #include <unordered_set>
 #include <string>
 #undef APIENTRY
@@ -99,6 +100,7 @@ auto main(int argc, char** argv) -> int
   std::filesystem::path hdrFilename{"std_env.hdr"};  // Default HDR
   std::filesystem::path loadPresetFilename;          // --loadSkyPreset, applied on write
   std::filesystem::path savePresetFilename;          // --saveSkyPreset, written on write
+  std::filesystem::path iniFilename;                 // --iniFile: settings for an automated run (opt-in)
 #ifdef USE_AGENTIC
   std::string agenticBridgeRoot{};
   bool        agenticBridgeInit{false};
@@ -152,6 +154,10 @@ auto main(int argc, char** argv) -> int
                                }
                              }},
                         {".hdr", ".exr"}, &hdrFilename);
+  parameterRegistry.add({"iniFile",
+                         "Restore settings from this .ini in a headless, scripted or benchmark run (those ignore "
+                         "the default .ini, so their result does not depend on the last interactive session)"},
+                        {".ini"}, &iniFilename);
 
   // Sky presets. Actions, like hdrfile above: the value is a path and setting it does the thing,
   // which is what makes them reachable from a benchmark sequence and from MCP without a second
@@ -247,6 +253,7 @@ auto main(int argc, char** argv) -> int
   if(appInfo.headless)
   {
     elemGltfRenderer->alignMaxFramesForHeadless(appInfo.headlessFrameCount);
+    elemGltfRenderer->applyHeadlessDefaults();
   }
 
   if(benchmarkOptions.enabled)
@@ -257,6 +264,14 @@ auto main(int argc, char** argv) -> int
       LOGE("Benchmark mode requires --sequencefile or --sequencestring\n");
       return -1;
     }
+  }
+
+  // ImGui::LoadIniSettingsFromDisk() silently keeps the defaults when it cannot read the file, so an
+  // automated run would report results for a configuration it never restored. Reject it up front.
+  if(!iniFilename.empty() && !std::ifstream(iniFilename))
+  {
+    LOGE("--iniFile '%s' cannot be read\n", nvutils::utf8FromPath(iniFilename).c_str());
+    return -1;
   }
 
   // Using the command line parameters
@@ -482,6 +497,18 @@ auto main(int argc, char** argv) -> int
   // so the two can never drift (src/ui_dock_layout.cpp).
   appInfo.dockSetup = &ui::buildDefaultDockLayout;
 
+  // An automated run neither restores nor saves the .ini (window, layout, renderer settings).
+  //
+  // Saving: a scripted run arranges the window for its own purposes (--benchmark hides the side
+  // panels, a capture script picks its own window size), and saving that leaves the next
+  // interactive session with a layout nobody chose -- panels missing and no clue why.
+  // Restoring: tonemapper, path-tracer and window settings would leak from the last interactive
+  // session into the result, so the same command line gave different images and timings on
+  // different days. Settings come from the defaults and the command line; --iniFile opts back into
+  // a specific file (loaded below, once every element has registered its settings handler).
+  const bool automatedRun = appInfo.headless || sequencerInfo.hasScript() || benchmarkOptions.enabled;
+  appInfo.persistSettings = !automatedRun;
+
   // Create the application
   nvapp::Application app;
   app.init(appInfo);
@@ -519,6 +546,13 @@ auto main(int argc, char** argv) -> int
     app.addElement(elemLogger);
     app.addElement(elemGpuMonitor);
     app.addElement(elemProfiler);
+    // Presentation mode (F11) hides these panels too, and restores them on the way out.
+    elemGltfRenderer->addPresentationWindow([elemLogger] { return elemLogger->isShowLog(); },
+                                            [elemLogger](bool v) { elemLogger->setShowLog(v); });
+    elemGltfRenderer->addPresentationWindow([elemGpuMonitor] { return elemGpuMonitor->showWindow; },
+                                            [elemGpuMonitor](bool v) { elemGpuMonitor->showWindow = v; });
+    elemGltfRenderer->addPresentationWindow([profilerSettings] { return profilerSettings->show; },
+                                            [profilerSettings](bool v) { profilerSettings->show = v; });
 #ifdef USE_DBG_PRINTF
     app.addElement(elemDbgPrintf);
 #endif
@@ -559,21 +593,23 @@ auto main(int argc, char** argv) -> int
     elemGltfRenderer->queueStartupSkyPresets(loadPresetFilename, savePresetFilename);
   }
 
-  // Do not let an automated run persist a UI layout.
-  //
-  // ImGui writes the .ini on exit, so any run that arranges the window for its own purposes
-  // leaves that arrangement behind as the user's layout. Headless was already guarded. Scripted
-  // runs were not, and they are worse: --benchmark hides the side panels and a capture script
-  // picks its own window size, so the layout that gets saved is one nobody chose -- and the next
-  // interactive session opens with panels missing and no clue why.
-  //
-  // A scripted run is not someone expressing a preference about where their panels go.
-  if(appInfo.headless || sequencerInfo.hasScript() || benchmarkOptions.enabled)
+  // --iniFile: an automated run restores this file on purpose (see persistSettings above).
+  if(automatedRun && !iniFilename.empty())
   {
-    ImGui::GetIO().IniFilename = nullptr;
+    LOGI("Restoring settings from '%s'\n", nvutils::utf8FromPath(iniFilename).c_str());
+    ImGui::LoadIniSettingsFromDisk(nvutils::utf8FromPath(iniFilename).c_str());
+  }
+  else if(!iniFilename.empty())
+  {
+    LOGW("--iniFile is only used by headless, scripted and benchmark runs; ignored.\n");
   }
 
   app.run();
+
+  // Closing the window while presenting: put the window and panels back first, since deinit() is
+  // what persists the window geometry and the ImGui.ini -- otherwise the next launch would open
+  // borderless-sized with every panel hidden.
+  elemGltfRenderer->exitPresentationMode();
 
   // A start-up --savefile writes once the run is over, not during the parse: the callback above
   // no-ops while `renderer` is still null, and even afterwards the scene is not fully set up

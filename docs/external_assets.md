@@ -77,6 +77,13 @@ and **before** `parseScene`. Algorithm:
    `SceneMerger::instanceSubtree`.
 5. **Tag** every merged node read-only via `recordReferencedAsset` (which stamps the marker through `setExternalAssetMarker`) (§4).
 
+Before a file is merged, `rebaseImageUris` rewrites its relative image URIs to be relative to the
+folder of the model it is merged into. Images are later found through the scene-wide image search
+paths, where the first match wins, so without this two assets using the same relative name for
+different images (e.g. every Kenney kit's `Textures/colormap.png`) would both get the first one. The
+same rebase runs at every nesting level (`flattenReferencedModel`), for **Import/Merge Scene**
+(`mergeScene`), and for the editor's reference (`referenceScene`).
+
 The instance node's own `mesh`/`camera` are cleared (spec: `externalAsset` takes precedence).
 
 ### `SceneMerger` (`gltf_scene_merger.{hpp,cpp}`)
@@ -131,7 +138,7 @@ resolution chain:
 3. The canonical key is pushed before recursing and popped after, so it is a true path stack. As a
    result **diamonds are not false positives** (`A→B→D`, `A→C→D` is fine) — only genuine cycles
    (`A↔B`, `A→B→C→A`, self-reference, child→root) are flagged.
-4. A hard depth backstop (`kMaxExternalAssetDepth = 16`) stops runaway recursion even if the path
+4. A hard depth backstop (`kMaxExternalAssetDepth`) stops runaway recursion even if the path
    check is defeated (see caveat in §9).
 
 ---

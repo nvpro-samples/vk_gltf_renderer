@@ -139,7 +139,7 @@ public:
   enum class TransparencyMode
   {
     eDefault,   // First-hit guides only.
-    eImproved,  // Blended guides through transparent layers.
+    eImproved,  // Clear glass: guides, depth and motion of the surface seen through it (shaders: dlssTraceClearGlass).
   };
 
   // SR-only: user-facing DLSS-SR quality ladder.
@@ -245,7 +245,6 @@ public:
 
   // ---- RR-only accessors (assert m_kind == Kind::RR in debug) --------------------------------
 
-  bool             useDlssTransparency() const;
   TransparencyMode getTransparencyMode() const;
 
   // Typed access into the RR guide GBuffer; indices match shaderio::OutputImage, hiding m_innerGBuffer implementation details.
@@ -331,9 +330,10 @@ private:
   // Persisted settings (per kind).
   struct Settings
   {
-    bool     enableRr    = false;                            // RR only
-    SizeMode sizeMode    = SizeMode::eOptimal;               // RR only
-    int      qualityMode = static_cast<int>(Quality::eOff);  // SR only (int for SettingsHandler)
+    bool     enableRr         = false;                                         // RR only
+    SizeMode sizeMode         = SizeMode::eOptimal;                            // RR only
+    int      qualityMode      = static_cast<int>(Quality::eOff);               // SR only (int for SettingsHandler)
+    int      transparencyMode = static_cast<int>(TransparencyMode::eDefault);  // RR only (int for SettingsHandler)
   };
 
   // ---- Internal predicates (callers consume state() / isActive() instead) -------------------
@@ -441,9 +441,6 @@ private:
   bool               m_nrForceReset   = false;
   bool               m_nrSettingsOpen = false;
 #endif  // USE_DLSSNR
-
-  // ---- RR-only state --------------------------------------------------------------------------
-  TransparencyMode m_transparencyMode = TransparencyMode::eDefault;  // transparency mode
 
   // ---- SR-only state --------------------------------------------------------------------------
   bool     m_dlssCreated      = false;                // m_dlss has a valid feature handle (cmdInit succeeded)

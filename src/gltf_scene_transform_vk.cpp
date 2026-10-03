@@ -276,7 +276,7 @@ void TransformComputeVk::markGpuStale()
 //--------------------------------------------------------------------------------------------------
 // Flag just these nodes' GPU local matrices as out of date. For a CPU frame that moved only
 // mesh-less nodes: re-uploading every local on the next GPU frame (markGpuStale) would turn each
-// frame of, say, a sun drag into a full-scene upload waiting for the next mesh edit.
+// frame of, say, a Time of Day drag into a full-scene upload waiting for the next mesh edit.
 void TransformComputeVk::markLocalsStale(const std::unordered_set<int>& nodes)
 {
   m_pendingLocalUploads.insert(nodes.begin(), nodes.end());

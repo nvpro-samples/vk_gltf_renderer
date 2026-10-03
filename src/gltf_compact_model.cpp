@@ -94,6 +94,32 @@ void collectOpacityMicromapAccessors(const tinygltf::Model& model, std::set<int>
   }
 }
 
+// EXT_mesh_gpu_instancing stores per-instance TRANSLATION/ROTATION/SCALE accessor indices inside
+// node.extensions["EXT_mesh_gpu_instancing"]["attributes"] as a JSON object. These are ordinary
+// accessor references but they do not live on any primitive/skin/animation, so the standard walk
+// misses them; without this, compaction drops or renumbers those accessors and re-parsing throws
+// out_of_range from accessors.at() (see nvvkgltf::Scene::handleGpuInstancing).
+void collectGpuInstancingAccessors(const tinygltf::Model& model, std::set<int>& usedAccessors)
+{
+  for(const auto& node : model.nodes)
+  {
+    const tinygltf::Value* ext = tinygltf::utils::findExtension(node.extensions, EXT_MESH_GPU_INSTANCING_EXTENSION_NAME);
+    if(ext == nullptr || !ext->Has("attributes") || !ext->Get("attributes").IsObject())
+      continue;
+    const tinygltf::Value& attrs = ext->Get("attributes");
+    for(const std::string& key : attrs.Keys())
+    {
+      const tinygltf::Value& v = attrs.Get(key);
+      if(v.IsInt())
+      {
+        const int accessorIdx = v.GetNumberAsInt();
+        if(accessorIdx >= 0)
+          usedAccessors.insert(accessorIdx);
+      }
+    }
+  }
+}
+
 // See collectOpacityMicromapAccessors: the root micromaps[] entries reference `data`/`triangles`
 // bufferViews directly (not through accessors), so they need their own collection pass.
 void collectOpacityMicromapBufferViews(const tinygltf::Model& model, std::set<int>& usedBufferViews)
@@ -134,6 +160,7 @@ std::set<int> collectUsedAccessors(const tinygltf::Model& model)
   }
 
   collectOpacityMicromapAccessors(model, usedAccessors);
+  collectGpuInstancingAccessors(model, usedAccessors);
 
   for(const auto& skin : model.skins)
   {
@@ -359,6 +386,30 @@ std::vector<tinygltf::Accessor> buildCompactAccessors(const tinygltf::Model&  mo
   return newAccessors;
 }
 
+// Mirror of collectGpuInstancingAccessors: rewrite the per-attribute accessor indices in
+// node.extensions["EXT_mesh_gpu_instancing"]["attributes"] to the compacted numbering. Without this
+// the JSON keeps pre-compaction indices and parseScene() throws out_of_range from accessors.at().
+void updateGpuInstancingReferences(tinygltf::Model& model, const std::vector<int>& accessorRemap)
+{
+  for(auto& node : model.nodes)
+  {
+    auto it = node.extensions.find(EXT_MESH_GPU_INSTANCING_EXTENSION_NAME);
+    if(it == node.extensions.end() || !it->second.Has("attributes") || !it->second.Get("attributes").IsObject())
+      continue;
+
+    tinygltf::Value::Object& ext   = it->second.Get<tinygltf::Value::Object>();
+    tinygltf::Value::Object& attrs = ext["attributes"].Get<tinygltf::Value::Object>();
+    for(auto& [key, val] : attrs)
+    {
+      if(!val.IsInt())
+        continue;
+      const int oldIdx = val.Get<int>();
+      if(oldIdx >= 0 && oldIdx < static_cast<int>(accessorRemap.size()) && accessorRemap[oldIdx] >= 0)
+        val = tinygltf::Value(accessorRemap[oldIdx]);
+    }
+  }
+}
+
 // Rewrite the EXT_mesh_opacity_micromap references that collectOpacityMicromap*() kept alive so they
 // point at the compacted accessor/bufferView indices. Mirror of those collectors: `micromapIndices`
 // accessors on primitive extensions, and `data`/`triangles` bufferViews on the root micromaps[].
@@ -460,6 +511,7 @@ void updateModelReferences(tinygltf::Model& model, const std::vector<int>& acces
   }
 
   updateOpacityMicromapReferences(model, accessorRemap, bufferViewRemap);
+  updateGpuInstancingReferences(model, accessorRemap);
 }
 
 }  // anonymous namespace

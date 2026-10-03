@@ -792,6 +792,11 @@ void Dlss::registerParameters(SettingsRegistry* settings, std::function<void()> 
   {
     settings->add({.name = "dlssEnable", .help = "DLSS Denoiser: Enable DLSS denoiser", .callbackSuccess = cb},
                   &m_settings.enableRr, Persist::eYes);
+    settings->add({.name            = "dlssTransparency",
+                   .help            = "DLSS-RR guide buffers for clear glass: 0=Default (the glass surface), "
+                                      "1=Improved (the surface seen through every glass layer)",
+                   .callbackSuccess = cb},
+                  &m_settings.transparencyMode, Persist::eYes, 0, 1);
   }
   else
   {
@@ -871,7 +876,7 @@ void Dlss::buildGuideEntries()
 
   if(m_kind == Kind::RR)
   {
-    // RR table mirrors the existing 6 thumbnails. Indices match shaderio::OutputImage values
+    // RR guide thumbnails. Indices match shaderio::OutputImage values
     // because the path tracer writes its guide buffers directly into those attachment slots.
     m_guideEntries.push_back({"Color", static_cast<uint32_t>(shaderio::OutputImage::eDlssAlbedo)});
     m_guideEntries.push_back({"Specular Albedo", static_cast<uint32_t>(shaderio::OutputImage::eDlssSpecAlbedo)});
@@ -1333,13 +1338,15 @@ bool Dlss::onUiSettingsRr()
 
   namespace PE = nvgui::PropertyEditor;
   PE::begin();
-  const char* transparencyModes[] = {"Default (first hit)", "Improved (blended guides)"};
-  int         currentTransMode    = static_cast<int>(m_transparencyMode);
+  const char* transparencyModes[] = {"Default (first hit)", "Improved (see through glass)"};
+  int         currentTransMode    = m_settings.transparencyMode;
   if(PE::Combo("Transparency", &currentTransMode, transparencyModes, IM_ARRAYSIZE(transparencyModes), 0,
-               "Controls how DLSS guide buffers are generated for transparent materials."))
+               "Controls how DLSS guide buffers are generated for transparent materials.\n"
+               "Improved: on clear glass, the guides, depth and motion vectors describe the surface seen through "
+               "every glass layer instead of the glass itself, so content behind glass does not smear in motion."))
   {
-    m_transparencyMode = static_cast<TransparencyMode>(currentTransMode);
-    changed            = true;
+    m_settings.transparencyMode = currentTransMode;
+    changed                     = true;
   }
   if(PE::Combo("Input Size", &currentSizeMode, sizeModes, IM_ARRAYSIZE(sizeModes)))
   {
@@ -1376,16 +1383,10 @@ bool Dlss::onUiSettingsRr()
   return changed;
 }
 
-bool Dlss::useDlssTransparency() const
-{
-  assertKind(Kind::RR);
-  return m_transparencyMode != TransparencyMode::eDefault;
-}
-
 Dlss::TransparencyMode Dlss::getTransparencyMode() const
 {
   assertKind(Kind::RR);
-  return m_transparencyMode;
+  return static_cast<TransparencyMode>(m_settings.transparencyMode);
 }
 
 void Dlss::releaseRrInnerGBuffer()

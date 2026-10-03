@@ -37,6 +37,7 @@
 #include <nvgui/file_dialog.hpp>
 #include <nvgui/fonts.hpp>
 #include <nvgui/property_editor.hpp>
+#include <nvgui/camera.hpp>
 #include <nvgui/hover_scrolling.hpp>
 #include <nvgui/tonemapper.hpp>
 #include <nvgui/tooltip.hpp>
@@ -299,30 +300,22 @@ void GltfRenderer::updateSelectionFromPick(int renderNodeIdx, const glm::vec3& s
 
 nvutils::Bbox GltfRenderer::getRenderNodeBbox(int renderNodeIndex)
 {
-  nvutils::Bbox    worldBbox({-1, -1, -1}, {1, 1, 1});
+  // Empty when the render node is invalid or its primitive has no readable bounds, so a union
+  // over a selection is never widened by a made-up box.
   nvvkgltf::Scene* scene = m_resources.getScene();
   if(renderNodeIndex < 0 || !scene || !scene->valid())
-    return worldBbox;
+    return {};
 
   const auto& renderNodes = scene->getRenderNodes();
   if(renderNodeIndex >= static_cast<int>(renderNodes.size()))
-    return worldBbox;
+    return {};
 
   const nvvkgltf::RenderNode&      renderNode      = renderNodes[renderNodeIndex];
   const nvvkgltf::RenderPrimitive& renderPrimitive = scene->getRenderPrimitive(renderNode.renderPrimID);
-  const tinygltf::Model&           model           = scene->getModel();
-  const tinygltf::Accessor&        accessor = model.accessors[renderPrimitive.pPrimitive->attributes.at("POSITION")];
 
-  glm::vec3 minValues = {-1.f, -1.f, -1.f};
-  glm::vec3 maxValues = {1.f, 1.f, 1.f};
-  if(!accessor.minValues.empty())
-    minValues = {tinygltf::utils::getAccessorNormalizedValue(accessor, accessor.minValues[0]),
-                 tinygltf::utils::getAccessorNormalizedValue(accessor, accessor.minValues[1]),
-                 tinygltf::utils::getAccessorNormalizedValue(accessor, accessor.minValues[2])};
-  if(!accessor.maxValues.empty())
-    maxValues = {tinygltf::utils::getAccessorNormalizedValue(accessor, accessor.maxValues[0]),
-                 tinygltf::utils::getAccessorNormalizedValue(accessor, accessor.maxValues[1]),
-                 tinygltf::utils::getAccessorNormalizedValue(accessor, accessor.maxValues[2])};
+  glm::vec3 minValues, maxValues;
+  if(!tinygltf::utils::getPrimitivePositionBounds(scene->getModel(), *renderPrimitive.pPrimitive, minValues, maxValues))
+    return {};
   nvutils::Bbox objBbox(minValues, maxValues);
 
   glm::mat4 nodeWorld = scene->computeNodeWorldMatrix(renderNode.refNodeID);
@@ -342,9 +335,7 @@ nvutils::Bbox GltfRenderer::getRenderNodeBbox(int renderNodeIndex)
       }
     }
   }
-  worldBbox = objBbox.transform(nodeWorld);
-
-  return worldBbox;
+  return objBbox.transform(nodeWorld);
 }
 
 nvutils::Bbox GltfRenderer::getRenderNodesBbox(const std::unordered_set<int>& renderNodeIndices)
@@ -720,35 +711,14 @@ void GltfRenderer::renderUI()
         m_resources.settings.showGrid = !m_resources.settings.showGrid;
       if(ImGui::IsKeyPressed(ImGuiKey_T, false))
         m_resources.settings.showGizmo = !m_resources.settings.showGizmo;
+      // Home flies back to the home camera (same as the Camera window's Home button).
+      if(ImGui::IsKeyPressed(ImGuiKey_Home, false) && !ImGui::GetIO().WantTextInput && !nvgui::GetCameras().empty())
+        m_cameraManip->setCamera(nvgui::GetCameras()[0], false);
       // Space toggles animation play/pause.
       if(ImGui::IsKeyPressed(ImGuiKey_Space, false))
       {
         if(ui::animation::hasPlayableAnimation(m_resources.getScene()))
           m_resources.animationControl.togglePlay();
-      }
-
-      // Ctrl+Shift+L: hold and move the mouse to swing the sun, the way Unreal's Ctrl+L does.
-      // Ctrl+L alone is taken -- it is the shader hot-reload -- hence the extra modifier.
-      //
-      // No mouse button: the modifier *is* the gesture, so there is nothing to conflict with
-      // orbiting, and the camera is already held off while Ctrl is down. Horizontal motion turns the
-      // sun, vertical raises and lowers it, at a degree per pixel; elevation is clamped rather than
-      // wrapped so pushing past the zenith parks the sun there instead of flipping the sky over.
-      //
-      // The undo stack coalesces this by itself: every frame of the drag pushes a SetTransformCommand
-      // on the same node, and pushExecuted merges consecutive compatible commands inside its window,
-      // so a drag is one history entry rather than a hundred.
-      if(ImGui::IsKeyDown(ImGuiMod_Ctrl) && ImGui::IsKeyDown(ImGuiMod_Shift) && ImGui::IsKeyDown(ImGuiKey_L))
-      {
-        const ImVec2 drag = ImGui::GetIO().MouseDelta;
-        if(drag.x != 0.0F || drag.y != 0.0F)
-        {
-          Settings& st = m_resources.settings;
-          m_skySun.setAngles(st.sunAzimuth + drag.x, std::clamp(st.sunElevation - drag.y, -90.0F, 90.0F));
-        }
-        // A hint, because an invisible modifier gesture is undiscoverable and easy to trigger by
-        // accident. It also reports the angles, which is what makes the drag usable for an exact one.
-        ImGui::SetTooltip("Sun  %.0f deg az  %.0f deg elev", m_resources.settings.sunAzimuth, m_resources.settings.sunElevation);
       }
     }
 
@@ -1076,6 +1046,11 @@ void GltfRenderer::renderViewMenu(bool validScene, bool& fitScene, bool& fitObje
   ImGui::MenuItem(ICON_MS_STRAIGHTEN " Snap", nullptr, &m_resources.settings.snapEnabled);
   ImGui::MenuItem(ICON_MS_MOVIE " Animation Strip", nullptr, &m_resources.animationControl.showStrip);
   ImGui::Separator();
+  // Only a request: updatePresentationMode() applies it at the top of the next UI pass.
+  ImGui::MenuItem(ICON_MS_PRESENT_TO_ALL " Presentation Mode", "F11", &m_presentationModeRequested);
+  ImGui::SetItemTooltip(
+      "Viewport only: hide every panel and the menu bar, borderless full screen on this monitor.\n"
+      "F11 or Esc to leave.");
   ImGui::EndMenu();
 }
 
@@ -1135,6 +1110,11 @@ void GltfRenderer::renderWindowsMenu()
 // nothing further to invalidate.
 void GltfRenderer::applyPendingResets()
 {
+  // Both resets rewrite panel visibility and the dock tree, which presentation mode has saved and
+  // hidden. Leave it first (only reachable from a script or MCP: the menu is hidden while presenting),
+  // so the reset lands on the real layout instead of being overwritten by the restore.
+  if((m_pendingResetSettings || m_pendingResetLayout) && m_presentation.isActive())
+    exitPresentationMode();
   if(m_pendingResetSettings)
   {
     m_pendingResetSettings = false;
@@ -1148,6 +1128,39 @@ void GltfRenderer::applyPendingResets()
     m_pendingResetLayout = false;
     ui::resetDockLayout();
   }
+}
+
+void GltfRenderer::updatePresentationMode()
+{
+  // Harmless in headless runs: there is no window to make full screen and no panel to hide.
+  if(isHeadlessMode())
+  {
+    m_presentationModeRequested = false;
+    return;
+  }
+
+  // F11 toggles. Esc also leaves -- it otherwise clears the selection, but that shortcut lives in
+  // renderMenu(), which does not run while the menu bar is hidden, so the two never compete. Esc is
+  // left to ImGui while it closes a popup or cancels a text edit.
+  if(ImGui::IsKeyPressed(ImGuiKey_F11, false))
+    m_presentationModeRequested = !m_presentation.isActive();
+  else if(m_presentation.isActive() && ImGui::IsKeyPressed(ImGuiKey_Escape, false) && !ImGui::GetIO().WantTextInput
+          && !ImGui::IsPopupOpen(nullptr, ImGuiPopupFlags_AnyPopupId))
+    m_presentationModeRequested = false;
+
+  m_presentation.setActive(m_app, m_presentationModeRequested);
+  m_presentationModeRequested = m_presentation.isActive();  // reads back the real state (e.g. if entering was refused)
+}
+
+void GltfRenderer::exitPresentationMode()
+{
+  m_presentation.setActive(m_app, false);
+  m_presentationModeRequested = m_presentation.isActive();
+}
+
+void GltfRenderer::addPresentationWindow(std::function<bool()> isVisible, std::function<void(bool)> setVisible)
+{
+  m_presentation.addWindow(std::move(isVisible), std::move(setVisible));
 }
 
 // (The Agentic feature has no top-level menu; its window is toggled from the
@@ -1541,7 +1554,8 @@ void GltfRenderer::renderMenu()
   {
     nvutils::Bbox bbox = fitScene ? m_resources.getScene()->getSceneBounds() :
                                     GltfRenderer::getRenderNodesBbox(m_resources.selectedRenderNodes);
-    m_cameraManip->fit(bbox.min(), bbox.max(), false, true, m_cameraManip->getAspectRatio());
+    if(!bbox.isEmpty())  // A selection with no readable bounds leaves the camera alone
+      m_cameraManip->fit(bbox.min(), bbox.max(), false, true, m_cameraManip->getAspectRatio());
   }
 
   if(compactScene && validScene)

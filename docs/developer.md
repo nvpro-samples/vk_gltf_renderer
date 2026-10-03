@@ -165,6 +165,8 @@ src/
 │                               #   Pure, self-contained, nothing else links against it
 ├── ui_dock_layout.cpp/hpp      # Default docking arrangement, shared by start-up (main.cpp's
 │                               #   dockSetup) and Windows > Reset UI Layout
+├── ui_presentation_mode.cpp/hpp # Presentation mode (F11): hides panels + menu bar, borderless
+│                               #   full screen on the window's monitor; saves/restores both
 ├── ui_xmp.cpp/hpp              # KHR_xmp_json_ld metadata display
 ├── ui_animation.cpp/hpp        # Animation playback state and viewport animation widget
 ├── ui_mouse_state.hpp          # Mouse state tracking for viewport
@@ -552,9 +554,11 @@ This creates `manifest.json`, `requests/`, `responses/`, and `assets/` without r
 
 ### Add a command-line parameter
 
-1. Register it in `main.cpp` through `nvutils::ParameterRegistry`.
+1. Register it once: `m_settings.add(...)` (`SettingsRegistry`) for a renderer setting, or
+   `parameterRegistry.add(...)` in `main.cpp` for an app-level flag.
 2. Wire it to renderer or app settings.
-3. Document it in [user-guide.md](user-guide.md#command-line-reference).
+3. Nothing to list by hand: it appears in `--help`. Describe it in the
+   [user guide](user-guide.md) only where users need to know how to use it.
 
 ### Add a renderer setting
 

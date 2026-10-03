@@ -62,7 +62,6 @@
 #include <unordered_set>
 #include <utility>
 #include <vulkan/vulkan_core.h>
-#include <webp/decode.h>
 #include <stb/stb_image.h>
 
 #include "GLFW/glfw3.h"
@@ -120,34 +119,6 @@ extern nvutils::ProfilerManager g_profilerManager;  // #PROFILER
 namespace {
 // Background clear color used when no scene is loaded or to show DLSS render resolution borders
 constexpr VkClearColorValue kBackgroundClearColor = {{0.17f, 0.21f, 0.25f, 1.f}};
-
-// WebP callback for glTF image loading. Decodes an image into a SceneImage
-// object, returning `true` on success.
-bool webPLoadCallback(nvvkgltf::SceneVk::SceneImage& image, const void* data, size_t byteLength)
-{
-  const uint8_t* dataU8 = reinterpret_cast<const uint8_t*>(data);
-
-  int width = 0, height = 0;
-  if(!WebPGetInfo(dataU8, byteLength, &width, &height) || width <= 0 || height <= 0 || width > INT_MAX / 4)
-  {
-    return false;
-  }
-
-  std::vector<char> decompressed(static_cast<size_t>(width) * static_cast<size_t>(height) * 4);
-  if(!WebPDecodeRGBAInto(dataU8, byteLength,                                                    //
-                         reinterpret_cast<uint8_t*>(decompressed.data()), decompressed.size(),  //
-                         width * 4))
-  {
-    LOGW("Failed to decode WebP image '%s'.\n", image.imgName.c_str());
-    return false;
-  }
-
-  image.format  = VK_FORMAT_R8G8B8A8_UNORM;
-  image.size    = {static_cast<uint32_t>(width), static_cast<uint32_t>(height)};
-  image.mipData = {std::move(decompressed)};
-  return true;
-}
-
 
 // Angular radius of the disk the gradient sky draws. The extension has no field for it, so this is
 // the sun's true radius as seen from Earth (~0.27 deg) -- enough for the disk to read as a sun.
@@ -242,6 +213,12 @@ GltfRenderer::GltfRenderer(nvutils::ParameterRegistry* paramReg, const nvutils::
   m_settings.add({"useSolidBackground", "Use solid color background"}, &m_resources.settings.useSolidBackground, Persist::eYes, true);
   m_settings.addVector({"solidBackgroundColor", "Solid Background Color"}, &m_resources.settings.solidBackgroundColor, Persist::eYes);
   m_settings.add({"ptMaxFrames", "Maximum number of iterations"}, &m_resources.settings.maxFrames, Persist::eYes);
+  // Not persisted: a scripted or headless run must not change what the next interactive session plays.
+  m_settings.add(
+      {.name = "animPlay",
+       .help = "Play animations [Off:0, On:1]. Default: on, off in headless runs. A scene with a behavior graph never autoplays",
+       .callbackSuccess = [this](const nvutils::ParameterBase* const) { m_resources.animationControl.play = m_animPlay; }},
+      &m_animPlay, Persist::eNo);
   // Headless-only output path: consumed at start-up, so remembering it would be misleading.
   m_settings.add({"output", "Output image file path for headless mode"}, &m_resources.headlessOutputPath, Persist::eNo);
 
@@ -308,6 +285,26 @@ GltfRenderer::GltfRenderer(nvutils::ParameterRegistry* paramReg, const nvutils::
   m_settings.add({"uiShowAgentic", "Show the Agentic bridge window"}, &m_resources.settings.showAgenticWindow, Persist::eYes);
   m_settings.add({"uiShowGridSettings", "Show the Grid & Snap settings window"},
                  &m_resources.settings.showGridSettingsWindow, Persist::eYes);
+
+  // Presentation mode (F11): viewport only, borderless on the window's monitor. Not persisted --
+  // a talk should not start the next session in it -- and ignored in headless runs. The value is a
+  // request that updatePresentationMode() applies at the top of the next UI pass.
+  m_settings.add({"presentationMode",
+                  "Presentation mode: hide all panels and the menu bar, borderless full screen on "
+                  "the window's monitor [Off:0, On:1] (F11)"},
+                 &m_presentationModeRequested, Persist::eNo);
+  // Every panel presentation mode hides (main.cpp adds the profiler, logger and NVML monitor).
+  for(bool* visible : {&m_resources.settings.showCameraWindow, &m_resources.settings.showSettingsWindow,
+                       &m_resources.settings.showEnvironmentWindow, &m_resources.settings.showTonemapperWindow,
+                       &m_resources.settings.showStatisticsWindow, &m_resources.settings.showSceneBrowserWindow,
+                       &m_resources.settings.showInspectorWindow, &m_resources.settings.showInteractivityWindow,
+                       &m_resources.settings.showAgenticWindow, &m_resources.settings.showGridSettingsWindow,
+                       &m_resources.settings.showMemStats, &m_resources.animationControl.showStrip})
+    m_presentation.addWindow(visible);
+#ifndef NDEBUG
+  m_presentation.addWindow(&m_resources.settings.showGridStyleWindow);
+  m_presentation.addWindow(&m_resources.settings.showGizmoStyleWindow);
+#endif
 
   // The sun. One direction is shared by every sky type that has a sun, which is why these are not
   // named sky*: Resources::sunDirection is the single source of truth and the angles drive it
@@ -988,6 +985,13 @@ void GltfRenderer::alignMaxFramesForHeadless(uint32_t headlessFrames)
   BenchmarkController::alignMaxFramesForHeadless(m_resources.settings.maxFrames, headlessFrames);
 }
 
+void GltfRenderer::applyHeadlessDefaults()
+{
+  if(!(m_parameterParser && m_parameterParser->wasParsed("animPlay")))
+    m_animPlay = false;
+  m_resources.animationControl.play = m_animPlay;
+}
+
 BenchmarkController::HeadlessFrameInfo GltfRenderer::benchmarkFrameInfo() const
 {
   return {.totalFrames = m_app ? m_app->getHeadlessFrameCount() : 0,
@@ -1171,6 +1175,7 @@ void GltfRenderer::onUIRender()
   // sequence that issues --resetAllToDefault expects the settings to be back at their defaults for
   // the measurements that follow, and benchmark mode never reaches renderUI().
   applyPendingResets();
+  updatePresentationMode();
 
   if(isBenchmarkMode())
   {
@@ -3263,8 +3268,9 @@ void GltfRenderer::cleanupScene()
   m_inspector.setScene(nullptr);
   m_sceneSelection.clearSelection();  // Clear selection in new UI system
   m_resources.selectedRenderNodes.clear();
-  m_resources.animationControl     = AnimationControl{};
-  m_resources.interactivityControl = InteractivityControl{};
+  m_resources.animationControl      = AnimationControl{};
+  m_resources.animationControl.play = m_animPlay;
+  m_resources.interactivityControl  = InteractivityControl{};
 
   // Drop async pick/hover state tied to the outgoing scene - a pending click ray-pick or a
   // cached hover node index would otherwise be consumed by the newly loaded scene once its
@@ -3300,7 +3306,7 @@ void GltfRenderer::rebuildVulkanSceneInternal(nvvkgltf::SceneGpu::RebuildMode mo
 {
   using RebuildMode = nvvkgltf::SceneGpu::RebuildMode;
   // Modes that add or reload images (eFull re-reads all; eMergeAppend loads only the new tail). Both
-  // need the WebP loader and a descriptor rewrite; eGeometryOnly leaves textures untouched.
+  // need a descriptor rewrite; eGeometryOnly leaves textures untouched.
   const bool touchesTextures = (mode == RebuildMode::eFull || mode == RebuildMode::eMergeAppend);
 
   // SYNC NOTE: Full scene rebuild (merge/compact/geometry change) -- wait ensures GPU is idle.
@@ -3317,11 +3323,6 @@ void GltfRenderer::rebuildVulkanSceneInternal(nvvkgltf::SceneGpu::RebuildMode mo
   {
     if(scene)
       m_resources.transformCompute.destroyGpuBuffers();  // Before scene RTX rebuild
-
-    // Add WebP loading support to SceneVk (needed whenever images are (re)loaded)
-    if(touchesTextures)
-      m_resources.sceneVk.setImageLoadCallback(webPLoadCallback);
-
     VkCommandBuffer cmd{};
     nvvk::beginSingleTimeCommands(cmd, m_device, m_transientCmdPool);
     m_resources.sceneGpu.rebuild(cmd, *scene, mode);
@@ -3458,9 +3459,6 @@ void GltfRenderer::rebuildVulkanSceneFull()
 void GltfRenderer::createVulkanScene()
 {
   {
-    // Add WebP loading support to SceneVk
-    m_resources.sceneVk.setImageLoadCallback(webPLoadCallback);
-
     // Enable opacity micromap (EXT_mesh_opacity_micromap) build when the device supports it
     m_resources.sceneVk.setOpacityMicromapEnabled(m_resources.settings.opacityMicromapSupported);
 

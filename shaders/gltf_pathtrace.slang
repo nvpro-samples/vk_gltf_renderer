@@ -97,7 +97,7 @@ float3 evalPhysicalSkyBackground(float3 worldDir, SceneFrameInfo* frameInfo)
 
 // Specialization constants
 [[vk::constant_id(0)]]  int USE_SER = 1;
-[[vk::constant_id(1)]]  int USE_DLSS_TRANSP = 0; // Primary surface selection mode
+[[vk::constant_id(1)]]  int USE_DLSS_TRANSP = 0; // Dlss::TransparencyMode: 1 = primary surface replacement through clear glass
 
 // clang-format on
 
@@ -316,19 +316,35 @@ PathStepResult pathTraceOneBounce(IRaytracer raytracer, inout RayDesc ray, inout
       float  f0_from_ior          = pow((pbrMat.ior2 - pbrMat.ior1) / (pbrMat.ior2 + pbrMat.ior1), 2.0F);
       float3 specularColorClamped = min(f0_from_ior * pbrMat.specularColor, float3(1.0F));
       float3 specularAlbedo = EnvBRDFApprox2(specularColorClamped, pbrMat.roughness.x, dot(pbrMat.N, ray.Direction));
+      float3 guideNormal    = pbrMat.N;
+      float  guideRoughness = pbrMat.roughness.x;
       if(USE_DLSS_TRANSP == 1 && !hasFlag(pushConst.flags, PathtracerFlags::ePtUseOptixDenoiser) && dlssIsClearGlass(pbrMat))
       {
-        guideAlbedo = dlssGetClearGlassGuideAlbedo(raytracer, pbrMat, hit, ray.Direction, frameInfo, seed,
-                                                   ptIsInside(pt), specularAlbedo);
+        // #DLSS primary surface replacement: describe what is seen through the glass. The albedo
+        // keeps the glass's Fresnel share; depth and motion come from the replaced surface.
+        DlssGlassPsr psr     = dlssTraceClearGlass(pbrMat, hit, ray.Direction, ptIsInside(pt));
+        float        ndotv   = saturate(dot(pbrMat.N, -ray.Direction));
+        float        fresnel = schlickFresnel((pbrMat.ior2 > 0.0f) ? (pbrMat.ior2 / pbrMat.ior1) : 1.5f, ndotv);
+        guideAlbedo          = dlssEnforceMinAlbedo(lerp(psr.albedo, pbrMat.baseColor.xyz, fresnel), specularAlbedo);
+        if(psr.valid)
+        {
+          guideNormal        = psr.normal;
+          guideRoughness     = psr.roughness;
+          pt.guide.psrValid  = true;
+          pt.guide.psrPos    = hit.pos + ray.Direction * psr.pathLength;
+          pt.firstHitPosPrev = pt.guide.psrPos + psr.posDelta;
+        }
       }
       pt.guide.specularAlbedo = float16_t3(specularAlbedo);
 #if MAT_EXT_DLSS_NR
       if(materialIndex >= 0)
         pt.guide.nrMask = float16_t4(materials[materialIndex].nrMask);
 #endif  // MAT_EXT_DLSS_NR
-#endif  // USE_DLSS_SHADER
+      pt.guide.normalRoughness = float16_t4(float16_t3(guideNormal), float16_t(guideRoughness));
+#else
       pt.guide.normalRoughness = float16_t4(float16_t3(pbrMat.N), float16_t(pbrMat.roughness.x));
-      pt.guide.albedo          = float16_t3(guideAlbedo);
+#endif  // USE_DLSS_SHADER
+      pt.guide.albedo = float16_t3(guideAlbedo);
 #endif  // USE_GUIDE_SHADER
     }
 
@@ -507,6 +523,16 @@ PathStepResult pathTraceOneBounce(IRaytracer raytracer, inout RayDesc ray, inout
     bounce.shadowRayPos      = safeOffsetRay(shadowOffsetBase, shadowOffsetDir);
     bounce.shadowRayDir      = directLight.direction;
     bounce.shadowRayDist     = directLight.distance;
+
+    // The light was sampled from `hit.pos`, stopping just short of the emitter. The terminator
+    // offset moves the origin, so aim at that same end point: keeping direction and distance would
+    // shift it through a grazing emissive triangle, which then shadows itself.
+    if(directLight.distance < INFINITE)
+    {
+      const float3 toTarget = hit.pos + directLight.direction * directLight.distance - bounce.shadowRayPos;
+      bounce.shadowRayDist  = length(toTarget);
+      bounce.shadowRayDir   = toTarget / max(bounce.shadowRayDist, 1e-12F);
+    }
   }
 
   return PathStepResult.eOutOfVolume;
@@ -753,10 +779,22 @@ void processPixel(IRaytracer raytracer, float2 samplePos, float2 imageSize)
     // previous position carries object motion); sky/background uses w=0, i.e. a point at infinity along
     // the view direction, so camera translation cancels and only rotation moves the sky (no far-plane
     // magic). sampleResult.hitPosition holds a world position for surfaces and a view direction for sky.
-    float hitW = hasSolidHit ? 1.0f : 0.0f;
-    float2 motionVec = calculateMotionVector(float4(sampleResult.hitPosition, hitW), float4(sampleResult.hitPositionPrev, hitW),
+    //
+    // Through clear glass in the Improved transparency mode, depth and motion describe the surface
+    // seen through it (primary surface replacement); hitPositionPrev already holds its previous
+    // position. The main depth (outDepth) keeps the glass, which picking and overlays rely on.
+    float  hitW       = hasSolidHit ? 1.0f : 0.0f;
+    float3 guidePos   = sampleResult.hitPosition;
+    float  guideDepth = ndcDepth;
+    if(sampleResult.guideOutput.psrValid)
+    {
+      guidePos             = sampleResult.guideOutput.psrPos;
+      const float4 psrClip = mul(float4(guidePos, 1.0), pushConst.frameInfo->viewProjMatrix);
+      guideDepth           = psrClip.z / psrClip.w;
+    }
+    float2 motionVec = calculateMotionVector(float4(guidePos, hitW), float4(sampleResult.hitPositionPrev, hitW),
                                              pushConst.frameInfo->prevMVP, pushConst.frameInfo->viewProjMatrix, imageSize);
-    outImages[int(OutputImage::eDlssDepth)][int2(samplePos)]           = float4(ndcDepth);
+    outImages[int(OutputImage::eDlssDepth)][int2(samplePos)]           = float4(guideDepth);
     outImages[int(OutputImage::eDlssMotion)][int2(samplePos)]          = float4(motionVec, 0, 0);
     outImages[int(OutputImage::eDlssNormalRoughness)][int2(samplePos)] = sampleResult.guideOutput.normalRoughness;
     outImages[int(OutputImage::eDlssAlbedo)][int2(samplePos)]          = sampleResult.guideOutput.albedo;

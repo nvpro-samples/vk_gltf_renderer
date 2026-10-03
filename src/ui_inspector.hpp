@@ -220,6 +220,7 @@ private:
   };
   TransformSnapshot m_transformSnapshot;
   bool              m_transformModifiedLastFrame = false;
+  bool              m_uniformDimensions          = true;  // Dimensions row: Keep Proportions checkbox
 
   // Material snapshot for undo: captures full tinygltf::Material before editing starts.
   // Pushed as EditMaterialCommand when the edit cycle ends.

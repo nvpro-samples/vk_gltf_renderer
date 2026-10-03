@@ -36,8 +36,8 @@
 // therefore what moving the sun costs. With no marked light it is a float; with one it is a scene
 // edit and belongs on the undo stack like any other.
 //
-// Every path that moves the sun -- the panel's sliders, the Time of Day widget, the viewport's
-// Ctrl+Shift+L drag, a preset load -- goes through aim(). That is the point: the "who owns it"
+// Every path that moves the sun -- the panel's sliders, the Time of Day widget, a preset load --
+// goes through aim(). That is the point: the "who owns it"
 // question is answered once rather than at each call site.
 //
 // An unmarked directional light is never adopted. A scene may hold any number of them and none is

@@ -210,7 +210,8 @@ bool SkySun::setMarkedDirection(const glm::vec3& toSun)
 
   // glTF aims a light down -Z, so +Z is what points at the sun.
   const glm::quat worldRotation = glm::rotation(glm::vec3(0.0F, 0.0F, 1.0F), glm::normalize(toSun));
-  // The scene keeps the parent table, so no hierarchy walk: this runs every frame of a sun drag.
+  // The scene keeps the parent table, so no hierarchy walk: this runs every frame of a slider or
+  // Time of Day drag.
   const std::vector<int>& parents     = scene->getNodeParents();
   const int               parent      = m_lightNode < static_cast<int>(parents.size()) ? parents[m_lightNode] : -1;
   const glm::mat4         parentWorld = parent >= 0 ? scene->computeNodeWorldMatrix(parent) : glm::mat4(1.0F);
@@ -225,10 +226,10 @@ bool SkySun::setMarkedDirection(const glm::vec3& toSun)
 //--------------------------------------------------------------------------------------------------
 // Apply a new sun direction, through whatever owns the sun.
 //
-// Three UI paths move the sun -- the azimuth/elevation sliders, the Time of Day widget, and the
-// viewport's Ctrl+Shift+L drag -- and each of them used to answer the same three questions for
-// itself: who owns the sun, do the reported angles still match it, and does the image have to be
-// re-baked. Answering them here is what keeps a fourth caller from getting one of them wrong.
+// The UI paths that move the sun -- the azimuth/elevation sliders, the Time of Day widget, and a
+// preset load -- each used to answer the same three questions for itself: who owns the sun, do the
+// reported angles still match it, and does the image have to be re-baked. Answering them here is
+// what keeps a new caller from getting one of them wrong.
 //
 void SkySun::aim(const glm::vec3& toSun)
 {

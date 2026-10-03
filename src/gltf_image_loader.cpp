@@ -18,7 +18,7 @@
  */
 
 //
-// Loads glTF image data from various container formats (KTX2, DDS,
+// Loads glTF image data from various container formats (KTX2, DDS, WebP,
 // and standard formats via stb_image) into Vulkan-compatible image
 // descriptors. Handles format detection, swizzle mapping, mip chains,
 // and conversion to VkFormat-based ImageData structures.
@@ -30,6 +30,7 @@
 #include <limits>
 
 #include <stb/stb_image.h>
+#include <webp/decode.h>
 #include "nvimageformats/nv_dds.h"
 #include "nvimageformats/nv_ktx.h"
 #include "nvimageformats/texture_formats.h"
@@ -160,6 +161,45 @@ bool loadKtx(LoadedImageData& out, const void* data, size_t byteLength, bool srg
   return true;
 }
 
+bool loadWebp(LoadedImageData& out, const void* data, size_t byteLength, bool srgb, uint64_t imageIDForLog)
+{
+  // VP8/VP8L bitstreams store each dimension in 14 bits. Only the VP8X canvas can declare more, and
+  // WebPGetFeatures returns it unchecked for animated or truncated files, so a tiny file could otherwise
+  // request a multi-GiB allocation.
+  constexpr int kMaxWebpDimension = 1 << 14;
+
+  const uint8_t* dataU8 = reinterpret_cast<const uint8_t*>(data);
+
+  WebPBitstreamFeatures features{};
+  if(WebPGetFeatures(dataU8, byteLength, &features) != VP8_STATUS_OK)
+    return false;
+  if(features.has_animation)
+  {
+    LOGW("WebP image %" PRIu64 " is animated, which is not supported.\n", imageIDForLog);
+    return false;
+  }
+  const int width  = features.width;
+  const int height = features.height;
+  if(width <= 0 || height <= 0 || width > kMaxWebpDimension || height > kMaxWebpDimension)
+  {
+    LOGW("WebP image %" PRIu64 " has invalid dimensions %dx%d.\n", imageIDForLog, width, height);
+    return false;
+  }
+
+  std::vector<char> decompressed(static_cast<size_t>(width) * static_cast<size_t>(height) * 4);
+  if(!WebPDecodeRGBAInto(dataU8, byteLength, reinterpret_cast<uint8_t*>(decompressed.data()), decompressed.size(), width * 4))
+  {
+    LOGW("Failed to decode WebP image %" PRIu64 "\n", imageIDForLog);
+    return false;
+  }
+
+  out.format = srgb ? VK_FORMAT_R8G8B8A8_SRGB : VK_FORMAT_R8G8B8A8_UNORM;
+  out.size   = {static_cast<uint32_t>(width), static_cast<uint32_t>(height)};
+  out.mipData.clear();
+  out.mipData.push_back(std::move(decompressed));
+  return true;
+}
+
 bool loadStb(LoadedImageData& out, const void* data, size_t byteLength, bool srgb, uint64_t imageIDForLog)
 {
   if(byteLength > static_cast<size_t>(std::numeric_limits<int>::max()))
@@ -213,7 +253,8 @@ bool loadStb(LoadedImageData& out, const void* data, size_t byteLength, bool srg
   {
     VkDeviceSize bufferSize = static_cast<VkDeviceSize>(w) * h * bytesPerPixel;
     out.size                = VkExtent2D{static_cast<uint32_t>(w), static_cast<uint32_t>(h)};
-    out.mipData             = {{decompressed, decompressed + bufferSize}};
+    out.mipData.clear();
+    out.mipData.emplace_back(decompressed, decompressed + bufferSize);
   }
 
   stbi_image_free(decompressed);
@@ -232,6 +273,8 @@ bool loadFromMemory(LoadedImageData& out, const void* data, size_t byteLength, b
   if(loadDds(out, data, byteLength, srgb, imageIDForLog))
     return true;
   if(loadKtx(out, data, byteLength, srgb, imageIDForLog))
+    return true;
+  if(loadWebp(out, data, byteLength, srgb, imageIDForLog))
     return true;
   if(loadStb(out, data, byteLength, srgb, imageIDForLog))
     return true;

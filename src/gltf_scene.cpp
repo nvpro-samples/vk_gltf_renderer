@@ -146,6 +146,45 @@ bool loadGltfFile(const std::filesystem::path& filename,
   return result;
 }
 
+//--------------------------------------------------------------------------------------------------
+// Rewrite the relative image URIs of `child`, loaded from `childDir`, so they resolve from `ownerDir`,
+// the folder of the model it is about to be merged into. Without this, merged images keep URIs
+// relative to their own file and are found through the scene-wide image search paths, where the
+// first match wins: assets that use the same relative name for different images (every Kenney kit
+// ships its own "Textures/colormap.png") would all get the first one found. Absolute, data: and
+// bufferView images are left alone. An empty `childDir` (a bare file name) is the working directory;
+// an empty `ownerDir` means the owner has no folder yet (a new, unsaved scene), so nothing is rebased.
+//--------------------------------------------------------------------------------------------------
+void rebaseImageUris(tinygltf::Model& child, const std::filesystem::path& childDir, const std::filesystem::path& ownerDir)
+{
+  if(ownerDir.empty())
+    return;
+  std::error_code             ec;
+  const std::filesystem::path from = std::filesystem::absolute(childDir.empty() ? "." : childDir, ec);
+  if(ec)
+    return;
+  const std::filesystem::path to = std::filesystem::absolute(ownerDir, ec);
+  if(ec || from.lexically_normal() == to.lexically_normal())
+    return;
+
+  for(size_t imageIndex = 0; imageIndex < child.images.size(); imageIndex++)
+  {
+    tinygltf::Image& image = child.images[imageIndex];
+    if(image.uri.empty() || image.bufferView >= 0 || image.uri.rfind("data:", 0) == 0)
+      continue;
+    const std::filesystem::path path = nvutils::pathFromUtf8(tinygltf::utils::decodePathFromUri(image.uri));
+    if(path.is_absolute())
+      continue;
+    const std::filesystem::path target  = (from / path).lexically_normal();
+    std::filesystem::path       rebased = target.lexically_relative(to.lexically_normal());
+    if(rebased.empty())  // no relative path, e.g. another drive on Windows: keep it absolute
+      rebased = target;
+    std::string uri = nvutils::utf8FromPath(rebased);
+    std::replace(uri.begin(), uri.end(), '\\', '/');
+    image.uri = tinygltf::utils::encodePathAsUri(uri);
+  }
+}
+
 }  // namespace
 
 //--------------------------------------------------------------------------------------------------
@@ -793,6 +832,7 @@ int nvvkgltf::Scene::mergeScene(const std::filesystem::path& filename, std::opti
   const size_t animationCountBeforeMerge = m_model.animations.size();
   const size_t importedAnimationCount    = importedModel.animations.size();
 
+  rebaseImageUris(importedModel, filename.parent_path(), m_filename.parent_path());
   int wrapperNodeIdx = SceneMerger::merge(m_model, importedModel, filename.stem().string(), maxTextureCount);
   if(wrapperNodeIdx < 0)
   {
@@ -991,6 +1031,7 @@ void nvvkgltf::Scene::flattenReferencedModel(tinygltf::Model&             model,
     ancestry.push_back(canonKey);
     flattenReferencedModel(childModel, childPath.parent_path(), ancestry, depth + 1);
     ancestry.pop_back();
+    rebaseImageUris(childModel, childPath.parent_path(), modelDir);
 
     // Images of the merged asset resolve from its own directory.
     std::filesystem::path importDir = std::filesystem::absolute(childPath.parent_path(), ec);
@@ -1142,6 +1183,7 @@ bool nvvkgltf::Scene::resolveExternalAssets()
     ancestry.push_back(canonKey);
     flattenReferencedModel(childModel, childPath.parent_path(), ancestry, 1);
     ancestry.pop_back();
+    rebaseImageUris(childModel, childPath.parent_path(), baseDir);
 
     const std::vector<int>& refNodes = nodesByFile[fileIdx];
 
@@ -1286,6 +1328,7 @@ int nvvkgltf::Scene::referenceScene(const std::filesystem::path& filename)
     ancestry.push_back(nvutils::utf8FromPath(absTarget));
     flattenReferencedModel(childModel, filename.parent_path(), ancestry, 1);
   }
+  rebaseImageUris(childModel, filename.parent_path(), m_filename.parent_path());
 
   // File entry: store a path relative to the scene's location when possible (portable), else absolute.
   std::string storedUri;
@@ -2273,15 +2316,7 @@ void nvvkgltf::Scene::destroy()
 glm::vec3 nvvkgltf::Scene::computePrimitiveCenterObj(const tinygltf::Primitive& primitive) const
 {
   glm::vec3 minVal{0.f}, maxVal{0.f};
-  auto      it = primitive.attributes.find("POSITION");
-  if(it != primitive.attributes.end() && static_cast<size_t>(it->second) < m_model.accessors.size())
-  {
-    const tinygltf::Accessor& accessor = m_model.accessors[it->second];
-    if(accessor.minValues.size() >= 3)
-      minVal = glm::vec3(float(accessor.minValues[0]), float(accessor.minValues[1]), float(accessor.minValues[2]));
-    if(accessor.maxValues.size() >= 3)
-      maxVal = glm::vec3(float(accessor.maxValues[0]), float(accessor.maxValues[1]), float(accessor.maxValues[2]));
-  }
+  tinygltf::utils::getPrimitivePositionBounds(m_model, primitive, minVal, maxVal);
   return 0.5f * (minVal + maxVal);
 }
 
@@ -2491,19 +2526,11 @@ nvutils::Bbox nvvkgltf::Scene::getSceneBounds() const
 
   for(const nvvkgltf::RenderNode& rnode : m_renderNodeRegistry.getRenderNodes())
   {
-    glm::vec3 minValues = {0.f, 0.f, 0.f};
-    glm::vec3 maxValues = {0.f, 0.f, 0.f};
-
-    const nvvkgltf::RenderPrimitive& rprim    = m_renderPrimitives[rnode.renderPrimID];
-    const tinygltf::Accessor&        accessor = m_model.accessors[rprim.pPrimitive->attributes.at("POSITION")];
-    if(!accessor.minValues.empty())
-      minValues = {tinygltf::utils::getAccessorNormalizedValue(accessor, accessor.minValues[0]),
-                   tinygltf::utils::getAccessorNormalizedValue(accessor, accessor.minValues[1]),
-                   tinygltf::utils::getAccessorNormalizedValue(accessor, accessor.minValues[2])};
-    if(!accessor.maxValues.empty())
-      maxValues = {tinygltf::utils::getAccessorNormalizedValue(accessor, accessor.maxValues[0]),
-                   tinygltf::utils::getAccessorNormalizedValue(accessor, accessor.maxValues[1]),
-                   tinygltf::utils::getAccessorNormalizedValue(accessor, accessor.maxValues[2])};
+    // A primitive without readable bounds contributes nothing; a placeholder box would pin the
+    // scene bounds to its node origin.
+    glm::vec3 minValues, maxValues;
+    if(!tinygltf::utils::getPrimitivePositionBounds(m_model, *m_renderPrimitives[rnode.renderPrimID].pPrimitive, minValues, maxValues))
+      continue;
     nvutils::Bbox bbox(minValues, maxValues);
     bbox = bbox.transform(rnode.worldMatrix);
     m_sceneBounds.insert(bbox);
@@ -2517,6 +2544,60 @@ nvutils::Bbox nvvkgltf::Scene::getSceneBounds() const
   }
 
   return m_sceneBounds;
+}
+
+nvutils::Bbox nvvkgltf::Scene::computeNodeSubtreeBounds(int nodeID) const
+{
+  nvutils::Bbox bounds;
+  if(nodeID < 0 || nodeID >= static_cast<int>(m_model.nodes.size()))
+    return bounds;
+
+  // Iterative walk; each entry carries the transform from that node's mesh space to the root node's
+  // pre-TRS frame. The root starts at identity, so its own TRS is deliberately left out.
+  // A glTF node has at most one parent, so a node seen twice means a malformed cycle; the load path
+  // does not validate unreachable nodes, and the Inspector can still select them.
+  std::vector<std::pair<int, glm::mat4>> stack{{nodeID, glm::mat4(1.0f)}};
+  std::vector<bool>                      visited(m_model.nodes.size(), false);
+  while(!stack.empty())
+  {
+    const int       id     = stack.back().first;
+    const glm::mat4 toRoot = stack.back().second;
+    stack.pop_back();
+    if(visited[id])
+      continue;
+    visited[id]                = true;
+    const tinygltf::Node& node = m_model.nodes[id];
+
+    if(node.mesh >= 0 && node.mesh < static_cast<int>(m_model.meshes.size()))
+    {
+      nvutils::Bbox meshBounds;
+      for(const tinygltf::Primitive& primitive : m_model.meshes[node.mesh].primitives)
+      {
+        glm::vec3 bmin, bmax;
+        if(tinygltf::utils::getPrimitivePositionBounds(m_model, primitive, bmin, bmax))
+          meshBounds.insert(nvutils::Bbox(bmin, bmax));
+      }
+      if(!meshBounds.isEmpty())
+      {
+        // KHR/EXT_mesh_gpu_instancing: one box per instance, as getRenderNodeBbox does.
+        std::unordered_map<int, std::vector<glm::mat4>>::const_iterator instIt = m_gpuInstanceLocalMatrices.find(id);
+        if(instIt != m_gpuInstanceLocalMatrices.end() && !instIt->second.empty())
+        {
+          for(const glm::mat4& instance : instIt->second)
+            bounds.insert(meshBounds.transform(toRoot * instance));
+        }
+        else
+        {
+          bounds.insert(meshBounds.transform(toRoot));
+        }
+      }
+    }
+
+    for(int child : node.children)
+      if(child >= 0 && child < static_cast<int>(m_model.nodes.size()))
+        stack.emplace_back(child, toRoot * tinygltf::utils::getNodeMatrix(m_model.nodes[child]));
+  }
+  return bounds;
 }
 
 void nvvkgltf::Scene::createRenderNodesForNode(int nodeID, const glm::mat4& worldMatrix, bool visible, const PrimitiveKeyMap& primMap)

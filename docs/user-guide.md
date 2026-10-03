@@ -38,20 +38,20 @@ A Monte Carlo path tracer with global illumination, progressive accumulation, an
 
 ![](images/pathtracer_settings.jpg)
 
-| Setting | Description |
-|---|---|
-| **Rendering Pipeline** | Choice between **Compute / Ray Query** (compute shader) and **Ray Tracing Pipeline** (hardware RT pipeline with SBT). Both produce identical results; Ray Query avoids pipeline overhead on some workloads. |
-| **Use SER** | Enable [Shader Execution Reorder](https://developer.nvidia.com/blog/improving-ray-tracing-performance-with-shader-execution-reorder/) for the Ray Tracing pipeline. Can improve coherence on RTX 40-series GPUs. |
-| **Max Depth** | Maximum number of bounces per path. |
-| **FireFly Clamp** | Clamps high-intensity samples to reduce firefly artifacts in early frames. |
-| **Texture LOD** | Ray-footprint gradient scale for texture mip selection: 0 always samples mip 0, 1 uses the full physically derived LOD. |
-| **Shadow Transmission** | Lets shadow rays pass straight through transmissive surfaces (`KHR_materials_transmission`), tinted by base color, Fresnel, and volume absorption. On by default: it brightens what lies behind glass and gives colored shadows, but it is a **biased approximation**, since it ignores refraction (no focused caustics) and adds to the light BSDF-sampled paths already carry through the surface. Turned off, every transmissive surface (thin-walled included) blocks shadow rays and light through it comes only from BSDF sampling. Nothing is approximated, but caustics from small or punctual lights (sun, point, spot, directional) are effectively missing: plain path tracing cannot sample light that reaches a diffuse surface through perfectly specular transmission. Alpha coverage is unaffected. |
-| **Max Iterations** | Maximum number of frames accumulated before the renderer stops. |
-| **Samples** | Number of samples per pixel per frame. Higher = cleaner but slower per frame. |
-| **Auto SPP** | Adaptive sampling: automatically adjusts samples-per-pixel to maintain a target frame rate. Choose between Interactive, Balanced, Quality, and Max Quality presets. |
-| **Aperture** | Depth-of-field lens aperture. Set to 0 for a pinhole camera (everything in focus). |
-| **Auto Focus** | Automatically sets the focal distance to the camera's interest point (double-click an object to set). |
-| **Infinite Plane** | Adds an infinite ground plane with optional **Shadow Catcher** mode. When enabled, the plane subtracts light from the environment and adds only shadows and reflections — ideal for product shots. Surface properties (color, roughness, metallic) are adjustable. |
+| Setting                 | Description                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                         |
+| ----------------------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| **Rendering Pipeline**  | Choice between **Compute / Ray Query** (compute shader) and **Ray Tracing Pipeline** (hardware RT pipeline with SBT). Both produce identical results; Ray Query avoids pipeline overhead on some workloads.                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                         |
+| **Use SER**             | Enable [Shader Execution Reorder](https://developer.nvidia.com/blog/improving-ray-tracing-performance-with-shader-execution-reorder/) for the Ray Tracing pipeline. Can improve coherence on RTX 40-series GPUs.                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                    |
+| **Max Depth**           | Maximum number of bounces per path.                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                 |
+| **FireFly Clamp**       | Clamps high-intensity samples to reduce firefly artifacts in early frames.                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                          |
+| **Texture LOD**         | Ray-footprint gradient scale for texture mip selection: 0 always samples mip 0, 1 uses the full physically derived LOD.                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                             |
+| **Shadow Transmission** | Lets shadow rays pass through transmissive surfaces (`KHR_materials_transmission`), tinted by their color and absorption, for brighter glass and colored shadows. A **biased approximation**: refraction is ignored. Off is unbiased, but caustics from small or punctual lights go missing. |
+| **Max Iterations**      | Maximum number of frames accumulated before the renderer stops.                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                     |
+| **Samples**             | Number of samples per pixel per frame. Higher = cleaner but slower per frame.                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                       |
+| **Auto SPP**            | Adaptive sampling: automatically adjusts samples-per-pixel to maintain a target frame rate. Choose between Interactive, Balanced, Quality, and Max Quality presets.                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                 |
+| **Aperture**            | Depth-of-field lens aperture. Set to 0 for a pinhole camera (everything in focus).                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                  |
+| **Auto Focus**          | Automatically sets the focal distance to the camera's interest point (double-click an object to set).                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                               |
+| **Infinite Plane**      | Adds an infinite ground plane with optional **Shadow Catcher** mode. When enabled, the plane subtracts light from the environment and adds only shadows and reflections — ideal for product shots. Surface properties (color, roughness, metallic) are adjustable.                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                  |
 
 ### AI-Accelerated Denoisers
 
@@ -63,12 +63,12 @@ Two denoisers are available to reduce path tracing noise while preserving detail
 
 [DLSS Ray Reconstruction](https://developer.nvidia.com/rtx/dlss) provides AI denoising with strong temporal stability for ray-traced content.
 
-![](images/dlss.jpg)
+![DLSS Ray Reconstruction settings and developer guide buffers](images/dlss.png)
 
 - Enable or disable it from the denoiser activation row; the status appears next to the row label. **Loading** means the nonblocking NGX prewarm is running, **Ready** means it can be enabled without waiting for startup initialization, and **On** means it is actively denoising the current frame.
 - Open the row's settings button to choose the input size (Min / Optimal / Max) — lower internal resolution means faster rendering, DLSS upscales to the viewport.
 - Developer guide-buffer previews (albedo, normal, motion, depth, specular) live at the bottom of the panel under **Developer Guide Buffers**. Use **Rendered** to switch back to the main image.
-- Transparency handling can be set to "Default (first hit)" or "Improved (blended guides)" for scenes with alpha-blended materials.
+- **Transparency** (`--dlssTransparency`) controls what the guides describe on clear glass. **Default** uses the glass surface itself. **Improved** uses the surface seen through every glass layer, which keeps content behind glass sharp while the camera moves (rough or tinted glass, and other materials, are unaffected). See [denoising.md](denoising.md#clear-glass-primary-surface-replacement).
 
 **How to enable:** Set `USE_DLSS=ON` in CMake (enabled by default). The DLSS SDK is downloaded automatically. Requires an NVIDIA RTX 20-series or newer GPU and up-to-date drivers.
 
@@ -112,7 +112,7 @@ local structure on a background prop while keeping it on a foreground character.
 
 [OptiX AI Denoiser](https://developer.nvidia.com/optix-denoiser) uses albedo and normal guide buffers to preserve detail while removing Monte Carlo noise.
 
-![OptiX AI Denoiser panel](images/optix.jpg)
+![OptiX AI Denoiser settings and output preview](images/optix.png)
 
 - Enable or disable it from the denoiser activation row; the status appears next to the row label.
 - Open the row's settings button, then click **Denoise Now** to denoise the current accumulation, or enable **Auto** to trigger automatically every N frames.
@@ -150,312 +150,129 @@ Wireframe mode can be toggled for mesh inspection.
 
 ## Environment
 
-**Environment Type** picks what lights the scene and what shows behind it. The list is built in
-`UiEnvironment::render` (`src/ui_environment.cpp`) and each entry carries its own tooltip; the
-sections below cover the ones with settings of their own.
+**Environment Type** picks what lights the scene and what shows behind it; hover an entry for a
+description.
 
-Whatever the type, the renderer consumes it the same way: everything except **None** ends up as a
-lat-long environment with an importance-sampling table behind it, so the path tracer, the
-rasterizer's image-based lighting, and the background dome all share one code path. The analytic
-types (**Plain**, **Gradient**, **Sky**) get there by being *baked* into that image — see
-[Authored skies](#authored-skies) and, for the mechanics,
-[developer.md § Environment Lighting](developer.md#environment-lighting).
+![The Environment panel with the physical sky selected](images/environment_panel.png)
 
-**Reset** at the top of the panel restores the *selected* environment type to its defaults and
-leaves everything else alone — the other sky types, the loaded HDR file, and the background color
-all survive. Use **Windows > Reset All to Default** for the whole application.
-The same action is available as `--envResetDefaults` for scripts.
+**Reset** restores the selected type to its defaults and leaves everything else alone (other sky
+types, the loaded HDR, the background color). **Windows > Reset All to Default** resets the whole
+application. Scripts can use `--envResetDefaults`.
 
-**Orientation** turns the environment, and it is one control for every type that can be turned — the
-HDR image, **Sky** and **Gradient** (a **Plain** sky looks the same from every direction, so it has
-none). **Rotation** turns it about the Y axis, in degrees. It edits the quaternion the extension
-stores, so what you see is exactly what a save writes. A tilt that a glTF's `OMI_environment_sky`
-`rotation` carries is rendered and kept — the slider changes only the heading — and
-`--envRotation x y z w` sets the full quaternion from the command line, in the same glTF order.
-
-The rotation is also where north is: turning a sky places its sun again from Time of Day, on the
-turned compass — see [Sun & Time of Day](#sun--time-of-day). A sun you aimed by hand is re-placed
-the same way, as the old North Offset did. **Reset** puts the orientation back to none along with the
-rest of the selected type.
+**Rotation** turns the environment about the vertical axis, in degrees (a **Plain** sky has
+nothing to turn). It also sets where north is, so turning a sky moves its sun with it; see
+[Sun & Time of Day](#sun--time-of-day). A tilt stored in a glTF's `rotation` is kept, and
+`--envRotation x y z w` sets the full quaternion.
 
 ### Authored skies
 
-**Plain** and **Gradient** are the two sky types of the
+**Plain**, **Gradient** and **Sky** come from the
 [OMI_environment_sky](https://github.com/omigroup/gltf-extensions/tree/main/extensions/2.0/OMI_environment_sky)
-glTF extension that this renderer evaluates. They are *scene* data, not viewer preferences: a scene
-that carries the extension selects its own sky on load, and **Save with scene** writes the current
-sky back out when the scene is saved.
+glTF extension (**Sky** is its `physical` type). They are scene data: a scene that carries the
+extension selects its own sky on load, and **Save with scene** writes the current sky back.
 
-- **Plain** — one solid color. It lights the scene and shows as the background. A plain sky at
-  black renders like **None** but keeps the sky in the glTF; pick **None** when you actually want
-  the no-environment fast path.
-- **Gradient** — bottom / horizon / top colors with a curve on each half, plus a sun disk and glow.
-  Each curve controls how sharply its band fades into the horizon color; 1.0 is a linear ramp and
-  smaller values tighten the transition toward a hard horizon.
-
-**The sun is never in the baked image.** The bake is the field that lights the scene, and a sun in
-it would be counted twice — once when a ray happens to hit it, once when the renderer samples the
-sun as a light. So the sky is baked without it and the sun is always a light, which also keeps the
-disk sharp: a half-degree sun is about one texel of a 1024×512 lat-long.
-
-The **Sky** type works the same way, for the same reason, though it gets there differently: its
-baked image is a real atmosphere simulation and already contains the glow around the sun, so only
-the disk itself is drawn on top. Expect it to redden as you lower the sun — that colour is the
-sunlight's path through the atmosphere, not a tint.
-
-Below the horizon the Sky type shows lit ground rather than black: a Lambertian surface at the
-planet's own albedo, fading into haze toward the horizon. It lights the scene from below like any
-other part of the environment, so expect warm bounce on downward-facing surfaces.
+- **Plain** — one solid color that lights the scene and shows as the background. Black looks like
+  **None** but keeps the sky in the file; pick **None** for the faster no-environment path.
+- **Gradient** — bottom, horizon and top colors with a curve on each half (1.0 is linear; smaller
+  values sharpen the horizon), plus a sun disk and glow.
+- **Sky** — a physical atmosphere. It reddens as the sun gets low, and below the horizon it shows
+  lit ground, which also bounces warm light onto the scene.
 
 ### Editing the atmosphere
 
-The **Sky** and **Gradient** types split into two tabs — **Sun & Time** for aiming the sun over
-the day, **Physical Sky** / **Gradient Sky** for what the sky itself looks like. They share the
-same sun but nothing else, so scrolling past the group you weren't editing was the old panel's
-main friction.
+**Sky** and **Gradient** each have two tabs: **Sun & Time** aims the sun, and **Physical Sky** /
+**Gradient Sky** sets the look. **Preset** at the top of Physical Sky applies Earth, Mars or an alien
+atmosphere; editing any value switches it to *Custom*.
 
-One collapsible group per physical concept, the same shape the Unreal Engine sky component uses.
-Each atmospheric component owns *everything* about it — the strength coefficient, the tint, and
-the shape of its density profile — rather than scattering those across a "simple" list and an
-"advanced" fold. A scale height is not more advanced than a strength; it answers a different
-question about the same substance.
+The Physical Sky groups:
 
-**Preset** at the top applies a whole atmosphere at once — Earth, Mars, or a deliberately unearthly
-one. Edit any slider afterwards and it reads **Custom**. Mars and Alien are plausible starting
-points, not authoritative data.
+- **Rayleigh** — scattering by air, blue on Earth: strength, tint, and how fast it thins with height.
+- **Mie** — haze, dust and smoke: strength, tint, height falloff, **Anisotropy** (how tight the glow
+  around the sun is) and **Albedo** (how much it scatters rather than absorbs).
+- **Ozone** — a high layer that absorbs rather than scatters: strength, height and thickness.
+- **Aerial Perspective** — haze between the camera and the scene; see
+  [Aerial perspective](#aerial-perspective).
+- **Planet** — ground radius and albedo, atmosphere thickness, and **Observer Altitude**.
+- **Sun** — **Angular Radius** (wider gives softer shadows) and **Irradiance**.
 
-The three atmospheric components, in the order light meets them on its way down:
-
-- **Rayleigh** — scattering by the air molecules themselves. **Scattering** is the /km coefficient,
-  **Tint** is which wavelengths it scatters hardest (blue on Earth), **Scale Height** is how fast
-  the air thins with altitude (8 km on Earth).
-- **Mie** — scattering by aerosols: haze, dust, smoke. Same **Scattering** + **Tint** pair, plus
-  **Anisotropy** (how tight the glow around the sun is — 0.8 on Earth), **Albedo** (how much of
-  what the aerosol removes it scatters vs absorbs), and **Scale Height** (1.2 km on Earth — haze
-  hugs the ground far more closely than air does).
-- **Ozone** — a high layer that *absorbs* without scattering, which is why its coefficient row is
-  called **Absorption** rather than Scattering. **Center** is where the layer peaks (25 km on
-  Earth), **Thickness** is how far it spreads.
-
-Then the scene-scale bridge:
-
-- **Aerial Perspective** — how much haze accumulates between the camera and what it is looking at;
-  see the next section for how it scales with scene size.
-
-And the world-shape facts most sessions leave alone:
-
-- **Planet** — **Ground Radius**, **Ground Albedo** (what the ground reflects, and lights the
-  lower half of the sky), **Atmosphere Thickness**, and **Observer Altitude** (how high the sky is
-  baked from — fixed rather than following the camera, which is what makes one baked image valid
-  for the whole scene).
-- **Sun** — the star's own properties, not its position (that lives in the Sun & Time tab):
-  **Angular Radius** (0.004675 rad ≈ half a degree on Earth; wider softens shadows) and
-  **Irradiance** (what reaches the top of the atmosphere, per channel).
-
-Most of these change only the scattering tables, which take about a tenth of a second to rebuild.
-So a drag rebuilds them at reduced quality — enough to see the colour and shape move with the
-slider — and the full rebuild happens once you let go. Expect the sky to settle slightly brighter
-when you release. Ground albedo, sun angular radius and observer altitude are read directly by the
-bake besides, so those respond immediately.
+While you drag a slider the sky updates at reduced quality, and it settles when you release.
 
 ### Sky presets
 
-**Preset → Save… / Load…** at the bottom of the Environment panel captures the current sky as a
-`.sky.json`, or applies one. You can also drag a `.sky.json` straight onto the viewport.
-
-It saves the whole sky -- type, colours, the full atmosphere -- plus the sun's angle, so a preset
-restores the look and not merely the ingredients. A preset that was saved without a sun (a plain sky
-has none) leaves your sun where it is rather than moving it.
-
-The file is one entry of the `OMI_environment_sky` extension, which is the same thing a scene
-carries, written on its own. It is plain indented JSON meant to be opened, diffed and hand-edited,
-and a preset written by a newer build keeps whatever it knew that this one does not.
-
-Scriptable as `--loadSkyPreset` / `--saveSkyPreset`:
+**Preset → Save… / Load…** at the bottom of the Environment panel saves the current sky as a
+`.sky.json` or applies one; you can also drop a `.sky.json` on the viewport. A preset stores the
+whole sky plus the sun's angle; one saved without a sun leaves yours where it is. The file is plain
+JSON: the same `OMI_environment_sky` entry a scene carries.
 
 ```bash
 vk_gltf_renderer --scenefile scene.gltf --loadSkyPreset presets/blue_hour.sky.json
 ```
 
-A start-up preset is applied on the first frame, after the saved settings and the scene's own sky,
-so it wins over both; `--saveSkyPreset` then writes the sky that is actually showing.
-
-Loading a preset is **not** undoable -- like every other environment control. The exception is the
-sun: if a light in your scene is marked as the sky's sun, aiming it is a scene edit and Ctrl+Z takes
-it back.
+`--loadSkyPreset` wins over both the saved settings and the scene's own sky; `--saveSkyPreset`
+writes the sky that is showing. Loading a preset can't be undone, except for the sun's move when a
+scene light is the sun.
 
 ### Aerial perspective
 
-The air between the camera and what you are looking at — why distant ridges go pale and blue while
-near ones stay crisp. **Sky → Aerial Perspective** says how many metres of air one scene unit is
-worth; 1.0 is glTF's own answer, since the format specifies metres, and 0 turns it off.
+The haze that makes distant objects pale and blue. **Sky → Aerial Perspective** sets how many metres
+of air one scene unit represents: 1.0 matches glTF's metres, 0 turns it off. Small assets show
+almost nothing, which is expected; raise the value for scenes modeled at a smaller scale, or raise
+**Mie Scattering** for a hazier day.
 
-It is a **distance**, not an opacity. Raising it says the scene is bigger, which keeps the result
-inside the atmosphere model rather than tinting its output. A 10 km terrain authored 100 units
-across wants 100.
+The path tracer shadows the haze (sun shafts, dark interiors); the rasterizer's haze is unshadowed.
 
-Expect nothing on a small asset — and that is correct. Two metres of clear air does nothing, and a
-shader ball has two metres of it. The effect needs a scene with real distance in it.
+### Sky brightness
 
-For a hazier day, raise **Mie Scattering**: that is the aerosol, and it is the knob with no
-geometric side effect. Pushing Aerial Perspective far enough instead will eventually sink the scene
-below the observer altitude in the Planet group, where there is no air left to model.
+The **Sky** type is calibrated to match a typical HDR, so it works at exposure 1.0. The scene
+darkens as the sun sets; that is physically correct.
 
-Both renderers show it. The path tracer's is the reference, and it is **shadowed**: air the scene
-hides from the sun — inside a helmet, a room, a canyon — does not glow with sunlight, and shafts
-form where the sun gets through a gap. Only the sun's own scattering is shadowed; the soft light the
-rest of the sky adds stays. The rasterizer's haze is unshadowed, which is all it can be — it cannot
-ask whether the sun reaches a point in mid-air — so at large scales the two can disagree inside
-enclosed spaces.
+### The sky's sun
 
-**Exposure.** The Sky type is calibrated to sit where a loaded HDR sits, so it is usable at
-exposure 1.0 without reaching for the tonemapper. Only ratios in an atmosphere model are physical;
-the absolute scale is a unit choice, and the one this renderer uses is set by the HDR files people
-load. A low sun is genuinely dimmer than midday, so expect the scene to darken as the sun sets —
-that is the model, not a miscalibration.
+A sky with a sun is lit by a directional light. **Sun Source** (under **Sun & Time of Day →
+Advanced**) picks it: *Renderer* for a built-in sun, or one of the scene's directional lights. The
+Inspector has the same switch on a directional light (**Sky's Sun**), and the Scene Browser shows
+that light with a sun icon. The choice is undoable and saved with the file.
 
-**The sun is a light, and the sky says which one.** The extension describes an atmosphere, not a
-light source, so a sky with a sun needs a directional light next to it — and the renderer marks
-that light rather than guessing at one.
+- Choosing an environment never edits your scene. Saving with **Save with scene** on writes the
+  built-in sun as a light, so the sky stays lit in other viewers.
+- Moving the sun light moves the sky, and the panel's sliders move the light, undoably.
+- The sun has a size: widen **Angular Radius** (**Physical Sky → Sun**) for softer shadows.
+- A gradient sky's sun is scaled to the sky's brightness; **Sun Color** sets its color and strength.
+- Other directional lights stay as authored, with hard shadows. Give one a `radius` in its `extras`
+  for soft ones.
 
-**Sun Source** under **Sun & Time of Day → Advanced** shows which light that is, and lets you
-change it — pick *Renderer* for a sun the sky carries itself, or any of the scene's directional
-lights to make that one the sun. The same switch is on a selected directional light in the
-Inspector, as **Sky's Sun**. Choosing is undoable, and the choice travels with the file. Whichever
-light is the sun draws with a **sun icon** in the Scene Browser instead of the usual lightbulb.
+### Sky in the glTF file
 
-When a scene has exactly one directional light and nothing has said whether it is the sun, the
-Advanced fold offers it — one click adopts it. With several lights it does not guess: pick the one
-you mean.
-
-Until you choose one, the renderer supplies the sun itself, so choosing an environment never edits
-your scene. **Saving with Save with scene on writes it**, because a sky
-saved without a sun renders unlit anywhere else. Save again and the same light is updated, not
-duplicated; save a sky that has no sun and the light goes away with it.
-
-Once the light exists it *is* the sun — moving it in the viewport moves the sky, and the panel's
-angle sliders move it back, undoably. Because it is a real sun it has a diameter, so its shadows
-carry a penumbra: widen **Angular Radius** under **Physical Sky → Sun** and the shadow edges
-soften.
-
-How much that sun actually *lights* depends on the sky. The **Sky** type's is a real sun and
-dominates the scene the way daylight does. A gradient sky's is a drawn disk rather than a
-measurement: its radiance is **Sun Color**, and spread over a half-degree disk that comes to a tiny
-fraction of what the sky itself contributes — visible, but not a light you can work by. Add a
-directional light if a gradient sky needs to cast real sunlight.
-
-A scene's own directional lights are **ordinary lights and are left exactly as authored**. A
-`KHR_lights_punctual` directional light is a delta light by specification — no angular extent, so
-hard-edged shadows — and a scene may contain several; none of that makes one of them the sun. If
-you want a soft-edged directional light of your own, give it a `radius` in its `extras` and the
-renderer will sample it as an area light.
-
-So a scene with a directional light under a sky that has a sun is lit by both: its own light, and
-the sky's.
-
-A scene authoring `physical` opens on the **Sky** type with that atmosphere applied: the
-extension's Rayleigh and Mie coefficients, its Mie anisotropy and its ground colour all take
-effect, and saving writes them back. Everything the extension does not describe — planet radii,
-the ozone layer, the solar spectrum — stays at Earth values.
-
-Sun angular radius and observer altitude are **not** written to the glTF. The extension has no
-field for either, and both are viewer settings rather than descriptions of the scene's atmosphere,
-so they persist in the .ini like blur does.
-
-`panorama` is preserved through a load/save round trip and loads as an HDR environment when it
-names an image.
-
-#### Baking and refresh
-
-Analytic skies are baked into a lat-long image of a fixed size (`kEnvBakeSize` in
-`src/env_baker.hpp`). There is no setting for it, because nothing you would pick it for depends on
-it: the sky is smooth and its sun is sampled as a light rather than looked up in the image, so the
-sampling table is built at a coarser fixed size still, and the path tracer evaluates what the camera
-sees per ray. The size only sets the sharpness of rough reflections, and of the physical sky's
-horizon in the rasterizer.
-
-Moving the sky previews with a cheap color-only re-bake and commits the full rebuild a frame after
-the movement stops -- whether it came from a slider, from the transform gizmo on the sun light, or
-from an animation driving that light. The rasterizer pays more for that preview than the path
-tracer does, because it also has to refresh its prefiltered cubemaps; the path tracer reads the
-lat-long image directly and updates essentially immediately.
+A `physical` sky loads as the **Sky** type with the file's scattering and ground color. What the
+extension cannot describe (planet size, ozone, solar spectrum) is saved in an
+`NV_environment_sky_atmosphere` block, along with the sun's angular radius; a file without one
+leaves those settings as they are. Observer altitude is a viewer setting, kept in the `.ini`. A
+`panorama` round-trips and loads as an HDR environment.
 
 ### Sun & Time of Day
 
-One sun serves every sky that has one, and this tab is where it is aimed. It sits next to the
-look tab (**Physical Sky** or **Gradient Sky**) for the **Sky** and **Gradient** types; the other
-three have no sun to point.
+This tab aims the one sun shared by the **Sky** and **Gradient** types.
 
-Simple first — the widgets are ordered by how often people reach for them.
+- **Time** — drag it and the sun moves to where it really was at that moment, for the place and
+  date under **Advanced → Location & Date**. The ticks under the slider mark solar midnight,
+  sunrise, noon and sunset.
+- **Jump To** — named moments such as sunrise, golden hour and blue hour, solved for your latitude
+  and date. Moments that don't happen that day (sunrise at Tromsø in December) are greyed out.
 
-**Time** is the fastest way to change what the sky looks like: drag it and the sun goes where it
-really was at that moment, for the place and date under **Advanced → Location & Date**. The four
-tick marks under the slider are that day's solar midnight, sunrise, noon and sunset, so a reading
-of 06:00 has something to mean against.
+North comes from the environment's **Rotation**. With no rotation, north is −Z and east is +X in a
+Y-up scene; in a Z-up scene north is −Y.
 
-**Jump To** offers the named moments — sunrise, both golden hours, noon, sunset, blue hour,
-midnight. It *sets* Time, so it sits below the slider it drives rather than above. They are not
-fixed clock times: each is an altitude the sun passes through, solved for your latitude and date,
-which is why they move through the year and why most of them are greyed out inside the polar
-circles. The sun does not rise at Tromsø in December, and the menu says so rather than picking a
-plausible hour.
+**Advanced** holds **Sun Source**, exact **Azimuth** / **Elevation**, **Gizmo on sun light**
+(selects the sun light and shows the transform gizmo; needs a scene light as the sun), and
+**Location & Date**: **Now** fills today's date, time and UTC offset from this machine, then
+**City**, latitude and longitude, date, and **UTC Offset**. Offsets are standard time, with no
+daylight saving, so adjust **UTC Offset** for a summer date.
 
-Which way north points is the environment's **Rotation**, at the top of the panel, rather than a
-row of its own here. Everything in this tab is astronomy and speaks compass bearings; the rotation
-is what ties them to your model's axes, so a building modelled facing any direction can still be lit
-by the real sun — and the sky turns with the compass instead of disagreeing with it.
-
-With no rotation, in a Y-up scene, north is **−Z** — the direction a glTF camera faces:
-
-| Compass | Axis |
-|---|---|
-| North | −Z |
-| East | +X |
-| South | +Z |
-| West | −X |
-
-A Z-up scene rotates the same rule: north −Y, east +X, south +Y, west −X. Turning the environment
-turns the compass around the scene, and the sun is placed again on it.
-
-**Ctrl+Shift+L** in the viewport, held while moving the mouse, swings the sun directly: sideways
-turns it, up and down raises and lowers it. A tooltip reports the angles while you drag, and the
-whole drag is one undo step. (`Ctrl+L` alone is shader hot-reload.)
-
-Under **Advanced** sit the widgets most sessions never touch, in order: **Sun Source** (which light
-is the sun), **Azimuth** and **Elevation** in degrees for typing an exact angle (they are what the
-command line carries and what a marked light stores), a **Gizmo on sun light** button that selects
-the marked light and switches the transform gizmo on so it can be aimed in the viewport (needs a
-marked light — with *Sun Source* on *Renderer* there is no node for a gizmo to hold, and the button
-says so), and a nested **Location & Date** tree. That tree opens with a **Now** button — one click
-fills the date, clock and UTC offset from this machine, the place left alone since it is the one
-thing the computer cannot tell us — then **City**, **Latitude** and **Longitude** in degrees, then
-**Date** as `yyyy-mm-dd`, and a **UTC Offset** in hours (a raw number rather than a named time
-zone, since no zone database ships with the renderer). The panel opens on today and on your own
-offset the first time it runs.
-
-The city list runs north to south — the axis the sun cares about — and is chosen for spread rather
-than for size: two inside the Arctic Circle, three near the equator, five in the southern
-hemisphere, one on a half-hour offset. Picking one sets all three values. The name shown is
-derived from the coordinates rather than remembered, so nudging either slider drops it to
-*Custom*, and a scene already set at Tokyo's latitude reads as Tokyo.
-
-**The offsets are standard time.** There is no daylight-saving rule, so a summer date at most of
-these is an hour off until you nudge **UTC Offset** — a smaller lie than shipping a zone table
-that goes stale. `--todCity` takes the name from the command line and forgives case and spacing:
-`--todCity "new york"` and `--todCity NewYork` are the same place.
-
-None of this is written to the glTF. `OMI_environment_sky` describes an atmosphere, not a moment,
-and has no field for a place or a date; what travels with a saved scene is the sun light's
-rotation, which captures the same thing. Location, date and time persist in the `.ini` so the
-widget reopens where you left it, and every one of them is also a command-line flag — see
-[benchmarking.md](benchmarking.md) for scripting a run:
+Location, date and time are saved in the `.ini`, not in the glTF, which keeps the sun light's
+direction instead. They are also command-line flags:
 
 ```bash
 vk_gltf_renderer --envSystem 0 --todCity Tokyo --todDate 2026-06-21 --todHour 16.5
-
-# or spell the place out, which is what --todCity fills in
-vk_gltf_renderer --envSystem 0 --todLatitude 47.37 --todLongitude 8.54 \
-  --todDate 2026-06-21 --todUtcOffset 2 --todHour 19.5
 ```
 
 ![](images/sky_1.jpg) ![](images/sky_2.jpg) ![](images/sky_3.jpg)
@@ -607,6 +424,7 @@ The undo history uses a linear model: performing a new action after an undo disc
 ### Transform Editing
 
 - **Inspector panel**: Edit Translation, Rotation, and Scale (TRS) numerically with precision.
+- **Dimensions (m)**: Below Scale, the Inspector shows the size of the node and all its children along the node's axes, in scene units (glTF: meters). Type a size to rescale the node — with **Keep Proportions** checked (default) all three axes scale together; uncheck it to stretch one axis. Sizes come from the bind pose (skinning and morph targets are not evaluated). A mesh's own mesh-space size is shown in the mesh Inspector, with its min/max in the tooltip.
 - **Transform Gizmo**: Enable via toolbar or **View → Gizmo** (`T`) for interactive translate/rotate/scale directly in the viewport.
 - **Scene Transform**: A popup on the scene root applies a global transform to all root nodes — useful for reorienting imported assets (e.g., Z-up to Y-up).
 
@@ -715,6 +533,7 @@ Multiple glTF files can be combined into a single scene:
 - **File > Import/Merge Scene...** opens a file dialog to select a `.gltf` or `.glb` file (embeds it into the current scene, or opens it as a new scene if none is loaded)
 - **Shift + Drag & Drop** a file onto the viewport to merge instead of replace
 - Merged content is wrapped under a new root node, preserving both scenes' hierarchies
+- To bring a merged scene to the same scale, select its new root node and type the real-world size of the object into **Dimensions (m)** (e.g. a helicopter that measures 60 units, typed as 15, gets a scale of 0.25)
 - Texture count is validated against the GPU descriptor limit before merging
 
 To keep external files as **references** (glTF 2.1 external assets) instead of embedding them,
@@ -744,35 +563,34 @@ Both flags cascade to the whole subtree (a `false` on an ancestor disables its d
 
 ### Interactivity
 
-Assets that carry a `KHR_interactivity` behavior graph run it automatically once the scene loads (lifecycle events, flow control, variables, math, `pointer/get`/`set` scene writes, and hover/select events — see [docs/interactivity.md](interactivity.md) for exact coverage). A small Play/Pause indicator appears in the viewport toolbar whenever the loaded scene actually has a graph — it's your at-a-glance sign that "this scene is interactive," and clicking it toggles the graph directly, no window required.
+Scenes with a `KHR_interactivity` behavior graph run it automatically on load; see
+[docs/interactivity.md](interactivity.md) for which nodes are supported. A Play/Pause button appears
+in the viewport toolbar whenever the scene has a graph.
 
-For live stats, variables, and a debug/log surface, open **View → Windows → Interactivity** (or press **F8**). This window is closed by default — most viewing doesn't need it — and gives you direct control over the graph:
+**View → Windows → Interactivity** (**F8**) has the controls: Play/Pause, **Reset** (restart with
+fresh state), live stats, the current variable values, **Send Event** to fire a custom event, and
+the graph's `debug/log` output.
 
-- **Play / Pause** — stop or resume ticking the graph.
-- **Reset** — discard all runtime state (variables, timers, pending delays) and restart it from scratch on the next tick.
-- **Live stats** — node/variable/event counts, started/ticked state, and elapsed time.
-- **Variables** — the current value of every graph variable, by index (the spec doesn't name them).
-- **Send Event** — pick one of the graph's declared custom events and fire it manually, the same delivery path `event/send` nodes use internally.
-- **Log** — the running history of `debug/log` output from the graph, useful for debugging authored content without a console.
+A scene with a graph doesn't autoplay its animations, since the graph controls them, but you can
+still scrub. While the graph plays, every viewport click re-selects and fires `event/onSelect`, so
+buttons and levers respond to each click; pause the graph for normal click behavior.
 
-Node support, including `animation/start`/`stop`/`stopAt` clip playback, is broad but not exhaustive; there is no visual node/wire graph debugger — see [docs/interactivity.md](interactivity.md) for the current coverage table. Loading a scene with a behavior graph disables the Animation Strip's autoplay by default (per spec, the graph is assumed to control all animations), though you can still scrub manually.
-
-
-While the graph is playing, clicking a node in the viewport always re-selects it and re-fires `event/onSelect`, even if it was already selected — unlike normal editing, where clicking the selected node again deselects it. This makes click-driven behavior (a lever, a button) respond to every click instead of every other one. Clicks also register instantly while playing, skipping the brief single/double-click debounce normal editing uses to distinguish a click from a double-click-to-recenter-camera. Pause the graph to get ordinary click-to-deselect/double-click-recenter editing back.
-
-Don't have a `KHR_interactivity` scene handy? [glTF-Test-Assets-Interactivity](https://github.com/KhronosGroup/glTF-Test-Assets-Interactivity) has the official Khronos conformance and showcase scenes, and the [Needle glTF Interactivity Editor](https://gltf-interactivity.needle.tools/) is a browser-based visual editor for authoring your own behavior graph and exporting it as glTF — see [docs/resources.md](resources.md) for both.
+Test scenes: [glTF-Test-Assets-Interactivity](https://github.com/KhronosGroup/glTF-Test-Assets-Interactivity)
+has the Khronos samples, and the [Needle glTF Interactivity Editor](https://gltf-interactivity.needle.tools/)
+authors new ones; see [docs/resources.md](resources.md).
 
 ---
 
 ## Animation
 
-If the loaded scene contains animations, an **Animation** control panel appears:
+If the loaded scene contains animations, an animation strip appears along the bottom of the viewport:
 
 ![](images/animation_controls.png)
 
-- **Play / Pause** the active animation
+- **Play / Pause** the active animation (`Space`)
 - **Step** forward one frame at a time
 - **Reset** to the beginning
+- Pick the **animation clip** when the scene has more than one
 - Adjust **playback speed** (0 to 100x, default 1x)
 - **Timeline scrubbing** — drag the slider to any time position
 
@@ -780,13 +598,13 @@ Supported animation types: keyframe translation/rotation/scale, skeletal skinnin
 
 ## Multiple Scenes
 
-If the glTF file contains multiple scenes, a scene selector appears. Click a scene name to switch.
+If the glTF file contains multiple scenes, a **Multiple Scenes** section appears at the bottom of the **Settings** panel. Pick a scene to switch.
 
 ![](images/multiple_scenes.png)
 
 ## Material Variants
 
-If the scene uses `KHR_materials_variants`, a variant selector shows all variant names. Click to apply a variant to all meshes that support it.
+If the scene uses `KHR_materials_variants`, a **Material Variants** section at the top of the **Scene Browser** lists every variant name. Click one to apply it to all meshes that support it.
 
 ![](images/material_variant.png)
 
@@ -875,6 +693,20 @@ Both are also available from **File > Save Image** and **File > Save Screen Imag
 
 Open via **Windows > Memory Usage**. Displays GPU memory allocation broken down by category (textures, buffers, acceleration structures, etc.). Useful for tracking memory consumption on large scenes.
 
+### Presentation Mode
+
+Press **F11** (or **View > Presentation Mode**) to show the viewport alone: every panel, the menu bar
+and the toolbar are hidden, and the window becomes borderless and covers the whole monitor it is on.
+It is a borderless window rather than exclusive full screen, so **Alt-Tab** to another application
+(e.g. slides on a second screen) and back is instant. Camera navigation works as usual, and
+**Home** flies back to the home camera (this works in the viewport outside presentation mode too).
+
+Press **F11** or **Esc** to leave: the panels, the menu bar, and the window's position, size and
+maximized state come back exactly as they were. The hidden layout is never written to the `.ini`,
+and closing the application while presenting restores the layout first, so the next launch is
+unaffected. It can also be turned on from the command line (`--presentationMode 1`), a benchmark
+script, or MCP (`presentationMode`); it is ignored in headless runs.
+
 ### Resetting the UI and Settings
 
 Two entries at the bottom of the **Windows** menu put the application back to a known state without
@@ -912,175 +744,32 @@ next launch.
 
 ### Command-Line Reference
 
-All settings can be overridden from the command line using `--paramName value` syntax.
-
-> The tables below cover the commonly used flags. The **authoritative, complete** set is
-> registered in code via `nvutils::ParameterRegistry` — see the `registerParameters()` /
-> `parameterRegistry.add(...)` calls in `src/main.cpp`, `src/renderer.cpp`,
-> `src/renderer_pathtracer.cpp`, `src/renderer_rasterizer.cpp`, and `src/benchmarking.cpp`.
-> Names and value ranges there take precedence over this list.
-
-**General**
-
-| Parameter | Description |
-|---|---|
-| `--scenefile <path>` | Input scene file (.gltf, .glb) |
-| `--hdrfile <path>` | Input HDR environment file (.hdr) |
-| `--agenticBridgeInit` | Create the optional external generation bridge manifest/directories and exit |
-| `--agenticBridgeRoot <path>` | Bridge folder for the optional generation bridge, used by `--agenticBridgeInit` and at runtime (default: `agentic_bridge` next to the executable) |
-| `--size <W> <H>` | Window size |
-| `--headless` | Run without UI (batch mode) |
-| `--frames <N>` | Number of frames to render in headless mode |
-| `--output <path>` | Output image file path for headless mode (default: `<exe_name>.jpg` next to executable) |
-| `--vsync` | Enable vertical sync |
-| `--vvl` | Activate Vulkan Validation Layers |
-| `--logLevel <N>` | Log level (nvutils values): Stats (1), Info (3), Warning (4), Error (5) |
-| `--logShow <N>` | Extra log info (bitset): None (0), Time (1), Level (2) |
-| `--device <index>` | Force a specific Vulkan GPU by device index |
-| `--vsyncOffMode <0-3>` | VSync-off present mode: Immediate (0), Mailbox (1), FIFO (2), FIFO Relaxed (3) |
-| `--floatingWindows` | Allow dock windows to be separate OS windows |
-| `--mcp` | Serve the shader-timing tools over MCP on `http://127.0.0.1:7671/mcp` (see [MCP shader timing](mcp.md)) |
-| `--mcpPort <N>` | Port for the `--mcp` endpoint |
-
-The bridge is also driven from the **Agentic** window (press F7, or open it from the Windows menu). From there, queue an HDRI prompt job or export the current render for image-to-image enhancement through an external adapter such as ComfyUI. See [ComfyUI Agentic Setup](comfyui-agentic-setup.md).
-
-**Display**
-
-| Parameter | Description |
-|---|---|
-| `--uiShowAxis` | Show the 3D axis widget in the viewport |
-| `--uiShowMemStats` | Open the Memory Statistics window on launch |
-| `--silhouetteColor <R> <G> <B>` | Selection silhouette color (0.0-1.0) |
-
-**Rendering**
-
-| Parameter | Description |
-|---|---|
-| `--renderSystem <0-1>` | Path tracer (0) or Rasterizer (1) |
-| `--envSystem <0-2>` | Sky (0), HDR (1), None (2) |
-| `--ptMaxFrames <N>` | Maximum path tracer iterations |
-| `--dbgVisualization <N>` | Visualization mode (0 = Rendered). Values map to `shaderio::Visualization` in `shaders/shaderio.h` — see that enum for the current list. |
-| `--useSolidBackground` | Use solid background color |
-| `--solidBackgroundColor <R> <G> <B>` | Solid background color (0.0-1.0) |
-
-**Path Tracer**
-
-| Parameter | Description |
-|---|---|
-| `--ptTechnique <0-1>` | Ray Query (0) or Ray Tracing pipeline (1) |
-| `--ptMaxDepth <N>` | Maximum ray bounce depth |
-| `--ptSamples <N>` | Samples per pixel per frame |
-| `--ptFireflyClamp <val>` | Firefly clamp threshold |
-| `--ptTexGradScale <val>` | Texture LOD ray-footprint scale (0-1) |
-| `--ptShadowTransmission <0\|1>` | Shadow rays pass through transmissive surfaces (biased approximation) |
-| `--ptAperture <val>` | Depth-of-field aperture |
-| `--ptFocalDistance <val>` | Focal distance |
-| `--ptAutoFocus <0\|1>` | Enable auto-focus |
-| `--ptAdaptiveSampling <0\|1>` | Enable adaptive SPP to meet FPS target |
-| `--ptPerformanceTarget <0-3>` | Interactive (0), Balanced (1), Quality (2), Max Quality (3) |
-
-**Rasterizer**
-
-| Parameter | Description |
-|---|---|
-| `--dbgWireframe` | Enable the wireframe overlay (global setting; both renderers honor it) |
-| `--rasterUseRecordedCmd` | Use recorded (secondary) command buffers |
-
-**Denoisers**
-
-| Parameter | Description |
-|---|---|
-| `--dlssEnable` | Enable DLSS Ray Reconstruction |
-| `--optixEnable` | Enable OptiX AI Denoiser |
-| `--optixAutoDenoiseEnabled` | Auto-denoise every N frames |
-| `--optixAutoDenoiseInterval <N>` | Auto-denoise interval (frames) |
-
-**Tone Mapping**
-
-| Parameter | Description |
-|---|---|
-| `--tmMethod <0-5>` | Filmic (0), Uncharted (1), Clip (2), ACES (3), AgX (4), Khronos PBR (5) |
-| `--tmActive <0-1>` | Enable tone mapping |
-| `--tmExposure <0.01-200>` | Exposure multiplier |
-| `--tmContrast <0-2>` | Contrast |
-| `--tmBrightness <0-2>` | Brightness (was `--tmGamma`) |
-| `--tmSaturation <0-2>` | Saturation |
-| `--tmVignette <-1..1>` | Vignette (was `--tmWhitePoint`) |
-| `--tmDither <0-1>` | Dither |
-| `--tmTemperature <2000-15000>` | White balance temperature, Kelvin |
-| `--tmTint <-0.03..0.03>` | White balance tint (Duv) |
-| `--tmVibrance <-1..1>` | Boosts muted colors only |
-| `--tmShadowBias <-1..1>`, `--tmMidtoneBias`, `--tmHighlightBias` | Tonal range bias |
-| `--tmCoolColor <R> <G> <B>`, `--tmWarmColor <R> <G> <B>` | Split-toning tints |
-| `--tmSplitBalance <-0.5..0.5>` | Split-toning balance |
-| `--tmAutoExposure <0-1>` | Auto-exposure (turn **off** for reproducible captures) |
-| `--tmAutoExposureSpeed <0-100>` | Adaptation speed |
-| `--tmEvMin <-24..24>`, `--tmEvMax <-24..24>` | Auto-exposure clamp, EV100 |
-
-**Environment**
-
-| Parameter | Description |
-|---|---|
-| `--envSystem <n>` | Which environment source; the values are `shaderio::EnvSystem` and the flag's own `--help` text lists them |
-| `--hdrfile <path>` | HDR to load; loads immediately when set at runtime |
-| `--hdrIntensity <0-100>` | HDR environment intensity |
-| `--envRotation <x> <y> <z> <w>` | Environment orientation as a unit quaternion, glTF order — `OMI_environment_sky`'s `rotation`. Turns the HDR, every sky, and the Time of Day compass |
-| `--hdrBlur <0-1>` | HDR environment blur |
-
-**The sun** (shared by every sky type that has one)
-
-| Parameter | Description |
-|---|---|
-| `--sunAzimuth <-180..180>` | Sun azimuth, degrees |
-| `--sunElevation <-90..90>` | Sun elevation, degrees — the "time of day" control |
-
-**Physical sky atmosphere** — `--atmo*`; run `--help` for the current list and ranges. Everything
-else about the atmosphere stays at Earth values for now.
-
-**Physical sky** (the **Sky** environment type) is the `atmo*` group — one flag per row of the
-**Physical Sky** tab, e.g. `--atmoPreset`, `--atmoMieScattering <R> <G> <B>` — described in
-[Editing the atmosphere](#editing-the-atmosphere) above.
-
-The authored skies add a `plain*`, `gradient*` and `env*` group of their own (colors, curves, bake
-resolution, save-with-scene). Rather than repeat them here, run `--help`: every setting is declared
-once and the command line is generated from those declarations, so `--help` cannot drift.
-
-**Headless / Batch Rendering Example:**
+Every setting can be set from the command line as `--name value`. For the full list, with types and
+ranges, run:
 
 ```bash
-./vk_gltf_renderer --headless --scenefile shader_ball.gltf --hdrfile daytime.hdr --envSystem 1 --frames 1000 --output render.jpg
+vk_gltf_renderer --help
 ```
 
-**Benchmarking (scripted regression)**
+The list is generated from the settings themselves, so it is always current. The same names work in
+`--configfile` files and benchmark scripts.
 
-| Parameter | Description |
-|---|---|
-| `--benchmark` | Enable scripted benchmark mode (requires `--sequencefile` or `--sequencestring`) |
-| `--sequencefile <path>` | Benchmark script (`.cfg`) with `SEQUENCE` blocks |
-| `--sequenceframes <N>` | Frames per sequence (script override) |
-| `--sequenceaverages <N>` | Profiler averaging window |
-| `--sequenceresetframes <N>` | Warmup frames after each sequence |
-| `--gltfCamera <index>` | Apply glTF camera (benchmark script) |
-| `--fitScene` | Fit camera to scene bounds (benchmark script) |
-| `--resetFrame` / `--updateData` | Reset path-tracer accumulation |
-| `--screenshot <path>` | Save tonemapped image (benchmark script) |
-
-Single-scene manual run:
+Headless render:
 
 ```bash
-./vk_gltf_renderer --benchmark 1 --size 1920 1080 \
-  --sequencefile utils/benchmark/quick.cfg \
+vk_gltf_renderer --headless --scenefile shader_ball.gltf --hdrfile daytime.hdr --envSystem 1 --frames 1000 --output render.jpg
+```
+
+Scripted benchmark:
+
+```bash
+vk_gltf_renderer --benchmark 1 --size 1920 1080 --sequencefile utils/benchmark/quick.cfg \
   --scenefile shader_ball.gltf --hdrfile std_env.hdr
 ```
 
-Batch runs, CSV export, and baseline vs candidate comparison:
-
-```bash
-python utils/benchmark/benchmark.py headless --scene resources/shader_ball.gltf --frames 500
-python utils/benchmark/benchmark.py run quick.cfg --scene resources/shader_ball.gltf --hdr std_env.hdr
-```
-
-See [Benchmarking](benchmarking.md) for headless A/B timing, script format, and interpretation of results.
+See [Benchmarking](benchmarking.md) for headless A/B timing and the script format. The optional
+image-generation bridge (`--agenticBridgeRoot`, `--agenticBridgeInit`, and the **Agentic** window
+on F7) is covered in [ComfyUI Agentic Setup](comfyui-agentic-setup.md).
 
 ---
 

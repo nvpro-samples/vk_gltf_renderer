@@ -57,6 +57,8 @@ set(TEST_SOURCES
     test_interactivity_hover_select.cpp
     # AnimationPointerSystem: partial texture-extension writes preserve sibling fields
     test_animation_pointer.cpp
+    # Image decoding (WebP path of the shared loader)
+    test_image_loader.cpp
     # Phase 1 (env pipeline): CPU-only unit test for nvvk::buildEnvAliasmap (Vose)
     test_alias_table.cpp
     # OMI_environment_sky serializer: round-trip incl. unmodelled-key passthrough
@@ -134,6 +136,7 @@ target_link_libraries(${TEST_NAME} PRIVATE
     fmt
     glm
     nvimageformats
+    webp
     tinyobjloader
     meshoptimizer
 )
@@ -226,6 +229,7 @@ target_link_libraries(${BENCHMARK_NAME} PRIVATE
     fmt
     glm
     nvimageformats
+    webp
     tinyobjloader
     meshoptimizer
 )

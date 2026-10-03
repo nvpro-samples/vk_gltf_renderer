@@ -36,6 +36,7 @@
 #include "ui_gltf_labels.hpp"
 
 #include <algorithm>
+#include <cmath>
 #include <cstdio>
 
 #include <imgui.h>
@@ -1311,14 +1312,29 @@ void UiInspector::renderMeshProperties(int meshIdx)
   ui_xmp::renderInfoButton(&m_scene->getModel(), mesh.extensions, popupId.c_str());
   ImGui::Separator();
 
-  // Totals across primitives.
-  long long totalVerts = 0, totalTris = 0;
+  // Totals and mesh-space bounds across primitives.
+  long long     totalVerts = 0, totalTris = 0;
+  nvutils::Bbox meshBounds;
   for(const tinygltf::Primitive& p : mesh.primitives)
   {
     totalVerts += primitiveVertexCount(model, p);
     totalTris += primitiveTriangleCount(model, p);
+    glm::vec3 bmin, bmax;
+    if(tinygltf::utils::getPrimitivePositionBounds(model, p, bmin, bmax))
+      meshBounds.insert(nvutils::Bbox(bmin, bmax));
   }
   ImGui::Text("Primitives: %zu    Vertices: %lld    Triangles: %lld", mesh.primitives.size(), totalVerts, totalTris);
+  if(!meshBounds.isEmpty())
+  {
+    const glm::vec3 size = meshBounds.extents();
+    const glm::vec3 bmin = meshBounds.min();
+    const glm::vec3 bmax = meshBounds.max();
+    ImGui::Text("Size: %.3f x %.3f x %.3f", size.x, size.y, size.z);
+    ImGui::SetItemTooltip(
+        "Mesh-space bounds (POSITION min/max), before any node transform\n"
+        "min (%.3f, %.3f, %.3f)\nmax (%.3f, %.3f, %.3f)",
+        bmin.x, bmin.y, bmin.z, bmax.x, bmax.y, bmax.z);
+  }
 
   ImGui::Separator();
 
@@ -1861,6 +1877,37 @@ void UiInspector::renderTransformSection(int nodeIdx)
     modif |= PE::DragFloat3("Translation", glm::value_ptr(translation), 0.01f * m_bbox.radius());
     modif |= PE::DragFloat3("Rotation", glm::value_ptr(m_cachedEuler.euler), 0.1f);
     modif |= PE::DragFloat3("Scale", glm::value_ptr(scale), 0.01f);
+
+    // Size of the node's geometry subtree along its own axes. Editing a dimension rewrites Scale
+    // (all axes under Keep Proportions), so it shares the undo cycle below.
+    nvutils::Bbox localBounds = m_scene->computeNodeSubtreeBounds(nodeIdx);
+    if(!localBounds.isEmpty())
+    {
+      const glm::vec3 extent      = localBounds.extents();
+      glm::vec3       dims        = extent * glm::abs(scale);
+      const glm::vec3 preEditDims = dims;
+      const float     speed       = std::max(0.005f * std::max({dims.x, dims.y, dims.z}), 0.001f);
+      const bool dimsChanged = PE::DragFloat3("Dimensions (m)", glm::value_ptr(dims), speed, 0.0f, FLT_MAX, "%.3f", 0,
+                                              "Size of this node and its children along the node's axes, in scene "
+                                              "units (glTF: meters).\nBind pose; skinning and morph targets are not evaluated.");
+      PE::Checkbox("Keep Proportions", &m_uniformDimensions,
+                   "Editing one dimension scales all three axes; uncheck to stretch a single axis");
+
+      for(int i = 0; dimsChanged && i < 3; ++i)
+      {
+        // A flat axis (zero extent) or zero scale has no ratio to scale by; ignore edits on it.
+        if(dims[i] == preEditDims[i] || dims[i] <= 0.0f || extent[i] <= 0.0f)
+          continue;
+        if(m_uniformDimensions && preEditDims[i] > 0.0f)
+          scale *= dims[i] / preEditDims[i];
+        else if(!m_uniformDimensions)
+          scale[i] = std::copysign(dims[i] / extent[i], scale[i]);
+        else
+          continue;
+        modif = true;
+        break;
+      }
+    }
 
     // Undo tracking: detect the start and end of a DragFloat3 edit cycle.
     // On the first frame where modif becomes true, snapshot the pre-edit TRS.

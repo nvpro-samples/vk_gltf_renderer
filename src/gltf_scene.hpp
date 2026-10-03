@@ -522,6 +522,10 @@ public:
   [[nodiscard]] uint64_t getNumTriangles() const { return m_numTriangles; }
   // Returns cached bounds; lazily computes on first call (mutable cache, logically const).
   [[nodiscard]] nvutils::Bbox getSceneBounds() const;
+  // AABB of a node's mesh and all its descendants' meshes, expressed in the node's own frame *before*
+  // its TRS: multiply the extents by the node's scale for its displayed size. Uses accessor min/max
+  // (bind pose; skinning and morph targets are not evaluated). Empty if the subtree has no geometry.
+  [[nodiscard]] nvutils::Bbox computeNodeSubtreeBounds(int nodeID) const;
 
   //--------------------------------------------------------------------------------------------------
   // Resource Management

@@ -141,9 +141,16 @@ HitState getHitState(GltfRenderPrimitive renderPrim,  //
     tng[1]   = t;
     tng[2]   = t;
   }
-  hit.tangent   = normalize(mixBary(tng[0].xyz, tng[1].xyz, tng[2].xyz, barycentrics));
-  hit.tangent   = mul(float4(hit.tangent, 0.0), objectToWorld).xyz;
-  hit.tangent   = normalize(hit.tangent - hit.nrm * dot(hit.nrm, hit.tangent));
+  float3 tangent = mixBary(tng[0].xyz, tng[1].xyz, tng[2].xyz, barycentrics);
+  tangent        = mul(float4(tangent, 0.0), objectToWorld).xyz;
+  // A zero tangent, or one parallel to the normal (some exporters write these for faces whose UVs are
+  // constant, e.g. palette textures), leaves nothing after removing the normal component: normalizing
+  // it would give NaN shading. Fall back to an arbitrary tangent perpendicular to the normal.
+  // The test is relative to the transformed tangent's own length, so a node's scale cannot trip it.
+  const float3 tangentOrtho = tangent - hit.nrm * dot(hit.nrm, tangent);
+  const float  orthoLength2 = dot(tangentOrtho, tangentOrtho);
+  hit.tangent =
+      orthoLength2 > 1e-6 * dot(tangent, tangent) ? tangentOrtho * rsqrt(orthoLength2) : makeFastTangent(hit.nrm).xyz;
   hit.bitangent = cross(hit.nrm, hit.tangent) * tng[0].w;
 
   // Flip geometric normal toward the ray origin for back-face hits (front-face already

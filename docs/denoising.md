@@ -31,7 +31,7 @@ the enum for the authoritative list and formats):
 | Guide (`OutputImage`) | Role | NGX input |
 |---|---|---|
 | `eResultImage` | Noisy 1-spp path-traced radiance (the image being denoised/upscaled) | `pInColor` |
-| `eDlssAlbedo` | Diffuse albedo (base color; clear-glass refinement applied) | `pInDiffuseAlbedo` |
+| `eDlssAlbedo` | Diffuse albedo (base color; see [clear glass](#clear-glass-primary-surface-replacement)) | `pInDiffuseAlbedo` |
 | `eDlssSpecAlbedo` | Specular albedo (`EnvBRDFApprox2` in `shaders/dlss_util.h`) | `pInSpecularAlbedo` |
 | `eDlssNormalRoughness` | World-space normal + roughness, packed | `pInNormals` (and `pInRoughness` in packed mode) |
 | `eDlssMotion` | Pixel-space motion vectors (see below) | `pInMotionVectors` |
@@ -71,6 +71,53 @@ result is ghosting/smearing on animated (skinned/morphed) meshes under motion â€
 a camera dolly, where the whole surface also moves in screen space. The rasterizer shares this
 limitation (see the note in `shaders/gltf_raster.slang`). Closing the gap requires a previous-frame
 position buffer per deforming primitive, reprojected the same way as instance motion.
+
+## Clear glass: primary surface replacement
+
+A camera ray that lands on clear glass sees *through* it, but by default every guide describes
+the glass itself: a flat normal, near-white albedo, and the glass's own depth and motion. When the
+camera moves, DLSS-RR reprojects the content behind the glass using the glass's motion vectors
+and has no guide edges to hold it, so that content smears and ghosts. The more glass layers
+there are (a box has two faces, nested boxes four), the worse it gets.
+
+The RR **Transparency** setting (`Dlss::TransparencyMode`, `--dlssTransparency`, the
+`USE_DLSS_TRANSP` specialization constant) selects **Improved** to fix this with primary surface
+replacement (PSR). `dlssTraceClearGlass` (`shaders/pathtrace_functions.h.slang`) follows the specular
+transmission direction through every clear-glass layer (`dlssIsClearGlass`). It goes straight
+through thin-walled glass, as the BSDF does, and refracts through glass with a volume. It stops at the
+first surface that is not clear glass, which then provides the albedo (mixed with the glass's Fresnel share),
+normal, and roughness guides. The DLSS depth and motion vectors use a virtual point along the
+camera ray at the full chain length, moved by that surface's instance motion, so they follow
+the content rather than the glass. The main depth buffer (`outDepth`, used for picking and
+overlays) still holds the glass.
+
+The chain is deterministic, unlike the path. Stochastic alpha in the guides makes them flicker
+frame to frame, which RR turns into speckle. Instead, `dlssTraceSkipThinGlass` resolves alpha with a
+fixed threshold: cut-out texels are skipped, and an alpha-blend texel counts as a surface from half
+opacity.
+
+Cost: each traversal rejects thin clear glass inside the ray query itself, using only the material
+factors (`dlssClearGlassFromFactors`), so a stack of glass panes costs one ray. Another traversal
+starts only at refracting glass, or at glass whose clarity depends on a texture. The surface found
+is shaded once. The extra work is paid only by pixels whose primary hit is clear glass. Measure it
+with the path-trace GPU timer (see [benchmarking.md](benchmarking.md)); the cost grows with
+glass screen coverage.
+
+The guides must agree with the noisy color. The path spends one bounce per glass surface, so
+when the chain crosses as many glass surfaces as `--ptMaxDepth` allows, the path never reached the
+surface behind and the pixel is dark. That pixel keeps the glass's own guides; otherwise RR gets a
+bright albedo against a black color and tints the result.
+
+What PSR does not capture: the glass's own reflections and refraction edges are lighting with no
+guide edge, so they stay softer than the reference. Rough, tinted, or partly opaque glass is left
+alone, because there the glass surface is what the camera sees.
+
+**Color-before-transparency guide.** NGX also accepts `pInColorBeforeTransparency` (a noisy color
+snapshot before transparencies are composited), meant for raster pipelines with ghosting
+particles. We prototyped it here by retracing pixels whose primary hit was transparent, with those
+surfaces skipped. On top of PSR it added rays and a full-resolution RGBA32F buffer and slightly
+increased the error, so it is not wired. A path tracer has no "before transparency" image to
+snapshot.
 
 ## Sky / background
 

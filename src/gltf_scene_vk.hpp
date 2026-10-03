@@ -205,7 +205,6 @@ public:
   // This must fill SceneImage::{size, format, mipData}, optionally fill
   // `SceneImage::componentMapping`, and return whether the image was
   // successfully loaded. The rest can be left unchanged.
-  // For an example, see `webPLoadCallback()` in vk_gltf_renderer.
   using ImageLoadCallback = std::function<bool(SceneImage& outImage, const void* data, size_t byteLength)>;
   void setImageLoadCallback(ImageLoadCallback callback) { m_imageLoadCallback = callback; }
 

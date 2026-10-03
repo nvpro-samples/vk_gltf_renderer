@@ -107,12 +107,13 @@ public:
   bool m_useSER{true};              // Requested SER state; clamped to m_supportSER each frame.
   bool m_shadowTransmission{true};  // Shadow rays pass through transmissive surfaces (biased; see ePtShadowTransmission).
   bool m_pipelineUseSER{false};     // SER value the currently-live pipelines were built with.
-  bool m_compiledWireframe{false};  // True when the shader is the wireframe build.
+  int  m_pipelineDlssTransparency{0};  // USE_DLSS_TRANSP value the currently-live pipelines were built with.
+  bool m_compiledWireframe{false};     // True when the shader is the wireframe build.
   bool m_compiledVisualize{false};  // True when the shader has the debug-visualization code compiled in (USE_VISUALIZE).
   bool m_compiledOptimal{false};    // True when the shader is the scene-aware optimized build.
   bool m_compiledDlss{false};       // True when the current shader was compiled with DLSS active (USE_DLSS_SHADER).
   bool m_compiledDlssGuide{false};  // True when the current shader has the guide-buffer variant compiled in (USE_GUIDE_SHADER).
-  bool m_compiledDlssTransparency{false};  // True when the live pipeline was specialized with USE_DLSS_TRANSP=1.
+  int m_compiledDlssTransparency{0};  // USE_DLSS_TRANSP the live pipeline was specialized with (Dlss::TransparencyMode).
   nvvkgltf::SceneFeatureSet m_compiledFeatures{};  // The feature set the current shader was compiled against.
 
   // Variant pipeline cache: avoids slow pipeline (re)compilation by reusing previously built
@@ -125,7 +126,7 @@ public:
     bool dlss      = false;  // True when DLSS is active (drives USE_DLSS_SHADER: sample-loop gate).
     bool dlssGuide = false;  // True when guide-buffer capture is compiled in (USE_GUIDE_SHADER: DLSS or OptiX).
     nvvkgltf::SceneFeatureSet features{};  // only meaningful when `optimal == true`
-    bool dlssTransparency = false;         // True when the pipeline was specialized with USE_DLSS_TRANSP=1.
+    int dlssTransparency = 0;  // USE_DLSS_TRANSP the pipeline was specialized with (Dlss::TransparencyMode).
 
     bool operator==(const VariantKey& o) const
     {
@@ -240,9 +241,10 @@ private:
     bool                      dlss      = false;
     bool                      dlssGuide = false;
     nvvkgltf::SceneFeatureSet features{};
-    bool                      pipelineUseSER = false;
-    VkPipeline                rqPipeline     = VK_NULL_HANDLE;
-    VkPipeline                rtxPipeline    = VK_NULL_HANDLE;
+    bool                      pipelineUseSER           = false;
+    VkPipeline                rqPipeline               = VK_NULL_HANDLE;
+    VkPipeline                rtxPipeline              = VK_NULL_HANDLE;
+    int                       pipelineDlssTransparency = 0;
   };
 
   void                 ensureShadersAndPipelines(Resources& resources);
@@ -261,6 +263,5 @@ private:
   void upscaleSelectionAndDepth(VkCommandBuffer cmd, Resources& resources);
   // Destroy the pipelines for both Ray Query and Ray Tracing
   void destroyPipelinesLocked();
-  void destroyPipelines();
   bool m_skipVariantCache{false};  // Set during reloadShader(); bypasses swapVariant lookup.
 };

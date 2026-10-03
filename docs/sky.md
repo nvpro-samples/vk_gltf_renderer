@@ -203,9 +203,9 @@ authored.
 
 ### Where it points
 
-Four things aim the sun — the panel's azimuth/elevation sliders, the transform gizmo on a marked
-light, the viewport's **Ctrl+Shift+L** drag, and the **Time of Day** widget — and all of them go
-through `SkySun::aim`, which answers what each would otherwise answer for itself: whether a marked
+The panel's azimuth/elevation sliders, the **Time of Day** widget and a preset load all go through
+`SkySun::aim`; the transform gizmo on a marked light edits the light directly, and the sky follows
+it. `SkySun::aim` answers what each would otherwise answer for itself: whether a marked
 light owns the direction (then it is an undoable scene edit) or the renderer does, whether the
 reported angles still match, and whether the image needs re-baking. Only the physical sky's bake
 depends on the sun.

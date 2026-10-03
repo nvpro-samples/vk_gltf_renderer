@@ -67,6 +67,7 @@
 #include "ui_busy_window.hpp"
 #include "ui_scene_browser.hpp"
 #include "ui_inspector.hpp"
+#include "ui_presentation_mode.hpp"
 #include "ui_thumbnail_cache.hpp"
 #include "ui_toast.hpp"
 #include "scene_selection.hpp"
@@ -134,6 +135,16 @@ public:
 #endif
   /// Ensures path-tracer accumulation covers the full headless run (--maxFrames >= --frames).
   void alignMaxFramesForHeadless(uint32_t headlessFrames);
+  // Headless runs render still images: unless --animPlay was given, animations don't play, since
+  // advancing them resets the path tracer's accumulation every frame.
+  void applyHeadlessDefaults();
+
+  /// Presentation mode (F11, View > Presentation Mode, --presentationMode): see ui_presentation_mode.hpp.
+  /// Registers a panel owned by another application element, so presentation mode hides it too.
+  void addPresentationWindow(std::function<bool()> isVisible, std::function<void(bool)> setVisible);
+  /// Leave presentation mode now, restoring the panels and the window. main() calls this before
+  /// Application::deinit(), which persists the window geometry and the ImGui.ini.
+  void exitPresentationMode();
 
   /// Drain the queue, recompile the active renderer's shaders, and reset accumulation.
   /// Application thread only: it destroys and recreates live pipelines.
@@ -462,6 +473,8 @@ private:
   // pass (m_pendingResetLayout / m_pendingResetSettings) so the rebuild does not run while the menu
   // bar is mid-submission, and so the panels pick the new state up before they are submitted.
   void applyPendingResets();
+  // F11 / Esc / --presentationMode: bring PresentationMode in line with the request. Top of the UI pass.
+  void updatePresentationMode();
   void renderEditMenu(bool validScene);
   void renderCreateMenu();  // "Create" menu: add procedural primitives (enabled whenever a scene exists)
   void renderToolsMenu(bool validScene, bool& reloadShader, bool& compactScene);
@@ -584,7 +597,10 @@ private:
   // Set when a Time of Day value arrives from outside the UI -- the command line, a benchmark
   // sequence or MCP. It decides a precedence question the ini restore would otherwise settle
   // wrongly: see the post-restore hook beside the tod* declarations.
-  bool                  m_todDrivesSun{false};
+  bool m_todDrivesSun{false};
+  // --animPlay: whether animations play. Re-applied to animationControl.play on every scene load,
+  // which resets the animation state. Off by default in headless runs (applyHeadlessDefaults).
+  bool                  m_animPlay{true};
   bool                  m_envPreviewPending{false};  // Record a colour-only re-bake into this frame
   bool                  m_envCommitOwed{false};      // Previewed at least once; owes a commit once the edits stop
   bool                  m_envOwnedByBaker{false};    // hdrIbl currently points at EnvBaker's image, not a loaded file
@@ -670,6 +686,12 @@ private:
   bool m_pendingResetLayout{false};
   bool m_pendingResetSettings{false};
   bool m_openResetAllPopupNextFrame{false};
+
+  // Presentation mode. The registered parameter (--presentationMode, MCP) is only the request;
+  // updatePresentationMode() applies it and writes the actual state back, so every path -- F11,
+  // Esc, the View menu, the command line, MCP -- goes through the same enter/leave.
+  PresentationMode m_presentation;
+  bool             m_presentationModeRequested{false};
 
   BenchmarkController m_benchmark;
 };
