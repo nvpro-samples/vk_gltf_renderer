@@ -22,11 +22,14 @@ different port. Point your agent's MCP client at that URL — for Claude Code, `
 --scope local --transport http vk_gltf_renderer http://127.0.0.1:7671/mcp`, which keeps the
 registration on your machine rather than in the repository.
 
-**Run the interactive app, not `--headless`.** Headless renders its frame budget as fast as it can
-and then exits, taking the endpoint with it — the tools are for driving a session that keeps
-drawing. Note the flip side: the timings you get are those of a live window, so leave it alone
-while measuring, and treat numbers taken while the window was occluded, resized or interacted with
-as void.
+**For timing, run the interactive app.** The timings you get are those of a live window, so leave
+it alone while measuring, and treat numbers taken while the window was occluded, resized or
+interacted with as void.
+
+**For captures, `--headless --frames 0 --mcp` works without a window.** A zero frame count keeps
+headless rendering until `nvpro_shutdown`. Set `cameraString` (`"{eye}, {center}, {up}, {fov},
+{near, far}"`, independent of the glTF cameras), wait for accumulation, then set `screenshot` to a
+.png/.jpg path; `nvpro_save_screenshot` / `nvpro_capture_screenshot` need a swapchain.
 
 ## What it exposes
 
@@ -106,8 +109,8 @@ the profiler's own running average, which spans the whole session.
   does not run until the pipeline it needs is live, so the first sample is also the first
   correct sample. Anything else reading timers straight after a load is on its own — insert a
   short delay or call `vk_gltf_list_timers` in a loop until it lists what you plan to measure.
-- **`--mcp` needs the interactive application.** Under `--headless` the app renders its frame
-  budget as fast as it can and exits, taking the endpoint with it.
+- **`--headless --mcp` needs `--frames 0`.** With a frame budget the app renders it as fast as it
+  can and exits, taking the endpoint with it.
 - **One bad value rejects the whole write.** `nvpro_set_parameters` validates every entry first
   (unknown name, out-of-range value) and applies none if any fails, so check the response — a
   batch that mixes a rejected name with good ones silently changes nothing.

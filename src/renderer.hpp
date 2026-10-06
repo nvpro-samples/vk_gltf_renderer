@@ -502,6 +502,7 @@ private:
   nvutils::Bbox getRenderNodesBbox(const std::unordered_set<int>& renderNodeIndices);
   void          windowTitle();
   void          applyGltfCamera(int cameraIndex);
+  void          applyCameraString(const std::string& text);
   void          setGltfCameraFromView(int cameraIndex);
   void          loadHdrFileDialog();
   /// The `.sky.json` pickers behind the Environment panel's two preset buttons.

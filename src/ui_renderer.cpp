@@ -1687,6 +1687,20 @@ void GltfRenderer::registerRecentFilesHandler()
 // This function converts GLTF camera parameters to camera manipulator settings
 // and applies them to the current view
 //
+void GltfRenderer::applyCameraString(const std::string& text)
+{
+  if(text.empty())
+    return;
+  nvutils::CameraManipulator::Camera cam = m_cameraManip->getCamera();
+  if(!cam.setFromString(text))
+  {
+    LOGW("cameraString not understood: %s\n", text.c_str());
+    return;
+  }
+  m_cameraManip->setCamera(cam);
+  resetFrame();
+}
+
 void GltfRenderer::applyGltfCamera(int cameraIndex)
 {
   if(!m_resources.getScene() || !m_resources.getScene()->valid())

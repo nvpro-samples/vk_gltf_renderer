@@ -105,6 +105,20 @@ void BenchmarkController::registerParameters(nvutils::ParameterRegistry* paramet
                               }},
                          &m_options.gltfCameraIndex);
 
+  parameterRegistry->add({.name = "cameraString",
+                          .help = "Set the camera independent of the glTF cameras: \"{eye}, {center}, {up}, {fov}, "
+                                  "{near, far}\" as copied from the Camera widget. Applied live and again after every "
+                                  "scene load (so it also works on the command line and headless). Resets "
+                                  "path-tracer accumulation.",
+                          .callbackSuccess =
+                              [this](const nvutils::ParameterBase* const) {
+                                if(m_callbacks.applyCameraString)
+                                {
+                                  m_callbacks.applyCameraString(m_options.cameraString);
+                                }
+                              }},
+                         &m_options.cameraString);
+
   parameterRegistry->add({.name = "fitScene",
                           .help = "Fit camera to scene bounds (benchmark script). Resets path-tracer accumulation.",
                           .callbackSuccess =

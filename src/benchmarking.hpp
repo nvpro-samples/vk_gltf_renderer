@@ -47,6 +47,7 @@ struct BenchmarkOptions
 {
   bool                  enabled{false};            // True when running under the benchmark harness
   int                   gltfCameraIndex{0};        // Index of the glTF camera to activate
+  std::string           cameraString;  // Free camera "{eye}, {center}, {up}, {fov}, {near, far}"; kept over scene loads
   bool                  fitSceneTrigger{false};    // Pulse: fit camera to scene bounds
   bool                  resetFrameTrigger{false};  // Pulse: reset path-tracer accumulation
   bool                  updateDataTrigger{false};  // Pulse: alias of resetFrame after settings change
@@ -70,6 +71,7 @@ public:
   struct Callbacks
   {
     std::function<void(int)>                          applyGltfCamera;   // Apply glTF camera by index
+    std::function<void(const std::string&)> applyCameraString;           // Apply a camera string (see BenchmarkOptions)
     std::function<void()>                             fitScene;          // Fit camera to scene bounds
     std::function<void()>                             resetFrame;        // Reset path-tracer accumulation
     std::function<void(const std::filesystem::path&)> saveScreenshot;    // Save tonemapped render (viewport only)
@@ -103,6 +105,9 @@ public:
   // Register all benchmark-script-driven parameters with the registry and
   // store the renderer callbacks they will invoke.
   void registerParameters(nvutils::ParameterRegistry* parameterRegistry, Callbacks callbacks);
+
+  // Camera string set by --cameraString / the script / MCP; empty when unset.
+  [[nodiscard]] const std::string& cameraString() const { return m_options.cameraString; }
 
   // True when the application is running under the benchmark harness.
   [[nodiscard]] bool isBenchmarkMode() const { return m_options.enabled; }

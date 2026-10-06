@@ -568,7 +568,8 @@ GltfRenderer::GltfRenderer(nvutils::ParameterRegistry* paramReg, const nvutils::
 
   m_benchmark.registerParameters(
       paramReg, {
-                    .applyGltfCamera = [this](int cameraIndex) { applyGltfCamera(cameraIndex); },
+                    .applyGltfCamera   = [this](int cameraIndex) { applyGltfCamera(cameraIndex); },
+                    .applyCameraString = [this](const std::string& text) { applyCameraString(text); },
                     .fitScene =
                         [this]() {
                           if(m_resources.getScene() && m_resources.getScene()->valid())
@@ -3070,8 +3071,9 @@ void GltfRenderer::finalizeSceneSetup(const std::filesystem::path& filename)
   nvvkgltf::Scene* scene = m_resources.getScene();
   m_resources.settings.infinitePlaneDistance = scene->getSceneBounds().min().y;  // Set the infinite plane distance to the bottom of the scene
 
-  // Set camera from scene
+  // Set camera from scene, unless a camera string overrides it
   nvvkgltf::addSceneCamerasToWidget(m_cameraManip, filename, scene->getRenderCameras(), scene->getSceneBounds());
+  applyCameraString(m_benchmark.cameraString());
 
   // Viewer-side environment controls (hdrEnvIntensity, envRotation, the backplate override)
   // are deliberately left alone by a scene load -- resetting them used to discard whatever the
@@ -3235,6 +3237,7 @@ void GltfRenderer::createSceneFromDescriptor(const std::filesystem::path& descri
   m_resources.settings.infinitePlaneDistance = scene->getSceneBounds().min().y;
 
   nvvkgltf::addSceneCamerasToWidget(m_cameraManip, descriptorPath, scene->getRenderCameras(), scene->getSceneBounds());
+  applyCameraString(m_benchmark.cameraString());
 
   if(!updateTextures())
   {

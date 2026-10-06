@@ -262,5 +262,7 @@ Auto-generated log: `log_<executable>.txt` next to the binary (Logger behavior).
 - Use fixed resolution (`--size 1920 1080`, set in `utils/benchmark/benchmark_runner.py`) for comparable numbers.
 - Disable validation layers for performance runs (`--vvl` off by default in Release).
 - Add scenes to `utils/benchmark/scenes.example.txt` (name + relative path per line).
-- Multi-camera scenes: add sequences with `--gltfCamera 0`, `--gltfCamera 1`, etc.
+- Multi-camera scenes: add sequences with `--gltfCamera 0`, `--gltfCamera 1`, etc., or
+  `--cameraString "{eye}, {center}, {up}, {fov}, {near, far}"` for views not in the file (also
+  headless: it is re-applied after the scene loads).
 - After large setting changes, use `--updateData` or `--resetFrame` (no value; bool triggers) and non-zero `--sequenceresetframes`.
