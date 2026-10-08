@@ -11,10 +11,12 @@ permissions:
   contents: write
 
 env:
-  # 1.4.341 is the first SDK that ships VK_EXT_descriptor_heap, which
-  # nvpro_core2/nvvk/descriptor_heap_writer.hpp requires. Bump as needed
-  # when nvpro_core2 starts using newer Vulkan symbols.
-  VULKAN_SDK_VERSION: 1.4.341.1
+  # Must ship every Vulkan symbol this repo and nvpro_core2 use unguarded:
+  #   VK_EXT_descriptor_heap        - nvpro_core2/nvvk/descriptor_heap_writer.hpp
+  #   VK_KHR_opacity_micromap       - src/gltf_scene_omm.cpp, src/gltf_scene_rtx.{cpp,hpp}
+  #   VK_KHR_device_address_commands - src/main.cpp
+  # Bump as needed when this repo or nvpro_core2 starts using newer symbols.
+  VULKAN_SDK_VERSION: 1.4.363.0
   # nvpro_core2 is checked out as a sibling so FindNvproCore2.cmake picks it up.
   # Head is fine; bump this if you ever need to pin to a specific tag/SHA.
   NVPRO_CORE2_REF: main
