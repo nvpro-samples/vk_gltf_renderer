@@ -44,6 +44,16 @@ In `main()` we attach:
 - `ElementGpuMonitor` — NVML-based GPU status monitoring
 - `ElementDbgPrintf` — shader `printf` debug output (only when built with `USE_DBG_PRINTF`)
 
+### Path-traced depth
+
+On the first frame after a reset, the path tracer writes NDC depth (`outDepth`) so picking and the
+overlays drawn after it (grid, gizmo) can depth-test against the path-traced image. It writes the
+G-buffer depth image directly as a storage image when the depth format supports it.
+`nvvk::RenderTarget` only grants STORAGE usage in that case, and Vulkan does not require it for any
+depth format; `D32_SFLOAT` lacks it on AMD. There `PathTracer` binds an `R32_SFLOAT` staging image
+instead and copies it into the depth image through a buffer (`PathTracer::cmdCopyStagedDepth`),
+since core Vulkan has no direct copy between color and depth images.
+
 ---
 
 ## Scene Graph
@@ -132,7 +142,7 @@ src/
 │
 ├── gltf_scene.cpp/hpp          # Core scene loading and management
 ├── gltf_scene_vk.cpp/hpp       # GPU buffer/texture upload (SceneVk)
-├── gltf_scene_omm.cpp/hpp      # Opacity micromaps (SceneOmm), EXT_mesh_opacity_micromap → VK_EXT_opacity_micromap
+├── gltf_scene_omm.cpp/hpp      # Opacity micromaps (SceneOmm), EXT_mesh_opacity_micromap → VK_KHR_opacity_micromap
 ├── gltf_scene_rtx.cpp/hpp      # BLAS/TLAS acceleration structures (SceneRtx)
 ├── gltf_scene_gpu.cpp/hpp      # SceneGpu — coordinates SceneVk / AnimationVk / SceneRtx / TransformComputeVk
 ├── gltf_scene_editor.cpp/hpp   # Scene editing (add/delete/duplicate nodes)

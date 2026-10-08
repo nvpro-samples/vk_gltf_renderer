@@ -401,8 +401,11 @@ bool Dlss::tick(Resources& resources)
 
 bool Dlss::needsRecreate() const
 {
-  // Only meaningful once NGX is up; before that updateSize() is a no-op.
-  return isAvailable() && m_needsRecreate;
+  // Only meaningful once NGX is up; before that updateSize() is a no-op. The RR input size is
+  // compared against what the feature was built with, so a change from the command line, a
+  // benchmark sequence or MCP recreates it the same way as the UI combo.
+  const bool sizeModeChanged = m_kind == Kind::RR && m_builtSizeMode >= 0 && m_builtSizeMode != m_settings.sizeMode;
+  return isAvailable() && (m_needsRecreate || sizeModeChanged);
 }
 
 
@@ -797,6 +800,11 @@ void Dlss::registerParameters(SettingsRegistry* settings, std::function<void()> 
                                       "1=Improved (the surface seen through every glass layer)",
                    .callbackSuccess = cb},
                   &m_settings.transparencyMode, Persist::eYes, 0, 1);
+    settings->add({.name            = "dlssInputSize",
+                   .help            = "DLSS-RR input resolution NGX picks for the viewport: 0=Min, 1=Optimal (default, "
+                                      "below native), 2=Max. Use 2 when comparing timings with DLSS on and off",
+                   .callbackSuccess = cb},
+                  &m_settings.sizeMode, Persist::eYes, 0, 2);
   }
   else
   {
@@ -1203,7 +1211,7 @@ VkExtent2D Dlss::updateSizeRr(VkCommandBuffer cmd, VkExtent2D size)
   }
 
   VkExtent2D renderingSize{};
-  switch(m_settings.sizeMode)
+  switch(static_cast<SizeMode>(m_settings.sizeMode))
   {
     case SizeMode::eMin:
       renderingSize = supportedSizes.minSize;
@@ -1217,6 +1225,12 @@ VkExtent2D Dlss::updateSizeRr(VkCommandBuffer cmd, VkExtent2D size)
       break;
   }
 
+  // A new input size restarts the Halton sequence and drops the temporal history.
+  if(m_builtSizeMode >= 0 && m_builtSizeMode != m_settings.sizeMode)
+    notifyReset();
+  m_builtSizeMode = m_settings.sizeMode;
+  LOGI("DLSS-RR: input %ux%u for output %ux%u (input size mode %d)\n", renderingSize.width, renderingSize.height,
+       size.width, size.height, m_settings.sizeMode);
   m_needsRecreate = false;
 
   DlssFeature::InitInfo initInfo{
@@ -1334,7 +1348,7 @@ bool Dlss::onUiSettingsRr()
     ImGui::BeginDisabled();
 
   const char* sizeModes[]     = {"Min", "Optimal", "Max"};
-  int         currentSizeMode = static_cast<int>(m_settings.sizeMode);
+  int         currentSizeMode = m_settings.sizeMode;
 
   namespace PE = nvgui::PropertyEditor;
   PE::begin();
@@ -1348,12 +1362,12 @@ bool Dlss::onUiSettingsRr()
     m_settings.transparencyMode = currentTransMode;
     changed                     = true;
   }
-  if(PE::Combo("Input Size", &currentSizeMode, sizeModes, IM_ARRAYSIZE(sizeModes)))
+  if(PE::Combo("Input Size", &currentSizeMode, sizeModes, IM_ARRAYSIZE(sizeModes), 0,
+               "Input resolution DLSS-RR renders at before upscaling to the viewport. Optimal is below native "
+               "resolution; Max is the largest NGX supports. The DLSS-SR Quality setting does not apply here."))
   {
-    m_settings.sizeMode = static_cast<SizeMode>(currentSizeMode);
-    m_needsRecreate     = true;
-    notifyReset();  // restart Halton sequence so the next-frame jitter matches the recreated feature
-    changed = true;
+    m_settings.sizeMode = currentSizeMode;  // needsRecreate() sees the change and recreates the feature
+    changed             = true;
   }
   // RR preset combo
   if(drawPresetCombo(Kind::RR, &m_preset, "Preset",

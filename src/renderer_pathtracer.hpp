@@ -103,18 +103,18 @@ public:
   VkPhysicalDeviceRayTracingInvocationReorderPropertiesEXT m_reorderProperties{
       VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_RAY_TRACING_INVOCATION_REORDER_PROPERTIES_EXT};
 
-  bool m_supportSER{false};         // True when the device supports SER (Shader Execution Reordering).
-  bool m_useSER{true};              // Requested SER state; clamped to m_supportSER each frame.
+  bool m_supportSER{false};      // True when the device supports SER (Shader Execution Reordering).
+  bool m_supportRayQuery{true};  // False where the driver cannot build the ray-query pipeline (see onAttach).
+
+  // Path-traced depth when the G-buffer depth format cannot be a storage image (D32_SFLOAT on AMD):
+  // the shader writes it into m_depthStaging, and the first frame copies it into the depth buffer.
+  bool               m_depthViaStaging{false};
+  bool               m_depthCopyable{true};  // The depth format is 32-bit float, so the staged depth can be copied in
+  nvvk::RenderTarget m_depthStaging;         // R32_SFLOAT, G-buffer size
+  nvvk::Buffer       m_depthCopyBuffer;      // Bridge for the color -> depth copy (no direct image copy between them)
+  bool               m_useSER{true};         // Requested SER state; clamped to m_supportSER each frame.
   bool m_shadowTransmission{true};  // Shadow rays pass through transmissive surfaces (biased; see ePtShadowTransmission).
   bool m_pipelineUseSER{false};     // SER value the currently-live pipelines were built with.
-  int  m_pipelineDlssTransparency{0};  // USE_DLSS_TRANSP value the currently-live pipelines were built with.
-  bool m_compiledWireframe{false};     // True when the shader is the wireframe build.
-  bool m_compiledVisualize{false};  // True when the shader has the debug-visualization code compiled in (USE_VISUALIZE).
-  bool m_compiledOptimal{false};    // True when the shader is the scene-aware optimized build.
-  bool m_compiledDlss{false};       // True when the current shader was compiled with DLSS active (USE_DLSS_SHADER).
-  bool m_compiledDlssGuide{false};  // True when the current shader has the guide-buffer variant compiled in (USE_GUIDE_SHADER).
-  int m_compiledDlssTransparency{0};  // USE_DLSS_TRANSP the live pipeline was specialized with (Dlss::TransparencyMode).
-  nvvkgltf::SceneFeatureSet m_compiledFeatures{};  // The feature set the current shader was compiled against.
 
   // Variant pipeline cache: avoids slow pipeline (re)compilation by reusing previously built
   // VkShaderModule and pipelines for a given VariantKey. LRU-limited (see kVariantCacheMaxEntries).
@@ -122,21 +122,25 @@ public:
   {
     bool wireframe = false;  // True when the shader is the wireframe build.
     bool visualize = false;  // True when the debug-visualization code is compiled in (USE_VISUALIZE).
+    bool omm       = false;  // True when the ray-query entry points opt in to opacity micromaps (USE_OMM).
     bool optimal   = false;  // True when the shader is the scene-aware optimized build.
     bool dlss      = false;  // True when DLSS is active (drives USE_DLSS_SHADER: sample-loop gate).
     bool dlssGuide = false;  // True when guide-buffer capture is compiled in (USE_GUIDE_SHADER: DLSS or OptiX).
     nvvkgltf::SceneFeatureSet features{};  // only meaningful when `optimal == true`
     int dlssTransparency = 0;  // USE_DLSS_TRANSP the pipeline was specialized with (Dlss::TransparencyMode).
 
-    bool operator==(const VariantKey& o) const
+    // Same SPIR-V: every shader macro matches. dlssTransparency is a pipeline specialization
+    // constant, not a macro, so it is left out. dlss and dlssGuide are compared in every mode (they
+    // drive USE_DLSS_SHADER / USE_GUIDE_SHADER independently of optimal); the full extension feature
+    // set only matters for the optimal build.
+    bool sameShader(const VariantKey& o) const
     {
-      // dlss and dlssGuide are compared in every mode (they drive USE_DLSS_SHADER / USE_GUIDE_SHADER
-      // independently of optimal); the full extension feature set only matters for the optimal build.
-      return wireframe == o.wireframe && visualize == o.visualize && optimal == o.optimal && dlss == o.dlss
-             && dlssGuide == o.dlssGuide && dlssTransparency == o.dlssTransparency
-             && (optimal ? (features == o.features) : true);
+      return wireframe == o.wireframe && visualize == o.visualize && omm == o.omm && optimal == o.optimal
+             && dlss == o.dlss && dlssGuide == o.dlssGuide && (optimal ? (features == o.features) : true);
     }
+    bool operator==(const VariantKey& o) const { return sameShader(o) && dlssTransparency == o.dlssTransparency; }
   };
+  VariantKey m_compiled{};  // The variant the live shader module and pipelines were built as. Guarded by m_compileMutex.
 
   // Variant cache entry: stores a shader module, RTX/RQ pipelines, and SBT for a given VariantKey.
   struct VariantCacheEntry
@@ -155,8 +159,11 @@ public:
   // Saves active shader/pipeline/SBT to cache by VariantKey; switches to `newKey`.
   // On hit, restores cached handles and returns true; on miss, clears handles for rebuild.
   // LRU-evicted SBTs are freed via Resources.
-  bool swapVariant(Resources& resources, const VariantKey& newKey);
-  void destroyVariantCache(Resources& resources);
+  bool       swapVariant(Resources& resources, const VariantKey& newKey);
+  void       destroyVariantCache(Resources& resources);
+  VariantKey makeVariantKey(const Resources& resources) const;  // The variant the current settings ask for.
+  // Swaps in the wanted variant if it is cached (cheap; no BusyWindow). Leaves live handles alone on a miss.
+  bool tryRestoreCachedVariant(Resources& resources);
 
   BusyWindow* m_busyWindow{nullptr};  // Modal shown during async shader/pipeline compile.
   std::mutex  m_compileMutex;         // Guards compile metadata and live pipeline handles.
@@ -233,35 +240,36 @@ public:
 
 
 private:
-  struct CompileStateSnapshot
+  // What the live shader / pipeline lack for the current settings (see getPendingCompileWork()).
+  struct PendingCompileWork
   {
-    bool                      wireframe = false;
-    bool                      visualize = false;
-    bool                      optimal   = false;
-    bool                      dlss      = false;
-    bool                      dlssGuide = false;
-    nvvkgltf::SceneFeatureSet features{};
-    bool                      pipelineUseSER           = false;
-    VkPipeline                rqPipeline               = VK_NULL_HANDLE;
-    VkPipeline                rtxPipeline              = VK_NULL_HANDLE;
-    int                       pipelineDlssTransparency = 0;
+    bool recompile       = false;  // A shader macro changed: needs another shader variant.
+    bool stalePipeline   = false;  // Pipelines built with stale specialization constants (SER, DLSS transparency).
+    bool missingPipeline = false;  // No pipeline for the selected technique.
+    bool any() const { return recompile || stalePipeline || missingPipeline; }
   };
-
-  void                 ensureShadersAndPipelines(Resources& resources);
-  void                 startAsyncCompile(Resources& resources);
-  CompileStateSnapshot getCompileStateSnapshot();
-  void                 updateStatistics(Resources& resources);
-  void                 renderRayQuery(VkCommandBuffer cmd, VkExtent2D renderingSize, Resources& resources);
-  void                 renderRayTrace(VkCommandBuffer cmd, VkExtent2D& renderingSize, Resources& resources);
-  void                 denoiseDlss(VkCommandBuffer cmd, Resources& resources);
-  void                 setupPushConstant(VkCommandBuffer cmd, Resources& resources, VkExtent2D renderingSize);
+  PendingCompileWork getPendingCompileWork(const Resources& resources);
+  bool               prepareFrame(Resources& resources);  // false: skip this frame (async build started)
+  void               ensureShadersAndPipelines(Resources& resources);
+  void               startAsyncCompile(Resources& resources);
+  void               updateStatistics(Resources& resources);
+  void               renderRayQuery(VkCommandBuffer cmd, VkExtent2D renderingSize, Resources& resources);
+  void               renderRayTrace(VkCommandBuffer cmd, VkExtent2D& renderingSize, Resources& resources);
+  void               denoiseDlss(VkCommandBuffer cmd, Resources& resources);
+  void               setupPushConstant(VkCommandBuffer cmd, Resources& resources, VkExtent2D renderingSize);
   // Determine if DLSS should actively denoise this frame
   bool getEffectiveDlssEnabled(const Resources& resources) const;
   // Determine if OptiX should actively denoise this frame
   bool getEffectiveOptixEnabled(const Resources& resources) const;
   // Upscale selection ID and depth from render resolution to display resolution (OptiX 2x mode)
   void upscaleSelectionAndDepth(VkCommandBuffer cmd, Resources& resources);
+  // Size m_depthStaging / m_depthCopyBuffer to the G-buffer (no-op unless m_depthViaStaging).
+  void updateDepthStaging(VkCommandBuffer cmd, Resources& resources);
+  // Copy the path-traced depth from m_depthStaging into the G-buffer depth image.
+  void cmdCopyStagedDepth(VkCommandBuffer cmd, Resources& resources);
   // Destroy the pipelines for both Ray Query and Ray Tracing
   void destroyPipelinesLocked();
-  bool m_skipVariantCache{false};  // Set during reloadShader(); bypasses swapVariant lookup.
+  // True when the scene's BLAS carry opacity micromaps, so the shader must be built with USE_OMM.
+  static bool wantOpacityMicromapShader(const Resources& resources);
+  bool        m_skipVariantCache{false};  // Set during reloadShader(); bypasses swapVariant lookup.
 };

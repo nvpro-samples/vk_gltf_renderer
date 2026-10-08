@@ -127,7 +127,8 @@ public:
   std::shared_ptr<nvutils::CameraManipulator> getCameraManipulator() { return m_cameraManip; }
   void                                        registerRecentFilesHandler();
   void                                        setDlssHardwareAvailability(bool rrAvailable, bool srAvailable);
-  void                                        setOpacityMicromapAvailable(bool available);
+  void                                        setSerAvailable(bool available);
+  void                                        setOpacityMicromapAvailable(bool hardware, bool enabled);
 #ifdef USE_AGENTIC
   /// Override the optional Agentic bridge root (from --agenticBridgeRoot). Applied
   /// to the controller once it is initialized in onAttach.

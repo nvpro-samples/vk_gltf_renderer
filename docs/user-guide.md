@@ -66,7 +66,7 @@ Two denoisers are available to reduce path tracing noise while preserving detail
 ![DLSS Ray Reconstruction settings and developer guide buffers](images/dlss.png)
 
 - Enable or disable it from the denoiser activation row; the status appears next to the row label. **Loading** means the nonblocking NGX prewarm is running, **Ready** means it can be enabled without waiting for startup initialization, and **On** means it is actively denoising the current frame.
-- Open the row's settings button to choose the input size (Min / Optimal / Max) — lower internal resolution means faster rendering, DLSS upscales to the viewport.
+- Open the row's settings button to choose the **Input Size** (`--dlssInputSize`: Min / Optimal / Max), the resolution DLSS-RR path-traces at before upscaling to the viewport. **Optimal**, the default, is below native resolution, which is why path tracing is usually faster with DLSS-RR on than off; **Max** traces at native resolution. The panel shows the resolution in use. The DLSS Super Resolution quality (`--dlssQuality`, e.g. DLAA) does not apply to Ray Reconstruction. See [denoising.md](denoising.md#dlss-rr-input-resolution).
 - Developer guide-buffer previews (albedo, normal, motion, depth, specular) live at the bottom of the panel under **Developer Guide Buffers**. Use **Rendered** to switch back to the main image.
 - **Transparency** (`--dlssTransparency`) controls what the guides describe on clear glass. **Default** uses the glass surface itself. **Improved** uses the surface seen through every glass layer, which keeps content behind glass sharp while the camera moves (rough or tinted glass, and other materials, are unaffected). See [denoising.md](denoising.md#clear-glass-primary-surface-replacement).
 
@@ -116,6 +116,7 @@ local structure on a background prop while keeping it on a foreground character.
 
 - Enable or disable it from the denoiser activation row; the status appears next to the row label.
 - Open the row's settings button, then click **Denoise Now** to denoise the current accumulation, or enable **Auto** to trigger automatically every N frames.
+- **Model** selects plain denoising or **Denoise + Upscale 2X**, which path traces at half resolution and lets OptiX upscale. The raw render is then quarter-size, so **Auto** is always on in that mode.
 - Use the **Rendered** / **Denoised** viewport toggle in **OptiX Output Preview** to compare the current render with the OptiX result.
 
 **How to enable:** Set `USE_OPTIX_DENOISER=ON` in CMake (enabled by default when CUDA Toolkit is found). OptiX headers are downloaded automatically — no separate SDK install needed. Requires the [CUDA Toolkit](https://developer.nvidia.com/cuda-downloads) (11.0+).
@@ -124,9 +125,9 @@ local structure on a background prop while keeping it on a foreground character.
 
 [Opacity Micromaps (OMM)](https://developer.nvidia.com/blog/improve-ray-tracing-performance-with-opacity-micromaps/) pre-classify each micro-triangle in alpha-tested geometry as opaque, transparent, or unknown. The ray tracer skips the any-hit shader for opaque micro-triangles, eliminating per-ray alpha evaluation on most of the surface.
 
-This renderer loads scenes that already contain `EXT_mesh_opacity_micromap` data and binds it when building the BLAS. Bake OMMs with [gltf_omm_baker](https://github.com/nvpro-samples/gltf_omm_baker), which writes the extension into the glTF file.
+This renderer loads scenes that already contain `EXT_mesh_opacity_micromap` data and binds it when building the BLAS. Bake OMMs with [gltf_omm_baker](https://github.com/nvpro-samples/gltf_omm_baker), which writes the extension into the glTF file. Using them requires `VK_KHR_opacity_micromap` (an NVIDIA RTX GPU with a recent driver); elsewhere the micromaps are skipped, with a one-line note when such a scene loads, and the image is unchanged.
 
-The **Opacity Micromap** visualization mode (Settings → Visualization) is a debug view for alpha-tested geometry that shows where the ray tracer still pays for alpha (any-hit) shading. Surfaces resolved by an opacity micromap as opaque are drawn green (no alpha work); "unknown" micro-triangles that still run the alpha shader are drawn yellow; transparent micro-triangles are culled, so those pixels show the environment behind. On a scene without an opacity micromap the whole alpha-tested surface reads yellow, illustrating the cost the OMM removes. The view is meaningful in the RayTracing (RT pipeline) technique, which consults the micromap.
+The **Opacity Micromap** visualization mode (Settings → Visualization) is a debug view for alpha-tested geometry that shows where the ray tracer still pays for alpha (any-hit) shading. Surfaces resolved by an opacity micromap as opaque are drawn green (no alpha work); "unknown" micro-triangles that still run the alpha shader are drawn yellow; transparent micro-triangles are culled, so those pixels show the environment behind. On a scene without an opacity micromap the whole alpha-tested surface reads yellow, illustrating the cost the OMM removes. Both path-tracer techniques (RayTracing and RayQuery) consult the micromap.
 
 <img src="images/omm_bake.png" alt="Left: scene with OMM (mostly green = OMM-resolved, some yellow = unknown micro-triangles). Right: same scene without OMM (all yellow = full any-hit evaluation on every ray)." width="480">
 
@@ -801,6 +802,11 @@ usage: gltf-material-modifier.py [-h] [--metallic METALLIC] [--roughness ROUGHNE
 - Ensure you have an NVIDIA RTX GPU with up-to-date drivers (535+).
 - Verify the Vulkan SDK is installed: run `vulkaninfo` from a terminal.
 - Try with validation layers: `--vvl` to get detailed Vulkan error messages.
+
+**Running on a non-NVIDIA GPU (AMD)**
+- The renderer targets NVIDIA RTX; other ray-tracing GPUs run with reduced features. On AMD, DLSS, OptiX, SER and opacity micromaps are unavailable, and the path tracer always uses the Ray Tracing Pipeline (Ray Query is greyed out).
+- Use the release binaries, or build with `-DSHADER_DEBUG_LEVEL=0` (or `1`): AMD's driver crashes compiling shaders that carry full debug info, which a default local build embeds.
+- `--device <index>` selects a GPU on a multi-GPU system.
 
 **DLSS not available**
 - DLSS requires an RTX 20-series or newer GPU and the `USE_DLSS=ON` CMake option.

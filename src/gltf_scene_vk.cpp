@@ -1228,8 +1228,8 @@ void nvvkgltf::SceneVk::createVertexBuffers(VkCommandBuffer cmd, nvvk::CmdUpload
     vBuf.positions               = (glm::vec3*)vertexBuffers.position.address;
     vBuf.normals                 = (glm::vec3*)vertexBuffers.normal.address;
     vBuf.tangents                = (glm::vec4*)vertexBuffers.tangent.address;
-    vBuf.texCoords[0]            = (glm::vec2*)vertexBuffers.texCoord0.address;
-    vBuf.texCoords[1]            = (glm::vec2*)vertexBuffers.texCoord1.address;
+    vBuf.texCoord0               = (glm::vec2*)vertexBuffers.texCoord0.address;
+    vBuf.texCoord1               = (glm::vec2*)vertexBuffers.texCoord1.address;
     vBuf.colors                  = (glm::uint*)vertexBuffers.color.address;
 
     renderPrim[primID].vertexBuffer = vBuf;
@@ -1281,13 +1281,13 @@ void nvvkgltf::SceneVk::uploadVertexBuffers(nvvk::CmdUploaderInterface& staging,
     if(newBuffer)
     {
       shaderio::GltfRenderPrimitive renderPrim{};  // The array of all primitive information
-      renderPrim.indices                   = (glm::uvec3*)m_bIndices[primID].address;
-      renderPrim.vertexBuffer.positions    = (glm::vec3*)vertexBuffers.position.address;
-      renderPrim.vertexBuffer.normals      = (glm::vec3*)vertexBuffers.normal.address;
-      renderPrim.vertexBuffer.tangents     = (glm::vec4*)vertexBuffers.tangent.address;
-      renderPrim.vertexBuffer.texCoords[0] = (glm::vec2*)vertexBuffers.texCoord0.address;
-      renderPrim.vertexBuffer.texCoords[1] = (glm::vec2*)vertexBuffers.texCoord1.address;
-      renderPrim.vertexBuffer.colors       = (glm::uint*)vertexBuffers.color.address;
+      renderPrim.indices                = (glm::uvec3*)m_bIndices[primID].address;
+      renderPrim.vertexBuffer.positions = (glm::vec3*)vertexBuffers.position.address;
+      renderPrim.vertexBuffer.normals   = (glm::vec3*)vertexBuffers.normal.address;
+      renderPrim.vertexBuffer.tangents  = (glm::vec4*)vertexBuffers.tangent.address;
+      renderPrim.vertexBuffer.texCoord0 = (glm::vec2*)vertexBuffers.texCoord0.address;
+      renderPrim.vertexBuffer.texCoord1 = (glm::vec2*)vertexBuffers.texCoord1.address;
+      renderPrim.vertexBuffer.colors    = (glm::uint*)vertexBuffers.color.address;
       staging.appendBuffer(m_bRenderPrim, sizeof(shaderio::GltfRenderPrimitive) * primID, std::span(&renderPrim, 1));
     }
   }

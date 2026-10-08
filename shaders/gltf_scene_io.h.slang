@@ -53,7 +53,11 @@ struct VertexBuffers
   float3* normals;
   uint*   colors;  // packed as 4 uint8_t
   float4* tangents;
-  float2* texCoords[2];  // texCoords[0] = TEXCOORD_0, texCoords[1] = TEXCOORD_1
+  // TEXCOORD_0 and TEXCOORD_1 as two members, not a `float2* texCoords[2]` array: AMD's Vulkan
+  // driver crashes compiling a shader that loads a struct holding an array of buffer pointers.
+  // Pick a channel at runtime with vertexTexCoords() (gltf_vertex_access.h.slang).
+  float2* texCoord0;
+  float2* texCoord1;
 };
 
 // This is the GLTF Primitive structure

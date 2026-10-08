@@ -64,27 +64,38 @@ If the **order** of primitives (and thus `renderPrimID`) ever changed **without*
 
 ### Opacity micromaps (optional)
 
-When a scene uses `EXT_mesh_opacity_micromap` and the device exposes `VK_EXT_opacity_micromap`,
-`SceneOmm` (owned by `SceneVk`, see `gltf_scene_omm.*`) builds one `VkMicromapEXT` per root
-`micromaps[]` entry and uploads the per-primitive micromap index buffers alongside the geometry.
+When a scene uses `EXT_mesh_opacity_micromap` and the device exposes `VK_KHR_opacity_micromap`
+(and `VK_KHR_device_address_commands`, which it depends on), `SceneOmm` (owned by `SceneVk`, see
+`gltf_scene_omm.*`) builds one opacity micromap per root `micromaps[]` entry and uploads the
+per-primitive micromap index buffers alongside the geometry. Under the KHR extension a micromap is
+an acceleration structure of type `VK_ACCELERATION_STRUCTURE_TYPE_OPACITY_MICROMAP_KHR`: it is
+created with `vkCreateAccelerationStructure2KHR` and built with `vkCmdBuildAccelerationStructuresKHR`.
 Results are keyed by `renderPrimID` so they follow the same BLAS ordering contract above.
 `SceneRtx::createBottomLevelAccelerationStructure()` then attaches a
-`VkAccelerationStructureTrianglesOpacityMicromapEXT` to each primitive's triangle geometry
+`VkAccelerationStructureTrianglesOpacityMicromapKHR` to each primitive's triangle geometry
 (`triangles.pNext`), and the path-tracer RT pipeline is created with the OMM flag
-(`VK_PIPELINE_CREATE_RAY_TRACING_OPACITY_MICROMAP_BIT_EXT`). This only accelerates alpha-tested
-traversal — microtriangles flagged "unknown" still run the existing any-hit alpha logic — so the
-image is identical to the non-OMM path. When the extension is unsupported (or
-`--useOpacityMicromap 0`), the whole subsystem is skipped and rendering falls back to the regular
-alpha path.
+(`VK_PIPELINE_CREATE_RAY_TRACING_OPACITY_MICROMAP_BIT_KHR`).
+
+Ray queries opt in separately: every entry point that runs a ray query against a BLAS carrying a
+micromap must declare the SPIR-V `OpacityMicromapIdKHR` execution mode. Its capability is only
+legal on a device with the extension, so it cannot live in the embedded SPIR-V. Instead
+`gltf_pathtrace.slang` emits it (inline SPIR-V on `computeMain` and `rgenMain`) behind the
+`USE_OMM` macro, which `PathTracer` sets only when `SceneOmm::hasAny()` reports a micromap; a scene
+that gains or loses micromaps triggers a recompile like any other variant switch.
+
+This only accelerates alpha-tested traversal — microtriangles flagged "unknown" still run the
+existing any-hit alpha logic — so the image is identical to the non-OMM path. When the extension
+is unsupported (or `--useOpacityMicromap 0`), the whole subsystem is skipped and rendering falls
+back to the regular alpha path.
 
 The `eOpacityMicromap` entry of `enum Visualization` (see `shaders/shaderio.h`) adds a debug view
 that colors the primary surface by how OMM traversal resolved it, using the fact that alpha
 evaluation only happens for "unknown" micro-triangles: OMM-opaque micro-triangles are committed by
 the hardware without any alpha work (green); "unknown" ones invoke the any-hit shader, which sets
 `payload.ommUnknown` (yellow); transparent ones are culled so those rays miss the mesh and show the
-environment behind. No baked micromap buffers are read by the shaders. The RT-pipeline technique
-consults the micromap (via the pipeline flag above); the inline RayQuery technique does not opt in,
-so there every alpha-tested triangle reads as "unknown".
+environment behind. No baked micromap buffers are read by the shaders. Both techniques consult the
+micromap: the RT pipeline through the pipeline flag above, the inline RayQuery technique through
+`USE_OMM`.
 
 This debug view (and its `payload.ommUnknown` field) is compiled out of the normal render path
 behind the `USE_VISUALIZE` macro — the host sets it (see `PathTracer::compileShader`) only when the

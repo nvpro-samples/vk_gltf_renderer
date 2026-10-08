@@ -79,7 +79,7 @@ shaderio::GltfTextureInfo getTextureInfoImpl(const T& tinfo, const TextureSlotTa
                         static_cast<uint8_t>(shaderio::TextureInfoFlagBits::eTexInfoTwoChannelSource) :
                         uint8_t{0};
 
-  // The renderer only uploads TEXCOORD_0 and TEXCOORD_1 (see VertexBuffers::texCoords[2]
+  // The renderer only uploads TEXCOORD_0 and TEXCOORD_1 (see VertexBuffers::texCoord0/texCoord1
   // in shaders/gltf_scene_io.h.slang). glTF allows TEXCOORD_N for higher N but we clamp
   // to 1 and warn once per occurrence so the user notices missing UV sets instead of
   // silently rendering with the wrong coordinates.

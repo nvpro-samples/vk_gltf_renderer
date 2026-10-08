@@ -311,7 +311,8 @@ auto main(int argc, char** argv) -> int
   VkPhysicalDeviceRayTracingPipelineFeaturesKHR rtPipelineFeature{VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_RAY_TRACING_PIPELINE_FEATURES_KHR};
   VkPhysicalDeviceShaderObjectFeaturesEXT shaderObjectFeatures{.sType = VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_SHADER_OBJECT_FEATURES_EXT};
   VkPhysicalDeviceRayTracingInvocationReorderFeaturesEXT reorderFeature{VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_RAY_TRACING_INVOCATION_REORDER_FEATURES_EXT};
-  VkPhysicalDeviceOpacityMicromapFeaturesEXT ommFeature{VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_OPACITY_MICROMAP_FEATURES_EXT};
+  VkPhysicalDeviceOpacityMicromapFeaturesKHR ommFeature{VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_OPACITY_MICROMAP_FEATURES_KHR};
+  VkPhysicalDeviceDeviceAddressCommandsFeaturesKHR addressCmdFeature{VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_DEVICE_ADDRESS_COMMANDS_FEATURES_KHR};
   // clang-format on
 
   // Requesting the extensions and features needed
@@ -327,7 +328,8 @@ auto main(int argc, char** argv) -> int
       {VK_KHR_FRAGMENT_SHADER_BARYCENTRIC_EXTENSION_NAME, &baryFeatures},
       {VK_EXT_NESTED_COMMAND_BUFFER_EXTENSION_NAME, &nestedCmdFeature},
       {VK_EXT_RAY_TRACING_INVOCATION_REORDER_EXTENSION_NAME, &reorderFeature, false},
-      {VK_EXT_OPACITY_MICROMAP_EXTENSION_NAME, &ommFeature, false},  // Optional: Opacity Micromap (OMM)
+      {VK_KHR_DEVICE_ADDRESS_COMMANDS_EXTENSION_NAME, &addressCmdFeature, false},  // Optional: required by VK_KHR_opacity_micromap
+      {VK_KHR_OPACITY_MICROMAP_EXTENSION_NAME, &ommFeature, false},                // Optional: Opacity Micromap (OMM)
   };
 
   // Only request the graphics queue
@@ -471,14 +473,19 @@ auto main(int argc, char** argv) -> int
   elemGltfRenderer->setDlssHardwareAvailability(dlssRrHardwareAvailable, dlssSrHardwareAvailable);
 #endif
 
+  // SER is optional. Some drivers fill VkPhysicalDeviceRayTracingInvocationReorderPropertiesEXT
+  // even without exposing the extension, so the path tracer must not trust that alone.
+  elemGltfRenderer->setSerAvailable(vkContext.hasExtensionEnabled(VK_EXT_RAY_TRACING_INVOCATION_REORDER_EXTENSION_NAME)
+                                    && (reorderFeature.rayTracingInvocationReorder == VK_TRUE));
+
   // Opacity Micromap (OMM) is optional: it may be filtered out if unsupported, and the feature
   // flag confirms the driver actually enabled it. When unavailable, the glTF extension is ignored.
   const bool ommHardware =
-      vkContext.hasExtensionEnabled(VK_EXT_OPACITY_MICROMAP_EXTENSION_NAME) && (ommFeature.micromap == VK_TRUE);
-  const bool ommAvailable = ommHardware && useOpacityMicromap;
-  if(!ommHardware)
-    LOGW("Opacity Micromap (VK_EXT_opacity_micromap) not available - EXT_mesh_opacity_micromap will be ignored\n");
-  elemGltfRenderer->setOpacityMicromapAvailable(ommAvailable);
+      vkContext.hasExtensionEnabled(VK_KHR_OPACITY_MICROMAP_EXTENSION_NAME) && (ommFeature.micromap == VK_TRUE)
+      && vkContext.hasExtensionEnabled(VK_KHR_DEVICE_ADDRESS_COMMANDS_EXTENSION_NAME)
+      && (addressCmdFeature.deviceAddressCommands == VK_TRUE);  // micromaps are created with vkCreateAccelerationStructure2KHR
+  // A scene that carries micromaps on hardware without OMM says so when it loads (createVulkanScene).
+  elemGltfRenderer->setOpacityMicromapAvailable(ommHardware, useOpacityMicromap);
 
 
   // Application information

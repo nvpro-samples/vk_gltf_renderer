@@ -107,6 +107,8 @@ set(OptiX_VERSION      "9.1.0"   CACHE STRING "OptiX headers version to download
 # Slang debug/opt levels applied to every shader in this project.
 #   OPT_LEVEL 0 is intentional: the driver optimizes SPIR-V when it JITs to native,
 #   and pre-optimizing at Slang time can remove opportunities the driver would take.
+#   SHADER_DEBUG_LEVEL 2+ embeds NonSemantic shader debug info (Nsight source-level debugging).
+#   AMD's Vulkan driver crashes compiling it, so release builds use 0 (.github/workflows/build.yml).
 set(SHADER_DEBUG_LEVEL 2 CACHE STRING "Slang debug info: 0=none, 1=minimal, 2=standard, 3=maximal.")
 set(SHADER_OPT_LEVEL   0 CACHE STRING "Slang optimization: 0=none (recommended — let the driver optimize) .. 3=max.")
 
@@ -312,6 +314,7 @@ message(STATUS "Compiling ${_SHADER_COUNT} Slang shader(s) to SPIR-V")
 set(SHADER_CAPABILITIES
   spvGroupNonUniformArithmetic   # arithmetic across subgroups
   spvGroupNonUniform             # subgroup ops (required for wave operations)
+  nonuniformqualifier            # NonUniformResourceIndex on the bindless texture/sampler arrays
 )
 
 # Probe DLSS / OptiX backend availability here (before compile_slang) so the

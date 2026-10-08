@@ -218,8 +218,7 @@ bool OptiXDenoiser::initOptiXDenoiser()
 
 bool OptiXDenoiser::recreateDenoiser()
 {
-  m_needModelRecreate = false;
-  m_hasValidOutput    = false;
+  m_hasValidOutput = false;
 
   // Destroy only the denoiser and buffers, keep the OptiX context and CUDA stream
   if(m_denoiser)
@@ -344,6 +343,29 @@ void OptiXDenoiser::updateSize(VkCommandBuffer cmd, VkExtent2D size)
   m_inputSize = inputSize;
 }
 
+bool OptiXDenoiser::ensureTargets(Resources& resources)
+{
+  if(!m_settings.enable)
+    return false;
+
+  const VkExtent2D size     = resources.gBuffers.getSize();
+  const auto       sameSize = [](VkExtent2D a, VkExtent2D b) { return a.width == b.width && a.height == b.height; };
+  const VkExtent2D inputSize = isUpscaleMode() ? VkExtent2D{std::max(size.width / 2, 1u), std::max(size.height / 2, 1u)} : size;
+  const bool stale = !sameSize(m_denoiserTarget.getSize(), size) || !sameSize(m_inputSize, inputSize)
+                     || (isUpscaleMode() && !sameSize(m_upscaleStaging.getSize(), inputSize));
+  if(!stale)
+    return false;
+
+  // SYNC NOTE: rare (enable / model change); the old targets may still be read by a frame in flight.
+  vkQueueWaitIdle(resources.app->getQueue(0).queue);
+  m_needRebuildBuffers = true;  // rebuiltBuffers() also recreates the OptiX model if modelKind changed
+  m_hasValidOutput     = false;
+  VkCommandBuffer cmd  = resources.app->createTempCmdBuffer();
+  updateSize(cmd, size);
+  resources.app->submitAndWaitTempCmdBuffer(cmd);
+  return true;
+}
+
 //---------------------------------------------------------
 // Called when the buffer size has changed or model needs recreation.
 void OptiXDenoiser::rebuiltBuffers()
@@ -356,9 +378,8 @@ void OptiXDenoiser::rebuiltBuffers()
   {
     // Recreate the OptiX denoiser if the model kind changed
     // (also catches settings loaded after init via setSettingsHandler)
-    if(m_needModelRecreate || m_createdModelKind != m_settings.modelKind)
+    if(m_createdModelKind != m_settings.modelKind)
     {
-      m_needModelRecreate = true;
       if(!recreateDenoiser())
         return;
     }
@@ -392,6 +413,7 @@ bool OptiXDenoiser::denoiseOneShot(Resources& resources)
   {
     return false;
   }
+  ensureTargets(resources);  // "Denoise Now" can run while the renderer is idle (converged)
 
   // IMPORTANT: Wait for ALL GPU operations to complete before denoising
   // This ensures:
@@ -775,7 +797,7 @@ void OptiXDenoiser::updateDenoiser(Resources& resources)
   }
 
   // Auto-denoise logic: trigger denoising at frame intervals
-  if(m_settings.autoDenoiseEnabled && m_settings.autoDenoiseInterval > 0)
+  if(isAutoDenoiseActive() && m_settings.autoDenoiseInterval > 0)
   {
     // Reset tracking if frame count went backwards (rendering restarted)
     if(resources.frameCount < m_lastAutoDenoiseFrame)
@@ -841,16 +863,16 @@ bool OptiXDenoiser::onUiActivation(Resources& resources)
                                        avail ? "Enable the OptiX denoiser." : "OptiX initialization failed; check CUDA/OptiX hardware support.",
                                        "Show OptiX denoiser settings."))
   {
+    // Targets are allocated by ensureTargets() on the next rendered frame or denoise.
     m_settings.enable = optixEnabled;
-    if(m_settings.enable && !wasEnabled)
-    {
-      VkCommandBuffer cmd = resources.app->createTempCmdBuffer();
-      updateSize(cmd, resources.gBuffers.getSize());
-      resources.app->submitAndWaitTempCmdBuffer(cmd);
-    }
     if(!m_settings.enable && (resources.settings.displayBuffer == DisplayBuffer::eOptixDenoised))
       resources.settings.displayBuffer = DisplayBuffer::eRendered;
-    changed = true;
+    // The plain denoiser reads the accumulated image as-is and its albedo/normal guides are rewritten
+    // every frame, so toggling it keeps the accumulation. Restart it only when the 2x upscale model
+    // changes the render size, or when enabling on a converged image: the renderer is idle then, and
+    // the guides and the denoise both need rendered frames.
+    const bool converged = resources.frameCount >= resources.settings.maxFrames;
+    changed              = isUpscaleMode() || (m_settings.enable && !wasEnabled && converged);
   }
   return changed;
 }
@@ -899,19 +921,22 @@ bool OptiXDenoiser::onUiSettings(Resources& resources)
     int                currentModel   = static_cast<int>(m_settings.modelKind);
     if(PE::Combo("Model", &currentModel, s_modelNames, IM_ARRAYSIZE(s_modelNames)))
     {
-      m_settings.modelKind = static_cast<ModelKind>(currentModel);
-      m_needModelRecreate  = true;
-      m_needRebuildBuffers = true;
-      m_hasValidOutput     = false;
-
-      VkCommandBuffer cmd = resources.app->createTempCmdBuffer();
-      updateSize(cmd, resources.gBuffers.getSize());
-      resources.app->submitAndWaitTempCmdBuffer(cmd);
+      m_settings.modelKind = static_cast<ModelKind>(currentModel);  // ensureTargets() follows on the next frame
+      changed              = true;                                  // the render size changes with the model
     }
   }
 
-  PE::Checkbox("Auto", &m_settings.autoDenoiseEnabled);
-  if(m_settings.autoDenoiseEnabled)
+  if(isUpscaleMode())
+  {
+    // Upscale renders a quarter-size image; only the denoised output is full size, so it must keep refreshing.
+    bool alwaysOn = true;
+    ImGui::BeginDisabled();
+    PE::Checkbox("Auto", &alwaysOn, "Always on with Upscale 2X: the denoised output is the only full-size image.");
+    ImGui::EndDisabled();
+  }
+  else
+    PE::Checkbox("Auto", &m_settings.autoDenoiseEnabled);
+  if(isAutoDenoiseActive())
   {
     PE::SliderInt("Interval", &m_settings.autoDenoiseInterval, 1, 500, "%d frames");
     if(m_settings.autoDenoiseInterval > 1)

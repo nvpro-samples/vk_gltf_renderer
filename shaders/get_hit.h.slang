@@ -112,7 +112,7 @@ HitState getHitState(GltfRenderPrimitive renderPrim,  //
   // Texel density for ray-footprint texture LOD (geometry-only; used by path tracer)
   if(hasVertexTexCoord(renderPrim, 0))
   {
-    float2* texCoords0 = renderPrim.vertexBuffer.texCoords[0];
+    float2* texCoords0 = renderPrim.vertexBuffer.texCoord0;
     float2  uv0        = texCoords0[triangleIndex.x];
     float2  uv1        = texCoords0[triangleIndex.y];
     float2  uv2        = texCoords0[triangleIndex.z];

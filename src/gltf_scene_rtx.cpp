@@ -192,8 +192,8 @@ void nvvkgltf::SceneRtx::createBottomLevelAccelerationStructure(const nvvkgltf::
 
   // Per-primitive opacity micromap linkage (kept alive for the whole build; see header).
   const SceneOmm& sceneOmm = sceneVk.opacityMicromap();
-  m_ommGeometry.assign(renderPrimitives.size(), VkAccelerationStructureTrianglesOpacityMicromapEXT{
-                                                    VK_STRUCTURE_TYPE_ACCELERATION_STRUCTURE_TRIANGLES_OPACITY_MICROMAP_EXT});
+  m_ommGeometry.assign(renderPrimitives.size(), VkAccelerationStructureTrianglesOpacityMicromapKHR{
+                                                    VK_STRUCTURE_TYPE_ACCELERATION_STRUCTURE_TRIANGLES_OPACITY_MICROMAP_KHR});
 
   for(uint32_t p_idx = 0; p_idx < renderPrimitives.size(); p_idx++)
   {
@@ -210,9 +210,9 @@ void nvvkgltf::SceneRtx::createBottomLevelAccelerationStructure(const nvvkgltf::
     if(sceneOmm.has(p_idx))
     {
       const SceneOmm::PrimitiveOmm&                       omm    = sceneOmm.get(p_idx);
-      VkAccelerationStructureTrianglesOpacityMicromapEXT& ommGeo = m_ommGeometry[p_idx];
+      VkAccelerationStructureTrianglesOpacityMicromapKHR& ommGeo = m_ommGeometry[p_idx];
       ommGeo.indexType                                           = omm.indexType;
-      ommGeo.indexBuffer.deviceAddress                           = omm.indexAddress;
+      ommGeo.indexBuffer                                         = omm.indexAddress;
       ommGeo.indexStride                                         = omm.indexStride;
       ommGeo.baseTriangle                                        = omm.baseTriangle;
       ommGeo.micromap                                            = omm.micromap;

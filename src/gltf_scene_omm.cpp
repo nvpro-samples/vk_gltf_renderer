@@ -18,7 +18,7 @@
  */
 
 //
-// Builds Vulkan opacity micromaps (VK_EXT_opacity_micromap) from the pre-baked
+// Builds Vulkan opacity micromaps (VK_KHR_opacity_micromap) from the pre-baked
 // EXT_mesh_opacity_micromap glTF extension. See gltf_scene_omm.hpp for design.
 //
 
@@ -80,6 +80,11 @@ void nvvkgltf::SceneOmm::init(nvvk::ResourceAllocator* alloc)
   assert(!m_alloc);
   m_alloc  = alloc;
   m_device = alloc->getDevice();
+
+  VkPhysicalDeviceAccelerationStructurePropertiesKHR asProps{VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_ACCELERATION_STRUCTURE_PROPERTIES_KHR};
+  VkPhysicalDeviceProperties2 props{.sType = VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_PROPERTIES_2, .pNext = &asProps};
+  vkGetPhysicalDeviceProperties2(alloc->getPhysicalDevice(), &props);
+  m_scratchAlignment = asProps.minAccelerationStructureScratchOffsetAlignment;
 }
 
 //--------------------------------------------------------------------------------------------------
@@ -96,7 +101,7 @@ void nvvkgltf::SceneOmm::destroy()
 {
   for(Micromap& mm : m_micromaps)
   {
-    vkDestroyMicromapEXT(m_device, mm.micromap, nullptr);
+    vkDestroyAccelerationStructureKHR(m_device, mm.micromap, nullptr);
     m_alloc->destroyBuffer(mm.storage);
     m_alloc->destroyBuffer(mm.data);
     m_alloc->destroyBuffer(mm.triangles);
@@ -122,6 +127,17 @@ const nvvkgltf::SceneOmm::PrimitiveOmm& nvvkgltf::SceneOmm::get(uint32_t renderP
 {
   assert(renderPrimID < m_primitives.size());
   return m_primitives[renderPrimID];
+}
+
+//--------------------------------------------------------------------------------------------------
+bool nvvkgltf::SceneOmm::hasAny() const
+{
+  for(const PrimitiveOmm& p : m_primitives)
+  {
+    if(p.valid)
+      return true;
+  }
+  return false;
 }
 
 //--------------------------------------------------------------------------------------------------
@@ -161,18 +177,18 @@ void nvvkgltf::SceneOmm::create(VkCommandBuffer cmd, nvvk::CmdUploaderInterface&
     return std::span<const uint8_t>(buf.data.data() + bv.byteOffset, bv.byteLength);
   };
 
-  // --- Build one VkMicromapEXT per root micromaps[] entry ---
+  // --- Build one opacity micromap acceleration structure per root micromaps[] entry ---
   const tinygltf::Value& micromapsArray = rootExt->Get("micromaps");
   m_micromaps.resize(micromapsArray.ArrayLen());
 
   // The GPU builds are deferred until after the upload barrier, so the build inputs are resident
-  // before vkCmdBuildMicromapsEXT reads them. Reserve so pUsageCounts pointers stay stable.
+  // before vkCmdBuildAccelerationStructuresKHR reads them. The build info is assembled at record
+  // time, so it points at each entry's own `usages`.
   struct PendingBuild
   {
-    VkMicromapBuildInfoEXT          buildInfo;
     Micromap*                       micromap;
     uint32_t                        triangleStride;
-    std::vector<VkMicromapUsageEXT> usages;
+    std::vector<VkMicromapUsageKHR> usages;
   };
   std::vector<PendingBuild> pendingBuilds;
   pendingBuilds.reserve(micromapsArray.ArrayLen());
@@ -212,69 +228,82 @@ void nvvkgltf::SceneOmm::create(VkCommandBuffer cmd, nvvk::CmdUploaderInterface&
       LOGW("EXT_mesh_opacity_micromap: micromaps[%zu] has misaligned usageCounts/usageLevels/usageFormats arrays - skipping\n", i);
       continue;
     }
-    std::vector<VkMicromapUsageEXT> usages(counts.ArrayLen());
+    std::vector<VkMicromapUsageKHR> usages(counts.ArrayLen());
     for(size_t u = 0; u < usages.size(); u++)
     {
       usages[u].count            = uint32_t(counts.Get(int(u)).Get<int>());
       usages[u].subdivisionLevel = uint32_t(levels.Get(int(u)).Get<int>());
-      usages[u].format           = uint32_t(formats.Get(int(u)).Get<int>());
+      usages[u].format           = VkOpacityMicromapFormatKHR(formats.Get(int(u)).Get<int>());
     }
 
     // Upload the packed opacity bits and the per-triangle records (layout-compatible with
-    // VkMicromapTriangleEXT). The triangles bufferView may specify a stride (>= 8, multiple of 4).
+    // VkMicromapTriangleKHR). The triangles bufferView may specify a stride (>= 8, multiple of 4).
     const std::span<const uint8_t> dataBytes      = bufferViewSpan(dataView);
     const std::span<const uint8_t> trianglesBytes = bufferViewSpan(trianglesView);
     const uint32_t                 triangleStride = model.bufferViews[trianglesView].byteStride ?
                                                         uint32_t(model.bufferViews[trianglesView].byteStride) :
-                                                        uint32_t(sizeof(VkMicromapTriangleEXT));
+                                                        uint32_t(sizeof(VkMicromapTriangleKHR));
 
-    // vkCmdBuildMicromapsEXT requires data.deviceAddress and triangleArray.deviceAddress to be
-    // multiples of 256 (VUID-vkCmdBuildMicromapsEXT-pInfos-07515). Force the buffers' base device
+    // The micromap geometry's data and triangleArray addresses must be multiples of 128
+    // (VUID-vkCmdBuildAccelerationStructuresKHR-micromap-11552). Force the buffers' base device
     // address to that alignment; otherwise VMA can suballocate them at a smaller offset (the exact
     // offset depends on prior allocations, so this only surfaces after e.g. a scene merge).
-    constexpr VkDeviceSize kMicromapInputAlignment = 256;
+    constexpr VkDeviceSize kMicromapInputAlignment = 128;
     NVVK_CHECK(m_alloc->createBuffer(mm.data, dataBytes.size_bytes(),
-                                     VK_BUFFER_USAGE_2_MICROMAP_BUILD_INPUT_READ_ONLY_BIT_EXT | VK_BUFFER_USAGE_2_SHADER_DEVICE_ADDRESS_BIT,
+                                     VK_BUFFER_USAGE_2_ACCELERATION_STRUCTURE_BUILD_INPUT_READ_ONLY_BIT_KHR | VK_BUFFER_USAGE_2_SHADER_DEVICE_ADDRESS_BIT,
                                      VMA_MEMORY_USAGE_AUTO, {}, kMicromapInputAlignment));
     NVVK_CHECK(staging.appendBuffer(mm.data, 0, dataBytes));
     NVVK_DBG_NAME(mm.data.buffer);
 
     NVVK_CHECK(m_alloc->createBuffer(mm.triangles, trianglesBytes.size_bytes(),
-                                     VK_BUFFER_USAGE_2_MICROMAP_BUILD_INPUT_READ_ONLY_BIT_EXT | VK_BUFFER_USAGE_2_SHADER_DEVICE_ADDRESS_BIT,
+                                     VK_BUFFER_USAGE_2_ACCELERATION_STRUCTURE_BUILD_INPUT_READ_ONLY_BIT_KHR | VK_BUFFER_USAGE_2_SHADER_DEVICE_ADDRESS_BIT,
                                      VMA_MEMORY_USAGE_AUTO, {}, kMicromapInputAlignment));
     NVVK_CHECK(staging.appendBuffer(mm.triangles, 0, trianglesBytes));
     NVVK_DBG_NAME(mm.triangles.buffer);
 
     // Query build sizes, then create the micromap storage + scratch buffers and the micromap object.
-    VkMicromapBuildInfoEXT buildInfo{VK_STRUCTURE_TYPE_MICROMAP_BUILD_INFO_EXT};
-    buildInfo.type             = VK_MICROMAP_TYPE_OPACITY_MICROMAP_EXT;
-    buildInfo.flags            = VK_BUILD_MICROMAP_PREFER_FAST_TRACE_BIT_EXT;
-    buildInfo.mode             = VK_BUILD_MICROMAP_MODE_BUILD_EXT;
-    buildInfo.usageCountsCount = uint32_t(usages.size());
-    buildInfo.pUsageCounts     = usages.data();
+    // The size query reads the usage histogram and stride; the device addresses are filled at record time.
+    VkAccelerationStructureGeometryMicromapDataKHR micromapData{VK_STRUCTURE_TYPE_ACCELERATION_STRUCTURE_GEOMETRY_MICROMAP_DATA_KHR};
+    micromapData.usageCountsCount    = uint32_t(usages.size());
+    micromapData.pUsageCounts        = usages.data();
+    micromapData.triangleArrayStride = triangleStride;
+    VkAccelerationStructureGeometryKHR geometry{VK_STRUCTURE_TYPE_ACCELERATION_STRUCTURE_GEOMETRY_KHR};
+    geometry.pNext        = &micromapData;
+    geometry.geometryType = VK_GEOMETRY_TYPE_MICROMAP_KHR;
+    VkAccelerationStructureBuildGeometryInfoKHR buildInfo{VK_STRUCTURE_TYPE_ACCELERATION_STRUCTURE_BUILD_GEOMETRY_INFO_KHR};
+    buildInfo.type          = VK_ACCELERATION_STRUCTURE_TYPE_OPACITY_MICROMAP_KHR;
+    buildInfo.flags         = VK_BUILD_ACCELERATION_STRUCTURE_PREFER_FAST_TRACE_BIT_KHR;
+    buildInfo.mode          = VK_BUILD_ACCELERATION_STRUCTURE_MODE_BUILD_KHR;
+    buildInfo.geometryCount = 1;
+    buildInfo.pGeometries   = &geometry;
 
-    VkMicromapBuildSizesInfoEXT sizeInfo{VK_STRUCTURE_TYPE_MICROMAP_BUILD_SIZES_INFO_EXT};
-    vkGetMicromapBuildSizesEXT(m_device, VK_ACCELERATION_STRUCTURE_BUILD_TYPE_DEVICE_KHR, &buildInfo, &sizeInfo);
-    assert(sizeInfo.micromapSize > 0);
+    // Micromaps take no primitive counts (VUID-vkGetAccelerationStructureBuildSizesKHR-pMaxPrimitiveCounts-11613).
+    VkAccelerationStructureBuildSizesInfoKHR sizeInfo{VK_STRUCTURE_TYPE_ACCELERATION_STRUCTURE_BUILD_SIZES_INFO_KHR};
+    vkGetAccelerationStructureBuildSizesKHR(m_device, VK_ACCELERATION_STRUCTURE_BUILD_TYPE_DEVICE_KHR, &buildInfo, nullptr, &sizeInfo);
+    assert(sizeInfo.accelerationStructureSize > 0);
 
-    NVVK_CHECK(m_alloc->createBuffer(mm.storage, sizeInfo.micromapSize,
-                                     VK_BUFFER_USAGE_2_MICROMAP_STORAGE_BIT_EXT | VK_BUFFER_USAGE_2_SHADER_DEVICE_ADDRESS_BIT));
+    // The micromap's address must be a multiple of 256 (VUID-VkAccelerationStructureCreateInfo2KHR-addressRange-11605).
+    constexpr VkDeviceSize kMicromapStorageAlignment = 256;
+    NVVK_CHECK(m_alloc->createBuffer(mm.storage, sizeInfo.accelerationStructureSize,
+                                     VK_BUFFER_USAGE_2_ACCELERATION_STRUCTURE_STORAGE_BIT_KHR | VK_BUFFER_USAGE_2_SHADER_DEVICE_ADDRESS_BIT,
+                                     VMA_MEMORY_USAGE_AUTO, {}, kMicromapStorageAlignment));
     NVVK_DBG_NAME(mm.storage.buffer);
 
     const VkDeviceSize scratchSize = std::max(sizeInfo.buildScratchSize, VkDeviceSize(4));
-    NVVK_CHECK(m_alloc->createBuffer(mm.scratch, scratchSize,
-                                     VK_BUFFER_USAGE_2_STORAGE_BUFFER_BIT | VK_BUFFER_USAGE_2_SHADER_DEVICE_ADDRESS_BIT
-                                         | VK_BUFFER_USAGE_2_MICROMAP_STORAGE_BIT_EXT));
+    NVVK_CHECK(m_alloc->createBuffer(mm.scratch, scratchSize, VK_BUFFER_USAGE_2_STORAGE_BUFFER_BIT | VK_BUFFER_USAGE_2_SHADER_DEVICE_ADDRESS_BIT,
+                                     VMA_MEMORY_USAGE_AUTO, {}, m_scratchAlignment));
     NVVK_DBG_NAME(mm.scratch.buffer);
 
-    VkMicromapCreateInfoEXT createInfo{VK_STRUCTURE_TYPE_MICROMAP_CREATE_INFO_EXT};
-    createInfo.buffer = mm.storage.buffer;
-    createInfo.size   = sizeInfo.micromapSize;
-    createInfo.type   = VK_MICROMAP_TYPE_OPACITY_MICROMAP_EXT;
-    NVVK_CHECK(vkCreateMicromapEXT(m_device, &createInfo, nullptr, &mm.micromap));
+    // A micromap can only be created through the address-range entry point
+    // (VUID-VkAccelerationStructureCreateInfoKHR-type-11600).
+    VkAccelerationStructureCreateInfo2KHR createInfo{VK_STRUCTURE_TYPE_ACCELERATION_STRUCTURE_CREATE_INFO_2_KHR};
+    createInfo.addressRange = {mm.storage.address, sizeInfo.accelerationStructureSize};
+    createInfo.type         = VK_ACCELERATION_STRUCTURE_TYPE_OPACITY_MICROMAP_KHR;
+    NVVK_CHECK(vkCreateAccelerationStructure2KHR(m_device, &createInfo, nullptr, &mm.micromap));
+    NVVK_DBG_NAME(mm.micromap);
 
-    // Store the finalized build info to record after the upload barrier.
-    pendingBuilds.push_back({buildInfo, &mm, triangleStride, std::move(usages)});
+    // Store the inputs to record the build after the upload barrier.
+    pendingBuilds.push_back({&mm, triangleStride, std::move(usages)});
   }
 
   // --- Upload the per-primitive micromap index buffers and record the linkage ---
@@ -368,24 +397,39 @@ void nvvkgltf::SceneOmm::create(VkCommandBuffer cmd, nvvk::CmdUploaderInterface&
   // --- Flush uploads, then record the micromap builds (build inputs must be resident first) ---
   staging.cmdUploadAppended(cmd);
 
-  nvvk::cmdMemoryBarrier(cmd, VK_PIPELINE_STAGE_2_TRANSFER_BIT, VK_PIPELINE_STAGE_2_MICROMAP_BUILD_BIT_EXT,
-                         VK_ACCESS_2_TRANSFER_WRITE_BIT, VK_ACCESS_2_MICROMAP_READ_BIT_EXT);
+  // Build inputs (opacity data, triangle records) are read by the build like any AS input: SHADER_READ.
+  nvvk::cmdMemoryBarrier(cmd, VK_PIPELINE_STAGE_2_TRANSFER_BIT, VK_PIPELINE_STAGE_2_ACCELERATION_STRUCTURE_BUILD_BIT_KHR,
+                         VK_ACCESS_2_TRANSFER_WRITE_BIT, VK_ACCESS_2_SHADER_READ_BIT);
 
   for(PendingBuild& pb : pendingBuilds)
   {
-    pb.buildInfo.pUsageCounts                = pb.usages.data();  // Re-point after the move into the vector
-    pb.buildInfo.dstMicromap                 = pb.micromap->micromap;
-    pb.buildInfo.data.deviceAddress          = pb.micromap->data.address;
-    pb.buildInfo.triangleArray.deviceAddress = pb.micromap->triangles.address;
-    pb.buildInfo.triangleArrayStride         = pb.triangleStride;
-    pb.buildInfo.scratchData.deviceAddress   = pb.micromap->scratch.address;
-    vkCmdBuildMicromapsEXT(cmd, 1, &pb.buildInfo);
+    VkAccelerationStructureGeometryMicromapDataKHR micromapData{VK_STRUCTURE_TYPE_ACCELERATION_STRUCTURE_GEOMETRY_MICROMAP_DATA_KHR};
+    micromapData.usageCountsCount    = uint32_t(pb.usages.size());
+    micromapData.pUsageCounts        = pb.usages.data();
+    micromapData.data                = pb.micromap->data.address;
+    micromapData.triangleArray       = pb.micromap->triangles.address;
+    micromapData.triangleArrayStride = pb.triangleStride;
+    VkAccelerationStructureGeometryKHR geometry{VK_STRUCTURE_TYPE_ACCELERATION_STRUCTURE_GEOMETRY_KHR};
+    geometry.pNext        = &micromapData;
+    geometry.geometryType = VK_GEOMETRY_TYPE_MICROMAP_KHR;
+    VkAccelerationStructureBuildGeometryInfoKHR buildInfo{VK_STRUCTURE_TYPE_ACCELERATION_STRUCTURE_BUILD_GEOMETRY_INFO_KHR};
+    buildInfo.type                      = VK_ACCELERATION_STRUCTURE_TYPE_OPACITY_MICROMAP_KHR;
+    buildInfo.flags                     = VK_BUILD_ACCELERATION_STRUCTURE_PREFER_FAST_TRACE_BIT_KHR;
+    buildInfo.mode                      = VK_BUILD_ACCELERATION_STRUCTURE_MODE_BUILD_KHR;
+    buildInfo.dstAccelerationStructure  = pb.micromap->micromap;
+    buildInfo.geometryCount             = 1;
+    buildInfo.pGeometries               = &geometry;
+    buildInfo.scratchData.deviceAddress = pb.micromap->scratch.address;
+
+    // Micromaps take no build ranges (VUID-vkCmdBuildAccelerationStructuresKHR-ppBuildRangeInfos-11544).
+    const VkAccelerationStructureBuildRangeInfoKHR* noRanges = nullptr;
+    vkCmdBuildAccelerationStructuresKHR(cmd, 1, &buildInfo, &noRanges);
   }
 
   // Micromap build results and the transfer-written index buffers are consumed by the BLAS build
   // (recorded on a later command buffer on the same queue, so this barrier synchronizes it).
-  nvvk::cmdMemoryBarrier(cmd, VK_PIPELINE_STAGE_2_MICROMAP_BUILD_BIT_EXT | VK_PIPELINE_STAGE_2_TRANSFER_BIT,
+  nvvk::cmdMemoryBarrier(cmd, VK_PIPELINE_STAGE_2_ACCELERATION_STRUCTURE_BUILD_BIT_KHR | VK_PIPELINE_STAGE_2_TRANSFER_BIT,
                          VK_PIPELINE_STAGE_2_ACCELERATION_STRUCTURE_BUILD_BIT_KHR,
-                         VK_ACCESS_2_MICROMAP_WRITE_BIT_EXT | VK_ACCESS_2_TRANSFER_WRITE_BIT,
-                         VK_ACCESS_2_ACCELERATION_STRUCTURE_READ_BIT_KHR | VK_ACCESS_2_MICROMAP_READ_BIT_EXT);
+                         VK_ACCESS_2_ACCELERATION_STRUCTURE_WRITE_BIT_KHR | VK_ACCESS_2_TRANSFER_WRITE_BIT,
+                         VK_ACCESS_2_ACCELERATION_STRUCTURE_READ_BIT_KHR | VK_ACCESS_2_SHADER_READ_BIT);
 }

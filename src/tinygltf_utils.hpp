@@ -467,10 +467,13 @@ inline void getArrayValue(const tinygltf::Value& value, const std::string& name,
 {
   if(value.Has(name))
   {
+    // Read at the component precision of T: narrowing through float would round double targets
+    // (e.g. camera::eye into a dvec3), so they would not round-trip a save/reload unchanged.
+    using Component   = typename T::value_type;
     const auto& v     = value.Get(name).Get<tinygltf::Value::Array>();
-    const auto  count = std::min(v.size(), sizeof(T) / sizeof(float));
+    const auto  count = std::min(v.size(), sizeof(T) / sizeof(Component));
     std::transform(v.begin(), v.begin() + count, glm::value_ptr(result),
-                   [](const tinygltf::Value& v) { return static_cast<float>(v.Get<double>()); });
+                   [](const tinygltf::Value& v) { return static_cast<Component>(v.Get<double>()); });
   }
 }
 

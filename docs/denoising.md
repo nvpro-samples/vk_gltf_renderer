@@ -20,6 +20,21 @@ DLSS feature handle and sized render targets are still created later from `Dlss:
 a command buffer and display extent are available. Disabled DLSS-RR therefore reports **Ready** once
 NGX is warmed, but its heavier guide buffers stay unsized until the user enables it.
 
+## DLSS-RR input resolution
+
+DLSS-RR path-traces at an input resolution NGX recommends for the viewport, then upscales to it.
+`Dlss::updateSizeRr` queries NGX's supported input sizes and picks one according to the RR
+**Input Size** setting (`--dlssInputSize`, `Dlss::SizeMode`: Min / Optimal / Max). **Optimal**, the
+default, is below native resolution, so the path tracer traces fewer pixels with DLSS-RR on than
+off; that usually more than pays for the DLSS pass itself. **Max** traces at native resolution.
+
+The DLSS-SR quality setting (`--dlssQuality`, e.g. DLAA) is unrelated: it only sizes the
+rasterizer's Super Resolution input. The DLSS-RR panel shows the resolution actually in use
+("Input resolution"), and each resize is logged as `DLSS-RR: input WxH for output WxH`. Changing
+the input size from any source (UI, command line, benchmark sequence, MCP) recreates the feature
+and resets its temporal history; `Dlss::needsRecreate` compares the setting with the size mode the
+feature was built with.
+
 ## Guide buffers
 
 The path tracer writes all guide buffers in `processPixel` (`shaders/gltf_pathtrace.slang`, first-hit

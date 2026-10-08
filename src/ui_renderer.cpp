@@ -1732,22 +1732,21 @@ void GltfRenderer::applyGltfCamera(int cameraIndex)
 
   if(camera.type == nvvkgltf::RenderCamera::CameraType::ePerspective)
   {
-    float                              fov = static_cast<float>(glm::degrees(camera.yfov));
+    double                             fov = glm::degrees(camera.yfov);
     nvutils::CameraManipulator::Camera cam{camera.eye, camera.center, camera.up, fov};
     cam.projectionType = nvutils::CameraManipulator::Perspective;
     m_cameraManip->setCamera(cam);
-    m_cameraManip->setClipPlanes({static_cast<float>(camera.znear), static_cast<float>(camera.zfar)});
+    m_cameraManip->setClipPlanes({camera.znear, camera.zfar});
   }
   else if(camera.type == nvvkgltf::RenderCamera::CameraType::eOrthographic)
   {
-    float                              fov = 45.0f;
+    double                             fov = 45.0;
     nvutils::CameraManipulator::Camera cam{camera.eye, camera.center, camera.up, fov};
     cam.projectionType = nvutils::CameraManipulator::Orthographic;
-    cam.orthMag.x      = static_cast<float>(camera.xmag);
-    cam.orthMag.y      = static_cast<float>(camera.ymag);
+    cam.orthMag        = {camera.xmag, camera.ymag};
     m_cameraManip->setCamera(cam);
     m_cameraManip->adjustOrthographicAspect();
-    m_cameraManip->setClipPlanes({static_cast<float>(camera.znear), static_cast<float>(camera.zfar)});
+    m_cameraManip->setClipPlanes({camera.znear, camera.zfar});
   }
 
   // Also update the scene's camera to keep extras (eye, center, up) in sync
@@ -1777,17 +1776,17 @@ void GltfRenderer::setGltfCameraFromView(int cameraIndex)
 
   // Get current camera state from manipulator
   nvutils::CameraManipulator::Camera cameraState = m_cameraManip->getCamera();
-  glm::vec2                          clipPlanes  = m_cameraManip->getClipPlanes();
+  glm::dvec2                         clipPlanes  = m_cameraManip->getClipPlanes();
 
   // Update the camera parameters
   if(cameraState.projectionType == nvutils::CameraManipulator::Orthographic)
   {
     camera.type                         = "orthographic";
     tinygltf::OrthographicCamera& ortho = camera.orthographic;
-    ortho.xmag                          = static_cast<double>(cameraState.orthMag.x);
-    ortho.ymag                          = static_cast<double>(cameraState.orthMag.y);
-    ortho.znear                         = static_cast<double>(clipPlanes.x);
-    ortho.zfar                          = static_cast<double>(clipPlanes.y);
+    ortho.xmag                          = cameraState.orthMag.x;
+    ortho.ymag                          = cameraState.orthMag.y;
+    ortho.znear                         = clipPlanes.x;
+    ortho.zfar                          = clipPlanes.y;
   }
   else
   {
@@ -1795,8 +1794,8 @@ void GltfRenderer::setGltfCameraFromView(int cameraIndex)
     tinygltf::PerspectiveCamera& persp = camera.perspective;
     // Convert FOV from degrees (manipulator) to radians (GLTF)
     persp.yfov  = glm::radians(cameraState.fov);
-    persp.znear = static_cast<double>(clipPlanes.x);
-    persp.zfar  = static_cast<double>(clipPlanes.y);
+    persp.znear = clipPlanes.x;
+    persp.zfar  = clipPlanes.y;
     // Aspect ratio will be calculated from viewport when camera is applied
   }
 

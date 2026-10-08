@@ -25,6 +25,26 @@
 #define WIREFRAME 0
 #endif
 
+// VK_KHR_opacity_micromap: an entry point whose ray queries traverse a BLAS carrying an opacity
+// micromap must opt in with the OpacityMicromapIdKHR execution mode (VUID-vkCmdTraceRaysKHR-micromap-11636).
+// The capability it declares is only valid on a device with the extension, so the host sets USE_OMM
+// only when the loaded scene has micromaps; the embedded SPIR-V is built without it.
+#ifndef USE_OMM
+#define USE_OMM 0
+#endif
+#if USE_OMM
+#define RAYQUERY_USE_OPACITY_MICROMAP(entryPoint)                                                                      \
+  spirv_asm                                                                                                            \
+  {                                                                                                                    \
+    OpCapability RayTracingOpacityMicromapExecutionModeKHR;                                                            \
+    OpExtension "SPV_KHR_opacity_micromap";                                                                            \
+    %ommEnable = OpSpecConstantTrue $$bool;                                                                            \
+    OpExecutionModeId $entryPoint OpacityMicromapIdKHR %ommEnable                                                      \
+  }
+#else
+#define RAYQUERY_USE_OPACITY_MICROMAP(entryPoint)
+#endif
+
 // This is a debug flag to enable/disable debug output
 // For example, to use print statements in the shader, set this to true.
 // Add printf and enable the Validation layer debug output.
@@ -831,12 +851,11 @@ void processPixel(IRaytracer raytracer, float2 samplePos, float2 imageSize)
 [numthreads(WORKGROUP_SIZE, WORKGROUP_SIZE, 1)]
 void computeMain(uint3 threadIdx: SV_DispatchThreadID)
 {
+  RAYQUERY_USE_OPACITY_MICROMAP(computeMain);
+  // The render size, not the output image's: OptiX 2x upscale traces only its top-left quarter.
   RayQueryRaytracer raytracer;
   float2            samplePos = (float2)threadIdx.xy;
-  uint2             imageSize;
-  outImages[int(OutputImage::eResultImage)].GetDimensions(imageSize.x, imageSize.y);
-
-  processPixel(raytracer, samplePos, imageSize);
+  processPixel(raytracer, samplePos, (float2)pushConst.renderSize);
 }
 
 //-----------------------------------------------------------------------
@@ -845,11 +864,10 @@ void computeMain(uint3 threadIdx: SV_DispatchThreadID)
 [shader("raygeneration")]
 void rgenMain()
 {
+  RAYQUERY_USE_OPACITY_MICROMAP(rgenMain);  // Ray queries here too (e.g. dlssTraceSkipThinGlass)
   TraditionalRaytracer raytracer;
   float2               samplePos = (float2)DispatchRaysIndex().xy;
-  float2               imageSize = (float2)DispatchRaysDimensions().xy;
-
-  processPixel(raytracer, samplePos, imageSize);
+  processPixel(raytracer, samplePos, (float2)pushConst.renderSize);
 }
 
 //-----------------------------------------------------------------------

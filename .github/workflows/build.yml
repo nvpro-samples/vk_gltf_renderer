@@ -154,6 +154,7 @@ jobs:
           -DUSE_DRACO=ON
           -DBUILD_TESTING=OFF
           -DREQUIRE_NVML_MONITOR=ON
+          -DSHADER_DEBUG_LEVEL=0
           -DRELEASE_VERSION="${{ steps.version.outputs.release_version }}"
 
       # Note: we use Unix Makefiles instead of Ninja because nvpro_core2's
@@ -174,6 +175,7 @@ jobs:
           -DUSE_DRACO=ON
           -DBUILD_TESTING=OFF
           -DREQUIRE_NVML_MONITOR=ON
+          -DSHADER_DEBUG_LEVEL=0
           -DRELEASE_VERSION="${{ steps.version.outputs.release_version }}"
 
       - name: Build

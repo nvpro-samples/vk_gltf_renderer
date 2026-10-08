@@ -173,6 +173,8 @@ public:
 
   // Check if using UPSCALE2X model (renders at half resolution)
   bool isUpscaleMode() const { return m_settings.modelKind == ModelKind::eUpscale2X; }
+  // Upscale renders a quarter-size image, so its denoised output must keep refreshing: always auto there.
+  bool isAutoDenoiseActive() const { return m_settings.autoDenoiseEnabled || isUpscaleMode(); }
 
   // Return the render resolution (half of display for upscale mode, full otherwise)
   VkExtent2D getRenderSize() const { return m_inputSize; }
@@ -186,6 +188,10 @@ public:
 
   // Update size when rendering resolution changes
   void updateSize(VkCommandBuffer cmd, VkExtent2D size);
+  // The one place the targets follow `enable` / `modelKind`, however those were set (UI, command
+  // line, sequence script, MCP, ini restore): reallocates them if they no longer match. A few
+  // compares when nothing changed. Returns true when it reallocated.
+  bool ensureTargets(Resources& resources);
 
   // Perform one-shot denoising
   bool denoiseOneShot(Resources& resources);
@@ -240,8 +246,7 @@ private:
   VkExtent2D   m_inputSize{};   // Render/input resolution (half for upscale, full for AOV)
   Availability m_availability         = Availability::eNotChecked;
   bool         m_hasValidOutput       = false;
-  bool         m_needModelRecreate    = false;  // Denoiser must be destroyed and recreated
-  uint64_t     m_lastAutoDenoiseFrame = 0;      // Track last frame we auto-denoised
+  uint64_t     m_lastAutoDenoiseFrame = 0;  // Track last frame we auto-denoised
   bool         m_settingsOpen         = false;
 
   // OptiX context and denoiser

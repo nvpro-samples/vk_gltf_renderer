@@ -252,7 +252,7 @@ float getOpacity(GltfRenderNode renderNode, GltfRenderPrimitive renderPrim, int 
       GltfTextureInfo texInfo = texInfos[mat.pbrDiffuseTexture];
       float2          uv = getInterpolatedVertexTexCoord(renderPrim, texInfo.texCoord, triangleIndex, barycentrics);
       uv                 = applyTextureTransform(texInfo, uv);
-      baseColorAlpha *= allImages[texInfo.index].SampleLevel(allSamplers[texInfo.samplerIndex], uv, 0.0f).a;
+      baseColorAlpha *= allImages[NonUniformResourceIndex(texInfo.index)].SampleLevel(allSamplers[NonUniformResourceIndex(texInfo.samplerIndex)], uv, 0.0f).a;
     }
   }
   else
@@ -265,7 +265,7 @@ float getOpacity(GltfRenderNode renderNode, GltfRenderPrimitive renderPrim, int 
       float2          uv = getInterpolatedVertexTexCoord(renderPrim, texInfo.texCoord, triangleIndex, barycentrics);
       uv                 = applyTextureTransform(texInfo, uv);
 
-      baseColorAlpha *= allImages[texInfo.index].SampleLevel(allSamplers[texInfo.samplerIndex], uv, 0.0f).a;
+      baseColorAlpha *= allImages[NonUniformResourceIndex(texInfo.index)].SampleLevel(allSamplers[NonUniformResourceIndex(texInfo.samplerIndex)], uv, 0.0f).a;
     }
   }
 
@@ -368,7 +368,7 @@ float3 getShadowTransmission(GltfRenderNode      renderNode,
       float2          uv      = getInterpolatedVertexTexCoord(renderPrim, texInfo.texCoord, indices, barycentrics);
       uv                      = applyTextureTransform(texInfo, uv);
 
-      float4 mr_sample = allImages[texInfo.index].SampleLevel(allSamplers[texInfo.samplerIndex], uv, 0.0f);
+      float4 mr_sample = allImages[NonUniformResourceIndex(texInfo.index)].SampleLevel(allSamplers[NonUniformResourceIndex(texInfo.samplerIndex)], uv, 0.0f);
       roughness *= mr_sample.g;
       metallic *= mr_sample.b;
     }

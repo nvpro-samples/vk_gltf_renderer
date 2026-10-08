@@ -88,8 +88,10 @@ float4 getTexture(Texture2D images[], SamplerState samplers[], in GltfTextureInf
 {
 #ifdef USE_TEXTURES
   // Images and samplers are now separate bindless arrays (see GltfTextureInfo.index / samplerIndex).
-  Texture2D    tex     = images[textureInfo.index];
-  SamplerState sampler = samplers[textureInfo.samplerIndex];
+  // The path tracer shades a different material per lane, so the indices must be marked non-uniform:
+  // without it, AMD applies one lane's descriptor to the whole wave (blocky texture seams).
+  Texture2D    tex     = images[NonUniformResourceIndex(textureInfo.index)];
+  SamplerState sampler = samplers[NonUniformResourceIndex(textureInfo.samplerIndex)];
   float2       tt      = applyTextureTransform(textureInfo, texCoords[textureInfo.texCoord]);
   if(texGrad > 0.0f)
   {

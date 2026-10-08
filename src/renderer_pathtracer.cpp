@@ -25,6 +25,7 @@
 //
 
 #include <fmt/format.h>
+#include <algorithm>
 #include <chrono>
 #include <thread>
 #include <vector>
@@ -85,22 +86,51 @@ void PathTracer::onAttach(Resources& resources, nvvk::ProfilerGpuTimer* profiler
   // Create pipeline cache for faster pipeline creation
   m_pipelineCache.init(m_device, nvutils::getExecutablePath().parent_path() / "pipeline_cache.bin");
 
+  // The path tracer writes depth as a storage image. nvvk::RenderTarget only gives the G-buffer depth
+  // STORAGE usage when the format supports it, which D32_SFLOAT does not on every GPU (AMD); there the
+  // shader writes an R32_SFLOAT image instead, so the binding stays valid, and a copy brings it into the
+  // depth buffer. That copy reinterprets 32-bit float depth only; other formats get no path-traced depth.
+  {
+    const VkFormat     depthFormat = resources.gBuffers.getDepthFormat();
+    VkFormatProperties depthProps{};
+    vkGetPhysicalDeviceFormatProperties(resources.allocator.getPhysicalDevice(), depthFormat, &depthProps);
+    const bool storageDepth = (depthProps.optimalTilingFeatures & VK_FORMAT_FEATURE_STORAGE_IMAGE_BIT) != 0;
+    const bool floatDepth   = depthFormat == VK_FORMAT_D32_SFLOAT || depthFormat == VK_FORMAT_D32_SFLOAT_S8_UINT;
+    m_depthViaStaging       = !storageDepth;
+    m_depthCopyable         = floatDepth;
+    if(!storageDepth && !floatDepth)
+      LOGW("PathTracer: depth format %d is neither a storage image nor 32-bit float; path-traced depth is not written\n",
+           int(depthFormat));
+    if(m_depthViaStaging)
+      NVVK_CHECK(m_depthStaging.init(
+          {.device = m_device, .alloc = &resources.allocator, .colorFormats = {VK_FORMAT_R32_SFLOAT}, .debugName = "PathTracer-DepthStaging"}));
+  }
+
 
   // Requesting ray tracing properties
+  // The SER properties are only chained (and trusted) when the extension is enabled: a driver
+  // without it may still report a reordering hint, and compiling SER in would then make every
+  // path-tracer pipeline fail to create.
   VkPhysicalDeviceProperties2 prop2{VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_PROPERTIES_2};
   prop2.pNext                  = &m_rtPipelineProperties;
-  m_rtPipelineProperties.pNext = &m_reorderProperties;
+  m_rtPipelineProperties.pNext = resources.settings.serHardwareAvailable ? &m_reorderProperties : nullptr;
   vkGetPhysicalDeviceProperties2(resources.allocator.getPhysicalDevice(), &prop2);
 
-  m_supportSER = (bool)(m_reorderProperties.rayTracingInvocationReorderReorderingHint & VK_RAY_TRACING_INVOCATION_REORDER_MODE_REORDER_EXT) ?
-                     true :
-                     false;
+  m_supportSER = resources.settings.serHardwareAvailable
+                 && (m_reorderProperties.rayTracingInvocationReorderReorderingHint & VK_RAY_TRACING_INVOCATION_REORDER_MODE_REORDER_EXT);
+
+  // AMD's driver crashes creating the compute (ray-query) pipeline from this module, which also
+  // holds the ray-tracing entry points; the ray-tracing pipeline works. Keep the path tracer on it.
+  constexpr uint32_t kAmdVendorId = 0x1002;
+  m_supportRayQuery               = prop2.properties.vendorID != kAmdVendorId;
+  if(!m_supportRayQuery)
+    LOGI("PathTracer: the Ray Query technique is not supported with this driver; using the Ray Tracing Pipeline\n");
   // Keep whatever --ptUseSER asked for (the parameter is parsed before this runs); the device
   // capability only ever turns it off.
   m_useSER         = m_useSER && m_supportSER;
   m_pipelineUseSER = m_useSER;  // no pipelines exist yet; keep the first frame from invalidating
 #if defined(USE_DLSS)
-  m_pipelineDlssTransparency = static_cast<int>(m_dlss->getTransparencyMode());
+  m_compiled.dlssTransparency = static_cast<int>(m_dlss->getTransparencyMode());
 #endif
 
   // If SER is not supported, force recompiling without SER
@@ -167,6 +197,8 @@ void PathTracer::onDetach(Resources& resources)
     m_compileThread.join();
 
   resources.allocator.destroyBuffer(m_sbtBuffer);
+  resources.allocator.destroyBuffer(m_depthCopyBuffer);
+  m_depthStaging.deinit();
 
 #if defined(USE_DLSS)
   m_dlss->deinit(resources);
@@ -187,6 +219,7 @@ void PathTracer::onDetach(Resources& resources)
 // Resize the G-Buffer and the renderers
 void PathTracer::onResize(VkCommandBuffer cmd, const VkExtent2D& /*size*/, Resources& resources)
 {
+  updateDepthStaging(cmd, resources);
   updateDlssResources(cmd, resources);
   updateOptiXResources(cmd, resources);
 #if defined(USE_DLSS)
@@ -256,10 +289,17 @@ bool PathTracer::onUIRender(Resources& resources)
     // Rendering technique selector
     const char* techniques[] = {"Compute / Ray Query", "Ray Tracing Pipeline"};
     int         current      = static_cast<int>(m_renderTechnique);
+    ImGui::BeginDisabled(!m_supportRayQuery);
     if(PE::Combo("Rendering Pipeline", &current, techniques, IM_ARRAYSIZE(techniques)))
     {
       m_renderTechnique = static_cast<RenderTechnique>(current);
       changed           = true;
+    }
+    ImGui::EndDisabled();
+    if(!m_supportRayQuery)
+    {
+      ImGui::SameLine();
+      ImGui::TextDisabled("(Ray Query unsupported on this driver)");
     }
     nvgui::tooltip(
         "Both Ray Query and Ray Tracing use hardware accelerated ray tracing."
@@ -449,91 +489,84 @@ bool PathTracer::onUIRender(Resources& resources)
   return changed;
 }
 
-PathTracer::CompileStateSnapshot PathTracer::getCompileStateSnapshot()
+//--------------------------------------------------------------------------------------------------
+// What the live shader / pipeline lack for the current settings. Called every rendered frame, so it
+// stays cheap: build the wanted key, then one lock and a handful of compares.
+PathTracer::PendingCompileWork PathTracer::getPendingCompileWork(const Resources& resources)
 {
+  const VariantKey wanted = makeVariantKey(resources);
+  const bool       useSER = m_useSER && m_supportSER;
+
   std::lock_guard<std::mutex> lock(m_compileMutex);
+  const VkPipeline            live = (m_renderTechnique == RenderTechnique::RayQuery) ? m_rqPipeline : m_rtxPipeline;
   return {
-      m_compiledWireframe, m_compiledVisualize, m_compiledOptimal, m_compiledDlss, m_compiledDlssGuide,
-      m_compiledFeatures,  m_pipelineUseSER,    m_rqPipeline,      m_rtxPipeline,  m_pipelineDlssTransparency,
+      .recompile       = !wanted.sameShader(m_compiled),
+      .stalePipeline   = useSER != m_pipelineUseSER || wanted.dlssTransparency != m_compiled.dlssTransparency,
+      .missingPipeline = live == VK_NULL_HANDLE,
   };
 }
 
+bool PathTracer::wantOpacityMicromapShader(const Resources& resources)
+{
+  return resources.sceneVk.opacityMicromap().hasAny();
+}
+
 //--------------------------------------------------------------------------------------------------
-// Ensure shader binaries and the selected technique pipeline are available.
+// Ensure shader binaries and the selected technique pipeline are available. Runs on the compile
+// worker (or inline when headless); getPendingCompileWork() says what is missing.
 void PathTracer::ensureShadersAndPipelines(Resources& resources)
 {
-  // Recompile Slang->SPIR-V when any of the following changed since the last compile:
-  //   - wireframe flag (drives WIREFRAME macro in the shader)
-  //   - optimal-shader mode toggle (default vs scene-specific)
-  //   - the scene's feature set, while optimal mode is on (scene load / merge /
-  //     material edit may have widened or narrowed which KHR_materials_* are used)
-  // compileShader() also destroys existing pipelines, so pipeline creation below
-  // runs against fresh handles.
-  const bool wantOptimal = resources.settings.optimalShader;
-  auto       state       = getCompileStateSnapshot();
+  m_useSER = m_useSER && m_supportSER;  // a device without SER support can never turn it on
 
-  const bool wantDlss          = isDlssEnabled();
-  const bool wantDlssGuide     = resources.currentFeatureSet.has(nvvkgltf::SceneFeatureSet::eDlssGuide);
-  const bool wantVisualize     = (resources.settings.visualization != shaderio::Visualization::eRendered);
-  const bool wireframeChanged  = (state.wireframe != resources.settings.wireframe);
-  const bool visualizeChanged  = (state.visualize != wantVisualize);
-  const bool optimalChanged    = (state.optimal != wantOptimal);
-  const bool dlssChanged       = (state.dlss != wantDlss);
-  const bool guideChanged      = (state.dlssGuide != wantDlssGuide);
-  const bool featureSetChanged = wantOptimal && (state.features != resources.currentFeatureSet);
-
-  const bool needCompile = wireframeChanged || visualizeChanged || optimalChanged || dlssChanged || guideChanged || featureSetChanged;
-  if(needCompile)
+  // A shader macro changed (wireframe, visualization, opacity micromaps, optimal mode and the
+  // scene's feature set, DLSS, denoiser guides). compileShader() also destroys the pipelines built from the old shader.
+  PendingCompileWork work = getPendingCompileWork(resources);
+  if(work.recompile)
   {
     if(m_busyWindow)
       m_busyWindow->setReason("Compiling Slang shaders...");
     compileShader(resources);
-    state = getCompileStateSnapshot();
+    work = getPendingCompileWork(resources);
   }
 
   // SER (--ptUseSER / the UI checkbox) and the DLSS transparency mode (--dlssTransparency / the
   // UI combo) are pipeline specialization constants, not shader macros, so they need no recompile --
   // only the pipelines built with the old values have to go. The SBT is generated from the RTX
   // pipeline, so it goes with it.
-  m_useSER = m_useSER && m_supportSER;  // a device without SER support can never turn it on
-#if defined(USE_DLSS)
-  const int wantDlssTransparency = static_cast<int>(m_dlss->getTransparencyMode());
-#else
-  const int wantDlssTransparency = 0;
-#endif
-  if(m_useSER != state.pipelineUseSER || wantDlssTransparency != state.pipelineDlssTransparency)
+  if(work.stalePipeline)
   {
     // SYNC NOTE: pipelines may still be in use by the previous frame.
     NVVK_CHECK(vkQueueWaitIdle(resources.app->getQueue(0).queue));
+    const int wantDlssTransparency = makeVariantKey(resources).dlssTransparency;
     {
       std::lock_guard<std::mutex> lock(m_compileMutex);
       vkDestroyPipeline(m_device, m_rqPipeline, nullptr);
       vkDestroyPipeline(m_device, m_rtxPipeline, nullptr);
-      m_rqPipeline               = VK_NULL_HANDLE;
-      m_rtxPipeline              = VK_NULL_HANDLE;
-      m_pipelineUseSER           = m_useSER;
-      m_pipelineDlssTransparency = wantDlssTransparency;
-      m_compiledDlssTransparency = wantDlssTransparency;  // the variant key names the live pipelines
+      m_rqPipeline                = VK_NULL_HANDLE;
+      m_rtxPipeline               = VK_NULL_HANDLE;
+      m_pipelineUseSER            = m_useSER;
+      m_compiled.dlssTransparency = wantDlssTransparency;
       resources.allocator.destroyBuffer(m_sbtBuffer);
       m_sbtBuffer  = {};
       m_sbtRegions = {};
     }
-    state = getCompileStateSnapshot();
+    work = getPendingCompileWork(resources);
   }
 
-  const bool rqMissing  = m_renderTechnique == RenderTechnique::RayQuery && state.rqPipeline == VK_NULL_HANDLE;
-  const bool rtxMissing = m_renderTechnique == RenderTechnique::RayTracing && state.rtxPipeline == VK_NULL_HANDLE;
-  if(rqMissing)
+  if(work.missingPipeline)
   {
-    if(m_busyWindow)
-      m_busyWindow->setReason("Creating Ray Query pipeline...");
-    createRqPipeline(resources);
-  }
-  else if(rtxMissing)
-  {
-    if(m_busyWindow)
-      m_busyWindow->setReason("Creating RTX pipeline...");
-    createRtxPipeline(resources);
+    if(m_renderTechnique == RenderTechnique::RayQuery)
+    {
+      if(m_busyWindow)
+        m_busyWindow->setReason("Creating Ray Query pipeline...");
+      createRqPipeline(resources);
+    }
+    else
+    {
+      if(m_busyWindow)
+        m_busyWindow->setReason("Creating RTX pipeline...");
+      createRtxPipeline(resources);
+    }
   }
 }
 
@@ -554,56 +587,51 @@ void PathTracer::startAsyncCompile(Resources& resources)
 }
 
 //--------------------------------------------------------------------------------------------------
+// Bring the live shader, pipeline, and denoiser targets in line with the settings, however those
+// were changed (UI, command line, sequence script, MCP). Nothing but compares when they already
+// match. Returns false when this frame must be skipped because an async build was started.
+bool PathTracer::prepareFrame(Resources& resources)
+{
+  // A variant already in the cache is swapped in right here: only handles move, so there is no
+  // BusyWindow and no accumulation reset. Anything else goes to an async job that shows the BusyWindow.
+  PendingCompileWork work = getPendingCompileWork(resources);
+  if(work.any())
+  {
+    // SYNC NOTE: old pipelines may be in flight from the previous frame — wait before
+    // they are parked, destroyed, or recreated.
+    NVVK_CHECK(vkQueueWaitIdle(resources.app->getQueue(0).queue));
+    if(work.recompile && tryRestoreCachedVariant(resources))
+      work = getPendingCompileWork(resources);  // the cached pipelines may still need a rebuild (SER, technique)
+  }
+
+  if(work.any())
+  {
+    if(!resources.app->isHeadless())
+    {
+      startAsyncCompile(resources);
+      return false;
+    }
+    // In headless mode we must compile/build synchronously so frames are actually rendered before the application frame loop exits.
+    ensureShadersAndPipelines(resources);
+  }
+
+#if defined(USE_OPTIX_DENOISER)
+  m_optix->ensureTargets(resources);
+#endif
+  return true;
+}
+
+//--------------------------------------------------------------------------------------------------
 // Render the scene
 void PathTracer::onRender(VkCommandBuffer cmd, Resources& resources)
 {
+  if(!m_supportRayQuery)
+    m_renderTechnique = RenderTechnique::RayTracing;
+
   NVVK_DBG_SCOPE(cmd);  // <-- Helps to debug in NSight
 
-  // Decide whether we need to (re)compile or (re)build a pipeline. Any of these triggers
-  // an async job that shows the BusyWindow; we then skip rendering this frame.
-  // Mirrors the gating logic in ensureShadersAndPipelines().
-  const bool wantOptimal = resources.settings.optimalShader;
-  const auto state       = getCompileStateSnapshot();
-
-  const bool wantDlss          = isDlssEnabled();
-  const bool wantDlssGuide     = resources.currentFeatureSet.has(nvvkgltf::SceneFeatureSet::eDlssGuide);
-  const bool wantVisualize     = (resources.settings.visualization != shaderio::Visualization::eRendered);
-  const bool wireframeChanged  = (state.wireframe != resources.settings.wireframe);
-  const bool visualizeChanged  = (state.visualize != wantVisualize);
-  const bool optimalChanged    = (state.optimal != wantOptimal);
-  const bool dlssChanged       = (state.dlss != wantDlss);
-  const bool guideChanged      = (state.dlssGuide != wantDlssGuide);
-  const bool featureSetChanged = wantOptimal && (state.features != resources.currentFeatureSet);
-  const bool needRecompile = wireframeChanged || visualizeChanged || optimalChanged || dlssChanged || guideChanged || featureSetChanged;
-  // SER and DLSS-transparency toggles only need a pipeline rebuild (they are specialization
-  // constants, not macros), but the live pipeline still needs to be replaced — detect that here.
-  // Use the mutex-protected snapshot value to avoid racing with the compile worker.
-  const bool serChanged = (m_useSER && m_supportSER) != state.pipelineUseSER;
-#if defined(USE_DLSS)
-  const bool transparencyChanged = static_cast<int>(m_dlss->getTransparencyMode()) != state.pipelineDlssTransparency;
-#else
-  const bool transparencyChanged = false;
-#endif
-  const bool needPipeline = serChanged || transparencyChanged
-                            || ((m_renderTechnique == RenderTechnique::RayQuery) ? (state.rqPipeline == VK_NULL_HANDLE) :
-                                                                                   (state.rtxPipeline == VK_NULL_HANDLE));
-
-  if(needRecompile || needPipeline)
-  {
-    // SYNC NOTE: old pipelines may be in flight from the previous frame — wait before
-    // the worker destroys/recreates them.
-    NVVK_CHECK(vkQueueWaitIdle(resources.app->getQueue(0).queue));
-    if(resources.app->isHeadless())
-    {
-      // In headless mode we must compile/build synchronously so frames are actually rendered before the application frame loop exits.
-      ensureShadersAndPipelines(resources);
-    }
-    else
-    {
-      startAsyncCompile(resources);
-      return;
-    }
-  }
+  if(!prepareFrame(resources))
+    return;
 
 #if defined(USE_DLSS)
   // Drive the DLSS state machine.
@@ -622,6 +650,7 @@ void PathTracer::onRender(VkCommandBuffer cmd, Resources& resources)
 
   // Finding the rendering size (needed before setupPushConstant so pixelAngle can be derived).
   VkExtent2D renderingSize = resources.gBuffers.getSize();
+  updateDepthStaging(cmd, resources);  // first frame: onResize may not have run yet
 #if defined(USE_DLSS)
   // When DLSS is effectively enabled, use DLSS render size
   if(getEffectiveDlssEnabled(resources))
@@ -655,6 +684,11 @@ void PathTracer::onRender(VkCommandBuffer cmd, Resources& resources)
 
   // Making sure the rendered image is ready to be used by tonemapper
   nvvk::cmdMemoryBarrier(cmd, VK_PIPELINE_STAGE_2_COMPUTE_SHADER_BIT, VK_PIPELINE_STAGE_2_COMPUTE_SHADER_BIT);
+
+  // Depth is only traced on the first frame (see processPixel); bring it into the depth buffer
+  // before anything reads it (OptiX upscale below, overlays and picking after).
+  if(m_depthViaStaging && m_depthCopyable && resources.frameCount == 0)
+    cmdCopyStagedDepth(cmd, resources);
 
 #if defined(USE_DLSS)
   // If DLSS is effectively enabled for this frame, perform denoising
@@ -727,6 +761,53 @@ void PathTracer::upscaleSelectionAndDepth(VkCommandBuffer cmd, Resources& resour
 }
 
 //--------------------------------------------------------------------------------------------------
+// Size the depth staging image and copy buffer to the G-buffer (path-traced depth on GPUs whose
+// depth format cannot be a storage image).
+void PathTracer::updateDepthStaging(VkCommandBuffer cmd, Resources& resources)
+{
+  if(!m_depthViaStaging)
+    return;
+  const VkExtent2D size = resources.gBuffers.getSize();
+  const VkExtent2D cur  = m_depthStaging.getSize();
+  if(size.width == cur.width && size.height == cur.height && m_depthCopyBuffer.buffer != VK_NULL_HANDLE)
+    return;
+
+  NVVK_CHECK(m_depthStaging.update(cmd, size));
+  resources.allocator.destroyBuffer(m_depthCopyBuffer);
+  NVVK_CHECK(resources.allocator.createBuffer(m_depthCopyBuffer, VkDeviceSize(size.width) * size.height * sizeof(float),
+                                              VK_BUFFER_USAGE_2_TRANSFER_SRC_BIT | VK_BUFFER_USAGE_2_TRANSFER_DST_BIT));
+  NVVK_DBG_NAME(m_depthCopyBuffer.buffer);
+}
+
+//--------------------------------------------------------------------------------------------------
+// Copy the depth the path tracer wrote into m_depthStaging (R32_SFLOAT) to the G-buffer depth image.
+// Core Vulkan has no direct copy between a color and a depth image, so it goes through a buffer:
+// both use the same 32-bit float texel layout.
+void PathTracer::cmdCopyStagedDepth(VkCommandBuffer cmd, Resources& resources)
+{
+  NVVK_DBG_SCOPE(cmd);
+  const VkExtent2D size = resources.gBuffers.getSize();
+
+  nvvk::cmdMemoryBarrier(cmd, VK_PIPELINE_STAGE_2_COMPUTE_SHADER_BIT | VK_PIPELINE_STAGE_2_RAY_TRACING_SHADER_BIT_KHR,
+                         VK_PIPELINE_STAGE_2_COPY_BIT, VK_ACCESS_2_SHADER_STORAGE_WRITE_BIT, VK_ACCESS_2_TRANSFER_READ_BIT);
+
+  VkBufferImageCopy region{
+      .imageSubresource = {.aspectMask = VK_IMAGE_ASPECT_COLOR_BIT, .layerCount = 1},
+      .imageExtent      = {size.width, size.height, 1},
+  };
+  vkCmdCopyImageToBuffer(cmd, m_depthStaging.getColorImage(0), VK_IMAGE_LAYOUT_GENERAL, m_depthCopyBuffer.buffer, 1, &region);
+
+  nvvk::cmdMemoryBarrier(cmd, VK_PIPELINE_STAGE_2_COPY_BIT, VK_PIPELINE_STAGE_2_COPY_BIT,
+                         VK_ACCESS_2_TRANSFER_WRITE_BIT, VK_ACCESS_2_TRANSFER_READ_BIT);
+
+  region.imageSubresource.aspectMask = VK_IMAGE_ASPECT_DEPTH_BIT;
+  vkCmdCopyBufferToImage(cmd, m_depthCopyBuffer.buffer, resources.gBuffers.getDepthImage(), VK_IMAGE_LAYOUT_GENERAL, 1, &region);
+
+  nvvk::cmdMemoryBarrier(cmd, VK_PIPELINE_STAGE_2_COPY_BIT, VK_PIPELINE_STAGE_2_ALL_COMMANDS_BIT,
+                         VK_ACCESS_2_TRANSFER_WRITE_BIT, VK_ACCESS_2_MEMORY_READ_BIT | VK_ACCESS_2_MEMORY_WRITE_BIT);
+}
+
+//--------------------------------------------------------------------------------------------------
 // Push the descriptor set
 // This is making sure our shader has the latest TLAS, and the latest output images
 void PathTracer::pushDescriptorSet(VkCommandBuffer cmd, Resources& resources, VkPipelineBindPoint bindPoint) const
@@ -773,10 +854,12 @@ void PathTracer::pushDescriptorSet(VkCommandBuffer cmd, Resources& resources, Vk
   write.append(allTextures, outputImages.data());
 
   // Bind GBuffer depth as storage image for writing hardware depth from path tracer (frame 0)
-  VkDescriptorImageInfo depthStorageInfo{
-      .imageView   = resources.gBuffers.getDepthImageView(),
-      .imageLayout = VK_IMAGE_LAYOUT_GENERAL,
-  };
+  // (or the R32_SFLOAT staging image when the depth format cannot be a storage image; see onAttach)
+  const VkDescriptorImageInfo depthStorageInfo = m_depthViaStaging ? m_depthStaging.getColorStorageImageInfo(0) :
+                                                                     VkDescriptorImageInfo{
+                                                                         .imageView = resources.gBuffers.getDepthImageView(),
+                                                                         .imageLayout = VK_IMAGE_LAYOUT_GENERAL,
+                                                                     };
   write.append(resources.descriptorBinding[1].getWriteSet(shaderio::BindingPoints::eOutDepth), depthStorageInfo);
 
   vkCmdPushDescriptorSetKHR(cmd, bindPoint, m_pipelineLayout, 1, write.size(), write.data());
@@ -963,9 +1046,9 @@ void PathTracer::createRtxPipeline(Resources& resources)
   };
 
   // Allow the pipeline to use opacity micromaps (EXT_mesh_opacity_micromap); harmless when
-  // geometry is not carrying a micromap. Only set when the device supports VK_EXT_opacity_micromap.
+  // geometry is not carrying a micromap. Only set when the device supports VK_KHR_opacity_micromap.
   VkPipelineCreateFlags flags = resources.settings.opacityMicromapSupported ?
-                                    VkPipelineCreateFlags(VK_PIPELINE_CREATE_RAY_TRACING_OPACITY_MICROMAP_BIT_EXT) :
+                                    VkPipelineCreateFlags(VK_PIPELINE_CREATE_RAY_TRACING_OPACITY_MICROMAP_BIT_KHR) :
                                     VkPipelineCreateFlags(0);
 
   // Assemble the shader stages and recursion depth info into the ray tracing pipeline
@@ -1131,20 +1214,7 @@ bool PathTracer::compileShader(Resources& resources, bool fromFile)
   // variant switch.
   if(fromFile && !m_skipVariantCache)
   {
-    const VariantKey targetKey{
-        resources.settings.wireframe,
-        resources.settings.visualization != shaderio::Visualization::eRendered,
-        resources.settings.optimalShader,
-        isDlssEnabled(),
-        resources.currentFeatureSet.has(nvvkgltf::SceneFeatureSet::eDlssGuide),
-        resources.settings.optimalShader ? resources.currentFeatureSet : nvvkgltf::SceneFeatureSet{},
-#if defined(USE_DLSS)
-        m_dlss ? static_cast<int>(m_dlss->getTransparencyMode()) : 0,
-#else
-        0,
-#endif
-    };
-    if(swapVariant(resources, targetKey))
+    if(swapVariant(resources, makeVariantKey(resources)))
     {
       LOGI("[PathTracer] Variant cache hit.\n");
       return true;
@@ -1190,6 +1260,8 @@ bool PathTracer::compileShader(Resources& resources, bool fromFile)
         // Debug-only visualization (incl. the OMM debug payload field). Compiled out of the normal
         // render path so it adds no payload/register cost; a mode switch triggers a recompile.
         {"USE_VISUALIZE", std::to_string(resources.settings.visualization != shaderio::Visualization::eRendered ? 1 : 0)},
+        // Ray queries against a BLAS with an opacity micromap need an explicit opt-in (see gltf_pathtrace.slang).
+        {"USE_OMM", std::to_string(wantOpacityMicromapShader(resources) ? 1 : 0)},
     };
     nvvkgltf::appendPathTracerDlssShaderMacro(macros, resources.currentFeatureSet, isDlssEnabled());
 
@@ -1218,6 +1290,8 @@ bool PathTracer::compileShader(Resources& resources, bool fromFile)
     }
     else
     {
+      // Falls back to the embedded SPIR-V, which is built with USE_OMM=0: in a scene with
+      // micromaps its ray queries lack the OpacityMicromapIdKHR opt-in until a compile succeeds.
       LOGW("Error compiling gltf_pathtrace.slang\n");
     }
   }
@@ -1236,39 +1310,70 @@ bool PathTracer::compileShader(Resources& resources, bool fromFile)
     NVVK_DBG_NAME(m_shaderModule);
   }
 
-  // Record what this compile was specialized against so the next-frame check in
-  // ensureShadersAndPipelines() knows whether a follow-up recompile is needed.
-  // If we fell back to the embedded SPIR-V (compiledFromFile=false), the running
-  // shader corresponds to the build-time defaults (not optimal, all-on features),
-  // so record that.
+  // Record which variant this compile is, so getPendingCompileWork() can tell whether the settings
+  // still match it. A from-file compile follows the live settings. The embedded SPIR-V fallback
+  // mirrors the CMake build (see CMakeLists.txt): not optimal, all-on features, USE_GUIDE_SHADER=1
+  // iff DLSS/OptiX is available at build time, and USE_DLSS_SHADER=0 (DLSS is never active at
+  // startup; it engages later and triggers a from-file recompile).
   {
     std::lock_guard<std::mutex> lock(m_compileMutex);
-    m_compiledWireframe = compiledFromFile ? resources.settings.wireframe : false;
-    m_compiledVisualize = compiledFromFile ? (resources.settings.visualization != shaderio::Visualization::eRendered) : false;
-    m_compiledOptimal  = compiledFromFile ? resources.settings.optimalShader : false;
-    m_compiledFeatures = (compiledFromFile && resources.settings.optimalShader) ? resources.currentFeatureSet :
-                                                                                  nvvkgltf::SceneFeatureSet{};
-    // From-file compiles follow the live runtime state. For the embedded SPIR-V fallback we mirror
-    // the CMake build (see CMakeLists.txt): USE_GUIDE_SHADER=1 iff DLSS/OptiX is available at build
-    // time, and USE_DLSS_SHADER=0 (DLSS is never active at startup; it engages later and triggers a
-    // from-file recompile).
 #if defined(USE_DLSS) || defined(USE_OPTIX_DENOISER)
     constexpr bool kEmbeddedDlssGuide = true;
 #else
     constexpr bool kEmbeddedDlssGuide = false;
 #endif
-    constexpr bool kEmbeddedDlss = false;
-    m_compiledDlss               = compiledFromFile ? isDlssEnabled() : kEmbeddedDlss;
-    m_compiledDlssGuide = compiledFromFile ? resources.currentFeatureSet.has(nvvkgltf::SceneFeatureSet::eDlssGuide) : kEmbeddedDlssGuide;
-#if defined(USE_DLSS)
-    m_compiledDlssTransparency = (compiledFromFile && m_dlss) ? static_cast<int>(m_dlss->getTransparencyMode()) : 0;
-#endif
+    if(compiledFromFile)
+      m_compiled = makeVariantKey(resources);
+    else
+      m_compiled = VariantKey{.dlssGuide = kEmbeddedDlssGuide};
 
     // Destroy pipeline since there is a new shader
     destroyPipelinesLocked();
   }
 
   return !fromFile || compiledFromFile;
+}
+
+//--------------------------------------------------------------------------------------------------
+// The variant the current settings ask for -- the variant-cache key compileShader() looks up.
+PathTracer::VariantKey PathTracer::makeVariantKey(const Resources& resources) const
+{
+  return VariantKey{
+      resources.settings.wireframe,
+      resources.settings.visualization != shaderio::Visualization::eRendered,
+      wantOpacityMicromapShader(resources),
+      resources.settings.optimalShader,
+      isDlssEnabled(),
+      resources.currentFeatureSet.has(nvvkgltf::SceneFeatureSet::eDlssGuide),
+      resources.settings.optimalShader ? resources.currentFeatureSet : nvvkgltf::SceneFeatureSet{},
+#if defined(USE_DLSS)
+      m_dlss ? static_cast<int>(m_dlss->getTransparencyMode()) : 0,
+#else
+      0,
+#endif
+  };
+}
+
+//--------------------------------------------------------------------------------------------------
+// Swap in the wanted variant if the cache already holds it. A hit is only a handle swap, so
+// onRender() does it inline instead of going through the async worker and the BusyWindow, whose
+// completion resets the accumulation. On a miss nothing is touched: the live handles stay put for
+// compileShader() to park.
+bool PathTracer::tryRestoreCachedVariant(Resources& resources)
+{
+  if(m_skipVariantCache)
+    return false;
+  const VariantKey key = makeVariantKey(resources);
+  {
+    std::lock_guard<std::mutex> lock(m_compileMutex);
+    if(std::none_of(m_variantCache.begin(), m_variantCache.end(),
+                    [&](const VariantCacheEntry& e) { return e.key == key; }))
+      return false;
+  }
+  const bool hit = swapVariant(resources, key);
+  if(hit)
+    LOGI("[PathTracer] Variant cache hit (swapped in place).\n");
+  return hit;
 }
 
 void PathTracer::destroyPipelinesLocked()
@@ -1297,10 +1402,8 @@ bool PathTracer::swapVariant(Resources& resources, const VariantKey& newKey)
   std::lock_guard<std::mutex> lock(m_compileMutex);
 
   // 1) Park the currently-active shader/pipelines/SBT so we don't leak them.
-  // The current variant key reflects what compileShader() last recorded.
-  const VariantKey currentKey{m_compiledWireframe, m_compiledVisualize, m_compiledOptimal,         m_compiledDlss,
-                              m_compiledDlssGuide, m_compiledFeatures,  m_compiledDlssTransparency};
-  const bool       hasLive = m_shaderModule != VK_NULL_HANDLE || m_rtxPipeline != VK_NULL_HANDLE
+  const VariantKey currentKey = m_compiled;
+  const bool       hasLive    = m_shaderModule != VK_NULL_HANDLE || m_rtxPipeline != VK_NULL_HANDLE
                        || m_rqPipeline != VK_NULL_HANDLE || m_sbtBuffer.buffer != VK_NULL_HANDLE;
   if(hasLive)
   {
@@ -1332,8 +1435,9 @@ bool PathTracer::swapVariant(Resources& resources, const VariantKey& newKey)
     }
     if(!foundExisting)
     {
-      m_variantCache.push_back(VariantCacheEntry{currentKey, m_shaderModule, m_rtxPipeline, m_rqPipeline,
-                                                 m_pipelineUseSER, m_sbtBuffer, m_sbtRegions});
+      // Front is most-recently used, so the LRU trim below evicts from the back.
+      m_variantCache.insert(m_variantCache.begin(), VariantCacheEntry{currentKey, m_shaderModule, m_rtxPipeline, m_rqPipeline,
+                                                                      m_pipelineUseSER, m_sbtBuffer, m_sbtRegions});
     }
   }
 
@@ -1371,14 +1475,7 @@ bool PathTracer::swapVariant(Resources& resources, const VariantKey& newKey)
         m_sbtBuffer   = {};
         m_sbtRegions  = {};
       }
-      m_compiledWireframe        = newKey.wireframe;
-      m_compiledVisualize        = newKey.visualize;
-      m_compiledOptimal          = newKey.optimal;
-      m_compiledDlss             = newKey.dlss;
-      m_compiledDlssGuide        = newKey.dlssGuide;
-      m_compiledFeatures         = newKey.features;
-      m_compiledDlssTransparency = newKey.dlssTransparency;
-      m_pipelineDlssTransparency = newKey.dlssTransparency;
+      m_compiled = newKey;
       m_variantCache.erase(it);
       return true;
     }
@@ -1646,6 +1743,7 @@ void PathTracer::setupPushConstant(VkCommandBuffer cmd, Resources& resources, Vk
   bool useOptixDenoiser = getEffectiveOptixEnabled(resources);
 #endif
   m_pushConst.frameCount = frameCount;
+  m_pushConst.renderSize = {renderingSize.width, renderingSize.height};
   // First-frame flag must use resources.frameCount so depth and ObjectID are written on app frame 0 and after
   // every reset (camera/scene change). The local frameCount can be overridden to a Halton index when DLSS
   // is on and never resets; using it for ePtFirstFrame would only write depth once and break selection/depth.

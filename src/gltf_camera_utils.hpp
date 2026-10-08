@@ -40,18 +40,17 @@ inline nvutils::CameraManipulator::Camera toManipulatorCamera(const nvvkgltf::Re
   uiCam.eye     = cam.eye;
   uiCam.ctr     = cam.center;
   uiCam.up      = cam.up;
-  uiCam.nearFar = {static_cast<float>(cam.znear), static_cast<float>(cam.zfar)};
+  uiCam.nearFar = {cam.znear, cam.zfar};
   if(cam.type == nvvkgltf::RenderCamera::CameraType::eOrthographic)
   {
     uiCam.projectionType = nvutils::CameraManipulator::ProjectionType::Orthographic;
-    uiCam.orthMag.x      = static_cast<float>(cam.xmag);
-    uiCam.orthMag.y      = static_cast<float>(cam.ymag);
-    uiCam.fov            = 45.0f;
+    uiCam.orthMag        = {cam.xmag, cam.ymag};
+    uiCam.fov            = 45.0;
   }
   else
   {
     uiCam.projectionType = nvutils::CameraManipulator::ProjectionType::Perspective;
-    uiCam.fov            = static_cast<float>(glm::degrees(cam.yfov));
+    uiCam.fov            = glm::degrees(cam.yfov);
   }
   return uiCam;
 }
@@ -100,19 +99,19 @@ inline std::vector<nvvkgltf::RenderCamera> getCamerasFromWidget()
     renderCam.eye    = cam.eye;
     renderCam.center = cam.ctr;
     renderCam.up     = cam.up;
-    renderCam.znear  = static_cast<double>(cam.nearFar.x);
-    renderCam.zfar   = static_cast<double>(cam.nearFar.y);
+    renderCam.znear  = cam.nearFar.x;
+    renderCam.zfar   = cam.nearFar.y;
 
     if(cam.projectionType == nvutils::CameraManipulator::ProjectionType::Orthographic)
     {
       renderCam.type = nvvkgltf::RenderCamera::CameraType::eOrthographic;
-      renderCam.xmag = static_cast<double>(cam.orthMag.x);
-      renderCam.ymag = static_cast<double>(cam.orthMag.y);
+      renderCam.xmag = cam.orthMag.x;
+      renderCam.ymag = cam.orthMag.y;
     }
     else
     {
       renderCam.type = nvvkgltf::RenderCamera::CameraType::ePerspective;
-      renderCam.yfov = static_cast<double>(glm::radians(cam.fov));
+      renderCam.yfov = glm::radians(cam.fov);
     }
 
     renderCameras.push_back(renderCam);

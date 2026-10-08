@@ -281,7 +281,9 @@ struct Settings
   float     shadowCatcherDarkness   = 0.0f;                      // Non-physical shadow darkening
   bool      dlssRrHardwareAvailable = false;  // DLSS Ray Reconstruction hardware/extensions available (set at startup)
   bool dlssSrHardwareAvailable = false;  // DLSS Super Resolution / DLAA hardware/extensions available (set at startup)
-  bool opacityMicromapSupported = false;  // VK_EXT_opacity_micromap available (set at startup); gates EXT_mesh_opacity_micromap
+  bool serHardwareAvailable = false;  // VK_EXT_ray_tracing_invocation_reorder enabled on the device (set at startup)
+  bool opacityMicromapSupported = false;  // VK_KHR_opacity_micromap available (set at startup); gates EXT_mesh_opacity_micromap
+  bool opacityMicromapMissing = false;  // --useOpacityMicromap is on but the device lacks VK_KHR_opacity_micromap
   DisplayBuffer displayBuffer = DisplayBuffer::eRendered;  // Which buffer to display in viewport
 
   // Enable scene-based shader optimization. When true, only features used by the scene are

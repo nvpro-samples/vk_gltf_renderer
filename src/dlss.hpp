@@ -330,10 +330,10 @@ private:
   // Persisted settings (per kind).
   struct Settings
   {
-    bool     enableRr         = false;                                         // RR only
-    SizeMode sizeMode         = SizeMode::eOptimal;                            // RR only
-    int      qualityMode      = static_cast<int>(Quality::eOff);               // SR only (int for SettingsHandler)
-    int      transparencyMode = static_cast<int>(TransparencyMode::eDefault);  // RR only (int for SettingsHandler)
+    bool enableRr         = false;                                         // RR only
+    int  sizeMode         = static_cast<int>(SizeMode::eOptimal);          // RR only (int for SettingsHandler)
+    int  qualityMode      = static_cast<int>(Quality::eOff);               // SR only (int for SettingsHandler)
+    int  transparencyMode = static_cast<int>(TransparencyMode::eDefault);  // RR only (int for SettingsHandler)
   };
 
   // ---- Internal predicates (callers consume state() / isActive() instead) -------------------
@@ -388,7 +388,8 @@ private:
 
   // ---- Common state ---------------------------------------------------------------------------
   Kind       m_kind;  // RR or SR
-  InitStatus m_state = InitStatus::eNotChecked;
+  InitStatus m_state         = InitStatus::eNotChecked;
+  int        m_builtSizeMode = -1;  // RR: Settings::sizeMode the inner GBuffer was last sized with (-1 = never)
   bool m_needsRecreate = false;  // true when the NGX feature must be torn down + recreated (UI preset / size-mode / quality change)
   uint32_t m_preset = 0;  // NGX preset hint (RR or SR table; 0 = NGX default)
   Settings m_settings{};  // persisted settings (per kind)

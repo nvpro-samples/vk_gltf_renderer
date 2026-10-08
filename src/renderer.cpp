@@ -768,9 +768,15 @@ void GltfRenderer::onAttach(nvapp::Application* app)
     m_resources.slangCompiler.defaultTarget();
     m_resources.slangCompiler.defaultOptions();
 
-    // Specific options for this sample
-    m_resources.slangCompiler.addOption(
-        {CompilerOptionName::DebugInformation, {CompilerOptionValueKind::Int, SLANG_DEBUG_INFO_LEVEL_STANDARD}});
+    // Specific options for this sample. Standard debug info (NonSemantic.Shader.DebugInfo, for
+    // Nsight) only on NVIDIA: AMD's Vulkan driver crashes compiling SPIR-V that carries it, while
+    // minimal debug info (OpLine) is accepted everywhere. Embedded shaders follow
+    // SHADER_DEBUG_LEVEL in CMake instead.
+    VkPhysicalDeviceProperties gpuProps{};
+    vkGetPhysicalDeviceProperties(m_app->getPhysicalDevice(), &gpuProps);
+    constexpr uint32_t kNvidiaVendorId = 0x10DE;
+    const int debugInfoLevel = (gpuProps.vendorID == kNvidiaVendorId) ? SLANG_DEBUG_INFO_LEVEL_STANDARD : SLANG_DEBUG_INFO_LEVEL_MINIMAL;
+    m_resources.slangCompiler.addOption({CompilerOptionName::DebugInformation, {CompilerOptionValueKind::Int, debugInfoLevel}});
     m_resources.slangCompiler.addOption(
         {CompilerOptionName::Optimization, {CompilerOptionValueKind::Int, SLANG_OPTIMIZATION_LEVEL_NONE}});
 
@@ -782,6 +788,7 @@ void GltfRenderer::onAttach(nvapp::Application* app)
     m_resources.slangCompiler.addCapability("spvRayQueryKHR");             // # Ray query operations
     m_resources.slangCompiler.addCapability("spvGroupNonUniformBallot");  // # Ballot operations for subgroup functionality
     m_resources.slangCompiler.addCapability("spvGroupNonUniformArithmetic");  // # Arithmetic operations across subgroups
+    m_resources.slangCompiler.addCapability("nonuniformqualifier");  // # NonUniformResourceIndex on the bindless arrays (also in CMake)
 
 #if defined(USE_DLSS)
     m_resources.slangCompiler.addMacro({"HAS_DLSS_MOTION", "1"});
@@ -2966,11 +2973,21 @@ void GltfRenderer::setDlssHardwareAvailability(bool rrAvailable, bool srAvailabl
 }
 
 //--------------------------------------------------------------------------------------------------
-// Set Opacity Micromap (VK_EXT_opacity_micromap) availability. When unavailable, the
-// EXT_mesh_opacity_micromap glTF extension is ignored. Call early, before scene creation.
-void GltfRenderer::setOpacityMicromapAvailable(bool available)
+// Set Shader Execution Reordering (VK_EXT_ray_tracing_invocation_reorder) availability. Call
+// before the path tracer is attached: it decides whether SER is compiled into the shader.
+void GltfRenderer::setSerAvailable(bool available)
 {
-  m_resources.settings.opacityMicromapSupported = available;
+  m_resources.settings.serHardwareAvailable = available;
+}
+
+//--------------------------------------------------------------------------------------------------
+// Set Opacity Micromap (VK_KHR_opacity_micromap) availability: whether the device supports it, and
+// whether the user enabled it (--useOpacityMicromap). When unavailable, the
+// EXT_mesh_opacity_micromap glTF extension is ignored. Call early, before scene creation.
+void GltfRenderer::setOpacityMicromapAvailable(bool hardware, bool enabled)
+{
+  m_resources.settings.opacityMicromapMissing   = enabled && !hardware;
+  m_resources.settings.opacityMicromapSupported = hardware && enabled;
 }
 
 //--------------------------------------------------------------------------------------------------
@@ -3464,6 +3481,15 @@ void GltfRenderer::createVulkanScene()
   {
     // Enable opacity micromap (EXT_mesh_opacity_micromap) build when the device supports it
     m_resources.sceneVk.setOpacityMicromapEnabled(m_resources.settings.opacityMicromapSupported);
+    // Micromaps are only an acceleration: without device support they are skipped and the image is
+    // unchanged. Mention it once per load, only for a scene that actually carries them, and not when
+    // the user turned them off (--useOpacityMicromap 0).
+    const std::vector<std::string>& extUsed = m_resources.getScene()->getModel().extensionsUsed;
+    if(m_resources.settings.opacityMicromapMissing
+       && std::find(extUsed.begin(), extUsed.end(), EXT_MESH_OPACITY_MICROMAP_EXTENSION_NAME) != extUsed.end())
+    {
+      LOGW("Scene has opacity micromaps; using them needs an NVIDIA RTX GPU with a recent driver (VK_KHR_opacity_micromap). Rendering is unaffected.\n");
+    }
 
     // Create and queue command buffer for scene data upload (vertices, indices, materials, etc.)
     // This work happens asynchronously via the command buffer queue

@@ -280,8 +280,9 @@ struct PathtracePushConstant
   int             flags                 = 0;       // Bit flags: see PathtracerFlags
   float           pixelAngle            = 0.0f;    // Angular size of one pixel (radians) for ray-cone footprint LOD
   float2          mouseCoord            = {0, 0};  // Mouse coordinates (use for debug)
-  SceneFrameInfo* frameInfo;                       // Camera info (incl. SceneFrameInfo::jitter when DLSS is active)
-  GltfScene*      gltfScene;                       // GLTF scene
+  uint2           renderSize = {0, 0};          // Traced region: smaller than the output images under OptiX 2x upscale
+  SceneFrameInfo* frameInfo;                    // Camera info (incl. SceneFrameInfo::jitter when DLSS is active)
+  GltfScene*      gltfScene;                    // GLTF scene
   float4x4*       prevRenderNodeObjectToWorld;  // #DLSS instance motion: previous-frame objectToWorld per render node
 };
 

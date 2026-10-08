@@ -124,6 +124,7 @@ and highly divergent; treat them as indicative of that class of content rather t
 | `--ptTechnique` | Ray query (compute) vs the ray tracing pipeline; the pipeline was ~2x faster |
 | `--ptUseSER` | Shader Execution Reordering; ~2.3-2.8x on a divergent scattering workload. Silently ignored when the device does not support it |
 | `--ptOptimalShader` | Recompiles with only the scene's feature gates; 14-20% across the scatter sample scenes with SER on, ~32% with SER off |
+| `--dlssInputSize` | DLSS-RR's input resolution. The default (Optimal) path-traces below native resolution, so a DLSS-on vs DLSS-off comparison at defaults compares different pixel counts: on one scene the path trace was ~2.1x cheaper with DLSS on. Set `--dlssInputSize 2` (Max, native) to compare at equal resolution; see [denoising.md](denoising.md#dlss-rr-input-resolution) |
 
 Three traps worth knowing, each of which produces confident-looking numbers that mean nothing:
 

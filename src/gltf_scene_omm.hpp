@@ -32,14 +32,17 @@
 /*-------------------------------------------------------------------------------------------------
 # class nvvkgltf::SceneOmm
 
->  Builds Vulkan opacity micromaps (VK_EXT_opacity_micromap) from the pre-baked
+>  Builds Vulkan opacity micromaps (VK_KHR_opacity_micromap) from the pre-baked
    EXT_mesh_opacity_micromap glTF extension.
 
 This extension stores *pre-build* opacity micromap source data (packed opacity bits, per-triangle
 records and usage histograms) that is layout-compatible with the Vulkan build inputs. This class
-uploads that data, builds one `VkMicromapEXT` per root `micromaps[]` entry, and uploads the
-per-primitive micromap index buffers. `SceneRtx` then attaches the result to the BLAS geometry
-(`VkAccelerationStructureTrianglesOpacityMicromapEXT` in `triangles.pNext`).
+uploads that data, builds one opacity micromap per root `micromaps[]` entry, and uploads the
+per-primitive micromap index buffers. Under the KHR extension a micromap is an acceleration
+structure of type `VK_ACCELERATION_STRUCTURE_TYPE_OPACITY_MICROMAP_KHR`, created with
+`vkCreateAccelerationStructure2KHR` and built with `vkCmdBuildAccelerationStructuresKHR`. `SceneRtx`
+then attaches the result to the BLAS geometry (`VkAccelerationStructureTrianglesOpacityMicromapKHR`
+in `triangles.pNext`).
 
 The per-primitive results are indexed by `renderPrimID` so they align with the BLAS ordering used
 by `SceneRtx`. When disabled (device extension unsupported), `create()` is a no-op and the glTF
@@ -53,12 +56,12 @@ public:
   // Per-renderPrimID opacity micromap linkage, consumed by SceneRtx at BLAS build time.
   struct PrimitiveOmm
   {
-    VkMicromapEXT   micromap     = VK_NULL_HANDLE;
-    VkDeviceAddress indexAddress = 0;
-    VkIndexType     indexType    = VK_INDEX_TYPE_UINT16;
-    uint32_t        indexStride  = 0;
-    uint32_t        baseTriangle = 0;
-    bool            valid        = false;  // true when this primitive has a usable opacity micromap
+    VkAccelerationStructureKHR micromap     = VK_NULL_HANDLE;
+    VkDeviceAddress            indexAddress = 0;
+    VkIndexType                indexType    = VK_INDEX_TYPE_UINT16;
+    uint32_t                   indexStride  = 0;
+    uint32_t                   baseTriangle = 0;
+    bool                       valid        = false;  // true when this primitive has a usable opacity micromap
   };
 
   SceneOmm() = default;
@@ -67,7 +70,7 @@ public:
   void init(nvvk::ResourceAllocator* alloc);
   void deinit();
 
-  // Enable/disable the OMM path. Driven from the VK_EXT_opacity_micromap availability flag.
+  // Enable/disable the OMM path. Driven from the VK_KHR_opacity_micromap availability flag.
   void setEnabled(bool enabled) { m_enabled = enabled; }
   bool isEnabled() const { return m_enabled; }
 
@@ -82,20 +85,25 @@ public:
   bool                has(uint32_t renderPrimID) const;
   const PrimitiveOmm& get(uint32_t renderPrimID) const;
 
+  // True when at least one primitive has a micromap attached. Shaders that trace ray queries
+  // against such a BLAS must opt in (see USE_OMM in gltf_pathtrace.slang).
+  bool hasAny() const;
+
 private:
   // A single built opacity micromap (one per root micromaps[] entry).
   struct Micromap
   {
-    VkMicromapEXT micromap = VK_NULL_HANDLE;
-    nvvk::Buffer  storage;    // Backing storage of the built micromap (kept for BLAS lifetime)
-    nvvk::Buffer  data;       // Packed opacity bits (build input)
-    nvvk::Buffer  triangles;  // VkMicromapTriangleEXT records (build input)
-    nvvk::Buffer  scratch;    // Build scratch
+    VkAccelerationStructureKHR micromap = VK_NULL_HANDLE;
+    nvvk::Buffer               storage;    // Backing storage of the built micromap (kept for BLAS lifetime)
+    nvvk::Buffer               data;       // Packed opacity bits (build input)
+    nvvk::Buffer               triangles;  // VkMicromapTriangleKHR records (build input)
+    nvvk::Buffer               scratch;    // Build scratch
   };
 
-  VkDevice                 m_device  = VK_NULL_HANDLE;
-  nvvk::ResourceAllocator* m_alloc   = nullptr;
-  bool                     m_enabled = false;
+  VkDevice                 m_device           = VK_NULL_HANDLE;
+  nvvk::ResourceAllocator* m_alloc            = nullptr;
+  bool                     m_enabled          = false;
+  VkDeviceSize             m_scratchAlignment = 0;  // minAccelerationStructureScratchOffsetAlignment
 
   std::vector<Micromap>     m_micromaps;     // One per root micromaps[] entry
   std::vector<nvvk::Buffer> m_indexBuffers;  // Per-renderPrimID micromap index buffers (owned)

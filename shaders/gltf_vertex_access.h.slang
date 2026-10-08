@@ -73,9 +73,15 @@ float3 getInterpolatedVertexNormal(GltfRenderPrimitive renderPrim, uint3 idx, fl
   return mixBary(nrm[0], nrm[1], nrm[2], barycentrics);
 }
 
+// TEXCOORD_<channel> buffer (0 or 1), null when the primitive has none.
+float2* vertexTexCoords(GltfRenderPrimitive renderPrim, int channel)
+{
+  return channel == 0 ? renderPrim.vertexBuffer.texCoord0 : renderPrim.vertexBuffer.texCoord1;
+}
+
 bool hasVertexTexCoord(GltfRenderPrimitive renderPrim, int channel)
 {
-  return renderPrim.vertexBuffer.texCoords[channel] != nullptr;
+  return vertexTexCoords(renderPrim, channel) != nullptr;
 }
 
 float2 getInterpolatedVertexTexCoord(GltfRenderPrimitive renderPrim, int channel, uint3 idx, float3 barycentrics)
@@ -83,7 +89,7 @@ float2 getInterpolatedVertexTexCoord(GltfRenderPrimitive renderPrim, int channel
   if(!hasVertexTexCoord(renderPrim, channel))
     return float2(0.0f, 0.0f);
 
-  float2* texcoords = renderPrim.vertexBuffer.texCoords[channel];
+  float2* texcoords = vertexTexCoords(renderPrim, channel);
   float2  uv[3];
   uv[0] = texcoords[idx.x];
   uv[1] = texcoords[idx.y];
