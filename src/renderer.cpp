@@ -619,6 +619,7 @@ void GltfRenderer::onAttach(nvapp::Application* app)
   m_device             = app->getDevice();
   m_resources.instance = app->getInstance();
   m_resources.app      = app;
+  registerCommands();
 
   // ===== Settings Handler (ImGui persistent) =====
   // The list lives with the declarations in the constructor; this replays the persisted ones now
@@ -1666,25 +1667,31 @@ void GltfRenderer::onFileDrop(const std::filesystem::path& filename)
     if(m_busy.isBusy())
       return;
 
-    // Shift state: when dropping from another app, our window often doesn't have focus so
-    // ImGui/GLFW don't see the key. On Windows use GetKeyState (state when the drop message
-    // was generated) so it works for Explorer, Everything, and other DnD sources.
-    bool shiftHeld = false;
-    bool ctrlHeld  = false;
-#if defined(_WIN32)
-    shiftHeld = (GetKeyState(VK_SHIFT) & 0x8000) != 0;
-    ctrlHeld  = (GetKeyState(VK_CONTROL) & 0x8000) != 0;
-#else
-    shiftHeld = ImGui::IsKeyDown(ImGuiKey_LeftShift) || ImGui::IsKeyDown(ImGuiKey_RightShift);
-    ctrlHeld  = ImGui::IsKeyDown(ImGuiKey_LeftCtrl) || ImGui::IsKeyDown(ImGuiKey_RightCtrl);
-#endif
+    // The modifiers held with the drop pick the command whose "Drop file" binding they match:
+    // File > Reference Scene (glTF 2.1, a read-only external asset) or File > Import/Merge Scene.
+    // Only the modifiers those bindings use are read, so another one held along does not matter.
+    const ImGuiKeyChord referenceMods = m_commands.get("file.reference").binding.chord;
+    const ImGuiKeyChord mergeMods     = m_commands.get("file.merge").binding.chord;
+    const ImGuiKeyChord dropMods      = (referenceMods | mergeMods) & ImGuiMod_Mask_;
 
-    if(shiftHeld && ctrlHeld)
+    // When dropping from another app, our window often doesn't have focus so ImGui/GLFW don't see
+    // the keys. On Windows use GetKeyState (state when the drop message was generated) so it works
+    // for Explorer, Everything, and other DnD sources.
+    ImGuiKeyChord held = ImGuiKey_None;
+#if defined(_WIN32)
+    held |= (GetKeyState(VK_CONTROL) & 0x8000) ? ImGuiMod_Ctrl : 0;
+    held |= (GetKeyState(VK_SHIFT) & 0x8000) ? ImGuiMod_Shift : 0;
+    held |= (GetKeyState(VK_MENU) & 0x8000) ? ImGuiMod_Alt : 0;
+#else
+    held = ImGui::GetIO().KeyMods;
+#endif
+    held &= dropMods;
+
+    if(held == referenceMods)
     {
-      // glTF 2.1: Ctrl+Shift+drop references the file as an external asset (read-only) instead of embedding.
       onReferenceScene(filename);
     }
-    else if(shiftHeld)
+    else if(held == mergeMods)
     {
       onMergeScene(filename);
     }

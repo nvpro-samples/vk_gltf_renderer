@@ -50,7 +50,7 @@ namespace {
 // Docs are not packaged with binary Releases, so the window links to GitHub for
 // the setup/install guide — the only discoverable path for someone who opened the
 // app without reading anything first.
-constexpr const char* kSetupGuideUrl = "https://github.com/nvpro-samples/vk_gltf_renderer/blob/main/docs/comfyui-agentic-setup.md";
+constexpr const char* kSetupGuideUrl = "https://github.com/nvpro-samples/vk_gltf_renderer/blob/master/docs/comfyui-agentic-setup.md";
 
 constexpr ImU32 kLightGreen = IM_COL32(90, 200, 90, 255);
 constexpr ImU32 kLightAmber = IM_COL32(230, 180, 60, 255);

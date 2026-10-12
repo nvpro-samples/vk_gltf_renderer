@@ -52,7 +52,9 @@ with the code, the code wins (fix the doc — see "Keep the docs true").
 | Visualization / debug modes | `enum Visualization` in `shaders/shaderio.h` |
 | Environment types | `enum EnvSystem` in `shaders/shaderio.h`, and the picker in `src/ui_renderer.cpp` |
 | Command-line / MCP / persisted settings (names, defaults, whether they persist) | `m_settings.add(...)` in `src/renderer*.cpp`, plus `parameterRegistry.add(...)` in `src/main.cpp` and `src/benchmarking.cpp` |
-| Menu labels, keyboard shortcuts, UI panels | menu/UI builders in `src/ui_renderer.cpp` (and other `src/ui_*`) |
+| Menu commands, their labels and keyboard shortcuts (including Esc in presentation mode and the file-drop modifiers) | `GltfRenderer::registerCommands()` in `src/ui_renderer.cpp` (the `ui::CommandRegistry`, `src/ui_commands.hpp`) — menus, toolbar, key handling and Help > Keyboard & Mouse all read it |
+| Viewport mouse bindings (camera drags, wheel, click to select, double-click to set the point of interest) and camera movement keys | `kBindings` in `src/camera_controls.cpp` — the viewport input handling (`camera_controls::update()`), `mouseClickedInViewport()` and Help's Camera tab all read it |
+| Menu layout, UI panels | menu/UI builders in `src/ui_renderer.cpp` (and other `src/ui_*`) |
 | Elements-list categories, columns, CRUD | `ensureElementRegistry()` (the `ElementTypeDesc` array) in `src/ui_scene_browser_elements.cpp` |
 | Material extension gates | `MAT_EXT_*` in `shaders/gltf_material_config.h`, `GLTF_USE_*` in `shaders/gltf_eval_config.h` |
 | Host/device structs & layout | `shaders/shaderio.h` + the `*_io.h.slang` / `*_shaderio.h.slang` headers |
@@ -80,7 +82,9 @@ with the code, the code wins (fix the doc — see "Keep the docs true").
 - `src/ui_*` — ImGui panels (inspector, scene browser, animation, environment);
   viewport and menus live in `ui_renderer.cpp`. One panel per file. The Scene Browser's **Elements** tab is
   data-driven: one `ElementTypeDesc` per glTF collection
-  (`ui_scene_browser_elements.cpp`) feeds a single generic list renderer.
+  (`ui_scene_browser_elements.cpp`) feeds a single generic list renderer. Menu items, toolbar
+  toggles and keyboard shortcuts are commands in one registry (`ui_commands.hpp`, filled by
+  `registerCommands()`); keys are routed with `ImGui::Shortcut()`.
 - `src/mcp_timing.{cpp,hpp}` — the optional MCP endpoint (`--mcp`): recompile
   shaders and time a GPU pass, so an agent can measure a shader change. Loading
   and every other setting go through the parameter registry instead. Built only
@@ -178,7 +182,7 @@ you are expected to keep them that way:
 |---|---|
 | Scene sync / dirty-flag / BLAS-TLAS data flow | [docs/RENDERING_ARCHITECTURE.md](docs/RENDERING_ARCHITECTURE.md) |
 | App lifecycle, source layout, material fork, build/test | [docs/developer.md](docs/developer.md) + this file |
-| A user-facing feature, menu, or shortcut | [docs/user-guide.md](docs/user-guide.md) |
+| A user-facing feature, menu, or shortcut | [docs/user-guide.md](docs/user-guide.md); a command or shortcut goes in `registerCommands()` (Help lists it from there) — see developer.md § Add a command |
 | DLSS/OptiX, motion-vector / jitter / reset behavior | [docs/denoising.md](docs/denoising.md) |
 | A sky model, its units, the sun, or the `OMI_environment_sky` mapping | [docs/sky.md](docs/sky.md) |
 | Environment sources, the sky bake, or the lighting/background split | [docs/developer.md](docs/developer.md) + [docs/user-guide.md](docs/user-guide.md) |

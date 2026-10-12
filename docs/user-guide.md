@@ -13,6 +13,7 @@
 - [Animation](#animation)
 - [Debug Visualization](#debug-visualization)
 - [Tools](#tools)
+- [Help](#help)
 - [Configuration and CLI](#configuration)
 - [Troubleshooting](#troubleshooting)
 
@@ -337,7 +338,23 @@ Camera navigation follows the [Softimage](https://en.wikipedia.org/wiki/Softimag
 
 ### Controls
 
-![](images/cam_info.png)
+**Help > Keyboard & Mouse** (or **?**) is the reference: it shows every mouse and key binding for the
+current navigation mode and projection as a button-by-modifier table, generated from the bindings the
+camera uses, and highlights the cell you are using as you hold modifiers and drag in the viewport.
+
+In **Examine** mode the defaults are:
+
+| | No modifier | Ctrl | Alt |
+|---|---|---|---|
+| **Left drag** | Orbit | Pan | Look around |
+| **Middle drag** | Pan | Pan | Pan |
+| **Right drag** | Dolly | Dolly | Dolly |
+| **Wheel** | Dolly | Dolly | Field of view |
+
+In **Fly** and **Walk**, a plain left drag looks around and Alt+left drag orbits, and Ctrl+wheel dollies
+without moving the point of interest. With an orthographic camera, dolly and field of view become zoom.
+`W` `A` `S` `D` and the arrow keys move the camera while the cursor is over the viewport, five times
+faster with **Shift**; with Ctrl or Alt held they are application shortcuts instead.
 
 ### Overview
 ![](images/cam_1.png)
@@ -723,6 +740,20 @@ having to quit and delete the `.ini`:
 
 Both are also reachable from a script, a benchmark sequence, or MCP as `--resetUiLayout` and
 `--resetAllToDefault`, which is how the behavior is exercised in a scripted UI run.
+
+---
+
+## Help
+
+The **Help** menu holds:
+
+- **Keyboard & Mouse** (**?**): the **Camera** tab is the mouse table described under
+  [Camera](#controls) plus the clicks and the camera keys; the **Shortcuts** tab lists every keyboard
+  shortcut by menu, including the modifiers for dropping a file under File and Esc for leaving
+  presentation mode under View, searchable by action or by key (for example `save` or `ctrl+shift`).
+  Keys light up while held.
+- **User Guide**, **Release Notes**, **Report an Issue**: open the project's GitHub pages.
+- **About**: version, GPU, driver and Vulkan version, with a **Copy** button for issue reports.
 
 ---
 

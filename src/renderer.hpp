@@ -62,9 +62,12 @@
 #include "sky_bruneton.hpp"
 #include "sky_sun.hpp"
 #include "ui_environment.hpp"
+#include "ui_help.hpp"
 #include "gltf_environment_sky.hpp"
 #include "hover_picker.hpp"
+#include "camera_controls.hpp"
 #include "ui_busy_window.hpp"
+#include "ui_commands.hpp"
 #include "ui_scene_browser.hpp"
 #include "ui_inspector.hpp"
 #include "ui_presentation_mode.hpp"
@@ -453,22 +456,13 @@ private:
   // UI
   void renderUI();
   void renderBenchmarkViewport();  // Minimal fullscreen image (benchmark mode)
+  void registerCommands();         // The menu, toolbar and keyboard commands (m_commands), once at attach
+  bool hasValidScene();
+  int  selectedNodeIndex();  // The node of a node or primitive selection, or -1
+  void fitCamera(bool wholeScene);
   void renderMenu();
-  void renderFileMenu(bool                   validScene,
-                      bool&                  newScene,
-                      bool&                  openFile,
-                      bool&                  mergeFile,
-                      bool&                  loadHdrFile,
-                      bool&                  saveFile,
-                      bool&                  saveAsFile,
-                      bool&                  saveSelfContainedAsFile,
-                      bool&                  saveScreenFile,
-                      bool&                  saveImageFile,
-                      bool&                  referenceFile,
-                      bool&                  closeApp,
-                      std::filesystem::path& sceneToLoadFilename,
-                      std::filesystem::path& sceneToMergeFilename);
-  void renderViewMenu(bool validScene, bool& fitScene, bool& fitObject, bool& toggleVsync);
+  void renderFileMenu(std::filesystem::path& sceneToLoadFilename);
+  void renderViewMenu();
   void renderWindowsMenu();
   // Windows > Reset UI Layout / Reset All to Default. Both are deferred to the top of the next UI
   // pass (m_pendingResetLayout / m_pendingResetSettings) so the rebuild does not run while the menu
@@ -476,9 +470,9 @@ private:
   void applyPendingResets();
   // F11 / Esc / --presentationMode: bring PresentationMode in line with the request. Top of the UI pass.
   void updatePresentationMode();
-  void renderEditMenu(bool validScene);
+  void renderEditMenu();
   void renderCreateMenu();  // "Create" menu: add procedural primitives (enabled whenever a scene exists)
-  void renderToolsMenu(bool validScene, bool& reloadShader, bool& compactScene);
+  void renderToolsMenu(bool validScene);
   void renderDebugMenu();
   void onUndoRedo();
   void renderMenuToolbarAndGizmos();
@@ -694,6 +688,28 @@ private:
   // Esc, the View menu, the command line, MCP -- goes through the same enter/leave.
   PresentationMode m_presentation;
   bool             m_presentationModeRequested{false};
+
+  ui::help::HelpState m_help;  // Help menu windows (ui_help.hpp)
+
+  // Every menu / toolbar / keyboard command (ui_commands.hpp), filled by registerCommands().
+  ui::CommandRegistry m_commands;
+  // File and Tools commands that open a dialog or rebuild the scene only raise a request here;
+  // renderMenu() carries them out once the menus are closed.
+  struct MenuRequests
+  {
+    bool newScene{false};
+    bool openFile{false};
+    bool mergeFile{false};
+    bool referenceFile{false};
+    bool loadHdrFile{false};
+    bool saveFile{false};
+    bool saveAsFile{false};
+    bool saveSelfContainedAsFile{false};
+    bool saveImageFile{false};
+    bool saveScreenFile{false};
+    bool reloadShaders{false};
+    bool compactScene{false};
+  } m_menuRequests;
 
   BenchmarkController m_benchmark;
 };

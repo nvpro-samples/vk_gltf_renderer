@@ -136,6 +136,9 @@ src/
 ├── mcp_timing.cpp/hpp          # Optional MCP endpoint (--mcp): recompile shaders, time a
 │                               #   GPU pass over a window (docs/mcp.md)
 ├── hover_picker.cpp/hpp        # Async G-buffer readback for KHR_interactivity hover detection
+├── camera_controls.cpp/hpp     # Viewport bindings table (drags, wheel, clicks, keys -> action) and the
+│                               #   per-frame input handling that drives the camera manipulator from it;
+│                               #   Help's Camera tab reads the same table
 ├── settings_registry.hpp       # One declaration per setting -> CLI + benchmark sequences + ImGui.ini;
 │                               #   also captures each declaration-time default (Reset All to Default)
 ├── resources.hpp               # Shared Vulkan resources and settings (`nvvk::FrameUploader` staging)
@@ -177,6 +180,10 @@ src/
 │                               #   dockSetup) and Windows > Reset UI Layout
 ├── ui_presentation_mode.cpp/hpp # Presentation mode (F11): hides panels + menu bar, borderless
 │                               #   full screen on the window's monitor; saves/restores both
+├── ui_commands.cpp/hpp         # Command registry: every menu/toolbar/keyboard command and its
+│                               #   key binding, and the shortcut routing (see Add a command)
+├── ui_help.cpp/hpp             # Help menu: Keyboard & Mouse reference (live camera table,
+│                               #   searchable shortcuts generated from the registry) and About
 ├── ui_xmp.cpp/hpp              # KHR_xmp_json_ld metadata display
 ├── ui_animation.cpp/hpp        # Animation playback state and viewport animation widget
 ├── ui_mouse_state.hpp          # Mouse state tracking for viewport
@@ -569,6 +576,44 @@ This creates `manifest.json`, `requests/`, `responses/`, and `assets/` without r
 2. Wire it to renderer or app settings.
 3. Nothing to list by hand: it appears in `--help`. Describe it in the
    [user guide](user-guide.md) only where users need to know how to use it.
+
+### Add a command or a keyboard shortcut
+
+Commands live in one place: `GltfRenderer::registerCommands()` (`ui_renderer.cpp`) adds each to the
+`ui::CommandRegistry` (`ui_commands.hpp`), with its label, icon, menu group, what it does, and
+optionally when it is enabled or checked. Its key binding sits beside it in the same declaration,
+held apart from the command so bindings can later become user-settable. Everything else is a view
+of the registry: a menu draws it with `menuItem(id)` (icon, label and shortcut text come along),
+the toolbar draws window and view toggles from it, and Help > Keyboard & Mouse lists every bound
+command, grouped by menu. A new shortcut therefore needs no change outside `registerCommands()`.
+
+Keys go through Dear ImGui's shortcut routing (`ImGui::Shortcut()`), polled once per frame per
+binding scope: global bindings by the menu bar, viewport bindings from inside the viewport window
+(live while the viewport is hovered — no click needed — or focused), and F11 from
+`updatePresentationMode()`, since the menu bar is hidden in presentation mode. That function also
+polls the presentation-only bindings (Esc leaves the mode) while the mode is on, so they never claim a
+key the rest of the time. Global bindings take
+the lowest routing priority, so a widget using the keyboard keeps it: while a text field is edited,
+letters, Delete, Home and Esc go to the field, and its own Ctrl+Z / Ctrl+Y win over Undo / Redo.
+Two kinds of binding are listed but never polled. A command without a `run` is handled by other
+code: the log window's key belongs to `nvapp::ElementLogger`. A binding with a `text` is matched by
+the code that handles it: '?' as a typed character by `ui_help.cpp`, and "Drop file", the modifiers
+held while a file is dropped, by `onFileDrop()`, which matches them against File > Import/Merge Scene
+and File > Reference Scene instead of naming the keys itself.
+
+The viewport's mouse, wheel and movement keys are not commands: they are held down, dragged or
+clicked rather than pressed. They have a table of their own, `kBindings` in `camera_controls.cpp`;
+each row names an input, the modifiers it needs and those it tolerates, the navigation modes and
+projection it applies to, the action, and the label and tooltip Help shows. For an input, the first
+matching row wins. `camera_controls::update()` replaces `nvapp::ElementCamera::updateCamera()` for
+the viewport and dispatches drags, the wheel and the movement keys from it instead of using
+`nvutils::CameraManipulator`'s own mapping, `mouseClickedInViewport()` takes the click
+that selects and the double-click that sets the point of interest from it, and Help > Keyboard &
+Mouse draws its Camera tab (mouse grid, clicks and keys) from it. Rebinding them is a change to that
+table only.
+
+A command that opens a dialog or rebuilds the scene only raises a request (`m_menuRequests`);
+`renderMenu()` carries it out once the menus are closed.
 
 ### Add a renderer setting
 

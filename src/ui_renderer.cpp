@@ -45,7 +45,6 @@
 #include <nvutils/file_operations.hpp>
 #include <nvvk/check_error.hpp>
 
-#include <nvapp/elem_camera.hpp>
 
 #include "env_image_loader.hpp"
 #include "renderer.hpp"
@@ -54,20 +53,33 @@
 #include "scoped_banner.hpp"
 #include "tinygltf_utils.hpp"
 #include "ui_animation.hpp"
+#include "ui_commands.hpp"
 #include "ui_dock_layout.hpp"
 #include "ui_helpers.hpp"
 #include "ui_interactivity.hpp"
 #include "ui_mouse_state.hpp"
 #include "version.hpp"
 
-// The Agentic window toggle (menu / toolbar / F7) is only wired when USE_AGENTIC
-// is built; this keeps it out of the window-toggle tables in a non-Agentic build
-// so there is no dead control.
-#ifdef USE_AGENTIC
-static constexpr size_t kAgenticToggleCount = 1;
-#else
-static constexpr size_t kAgenticToggleCount = 0;
-#endif
+// The window toggles: the "Windows" commands with an on/off state. The Windows menu and the toolbar
+// both list them, in the order registerCommands() adds them.
+static bool isWindowToggle(const ui::Command& cmd)
+{
+  return cmd.group != nullptr && std::strcmp(cmd.group, "Windows") == 0 && cmd.checked;
+}
+
+// Command actions over a bool the renderer owns: raise a request, flip a toggle, read its state.
+static std::function<void()> requestFlag(bool& flag)
+{
+  return [&flag] { flag = true; };
+}
+static std::function<void()> toggleFlag(bool& flag)
+{
+  return [&flag] { flag = !flag; };
+}
+static std::function<bool()> flagIsOn(const bool& flag)
+{
+  return [&flag] { return flag; };
+}
 
 void GltfRenderer::mouseClickedInViewport()
 {
@@ -108,8 +120,9 @@ void GltfRenderer::mouseClickedInViewport()
       return;
   }
 
-  // If double-clicking in the "Viewport", shoot a ray to the scene under the mouse.
-  // If the ray hit something, set the camera center to the hit position.
+  // A click in the "Viewport" shoots a ray to the scene under the mouse: a click selects what it
+  // hits, a double-click sets the camera center to the hit position. Which button and gesture do which
+  // comes from the camera_controls table (Action::eSelect, Action::eSetPointOfInterest).
   //
   // The actual ray-pick GPU work is deferred (see m_pendingClickPick's comment in renderer.hpp) -
   // this just captures everything it needs at the moment of the click (camera state included, so
@@ -124,9 +137,26 @@ void GltfRenderer::mouseClickedInViewport()
   //    click-driven graph needs, and that debounce is exactly the "still feels laggy" delay users
   //    notice even after the GPU wait was removed - so skip it entirely and react on the release
   //    itself (isMouseReleasedNoDrag still correctly excludes camera-orbit drags).
+  const camera_controls::Binding* selectBinding = camera_controls::findAction(camera_controls::Action::eSelect);
+  const camera_controls::Binding* centerBinding = camera_controls::findAction(camera_controls::Action::eSetPointOfInterest);
+  if(selectBinding == nullptr || centerBinding == nullptr)
+  {
+    assert(false && "The camera_controls table must bind eSelect and eSetPointOfInterest");
+    return;
+  }
+  auto gestured = [&](const camera_controls::Binding& binding) {
+    const ImGuiMouseButton button = camera_controls::clickButton(binding.input);
+    const bool held = camera_controls::matches(binding, camera_controls::heldMods(), m_cameraManip->getMode(),
+                                               m_cameraManip->getProjectionType());
+    return held
+           && (binding.input == camera_controls::Input::eLeftDoubleClick ? s_mouseClickState.isMouseDoubleClicked(button) :
+                                                                           s_mouseClickState.isMouseSingleClicked(button));
+  };
   const bool interactivityPlaying = isInteractivityPlaying();
-  const bool clicked = interactivityPlaying ? s_mouseClickState.isMouseReleasedNoDrag(ImGuiMouseButton_Left) :
-                                              s_mouseClickState.isMouseClicked(ImGuiMouseButton_Left);
+  const bool setCenter            = !interactivityPlaying && gestured(*centerBinding);
+  const bool clicked              = interactivityPlaying ?
+                                        s_mouseClickState.isMouseReleasedNoDrag(camera_controls::clickButton(selectBinding->input)) :
+                                        (gestured(*selectBinding) || setCenter);
   if(clicked)
   {
     // Convert screen coordinates to normalized viewport coordinates [0,1]
@@ -140,7 +170,7 @@ void GltfRenderer::mouseClickedInViewport()
         .perspectiveInv = glm::inverse(m_cameraManip->getPerspectiveMatrix()),
         .isOrthographic = (m_cameraManip->getProjectionType() == nvutils::CameraManipulator::Orthographic) ? 1 : 0,
         .pickPos        = {localMousePos.x, localMousePos.y},
-        .isDoubleClick  = !interactivityPlaying && s_mouseClickState.isMouseDoubleClicked(ImGuiMouseButton_Left),
+        .isDoubleClick  = setCenter,
     };
   }
 }
@@ -686,14 +716,11 @@ void GltfRenderer::renderUI()
     // Camera smooth animation runs always
     m_cameraManip->updateAnim();
 
-    // Camera orbit/pan/zoom only when gizmo is not capturing input and no Ctrl modifier is
-    // held (Ctrl+key combos are application shortcuts like Ctrl+S / Ctrl+D, not camera controls).
-    bool gizmoCapturedInput = m_visualHelpers.transform.isDragging();
-    bool ctrlHeld           = ImGui::IsKeyDown(ImGuiKey_LeftCtrl) || ImGui::IsKeyDown(ImGuiKey_RightCtrl);
-    if(!gizmoCapturedInput && !ctrlHeld)
-    {
-      nvapp::ElementCamera::updateCamera(m_cameraManip, ImGui::GetCurrentWindow());
-    }
+    // Camera orbit/pan/zoom, as camera_controls.cpp's table maps the input, unless the gizmo is
+    // capturing it. The table leaves the movement keys alone while Ctrl or Alt is held, since those
+    // combinations are application shortcuts (Ctrl+S, Ctrl+D, ...).
+    if(!m_visualHelpers.transform.isDragging())
+      camera_controls::update(*m_cameraManip, ImGui::GetCurrentWindow());
 
     // Handle mouse clicks and gizmo interaction in the viewport
     GltfRenderer::mouseClickedInViewport();
@@ -704,23 +731,9 @@ void GltfRenderer::renderUI()
     // it directly, so it's stashed on GltfRenderer for updateHoverState() to consume this frame.
     GltfRenderer::updateHoverCursorPosition();
 
-    // Viewport-scoped keyboard shortcuts (only when hovered or focused)
-    if(ImGui::IsWindowHovered(ImGuiHoveredFlags_RootWindow) || ImGui::IsWindowFocused())
-    {
-      if(ImGui::IsKeyPressed(ImGuiKey_G, false))
-        m_resources.settings.showGrid = !m_resources.settings.showGrid;
-      if(ImGui::IsKeyPressed(ImGuiKey_T, false))
-        m_resources.settings.showGizmo = !m_resources.settings.showGizmo;
-      // Home flies back to the home camera (same as the Camera window's Home button).
-      if(ImGui::IsKeyPressed(ImGuiKey_Home, false) && !ImGui::GetIO().WantTextInput && !nvgui::GetCameras().empty())
-        m_cameraManip->setCamera(nvgui::GetCameras()[0], false);
-      // Space toggles animation play/pause.
-      if(ImGui::IsKeyPressed(ImGuiKey_Space, false))
-      {
-        if(ui::animation::hasPlayableAnimation(m_resources.getScene()))
-          m_resources.animationControl.togglePlay();
-      }
-    }
+    // Viewport-scoped keyboard shortcuts (G, T, Home, Space): live while the viewport is hovered or
+    // focused. Called every frame from inside this window; the routing decides (ui_commands.cpp).
+    m_commands.dispatch(ui::KeyScope::eViewport);
 
     // Display the tonemapped viewport image. The Animation Strip below is an
     // overlay (drawn on top of the image), so the image uses the full content
@@ -770,6 +783,8 @@ void GltfRenderer::renderUI()
     ImGui::PopStyleVar();
   }
 
+
+  ui::help::renderWindows(m_help, *m_cameraManip, m_commands, m_app->getPhysicalDevice());
 
   // Show the busy window if the busy flag is set
   if(m_busy.isBusy())
@@ -907,32 +922,17 @@ void GltfRenderer::renderUI()
   }
 }
 
-void GltfRenderer::renderFileMenu(bool                   validScene,
-                                  bool&                  newScene,
-                                  bool&                  openFile,
-                                  bool&                  mergeFile,
-                                  bool&                  loadHdrFile,
-                                  bool&                  saveFile,
-                                  bool&                  saveAsFile,
-                                  bool&                  saveSelfContainedAsFile,
-                                  bool&                  saveScreenFile,
-                                  bool&                  saveImageFile,
-                                  bool&                  referenceFile,
-                                  bool&                  closeApp,
-                                  std::filesystem::path& sceneToLoadFilename,
-                                  std::filesystem::path& sceneToMergeFilename)
+void GltfRenderer::renderFileMenu(std::filesystem::path& sceneToLoadFilename)
 {
   if(!ImGui::BeginMenu("File"))
     return;
-  newScene = ImGui::MenuItem(ICON_MS_FILTER_NONE " New Scene", "Ctrl+N");
-  openFile |= ImGui::MenuItem(ICON_MS_FILE_OPEN " Open", "Ctrl+O");
+  m_commands.menuItem("file.new");
+  m_commands.menuItem("file.open");
   // Import/Merge and Reference always available: with no scene they create one from the imported file
   // (addSceneFromFile builds a fresh Scene), otherwise they add into the current scene.
-  mergeFile |= ImGui::MenuItem(ICON_MS_ADD " Import/Merge Scene...");
-  nvgui::tooltip("Embed another glTF into this scene, or open it as a new scene if none is loaded");
-  referenceFile |= ImGui::MenuItem(ICON_MS_LINK " Reference Scene...");
-  nvgui::tooltip("Link another glTF as a read-only external asset (glTF 2.1). Repeats share geometry; kept as a reference on save");
-  loadHdrFile |= ImGui::MenuItem(ICON_MS_IMAGE " Load HDR Environment", "Ctrl+Shift+O");
+  m_commands.menuItem("file.merge");
+  m_commands.menuItem("file.reference");
+  m_commands.menuItem("file.loadHdr");
   if(ImGui::BeginMenu(ICON_MS_HISTORY " Open Recent"))
   {
     for(const auto& file : m_recentFiles)
@@ -942,75 +942,30 @@ void GltfRenderer::renderFileMenu(bool                   validScene,
     }
     ImGui::EndMenu();
   }
-  ImGui::BeginDisabled(!validScene);
-  saveFile |= ImGui::MenuItem(ICON_MS_SAVE " Save", "Ctrl+S");
-  saveAsFile |= ImGui::MenuItem(ICON_MS_FILE_SAVE " Save As...", "Ctrl+Shift+S");
-  // glTF 2.1: only meaningful when the scene references external assets. Bakes them inline and
-  // drops all references, producing a portable file that can be shared without the referenced files.
-  if(validScene && m_resources.getScene()->hasExternalAssets())
-  {
-    saveSelfContainedAsFile |= ImGui::MenuItem(ICON_MS_FILE_SAVE " Save Self-Contained As...");
-    nvgui::tooltip("Bake referenced external assets into the file and remove all external references (shareable copy)");
-  }
-  ImGui::EndDisabled();
+  m_commands.menuItem("file.save");
+  m_commands.menuItem("file.saveAs");
+  // glTF 2.1: only meaningful when the scene references external assets.
+  if(hasValidScene() && m_resources.getScene()->hasExternalAssets())
+    m_commands.menuItem("file.saveSelfContained");
   ImGui::Separator();
-  saveImageFile |= ImGui::MenuItem(ICON_MS_IMAGE " Save Image", "Ctrl+Alt+I");
-  saveScreenFile |= ImGui::MenuItem(ICON_MS_DESKTOP_WINDOWS " Save Screen Image", "Ctrl+Alt+Shift+I");
+  m_commands.menuItem("file.saveImage");
+  m_commands.menuItem("file.saveScreen");
   ImGui::Separator();
-  closeApp |= ImGui::MenuItem(ICON_MS_POWER_SETTINGS_NEW " Exit", "Ctrl+Q");
+  m_commands.menuItem("file.exit");
   ImGui::EndMenu();
 }
 
-void GltfRenderer::renderEditMenu(bool validScene)
+void GltfRenderer::renderEditMenu()
 {
   if(!ImGui::BeginMenu("Edit"))
     return;
-
-  ImGui::BeginDisabled(!validScene || !m_undoStack.canUndo());
-  std::string undoLabel = m_undoStack.canUndo() ? ICON_MS_UNDO " Undo " + m_undoStack.undoDescription() : ICON_MS_UNDO " Undo";
-  if(ImGui::MenuItem(undoLabel.c_str(), "Ctrl+Z"))
-  {
-    m_undoStack.undo();
-    onUndoRedo();
-  }
-  ImGui::EndDisabled();
-
-  ImGui::BeginDisabled(!validScene || !m_undoStack.canRedo());
-  std::string redoLabel = m_undoStack.canRedo() ? ICON_MS_REDO " Redo " + m_undoStack.redoDescription() : ICON_MS_REDO " Redo";
-  if(ImGui::MenuItem(redoLabel.c_str(), "Ctrl+Y"))
-  {
-    m_undoStack.redo();
-    onUndoRedo();
-  }
-  ImGui::EndDisabled();
-
-  auto selectionNodeIndex = [this, validScene]() -> int {
-    if(!validScene || !m_sceneSelection.hasSelection())
-      return -1;
-    auto sel = m_sceneSelection.getSelection();
-    if((sel.type == SceneSelection::SelectionType::eNode || sel.type == SceneSelection::SelectionType::ePrimitive)
-       && sel.nodeIndex >= 0)
-      return sel.nodeIndex;
-    return -1;
-  };
-
-  bool hasNodeSelected = selectionNodeIndex() >= 0;
+  const std::string undoLabel = m_undoStack.canUndo() ? "Undo " + m_undoStack.undoDescription() : "Undo";
+  const std::string redoLabel = m_undoStack.canRedo() ? "Redo " + m_undoStack.redoDescription() : "Redo";
+  m_commands.menuItem("edit.undo", undoLabel.c_str());
+  m_commands.menuItem("edit.redo", redoLabel.c_str());
   ImGui::Separator();
-  ImGui::BeginDisabled(!hasNodeSelected);
-  if(ImGui::MenuItem(ICON_MS_CONTENT_COPY " Duplicate", "Ctrl+D"))
-  {
-    int  nodeIdx = selectionNodeIndex();
-    auto cmd     = std::make_unique<DuplicateNodeCommand>(*m_resources.getScene(), nodeIdx, &m_sceneSelection);
-    m_undoStack.executeCommand(std::move(cmd));
-    onUndoRedo();
-  }
-  if(ImGui::MenuItem(ICON_MS_DELETE " Delete", "Del"))
-  {
-    m_pendingDeleteNode        = selectionNodeIndex();
-    m_openDeletePopupNextFrame = true;
-  }
-  ImGui::EndDisabled();
-
+  m_commands.menuItem("edit.duplicate");
+  m_commands.menuItem("edit.delete");
   ImGui::EndMenu();
 }
 
@@ -1027,61 +982,33 @@ void GltfRenderer::renderCreateMenu()
   ImGui::EndMenu();
 }
 
-void GltfRenderer::renderViewMenu(bool validScene, bool& fitScene, bool& fitObject, bool& toggleVsync)
+void GltfRenderer::renderViewMenu()
 {
   if(!ImGui::BeginMenu("View"))
     return;
-  ImGui::BeginDisabled(!validScene);
-  fitScene |= ImGui::MenuItem(ICON_MS_ZOOM_OUT " Fit Scene", "Ctrl+Shift+F");
-  ImGui::BeginDisabled(m_resources.selectedRenderNodes.empty());
-  fitObject |= ImGui::MenuItem(ICON_MS_ZOOM_IN " Fit Object", "Ctrl+F");
-  ImGui::EndDisabled();
-  ImGui::EndDisabled();
+  m_commands.menuItem("view.fitScene");
+  m_commands.menuItem("view.fitObject");
   ImGui::Separator();
-  ImGui::MenuItem(ICON_MS_BOTTOM_PANEL_OPEN " V-Sync", "Ctrl+Shift+V", &toggleVsync);
-  ImGui::MenuItem(ICON_MS_VIEW_IN_AR " 3D-Axis", nullptr, &m_resources.settings.showAxis);
+  m_commands.menuItem("view.vsync");
+  m_commands.menuItem("view.axis");
   ImGui::Separator();
-  ImGui::MenuItem(ICON_MS_GRID_ON " Grid", "G", &m_resources.settings.showGrid);
-  ImGui::MenuItem(ICON_MS_3D_ROTATION " Gizmo", "T", &m_resources.settings.showGizmo);
-  ImGui::MenuItem(ICON_MS_STRAIGHTEN " Snap", nullptr, &m_resources.settings.snapEnabled);
-  ImGui::MenuItem(ICON_MS_MOVIE " Animation Strip", nullptr, &m_resources.animationControl.showStrip);
+  m_commands.menuItem("view.grid");
+  m_commands.menuItem("view.gizmo");
+  m_commands.menuItem("view.snap");
+  m_commands.menuItem("view.animationStrip");
   ImGui::Separator();
   // Only a request: updatePresentationMode() applies it at the top of the next UI pass.
-  ImGui::MenuItem(ICON_MS_PRESENT_TO_ALL " Presentation Mode", "F11", &m_presentationModeRequested);
-  ImGui::SetItemTooltip(
-      "Viewport only: hide every panel and the menu bar, borderless full screen on this monitor.\n"
-      "F11 or Esc to leave.");
+  m_commands.menuItem("view.presentation");
   ImGui::EndMenu();
 }
 
 void GltfRenderer::renderWindowsMenu()
 {
-  struct WindowToggleInfo
-  {
-    const char* icon;
-    const char* name;
-    const char* shortcut;
-    bool*       visible;
-  };
-  static const std::array<WindowToggleInfo, 7 + kAgenticToggleCount> toggles = {{
-      {ICON_MS_PHOTO_CAMERA, "Camera", "F1", &m_resources.settings.showCameraWindow},
-      {ICON_MS_ACCOUNT_TREE, "Scene Browser", "F2", &m_resources.settings.showSceneBrowserWindow},
-      {ICON_MS_SETTINGS, "Settings", "F3", &m_resources.settings.showSettingsWindow},
-      {ICON_MS_LIST_ALT, "Inspector", "F4", &m_resources.settings.showInspectorWindow},
-      {ICON_MS_PUBLIC, "Environment", "F5", &m_resources.settings.showEnvironmentWindow},
-      {ICON_MS_TONALITY, "Tonemapper", "F6", &m_resources.settings.showTonemapperWindow},
-      {ICON_MS_EXTENSION, "Interactivity", "F8", &m_resources.settings.showInteractivityWindow},
-#ifdef USE_AGENTIC
-      {ICON_MS_AUTO_AWESOME, "Agentic", "F7", &m_resources.settings.showAgenticWindow},
-#endif
-  }};
   if(!ImGui::BeginMenu("Windows"))
     return;
-  for(const auto& t : toggles)
-  {
-    std::string label = std::string(t.icon) + " " + t.name;
-    ImGui::MenuItem(label.c_str(), t.shortcut, t.visible);
-  }
+  for(const ui::Command& cmd : m_commands.all())
+    if(isWindowToggle(cmd))
+      m_commands.menuItem(cmd.id);
   ImGui::MenuItem(ICON_MS_ANALYTICS " Statistics", nullptr, &m_resources.settings.showStatisticsWindow);
   ImGui::MenuItem(ICON_MS_GRID_VIEW " Grid & Snap", nullptr, &m_resources.settings.showGridSettingsWindow);
   ImGui::Separator();
@@ -1139,14 +1066,13 @@ void GltfRenderer::updatePresentationMode()
     return;
   }
 
-  // F11 toggles. Esc also leaves -- it otherwise clears the selection, but that shortcut lives in
-  // renderMenu(), which does not run while the menu bar is hidden, so the two never compete. Esc is
-  // left to ImGui while it closes a popup or cancels a text edit.
-  if(ImGui::IsKeyPressed(ImGuiKey_F11, false))
-    m_presentationModeRequested = !m_presentation.isActive();
-  else if(m_presentation.isActive() && ImGui::IsKeyPressed(ImGuiKey_Escape, false) && !ImGui::GetIO().WantTextInput
-          && !ImGui::IsPopupOpen(nullptr, ImGuiPopupFlags_AnyPopupId))
-    m_presentationModeRequested = false;
+  // F11 toggles: its command is polled here (KeyScope::eAlways), not by the menu bar, which is
+  // hidden in this mode. Esc leaves (KeyScope::ePresentation), polled only while the mode is on: Esc
+  // otherwise clears the selection, a command polled by renderMenu(), which does not run while the
+  // menu bar is hidden, so the two never claim Esc in the same frame.
+  m_commands.dispatch(ui::KeyScope::eAlways);
+  if(m_presentation.isActive())
+    m_commands.dispatch(ui::KeyScope::ePresentation);
 
   m_presentation.setActive(m_app, m_presentationModeRequested);
   m_presentationModeRequested = m_presentation.isActive();  // reads back the real state (e.g. if entering was refused)
@@ -1166,11 +1092,11 @@ void GltfRenderer::addPresentationWindow(std::function<bool()> isVisible, std::f
 // (The Agentic feature has no top-level menu; its window is toggled from the
 //  Windows menu / F7 and rendered by agentic::renderAgenticWindow in ui_agentic.cpp.)
 
-void GltfRenderer::renderToolsMenu(bool validScene, bool& reloadShader, bool& compactScene)
+void GltfRenderer::renderToolsMenu(bool validScene)
 {
   if(!ImGui::BeginMenu("Tools"))
     return;
-  reloadShader |= ImGui::MenuItem(ICON_MS_REFRESH " Reload Shaders", "Ctrl+Shift+R");
+  m_commands.menuItem("tools.reloadShaders");
   ImGui::Separator();
   ImGui::BeginDisabled(!validScene);
   if(ImGui::MenuItem(ICON_MS_BUILD " Recreate Tangents - Simple"))
@@ -1194,10 +1120,7 @@ void GltfRenderer::renderToolsMenu(bool validScene, bool& reloadShader, bool& co
   }
   ImGui::SetItemTooltip("Recreate tangents using MikkTSpace (may split vertices at UV seams)");
   ImGui::Separator();
-  compactScene |= ImGui::MenuItem(ICON_MS_COMPRESS " Compact Scene", "Ctrl+K");
-  ImGui::SetItemTooltip(
-      "Remove orphaned resources (meshes, materials, textures, images, geometry).\n"
-      "Use after deleting nodes or importing/merging scenes.");
+  m_commands.menuItem("tools.compactScene");
   ImGui::EndDisabled();
   ImGui::EndMenu();
 }
@@ -1219,82 +1142,50 @@ void GltfRenderer::renderDebugMenu()
 
 void GltfRenderer::renderMenuToolbarAndGizmos()
 {
-  struct WindowToggleInfo
-  {
-    const char* icon;
-    const char* shortcut;
-    bool*       visible;
-    const char* tooltip;
+  // A row of icon buttons, one per command, lit while the command is checked.
+  auto toggleButtons = [this](std::span<const char* const> ids, ImVec2 buttonSize, auto&& tooltip) {
+    const ImGuiStyle& style = ImGui::GetStyle();
+    for(size_t i = 0; i < ids.size(); ++i)
+    {
+      const ui::Command& cmd = m_commands.get(ids[i]);
+      ImGui::PushStyleColor(ImGuiCol_Button, cmd.checked() ? style.Colors[ImGuiCol_ButtonActive] : style.Colors[ImGuiCol_ChildBg]);
+      if(ImGui::Button(cmd.icon, buttonSize))
+        cmd.run();
+      ImGui::PopStyleColor();
+      if(ImGui::IsItemHovered())
+        tooltip(cmd);
+      if(i < ids.size() - 1)
+        ImGui::SameLine(0, 0);
+    }
   };
-  static const std::array<WindowToggleInfo, 6 + kAgenticToggleCount> windowToggles = {{
-      {ICON_MS_PHOTO_CAMERA, "F1", &m_resources.settings.showCameraWindow, "Camera"},
-      {ICON_MS_ACCOUNT_TREE, "F2", &m_resources.settings.showSceneBrowserWindow, "Scene Browser"},
-      {ICON_MS_SETTINGS, "F3", &m_resources.settings.showSettingsWindow, "Settings"},
-      {ICON_MS_LIST_ALT, "F4", &m_resources.settings.showInspectorWindow, "Inspector"},
-      {ICON_MS_PUBLIC, "F5", &m_resources.settings.showEnvironmentWindow, "Environment"},
-      {ICON_MS_TONALITY, "F6", &m_resources.settings.showTonemapperWindow, "Tonemapper"},
-#ifdef USE_AGENTIC
-      {ICON_MS_AUTO_AWESOME, "F7", &m_resources.settings.showAgenticWindow, "Agentic"},
-#endif
-  }};
+
+  std::vector<const char*> windowIds;
+  for(const ui::Command& cmd : m_commands.all())
+    if(isWindowToggle(cmd))
+      windowIds.push_back(cmd.id);
+
   float             buttonSize     = ImGui::GetFrameHeight();
   const ImGuiStyle& style          = ImGui::GetStyle();
   float             separatorWidth = 2.0f;
-  float totalWidth  = separatorWidth + static_cast<float>(windowToggles.size()) * (buttonSize + style.ItemSpacing.x);
+  float totalWidth  = separatorWidth + static_cast<float>(windowIds.size()) * (buttonSize + style.ItemSpacing.x);
   float windowWidth = ImGui::GetWindowWidth();
   float offsetX     = windowWidth * 0.5f - totalWidth * 0.5f;
   ImGui::SameLine(offsetX);
   ImGui::SeparatorEx(ImGuiSeparatorFlags_Vertical);
   ImGui::SameLine();
-  for(size_t i = 0; i < windowToggles.size(); ++i)
-  {
-    const auto& toggle = windowToggles[i];
-    ImVec4      buttonColor =
-        *toggle.visible ? ImGui::GetStyle().Colors[ImGuiCol_ButtonActive] : ImGui::GetStyle().Colors[ImGuiCol_ChildBg];
-    ImGui::PushStyleColor(ImGuiCol_Button, buttonColor);
-    if(ImGui::Button(toggle.icon))
-      *toggle.visible = !*toggle.visible;
-    ImGui::PopStyleColor();
-    if(ImGui::IsItemHovered())
-      ImGui::SetTooltip("Toggle %s Window (%s)", toggle.tooltip, toggle.shortcut);
-    if(i < windowToggles.size() - 1)
-      ImGui::SameLine(0, 0);
-  }
+  toggleButtons(windowIds, ImVec2(0, 0), [](const ui::Command& cmd) {
+    ImGui::SetTooltip("Toggle %s Window (%s)", cmd.label, ui::shortcutText(cmd.binding).c_str());
+  });
   ImGui::SameLine();
   ImGui::SeparatorEx(ImGuiSeparatorFlags_Vertical);
   ImGui::SameLine();
-  struct GizmoToggle
-  {
-    const char* icon;
-    const char* tooltip;
-    const char* shortcut;
-    bool*       visible;
-  };
-  GizmoToggle gizmoToggles[] = {
-      {ICON_MS_GRID_ON, "Grid", "G", &m_resources.settings.showGrid},
-      {ICON_MS_3D_ROTATION, "Gizmo", "T", &m_resources.settings.showGizmo},
-      {ICON_MS_STRAIGHTEN, "Snap", nullptr, &m_resources.settings.snapEnabled},
-      {ICON_MS_MOVIE, "Animation Strip", nullptr, &m_resources.animationControl.showStrip},
-  };
-  for(size_t i = 0; i < std::size(gizmoToggles); ++i)
-  {
-    const auto& toggle = gizmoToggles[i];
-    ImVec4      buttonColor =
-        *toggle.visible ? ImGui::GetStyle().Colors[ImGuiCol_ButtonActive] : ImGui::GetStyle().Colors[ImGuiCol_ChildBg];
-    ImGui::PushStyleColor(ImGuiCol_Button, buttonColor);
-    if(ImGui::Button(toggle.icon, ImVec2(buttonSize, buttonSize)))
-      *toggle.visible = !*toggle.visible;
-    ImGui::PopStyleColor();
-    if(ImGui::IsItemHovered())
-    {
-      if(toggle.shortcut)
-        ImGui::SetTooltip("Toggle %s (%s in viewport)", toggle.tooltip, toggle.shortcut);
-      else
-        ImGui::SetTooltip("Toggle %s", toggle.tooltip);
-    }
-    if(i < std::size(gizmoToggles) - 1)
-      ImGui::SameLine(0, 0);
-  }
+  static constexpr const char* kGizmoIds[] = {"view.grid", "view.gizmo", "view.snap", "view.animationStrip"};
+  toggleButtons(kGizmoIds, ImVec2(buttonSize, buttonSize), [](const ui::Command& cmd) {
+    if(cmd.binding.isBound())
+      ImGui::SetTooltip("Toggle %s (%s in viewport)", cmd.label, ui::shortcutText(cmd.binding).c_str());
+    else
+      ImGui::SetTooltip("Toggle %s", cmd.label);
+  });
 
   // KHR_interactivity Play/Pause indicator - only drawn when the loaded scene actually has a graph
   // (unlike the toggles above, which are always present). Toggles InteractivityControl::play
@@ -1309,118 +1200,323 @@ void GltfRenderer::renderMenuToolbarAndGizmos()
   ImGui::SeparatorEx(ImGuiSeparatorFlags_Vertical);
 }
 
+//--------------------------------------------------------------------------------------------------
+// The commands of the menus, the toolbar and the keyboard (ui_commands.hpp). The order is the menus'
+// order, which is also the order Help lists the shortcuts in.
+void GltfRenderer::registerCommands()
+{
+  using ui::KeyScope;
+  constexpr ImGuiKeyChord kCtrl  = ImGuiMod_Ctrl;
+  constexpr ImGuiKeyChord kShift = ImGuiMod_Shift;
+  constexpr ImGuiKeyChord kAlt   = ImGuiMod_Alt;
+
+  auto validScene = [this] { return hasValidScene(); };
+  auto window     = [&](const char* id, const char* label, const char* icon, ImGuiKey key, bool& visible) {
+    m_commands.add(
+        {.id = id, .label = label, .icon = icon, .group = "Windows", .binding = {key}, .run = toggleFlag(visible), .checked = flagIsOn(visible)});
+  };
+  Settings& settings = m_resources.settings;
+
+  // File
+  m_commands.add({.id      = "file.new",
+                  .label   = "New Scene",
+                  .icon    = ICON_MS_FILTER_NONE,
+                  .group   = "File",
+                  .binding = {kCtrl | ImGuiKey_N},
+                  .run     = requestFlag(m_menuRequests.newScene)});
+  m_commands.add({.id      = "file.open",
+                  .label   = "Open",
+                  .icon    = ICON_MS_FILE_OPEN,
+                  .group   = "File",
+                  .binding = {kCtrl | ImGuiKey_O},
+                  .run     = requestFlag(m_menuRequests.openFile)});
+  m_commands.add({.id      = "file.merge",
+                  .label   = "Import/Merge Scene...",
+                  .icon    = ICON_MS_ADD,
+                  .group   = "File",
+                  .tooltip = "Embed another glTF into this scene, or open it as a new scene if none is loaded",
+                  .binding = {.chord = kShift, .text = "Drop file"},
+                  .run     = requestFlag(m_menuRequests.mergeFile)});
+  m_commands.add({.id    = "file.reference",
+                  .label = "Reference Scene...",
+                  .icon  = ICON_MS_LINK,
+                  .group = "File",
+                  .tooltip = "Link another glTF as a read-only external asset (glTF 2.1). Repeats share geometry; kept as a reference on save",
+                  .binding = {.chord = kCtrl | kShift, .text = "Drop file"},
+                  .run     = requestFlag(m_menuRequests.referenceFile)});
+  m_commands.add({.id      = "file.loadHdr",
+                  .label   = "Load HDR Environment",
+                  .icon    = ICON_MS_IMAGE,
+                  .group   = "File",
+                  .binding = {kCtrl | kShift | ImGuiKey_O},
+                  .run     = requestFlag(m_menuRequests.loadHdrFile)});
+  m_commands.add({.id      = "file.save",
+                  .label   = "Save",
+                  .icon    = ICON_MS_SAVE,
+                  .group   = "File",
+                  .binding = {kCtrl | ImGuiKey_S},
+                  .run     = requestFlag(m_menuRequests.saveFile),
+                  .enabled = validScene});
+  m_commands.add({.id      = "file.saveAs",
+                  .label   = "Save As...",
+                  .icon    = ICON_MS_FILE_SAVE,
+                  .group   = "File",
+                  .binding = {kCtrl | kShift | ImGuiKey_S},
+                  .run     = requestFlag(m_menuRequests.saveAsFile),
+                  .enabled = validScene});
+  // glTF 2.1: bakes the external assets inline and drops all references, producing a portable file
+  // that can be shared without the referenced files.
+  m_commands.add({.id    = "file.saveSelfContained",
+                  .label = "Save Self-Contained As...",
+                  .icon  = ICON_MS_FILE_SAVE,
+                  .group = "File",
+                  .tooltip = "Bake referenced external assets into the file and remove all external references (shareable copy)",
+                  .run     = requestFlag(m_menuRequests.saveSelfContainedAsFile),
+                  .enabled = validScene});
+  m_commands.add({.id      = "file.saveImage",
+                  .label   = "Save Image",
+                  .icon    = ICON_MS_IMAGE,
+                  .group   = "File",
+                  .binding = {kCtrl | kAlt | ImGuiKey_I},
+                  .run     = requestFlag(m_menuRequests.saveImageFile)});
+  m_commands.add({.id      = "file.saveScreen",
+                  .label   = "Save Screen Image",
+                  .icon    = ICON_MS_DESKTOP_WINDOWS,
+                  .group   = "File",
+                  .binding = {kCtrl | kAlt | kShift | ImGuiKey_I},
+                  .run     = requestFlag(m_menuRequests.saveScreenFile)});
+  m_commands.add(
+      {.id = "file.exit", .label = "Exit", .icon = ICON_MS_POWER_SETTINGS_NEW, .group = "File", .binding = {kCtrl | ImGuiKey_Q}, .run = [this] {
+         m_app->close();
+       }});
+
+  // Edit. Duplicate and Delete act on the node of a node or primitive selection.
+  m_commands.add({.id      = "edit.undo",
+                  .label   = "Undo",
+                  .icon    = ICON_MS_UNDO,
+                  .group   = "Edit",
+                  .binding = {kCtrl | ImGuiKey_Z},
+                  .run =
+                      [this] {
+                        m_undoStack.undo();
+                        onUndoRedo();
+                      },
+                  .enabled = [this] { return hasValidScene() && m_undoStack.canUndo(); }});
+  m_commands.add({.id      = "edit.redo",
+                  .label   = "Redo",
+                  .icon    = ICON_MS_REDO,
+                  .group   = "Edit",
+                  .binding = {kCtrl | ImGuiKey_Y},
+                  .run =
+                      [this] {
+                        m_undoStack.redo();
+                        onUndoRedo();
+                      },
+                  .enabled = [this] { return hasValidScene() && m_undoStack.canRedo(); }});
+  auto nodeSelected = [this] { return selectedNodeIndex() >= 0; };
+  m_commands.add({.id      = "edit.duplicate",
+                  .label   = "Duplicate",
+                  .icon    = ICON_MS_CONTENT_COPY,
+                  .group   = "Edit",
+                  .binding = {kCtrl | ImGuiKey_D},
+                  .run =
+                      [this] {
+                        m_undoStack.executeCommand(std::make_unique<DuplicateNodeCommand>(*m_resources.getScene(),
+                                                                                          selectedNodeIndex(), &m_sceneSelection));
+                        onUndoRedo();
+                      },
+                  .enabled = nodeSelected});
+  m_commands.add({.id      = "edit.delete",
+                  .label   = "Delete",
+                  .icon    = ICON_MS_DELETE,
+                  .group   = "Edit",
+                  .binding = {ImGuiKey_Delete},
+                  .run =
+                      [this] {
+                        m_pendingDeleteNode        = selectedNodeIndex();
+                        m_openDeletePopupNextFrame = true;
+                      },
+                  .enabled = nodeSelected});
+  m_commands.add({.id = "edit.clearSelection", .label = "Clear Selection", .group = "Edit", .binding = {ImGuiKey_Escape}, .run = [this] {
+                    m_resources.selectedRenderNodes.clear();
+                    m_sceneSelection.clearSelection();
+                  }});
+
+  // View
+  m_commands.add({.id      = "view.fitScene",
+                  .label   = "Fit Scene",
+                  .icon    = ICON_MS_ZOOM_OUT,
+                  .group   = "View",
+                  .binding = {kCtrl | kShift | ImGuiKey_F},
+                  .run     = [this] { fitCamera(true); },
+                  .enabled = validScene});
+  m_commands.add({.id      = "view.fitObject",
+                  .label   = "Fit Object",
+                  .icon    = ICON_MS_ZOOM_IN,
+                  .group   = "View",
+                  .binding = {kCtrl | ImGuiKey_F},
+                  .run     = [this] { fitCamera(false); },
+                  .enabled = [this] { return hasValidScene() && !m_resources.selectedRenderNodes.empty(); }});
+  m_commands.add({.id      = "view.vsync",
+                  .label   = "V-Sync",
+                  .icon    = ICON_MS_BOTTOM_PANEL_OPEN,
+                  .group   = "View",
+                  .binding = {kCtrl | kShift | ImGuiKey_V},
+                  .run     = [this] { m_app->setVsync(!m_app->isVsync()); },
+                  .checked = [this] { return m_app->isVsync(); }});
+  m_commands.add({.id      = "view.axis",
+                  .label   = "3D-Axis",
+                  .icon    = ICON_MS_VIEW_IN_AR,
+                  .group   = "View",
+                  .run     = toggleFlag(settings.showAxis),
+                  .checked = flagIsOn(settings.showAxis)});
+  m_commands.add({.id      = "view.grid",
+                  .label   = "Grid",
+                  .icon    = ICON_MS_GRID_ON,
+                  .group   = "View",
+                  .binding = {ImGuiKey_G, KeyScope::eViewport},
+                  .run     = toggleFlag(settings.showGrid),
+                  .checked = flagIsOn(settings.showGrid)});
+  m_commands.add({.id      = "view.gizmo",
+                  .label   = "Gizmo",
+                  .icon    = ICON_MS_3D_ROTATION,
+                  .group   = "View",
+                  .binding = {ImGuiKey_T, KeyScope::eViewport},
+                  .run     = toggleFlag(settings.showGizmo),
+                  .checked = flagIsOn(settings.showGizmo)});
+  m_commands.add({.id      = "view.snap",
+                  .label   = "Snap",
+                  .icon    = ICON_MS_STRAIGHTEN,
+                  .group   = "View",
+                  .run     = toggleFlag(settings.snapEnabled),
+                  .checked = flagIsOn(settings.snapEnabled)});
+  m_commands.add({.id      = "view.animationStrip",
+                  .label   = "Animation Strip",
+                  .icon    = ICON_MS_MOVIE,
+                  .group   = "View",
+                  .run     = toggleFlag(m_resources.animationControl.showStrip),
+                  .checked = flagIsOn(m_resources.animationControl.showStrip)});
+  // Only a request: updatePresentationMode() applies it, and polls F11 itself (KeyScope::eAlways)
+  // since the menu bar is hidden while it is on.
+  m_commands.add({.id    = "view.presentation",
+                  .label = "Presentation Mode",
+                  .icon  = ICON_MS_PRESENT_TO_ALL,
+                  .group = "View",
+                  .tooltip = "Viewport only: hide every panel and the menu bar, borderless full screen on this monitor.\n"
+                             "F11 or Esc to leave.",
+                  .binding = {ImGuiKey_F11, KeyScope::eAlways},
+                  .run     = [this] { m_presentationModeRequested = !m_presentation.isActive(); },
+                  .checked = flagIsOn(m_presentationModeRequested)});
+  // Esc is left to ImGui while it closes a popup or cancels a text edit.
+  m_commands.add({.id      = "view.leavePresentation",
+                  .label   = "Leave Presentation Mode",
+                  .group   = "View",
+                  .tooltip = "Only in presentation mode.",
+                  .binding = {ImGuiKey_Escape, KeyScope::ePresentation},
+                  .run     = [this] { m_presentationModeRequested = false; },
+                  .enabled =
+                      [this] {
+                        return m_presentationModeRequested && !ImGui::GetIO().WantTextInput
+                               && !ImGui::IsPopupOpen(nullptr, ImGuiPopupFlags_AnyPopupId);
+                      }});
+  // Same as the Camera window's Home button.
+  m_commands.add({.id      = "view.homeCamera",
+                  .label   = "Home Camera",
+                  .group   = "View",
+                  .binding = {ImGuiKey_Home, KeyScope::eViewport},
+                  .run     = [this] { m_cameraManip->setCamera(nvgui::GetCameras()[0], false); },
+                  .enabled = [] { return !nvgui::GetCameras().empty(); }});
+  m_commands.add({.id      = "view.playPause",
+                  .label   = "Play / Pause Animation",
+                  .group   = "View",
+                  .binding = {ImGuiKey_Space, KeyScope::eViewport},
+                  .run     = [this] { m_resources.animationControl.togglePlay(); },
+                  .enabled = [this] { return ui::animation::hasPlayableAnimation(m_resources.getScene()); }});
+
+  // Windows, in menu and toolbar order. The Agentic window only exists when USE_AGENTIC is built, so
+  // a non-Agentic build has no dead control.
+  window("window.camera", "Camera", ICON_MS_PHOTO_CAMERA, ImGuiKey_F1, settings.showCameraWindow);
+  window("window.sceneBrowser", "Scene Browser", ICON_MS_ACCOUNT_TREE, ImGuiKey_F2, settings.showSceneBrowserWindow);
+  window("window.settings", "Settings", ICON_MS_SETTINGS, ImGuiKey_F3, settings.showSettingsWindow);
+  window("window.inspector", "Inspector", ICON_MS_LIST_ALT, ImGuiKey_F4, settings.showInspectorWindow);
+  window("window.environment", "Environment", ICON_MS_PUBLIC, ImGuiKey_F5, settings.showEnvironmentWindow);
+  window("window.tonemapper", "Tonemapper", ICON_MS_TONALITY, ImGuiKey_F6, settings.showTonemapperWindow);
+  window("window.interactivity", "Interactivity", ICON_MS_EXTENSION, ImGuiKey_F8, settings.showInteractivityWindow);
+#ifdef USE_AGENTIC
+  window("window.agentic", "Agentic", ICON_MS_AUTO_AWESOME, ImGuiKey_F7, settings.showAgenticWindow);
+#endif
+  // Handled by nvapp::ElementLogger; listed so Help shows it.
+  m_commands.add({.id = "window.log", .label = "Log", .group = "Windows", .binding = {kCtrl | kShift | ImGuiKey_L}});
+
+  // Tools
+  m_commands.add({.id      = "tools.reloadShaders",
+                  .label   = "Reload Shaders",
+                  .icon    = ICON_MS_REFRESH,
+                  .group   = "Tools",
+                  .binding = {kCtrl | kShift | ImGuiKey_R},
+                  .run     = requestFlag(m_menuRequests.reloadShaders)});
+  m_commands.add({.id      = "tools.compactScene",
+                  .label   = "Compact Scene",
+                  .icon    = ICON_MS_COMPRESS,
+                  .group   = "Tools",
+                  .tooltip = "Remove orphaned resources (meshes, materials, textures, images, geometry).\n"
+                             "Use after deleting nodes or importing/merging scenes.",
+                  .binding = {kCtrl | ImGuiKey_K},
+                  .run     = requestFlag(m_menuRequests.compactScene),
+                  .enabled = validScene});
+
+  // Help. '?' is matched as a typed character by ui::help::renderMenu(), so it follows the keyboard
+  // layout; listed here for the menu text and for Help itself.
+  m_commands.add(
+      {.id = "help.keyboard", .label = "Keyboard & Mouse", .icon = ICON_MS_KEYBOARD, .group = "Help", .binding = {.text = "?"}});
+}
+
+bool GltfRenderer::hasValidScene()
+{
+  return m_resources.getScene() && m_resources.getScene()->valid();
+}
+
+int GltfRenderer::selectedNodeIndex()
+{
+  if(!hasValidScene() || !m_sceneSelection.hasSelection())
+    return -1;
+  const auto sel = m_sceneSelection.getSelection();
+  if(sel.type == SceneSelection::SelectionType::eNode || sel.type == SceneSelection::SelectionType::ePrimitive)
+    return sel.nodeIndex;
+  return -1;
+}
+
+// Frame the whole scene, or the selected render nodes. A selection with no readable bounds leaves the camera alone.
+void GltfRenderer::fitCamera(bool wholeScene)
+{
+  const nvutils::Bbox bbox = wholeScene ? m_resources.getScene()->getSceneBounds() :
+                                          GltfRenderer::getRenderNodesBbox(m_resources.selectedRenderNodes);
+  if(!bbox.isEmpty())
+    m_cameraManip->fit(bbox.min(), bbox.max(), false, true, m_cameraManip->getAspectRatio());
+}
+
 void GltfRenderer::renderMenu()
 {
-  bool v_sync = m_app->isVsync();
-  struct WindowToggleInfo
-  {
-    const char* icon;
-    const char* name;
-    const char* shortcut;
-    ImGuiKey    key;
-    bool        useShift;
-    bool*       visible;
-    const char* tooltip;
-  };
-  static const std::array<WindowToggleInfo, 7 + kAgenticToggleCount> windowToggles = {{
-      {ICON_MS_PHOTO_CAMERA, "Camera", "F1", ImGuiKey_F1, false, &m_resources.settings.showCameraWindow, "Camera"},
-      {ICON_MS_ACCOUNT_TREE, "Scene Browser", "F2", ImGuiKey_F2, false, &m_resources.settings.showSceneBrowserWindow, "Scene Browser"},
-      {ICON_MS_SETTINGS, "Settings", "F3", ImGuiKey_F3, false, &m_resources.settings.showSettingsWindow, "Settings"},
-      {ICON_MS_LIST_ALT, "Inspector", "F4", ImGuiKey_F4, false, &m_resources.settings.showInspectorWindow, "Inspector"},
-      {ICON_MS_PUBLIC, "Environment", "F5", ImGuiKey_F5, false, &m_resources.settings.showEnvironmentWindow, "Environment"},
-      {ICON_MS_TONALITY, "Tonemapper", "F6", ImGuiKey_F6, false, &m_resources.settings.showTonemapperWindow, "Tonemapper"},
-      {ICON_MS_EXTENSION, "Interactivity", "F8", ImGuiKey_F8, false, &m_resources.settings.showInteractivityWindow, "Interactivity"},
-#ifdef USE_AGENTIC
-      {ICON_MS_AUTO_AWESOME, "Agentic", "F7", ImGuiKey_F7, false, &m_resources.settings.showAgenticWindow, "Agentic"},
-#endif
-  }};
-  for(const auto& toggle : windowToggles)
-  {
-    if(toggle.useShift)
-    {
-      if(ImGui::IsKeyChordPressed(ImGuiMod_Shift | toggle.key))
-        *toggle.visible = !*toggle.visible;
-    }
-    else if(toggle.key != ImGuiKey_None && ImGui::IsKeyPressed(toggle.key))
-      *toggle.visible = !*toggle.visible;
-  }
+  // The global key bindings; the viewport's are polled by the viewport window, F11 by
+  // updatePresentationMode(). A command only raises a request (m_menuRequests) where its work has
+  // to wait for the menus to close.
+  m_commands.dispatch(ui::KeyScope::eGlobal);
+
   std::filesystem::path sceneToLoadFilename{};
-  std::filesystem::path sceneToMergeFilename{};
   GltfRenderer::windowTitle();
-  bool newScene                = ImGui::IsKeyChordPressed(ImGuiMod_Ctrl | ImGuiKey_N);
-  bool openFile                = ImGui::IsKeyChordPressed(ImGuiMod_Ctrl | ImGuiKey_O);
-  bool mergeFile               = false;
-  bool referenceFile           = false;
-  bool loadHdrFile             = ImGui::IsKeyChordPressed(ImGuiMod_Ctrl | ImGuiMod_Shift | ImGuiKey_O);
-  bool saveFile                = ImGui::IsKeyChordPressed(ImGuiMod_Ctrl | ImGuiKey_S);
-  bool saveAsFile              = ImGui::IsKeyChordPressed(ImGuiMod_Ctrl | ImGuiMod_Shift | ImGuiKey_S);
-  bool saveSelfContainedAsFile = false;
-  bool saveScreenFile          = ImGui::IsKeyChordPressed(ImGuiMod_Ctrl | ImGuiMod_Shift | ImGuiMod_Alt | ImGuiKey_I);
-  bool saveImageFile           = ImGui::IsKeyChordPressed(ImGuiMod_Ctrl | ImGuiMod_Alt | ImGuiKey_I);
-  bool closeApp                = ImGui::IsKeyChordPressed(ImGuiMod_Ctrl | ImGuiKey_Q);
-  bool fitScene                = ImGui::IsKeyChordPressed(ImGuiMod_Ctrl | ImGuiMod_Shift | ImGuiKey_F);
-  bool fitObject               = ImGui::IsKeyChordPressed(ImGuiMod_Ctrl | ImGuiKey_F);
-  bool toggleVsyc              = ImGui::IsKeyChordPressed(ImGuiMod_Ctrl | ImGuiMod_Shift | ImGuiKey_V);
-  bool reloadShader            = ImGui::IsKeyChordPressed(ImGuiMod_Ctrl | ImGuiMod_Shift | ImGuiKey_R);
-  bool compactScene            = ImGui::IsKeyChordPressed(ImGuiMod_Ctrl | ImGuiKey_K);
-  bool undoCmd                 = ImGui::IsKeyChordPressed(ImGuiMod_Ctrl | ImGuiKey_Z);
-  bool redoCmd                 = ImGui::IsKeyChordPressed(ImGuiMod_Ctrl | ImGuiKey_Y);
-  bool duplicateCmd            = ImGui::IsKeyChordPressed(ImGuiMod_Ctrl | ImGuiKey_D);
-  bool deleteCmd               = !ImGui::GetIO().WantTextInput && ImGui::IsKeyPressed(ImGuiKey_Delete, false);
-  if(toggleVsyc)
-    v_sync = !v_sync;
-  bool validScene = m_resources.getScene() && m_resources.getScene()->valid();
+  const bool validScene = hasValidScene();
 
-  renderFileMenu(validScene, newScene, openFile, mergeFile, loadHdrFile, saveFile, saveAsFile, saveSelfContainedAsFile,
-                 saveScreenFile, saveImageFile, referenceFile, closeApp, sceneToLoadFilename, sceneToMergeFilename);
-  renderEditMenu(validScene);
+  renderFileMenu(sceneToLoadFilename);
+  renderEditMenu();
   renderCreateMenu();
-
-  if(ImGui::IsKeyPressed(ImGuiKey_Escape))
-  {
-    m_resources.selectedRenderNodes.clear();
-    m_sceneSelection.clearSelection();
-  }
-
-  if(undoCmd && m_undoStack.canUndo())
-  {
-    m_undoStack.undo();
-    onUndoRedo();
-  }
-  if(redoCmd && m_undoStack.canRedo())
-  {
-    m_undoStack.redo();
-    onUndoRedo();
-  }
-
-  // Duplicate / Delete selected node (global shortcuts; works with both node and primitive selections)
-  if(validScene && m_sceneSelection.hasSelection())
-  {
-    auto sel = m_sceneSelection.getSelection();
-    int nodeIdx = (sel.type == SceneSelection::SelectionType::eNode || sel.type == SceneSelection::SelectionType::ePrimitive) ?
-                      sel.nodeIndex :
-                      -1;
-    if(nodeIdx >= 0)
-    {
-      if(duplicateCmd)
-      {
-        auto cmd = std::make_unique<DuplicateNodeCommand>(*m_resources.getScene(), nodeIdx, &m_sceneSelection);
-        m_undoStack.executeCommand(std::move(cmd));
-        onUndoRedo();
-      }
-      if(deleteCmd)
-      {
-        m_pendingDeleteNode        = nodeIdx;
-        m_openDeletePopupNextFrame = true;
-      }
-    }
-  }
-
-  renderViewMenu(validScene, fitScene, fitObject, v_sync);
+  renderViewMenu();
   renderWindowsMenu();
-  renderToolsMenu(validScene, reloadShader, compactScene);
+  renderToolsMenu(validScene);
   renderDebugMenu();
+  ui::help::renderMenu(m_help, m_commands);
   renderMenuToolbarAndGizmos();
+
+  MenuRequests req = std::exchange(m_menuRequests, {});
 
   // Shared "Save As"-style dialog wrapper: opens with defaultPath pre-filled and, if given a
   // remember-slot, updates it with the user's choice so later saves keep offering that name.
@@ -1440,7 +1536,7 @@ void GltfRenderer::renderMenu()
                           m_imageSaveFilename, &m_imageSaveFilename);
   };
 
-  if(newScene)
+  if(req.newScene)
   {
     // SYNC NOTE: User-initiated new scene — wait before full cleanup.
     vkQueueWaitIdle(m_app->getQueue(0).queue);
@@ -1449,13 +1545,13 @@ void GltfRenderer::renderMenu()
     m_imageSaveFilename.clear();
   }
 
-  if(reloadShader)
+  if(req.reloadShaders)
   {
     SCOPED_BANNER("Reload Shaders");
     reloadShaders();  // owns the GPU drain and the frame reset
   }
 
-  if(openFile)
+  if(req.openFile)
   {
     const std::filesystem::path& currentScene =
         m_resources.getScene() ? m_resources.getScene()->getFilename() : std::filesystem::path{};
@@ -1468,19 +1564,16 @@ void GltfRenderer::renderMenu()
     onFileDrop(sceneToLoadFilename.c_str());
   }
 
-  if(mergeFile)
+  if(req.mergeFile)
   {
-    sceneToMergeFilename = nvgui::windowOpenFileDialog(m_app->getWindowHandle(), "Import/Merge Scene",
-                                                       "3D Scene Files|*.gltf;*.glb|glTF Text|*.gltf|glTF Binary|*.glb",
-                                                       m_lastSceneDirectory);
-  }
-  if(!sceneToMergeFilename.empty())
-  {
-    onMergeScene(sceneToMergeFilename);
-    sceneToMergeFilename.clear();
+    std::filesystem::path filename =
+        nvgui::windowOpenFileDialog(m_app->getWindowHandle(), "Import/Merge Scene",
+                                    "3D Scene Files|*.gltf;*.glb|glTF Text|*.gltf|glTF Binary|*.glb", m_lastSceneDirectory);
+    if(!filename.empty())
+      onMergeScene(filename);
   }
 
-  if(referenceFile)
+  if(req.referenceFile)
   {
     std::filesystem::path filename =
         nvgui::windowOpenFileDialog(m_app->getWindowHandle(), "Reference Scene (External Asset)",
@@ -1489,12 +1582,12 @@ void GltfRenderer::renderMenu()
       onReferenceScene(filename);
   }
 
-  if(loadHdrFile)
+  if(req.loadHdrFile)
   {
     loadHdrFileDialog();
   }
 
-  if(saveFile && validScene)
+  if(req.saveFile && validScene)
   {
     // "Save": write directly to the current scene file when it is a glTF/glb we can overwrite.
     // Otherwise (no path yet, or a non-glTF source like .obj/.scene.json) fall back to "Save As".
@@ -1502,7 +1595,7 @@ void GltfRenderer::renderMenu()
     if(!currentFilename.empty() && isGltfExt(currentFilename))
       save(currentFilename);
     else
-      saveAsFile = true;
+      req.saveAsFile = true;
   }
 
   // Default filename offered by the "Save As" dialogs: the current scene file when it's already a
@@ -1514,14 +1607,14 @@ void GltfRenderer::renderMenu()
   };
   static constexpr const char* kGltfFilter = "glTF Files|*.gltf;*.glb|glTF Text|*.gltf|glTF Binary|*.glb";
 
-  if(saveAsFile && validScene)
+  if(req.saveAsFile && validScene)
   {
     std::filesystem::path filename = saveFileDialog("Save glTF", kGltfFilter, getSceneDefaultFilename());
     if(!filename.empty())
       save(filename);
   }
 
-  if(saveSelfContainedAsFile && validScene)
+  if(req.saveSelfContainedAsFile && validScene)
   {
     // glTF 2.1: write a portable copy with external assets baked inline (no external references).
     std::filesystem::path filename = saveFileDialog("Save Self-Contained glTF", kGltfFilter, getSceneDefaultFilename());
@@ -1529,7 +1622,7 @@ void GltfRenderer::renderMenu()
       save(filename, /*selfContained=*/true);
   }
 
-  if(saveScreenFile)
+  if(req.saveScreenFile)
   {
     std::filesystem::path filename = getSaveImage();
     if(!filename.empty())
@@ -1538,7 +1631,7 @@ void GltfRenderer::renderMenu()
     }
   }
 
-  if(saveImageFile)
+  if(req.saveImageFile)
   {
     std::filesystem::path filename = getSaveImage();
     if(!filename.empty())
@@ -1550,15 +1643,7 @@ void GltfRenderer::renderMenu()
     }
   }
 
-  if(validScene && (fitScene || (fitObject && !m_resources.selectedRenderNodes.empty())))
-  {
-    nvutils::Bbox bbox = fitScene ? m_resources.getScene()->getSceneBounds() :
-                                    GltfRenderer::getRenderNodesBbox(m_resources.selectedRenderNodes);
-    if(!bbox.isEmpty())  // A selection with no readable bounds leaves the camera alone
-      m_cameraManip->fit(bbox.min(), bbox.max(), false, true, m_cameraManip->getAspectRatio());
-  }
-
-  if(compactScene && validScene)
+  if(req.compactScene && validScene)
   {
     SCOPED_BANNER("Compact Scene");
     if(m_resources.getScene()->compactModel())
@@ -1571,16 +1656,6 @@ void GltfRenderer::renderMenu()
       rebuildVulkanSceneFull();
       resetFrame();  // Reset path tracer accumulation
     }
-  }
-
-  if(closeApp)
-  {
-    m_app->close();
-  }
-
-  if(m_app->isVsync() != v_sync)
-  {
-    m_app->setVsync(v_sync);
   }
 
   // Let both renderers handle their menus
