@@ -67,7 +67,7 @@ struct SceneFeatureSet
     eTextureTransform,
 
     // Shader-side guide-buffer code (GuideScratch / dlssTraceClearGlass / etc.).
-    // True when the active denoiser (DLSS or OptiX) wants the path tracer to populate
+    // True when the active denoiser (DLSS, OptiX or OIDN) wants the path tracer to populate
     // first-hit guide buffers. The build-time CMake gate also controls this via
     // USE_GUIDE_SHADER, but runtime variant rebuild can be more aggressive (e.g. turn
     // off when DLSS is compiled in but the user has disabled the denoiser).

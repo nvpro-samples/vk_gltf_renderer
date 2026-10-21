@@ -21,7 +21,7 @@
 // Vulkan ray tracing path tracer renderer. Builds and dispatches the
 // ray generation / closest-hit / any-hit / miss shader pipeline for
 // progressive path tracing of glTF scenes. Handles accumulation,
-// depth-of-field, and denoiser integration (OptiX / DLSS).
+// depth-of-field, and denoiser integration (OptiX / OIDN / DLSS).
 //
 
 #include <fmt/format.h>
@@ -40,6 +40,7 @@
 #include <nvgui/tooltip.hpp>
 
 #include "renderer_pathtracer.hpp"
+#include "sample_schedule.hpp"
 
 #include "scene_shader_macros.hpp"
 #include "ui_helpers.hpp"
@@ -72,6 +73,10 @@ PathTracer::PathTracer()
 
 #if defined(USE_OPTIX_DENOISER)
   m_optix = std::make_unique<OptiXDenoiser>();
+#endif
+
+#if defined(USE_OIDN_DENOISER)
+  m_oidn = std::make_unique<OidnDenoiser>();
 #endif
 }
 
@@ -123,6 +128,12 @@ void PathTracer::onAttach(Resources& resources, nvvk::ProfilerGpuTimer* profiler
   // holds the ray-tracing entry points; the ray-tracing pipeline works. Keep the path tracer on it.
   constexpr uint32_t kAmdVendorId = 0x1002;
   m_supportRayQuery               = prop2.properties.vendorID != kAmdVendorId;
+  m_capturePipelineStats          = false;
+  for(size_t i = 0; i < resources.deviceExtensions.size(); i++)
+  {
+    if(resources.deviceExtensions[i] == VK_KHR_PIPELINE_EXECUTABLE_PROPERTIES_EXTENSION_NAME)
+      m_capturePipelineStats = true;
+  }
   if(!m_supportRayQuery)
     LOGI("PathTracer: the Ray Query technique is not supported with this driver; using the Ray Tracing Pipeline\n");
   // Keep whatever --ptUseSER asked for (the parameter is parsed before this runs); the device
@@ -145,6 +156,13 @@ void PathTracer::onAttach(Resources& resources, nvvk::ProfilerGpuTimer* profiler
 #if defined(USE_OPTIX_DENOISER)
   m_optix->init(resources);
 #endif
+
+  // #OIDN - Create the vk_oidn context (compute pipelines); the network follows the size
+#if defined(USE_OIDN_DENOISER)
+  m_oidn->init(resources);
+#endif
+
+  m_handoff.init(resources);
 }
 
 //--------------------------------------------------------------------------------------------------
@@ -154,14 +172,19 @@ void PathTracer::registerParameters(SettingsRegistry* settings)
   // PathTracer-specific settings. Persist marks what survives a restart (see settings_registry.hpp).
   // Bounds mirror the UI sliders so CLI and benchmark sequences accept the same range the UI does:
   //   ptMaxDepth  -> "Max Depth" slider in showUI() (0..20)
-  //   ptSamples   -> "Samples" slider in showUI() (MIN_SAMPLES_PER_PIXEL..MAX_SAMPLES_PER_PIXEL);
+  //   ptSamples   -> "Samples per Frame" slider in onUIRender() (MIN_SAMPLES_PER_PIXEL..MAX_SAMPLES_PER_PIXEL);
   //                  the adaptive-sampling autopilot also clamps to the same range at runtime.
   settings->add({"ptMaxDepth", "PathTracer: Maximum ray depth"}, &m_pushConst.maxDepth, Persist::eYes, 0, 20);
   settings->add({.name            = "ptSamples",
-                 .help            = "PathTracer: Samples per pixel",
+                 .help            = "PathTracer: Samples per pixel traced each frame (see ptMaxSamples for the total)",
                  .callbackSuccess = [this](const nvutils::ParameterBase* const) { m_adaptiveSampling = false; }},
                 &m_pushConst.numSamples, Persist::eYes, MIN_SAMPLES_PER_PIXEL, MAX_SAMPLES_PER_PIXEL);
   settings->add({"ptFireflyClamp", "PathTracer: Firefly clamp threshold"}, &m_pushConst.fireflyClampThreshold, Persist::eYes);
+  // Not persisted: a different value only changes the noise pattern, which nobody wants carried into the next session.
+  settings->add({"ptSeed",
+                 "PathTracer: Random sequence (0 = default); another value gives statistically independent noise, "
+                 "e.g. for a reference image compared against a test render"},
+                &m_pushConst.seed, Persist::eNo);
   settings->add({"ptTexGradScale", "PathTracer: Ray-footprint gradient scale (0=mip0, 1=physical)"},
                 &m_pushConst.texGradScale, Persist::eYes, 0.0F, 1.0F);
   settings->add({"ptAperture", "PathTracer: Camera aperture"}, &m_pushConst.aperture, Persist::eYes, 0.0F, 1.0F);
@@ -176,8 +199,11 @@ void PathTracer::registerParameters(SettingsRegistry* settings)
   // benchmark sequence, not just on the command line. Silently ignored when the device lacks SER.
   settings->add({"ptUseSER", "PathTracer: Use Shader Execution Reordering (ignored if unsupported)"}, &m_useSER, Persist::eYes);
   settings->add({"ptAdaptiveSampling", "PathTracer: Enable adaptive sampling"}, &m_adaptiveSampling, Persist::eYes);
-  settings->add({"ptPerformanceTarget", "PathTracer: Performance target [Interactive:0, Balanced:1, Quality:2, MaxQuality:3]"},
-                (int*)&m_performanceTarget, Persist::eYes, 0, 3);
+  settings->add({.name = "ptPerformanceTarget",
+                 .help = "PathTracer: Auto SPP target [Interactive:0, Balanced:1, Quality:2, MaxQuality:3, Throughput:4]. "
+                         "Default: Balanced, Throughput in headless runs",
+                 .callbackSuccess = [this](const nvutils::ParameterBase* const) { restartAdaptiveSampling(); }},
+                (int*)&m_performanceTarget, Persist::eYes, 0, 4);
 #if defined(USE_DLSS)
   m_dlss->registerParameters(settings);
 #endif
@@ -185,6 +211,11 @@ void PathTracer::registerParameters(SettingsRegistry* settings)
 #if defined(USE_OPTIX_DENOISER)
   m_optix->registerParameters(settings);
 #endif
+
+#if defined(USE_OIDN_DENOISER)
+  m_oidn->registerParameters(settings);
+#endif
+  m_handoff.registerParameters(settings);
 }
 
 
@@ -207,6 +238,10 @@ void PathTracer::onDetach(Resources& resources)
 #if defined(USE_OPTIX_DENOISER)
   m_optix->deinit(resources);
 #endif
+#if defined(USE_OIDN_DENOISER)
+  m_oidn->deinit(resources);
+#endif
+  m_handoff.deinit(resources);
   vkDestroyPipelineLayout(m_device, m_pipelineLayout, nullptr);
   vkDestroyShaderModule(m_device, m_shaderModule, nullptr);
   vkDestroyPipeline(m_device, m_rtxPipeline, nullptr);
@@ -222,6 +257,10 @@ void PathTracer::onResize(VkCommandBuffer cmd, const VkExtent2D& /*size*/, Resou
   updateDepthStaging(cmd, resources);
   updateDlssResources(cmd, resources);
   updateOptiXResources(cmd, resources);
+#if defined(USE_OIDN_DENOISER)
+  m_oidn->updateSize(cmd, resources.gBuffers.getSize());
+#endif
+  m_handoff.onResize(cmd, resources.gBuffers.getSize());
 #if defined(USE_DLSS)
   m_dlss->notifyReset();  // viewport size changed -> reseed jitter sequence + drop NGX history
 #endif
@@ -354,22 +393,40 @@ bool PathTracer::onUIRender(Resources& resources)
   // Manual sampling controls
   if(PE::begin())
   {
-    PE::SliderInt("Max Iterations", &resources.settings.maxFrames, 0, 10000, "%d", 0, "Maximum number of iterations");
-    ImGui::BeginDisabled(m_adaptiveSampling || isDlssEnabled());
-    PE::SliderInt("Samples", &m_pushConst.numSamples, MIN_SAMPLES_PER_PIXEL, MAX_SAMPLES_PER_PIXEL, "%d", 0,
-                  "Number of samples per pixel");
+    // Progress is counted in samples per pixel: a frame holds a varying number of them
+    const int  maxSamples = std::max(resources.settings.maxSamples, 1);
+    const auto progress   = fmt::format("{} / {} spp", m_totalSamplesAccumulated, maxSamples);
+    PE::entry(
+        "Accumulated",
+        [&] {
+          ImGui::ProgressBar(std::min(float(m_totalSamplesAccumulated) / float(maxSamples), 1.0F), ImVec2(-FLT_MIN, 0),
+                             progress.c_str());
+          return false;
+        },
+        "Samples per pixel in the image, out of Max Samples");
+    // Bounds mirror the ptMaxSamples registration in GltfRenderer
+    PE::SliderInt("Max Samples", &resources.settings.maxSamples, 1, 1000000, "%d spp", ImGuiSliderFlags_Logarithmic,
+                  "Stop accumulating once the image holds this many samples per pixel");
+    // Set by hand, or, with Auto SPP or DLSS, showing the count they trace (ptSamples keeps the hand-set one)
+    const bool samplesByHand = !m_adaptiveSampling && !isDlssEveryFrame();
+    int        shownSamples  = samplesPerFrame();
+    ImGui::BeginDisabled(!samplesByHand);
+    PE::SliderInt("Samples per Frame", samplesByHand ? &m_pushConst.numSamples : &shownSamples, MIN_SAMPLES_PER_PIXEL,
+                  MAX_SAMPLES_PER_PIXEL, "%d", 0,
+                  "Samples per pixel traced each frame. A frame traces fewer to land on Max Samples or an "
+                  "--outputSamples count");
     ImGui::EndDisabled();
-    if(isDlssEnabled())
+    if(isDlssEveryFrame())
     {
       ImGui::SameLine();
       ImGui::TextDisabled("(DLSS: 1 spp)");
     }
 
     // Adaptive sampling controls
-    ImGui::BeginDisabled(isDlssEnabled());
+    ImGui::BeginDisabled(isDlssEveryFrame());
     PE::Checkbox("Auto SPP", &m_adaptiveSampling, "Automatically adjust samples per pixel based on performance target");
     ImGui::EndDisabled();
-    if(isDlssEnabled())
+    if(isDlssEveryFrame())
     {
       ImGui::SameLine();
       ImGui::TextDisabled("(DLSS disabled)");
@@ -377,20 +434,31 @@ bool PathTracer::onUIRender(Resources& resources)
     if(m_adaptiveSampling)
     {
       ImGui::SameLine();
-      ImGui::TextDisabled("(Auto: %d spp)", m_pushConst.numSamples);
+      if(m_performanceTarget == PerformanceTarget::eThroughput)
+        ImGui::TextDisabled(m_throughputSearch.settled() ? "(held: fastest)" : "(searching)");
+      else
+        ImGui::TextDisabled(m_frameRateControl.held() ? "(held: at target)" : "(climbing)");
+      nvgui::tooltip(
+          "After each camera move Auto SPP adds one sample per frame until the path-trace GPU time "
+          "reaches the target, then holds the count while the view is still. It steps down if frames "
+          "run over the target.",
+          true);
 
       // Performance target selection
-      const char* targets[] = {"Interactive (60 FPS)", "Balanced (30 FPS)", "Quality (15 FPS)", "Max Quality (10 FPS)"};
+      const char* targets[] = {"Interactive (60 FPS)", "Balanced (30 FPS)", "Quality (15 FPS)", "Max Quality (10 FPS)",
+                               "Max Throughput (offline)"};
       int         currentTarget = static_cast<int>(m_performanceTarget);
-      if(PE::Combo("Performance Target", &currentTarget, targets, IM_ARRAYSIZE(targets)))
+      if(PE::Combo("Performance Target", &currentTarget, targets, IM_ARRAYSIZE(targets), -1,
+                   "Frame rate Auto SPP aims at. Max Throughput finds the samples per frame with the lowest frame "
+                   "time per sample, for renders nobody interacts with (the headless default)"))
       {
         m_performanceTarget = static_cast<PerformanceTarget>(currentTarget);
+        restartAdaptiveSampling();
       }
     }
     // Performance info - always visible
     const int   frames      = resources.frameCount + 1;
     const float sppPerFrame = (frames > 0) ? float(m_totalSamplesAccumulated) / float(frames) : 0.f;
-    ImGui::TextDisabled("Samples/pixel: %d", m_totalSamplesAccumulated);
     ImGui::TextDisabled("Frames: %d (%.1f spp/frame)", frames, sppPerFrame);
     ImGui::TextDisabled("Throughput: %.2f MSPP/s", m_throughputRollingAvg.getAverage());
     nvgui::tooltip(fmt::format("Mega-sample-pixels per second (rolling average over last {} frames)",
@@ -464,6 +532,17 @@ bool PathTracer::onUIRender(Resources& resources)
     nvsamples::HelpMarker("Define USE_OPTIX_DENOISER in CMake to enable OptiX denoiser support.");
 #endif
 
+#if defined(USE_OIDN_DENOISER)
+    changed |= m_oidn->onUiActivation(resources);
+#else
+    ImGui::TextDisabled("OIDN Denoiser is not enabled.");
+    nvsamples::HelpMarker("Set USE_OIDN_DENOISER in CMake to enable the vk_oidn denoiser.");
+#endif
+
+    // DLSS-RR with OptiX or OIDN: how DLSS's image hands off to theirs
+    if(isDlssEnabled() && isAccumulationDenoiserEnabled())
+      m_handoff.onUi();
+
     ImGui::Spacing();
 
 #if defined(USE_DLSS)
@@ -476,11 +555,17 @@ bool PathTracer::onUIRender(Resources& resources)
 #if defined(USE_OPTIX_DENOISER)
     changed |= m_optix->onUiSettings(resources);
 #endif
+#if defined(USE_OIDN_DENOISER)
+    changed |= m_oidn->onUiSettings(resources);
+#endif
 
     ImGui::Spacing();
 
 #if defined(USE_OPTIX_DENOISER)
     changed |= m_optix->onUiPreview(resources);
+#endif
+#if defined(USE_OIDN_DENOISER)
+    changed |= m_oidn->onUiPreview(resources);
 #endif
 #if defined(USE_DLSS)
     changed |= m_dlss->onUiGuideBuffers();
@@ -618,6 +703,9 @@ bool PathTracer::prepareFrame(Resources& resources)
 #if defined(USE_OPTIX_DENOISER)
   m_optix->ensureTargets(resources);
 #endif
+#if defined(USE_OIDN_DENOISER)
+  m_oidn->ensureTargets(resources);
+#endif
   return true;
 }
 
@@ -630,6 +718,13 @@ void PathTracer::onRender(VkCommandBuffer cmd, Resources& resources)
 
   NVVK_DBG_SCOPE(cmd);  // <-- Helps to debug in NSight
 
+  // A new accumulation: whether DLSS renders its frame 0 is set where it does, and any hand-off is over
+  if(resources.frameCount == 0)
+  {
+    m_dlssFrame0 = false;
+    m_handoff.cancel();
+  }
+
   if(!prepareFrame(resources))
     return;
 
@@ -639,8 +734,10 @@ void PathTracer::onRender(VkCommandBuffer cmd, Resources& resources)
     updateDlssResources(cmd, resources);
 #endif
 
-  // Reset display buffer to rendered on first frame
-  if((resources.frameCount == 0) && (resources.settings.displayBuffer == DisplayBuffer::eOptixDenoised))
+  // Reset display buffer to rendered on first frame: the denoised image is stale until denoised again
+  if((resources.frameCount == 0)
+     && (resources.settings.displayBuffer == DisplayBuffer::eOptixDenoised
+         || resources.settings.displayBuffer == DisplayBuffer::eOidnDenoised))
   {
     resources.settings.displayBuffer = DisplayBuffer::eRendered;
   }
@@ -668,6 +765,12 @@ void PathTracer::onRender(VkCommandBuffer cmd, Resources& resources)
   // Setting up the push constant
   setupPushConstant(cmd, resources, renderingSize);
 
+  // Frame 1 after DLSS's frame 0: keep DLSS's image for the hand-off before the path tracer overwrites
+  // it. The barrier below orders that write after the copy.
+  if(resources.frameCount == 1 && m_dlssFrame0)
+    if(const std::optional<DenoiserHandoff::Denoiser> denoiser = handoffDenoiser(resources))
+      m_handoff.cmdCapture(cmd, resources, *denoiser);
+
   // Make sure buffer is ready to be used.
   nvvk::cmdMemoryBarrier(cmd, VK_PIPELINE_STAGE_2_TRANSFER_BIT,
                          VK_PIPELINE_STAGE_2_COMPUTE_SHADER_BIT | VK_PIPELINE_STAGE_2_RAY_TRACING_SHADER_BIT_KHR);
@@ -682,8 +785,9 @@ void PathTracer::onRender(VkCommandBuffer cmd, Resources& resources)
     renderRayTrace(cmd, renderingSize, resources);
   }
 
-  // Making sure the rendered image is ready to be used by tonemapper
-  nvvk::cmdMemoryBarrier(cmd, VK_PIPELINE_STAGE_2_COMPUTE_SHADER_BIT, VK_PIPELINE_STAGE_2_COMPUTE_SHADER_BIT);
+  // Making sure the rendered image is ready to be used by tonemapper (written by ray query compute or the RTX pipeline)
+  nvvk::cmdMemoryBarrier(cmd, VK_PIPELINE_STAGE_2_COMPUTE_SHADER_BIT | VK_PIPELINE_STAGE_2_RAY_TRACING_SHADER_BIT_KHR,
+                         VK_PIPELINE_STAGE_2_COMPUTE_SHADER_BIT);
 
   // Depth is only traced on the first frame (see processPixel); bring it into the depth buffer
   // before anything reads it (OptiX upscale below, overlays and picking after).
@@ -695,6 +799,7 @@ void PathTracer::onRender(VkCommandBuffer cmd, Resources& resources)
   if(getEffectiveDlssEnabled(resources))
   {
     denoiseDlss(cmd, resources);
+    m_dlssFrame0 = isAccumulationDenoiserEnabled();  // only on frame 0, then OptiX or OIDN takes over
   }
 #endif
 
@@ -702,17 +807,64 @@ void PathTracer::onRender(VkCommandBuffer cmd, Resources& resources)
   // Update OptiX auto-denoiser (only when effectively enabled)
   if(getEffectiveOptixEnabled(resources))
   {
-    auto timerSection = m_profiler->cmdFrameSection(cmd, "Optix denoiser");
-    m_optix->updateDenoiser(resources);
+    // OptiX runs on CUDA, outside this command buffer, where a Vulkan GPU timer reads ~0. The section's
+    // GPU time is the denoiser invoke measured with CUDA events (the Vulkan copies around it excluded),
+    // comparable to OIDN's; its CPU time is the host wall time, the wait for the frames in flight included.
+    {
+      const uint32_t denoisesBefore = m_optix->denoiseCount();
+      const auto section = m_profilerTimeline ? m_profilerTimeline->frameBeginSection("Optix denoiser", &m_optixTimeProvider) :
+                                                nvutils::ProfilerTimeline::FrameSectionID{};
+      m_optix->updateDenoiser(resources, m_dlssFrame0, handoffEnd(resources));
+      if(m_profilerTimeline)
+      {
+        m_optixGpuUs[section.subFrame] = (m_optix->denoiseCount() != denoisesBefore) ? 1000.0 * m_optix->lastInvokeGpuMs() : 0.0;
+        m_profilerTimeline->frameEndSection(section);
+      }
+    }
 
     if(m_optix->isUpscaleMode() && resources.frameCount == 0)
     {
+      auto timerSection = m_profiler->cmdFrameSection(cmd, "Optix upscale guides");
       upscaleSelectionAndDepth(cmd, resources);
     }
   }
 #endif
 
+#if defined(USE_OIDN_DENOISER)
+  // OIDN auto-denoise, recorded in this frame's command buffer: no lag, no host wait
+  if(getEffectiveOidnEnabled(resources))
+  {
+    // The image it reads includes the samples traced in this frame (not counted until updateStatistics)
+    m_oidn->updateDenoiser(cmd, resources, m_profiler, m_totalSamplesAccumulated + m_frameSamples, handoffEnd(resources));
+  }
+#endif
+
+  // DLSS hand-off: the image shown while OptiX or OIDN takes over from DLSS's frame 0
+  {
+    const std::optional<DenoiserHandoff::Denoiser> denoiser = handoffDenoiser(resources);
+    m_handoff.cmdUpdate(cmd, resources,
+                        {.denoiser   = denoiser ? &*denoiser : nullptr,
+                         .samples    = m_totalSamplesAccumulated + m_frameSamples,
+                         .handoffEnd = handoffEnd(resources)});
+  }
+
   updateStatistics(resources);
+}
+
+//--------------------------------------------------------------------------------------------------
+// Idle frames, once the accumulation is complete: the auto denoisers denoise its final image, which
+// is shown from then on, if their last denoise was not of it. OptiX, one frame behind, needs this for
+// every accumulation; OIDN only when the cap was lowered below it, or Auto turned on, since.
+void PathTracer::onAccumulationComplete(VkCommandBuffer cmd, Resources& resources)
+{
+#if defined(USE_OPTIX_DENOISER)
+  if(getEffectiveOptixEnabled(resources))
+    m_optix->denoiseFinal(resources);
+#endif
+#if defined(USE_OIDN_DENOISER)
+  if(getEffectiveOidnEnabled(resources))
+    m_oidn->denoiseFinal(cmd, resources, m_profiler);
+#endif
 }
 
 //--------------------------------------------------------------------------------------------------
@@ -838,13 +990,24 @@ void PathTracer::pushDescriptorSet(VkCommandBuffer cmd, Resources& resources, Vk
   }
 #endif
 
+  // The denoiser guide slots (ePtDenoiserGuides) get the images of the denoiser of the accumulation on
+  // this frame: OptiX and OIDN are exclusive, and neither shares a frame with DLSS
 #if defined(USE_OPTIX_DENOISER)
   if(getEffectiveOptixEnabled(resources))
   {
-    // With OptiX active, add the albedo/normal output image
     using namespace shaderio;
-    outputImages.resize(3);  // Adding the extra buffer to store albedo+normal
-    outputImages[eOptixAlbedoNormal] = m_optix->getDescriptorImageInfo(OptiXDenoiser::eGBufferAlbedoNormal);
+    outputImages.resize(eDenoiserNormal + 1);
+    outputImages[eDenoiserAlbedo] = m_optix->getDescriptorImageInfo(OptiXDenoiser::eGBufferAlbedo);
+    outputImages[eDenoiserNormal] = m_optix->getDescriptorImageInfo(OptiXDenoiser::eGBufferNormal);
+  }
+#endif
+#if defined(USE_OIDN_DENOISER)
+  if(getEffectiveOidnEnabled(resources))
+  {
+    using namespace shaderio;
+    outputImages.resize(eDenoiserNormal + 1);
+    outputImages[eDenoiserAlbedo] = m_oidn->getDescriptorImageInfo(OidnDenoiser::eGBufferAlbedo);
+    outputImages[eDenoiserNormal] = m_oidn->getDescriptorImageInfo(OidnDenoiser::eGBufferNormal);
   }
 #endif
 
@@ -922,6 +1085,7 @@ void PathTracer::createRqPipeline(Resources& /*resources*/)
   VkComputePipelineCreateInfo cpCreateInfo{
       .sType  = VK_STRUCTURE_TYPE_COMPUTE_PIPELINE_CREATE_INFO,
       .pNext  = &feedbackInfo,
+      .flags  = m_capturePipelineStats ? VkPipelineCreateFlags(VK_PIPELINE_CREATE_CAPTURE_STATISTICS_BIT_KHR) : 0u,
       .stage  = shaderStage,
       .layout = m_pipelineLayout,
   };
@@ -934,12 +1098,62 @@ void PathTracer::createRqPipeline(Resources& /*resources*/)
   {
     std::lock_guard<std::mutex> lock(m_compileMutex);
     m_rqPipeline = rqPipeline;
+    ++m_pipelineGeneration;
   }
 
   const bool valid = (feedback.flags & VK_PIPELINE_CREATION_FEEDBACK_VALID_BIT) != 0;
   const bool hit   = (feedback.flags & VK_PIPELINE_CREATION_FEEDBACK_APPLICATION_PIPELINE_CACHE_HIT_BIT) != 0;
   LOGI("RQ pipeline creation: %s, %s (%.2f ms)\n", valid ? "valid" : "invalid", hit ? "CACHE HIT" : "cache miss",
        feedback.duration / 1e6);
+  logPipelineStatistics(rqPipeline, "RQ");
+}
+
+//--------------------------------------------------------------------------------------------------
+// One log line per pipeline executable with the statistics the driver reports for it (register
+// count, spills, ...): what decides occupancy, and so the first thing to read after a shader edit
+// that should change it. Only when VK_KHR_pipeline_executable_properties is enabled, which also
+// makes the pipelines capture them (VK_PIPELINE_CREATE_CAPTURE_STATISTICS_BIT_KHR). NVIDIA's driver
+// reports the ray-query (compute) pipeline but no executables for the ray tracing pipeline.
+void PathTracer::logPipelineStatistics(VkPipeline pipeline, const char* label) const
+{
+  if(!m_capturePipelineStats)
+    return;
+  const VkPipelineInfoKHR pipelineInfo{.sType = VK_STRUCTURE_TYPE_PIPELINE_INFO_KHR, .pipeline = pipeline};
+  uint32_t                executableCount = 0;
+  vkGetPipelineExecutablePropertiesKHR(m_device, &pipelineInfo, &executableCount, nullptr);
+  std::vector<VkPipelineExecutablePropertiesKHR> executables(executableCount, {VK_STRUCTURE_TYPE_PIPELINE_EXECUTABLE_PROPERTIES_KHR});
+  vkGetPipelineExecutablePropertiesKHR(m_device, &pipelineInfo, &executableCount, executables.data());
+  for(uint32_t i = 0; i < executableCount; ++i)
+  {
+    const VkPipelineExecutableInfoKHR executableInfo{
+        .sType = VK_STRUCTURE_TYPE_PIPELINE_EXECUTABLE_INFO_KHR, .pipeline = pipeline, .executableIndex = i};
+    uint32_t statCount = 0;
+    vkGetPipelineExecutableStatisticsKHR(m_device, &executableInfo, &statCount, nullptr);
+    std::vector<VkPipelineExecutableStatisticKHR> stats(statCount, {VK_STRUCTURE_TYPE_PIPELINE_EXECUTABLE_STATISTIC_KHR});
+    vkGetPipelineExecutableStatisticsKHR(m_device, &executableInfo, &statCount, stats.data());
+    std::string line;
+    for(size_t s = 0; s < stats.size(); s++)
+    {
+      const VkPipelineExecutableStatisticKHR& stat = stats[s];
+      line += fmt::format("{}{}=", line.empty() ? "" : ", ", stat.name);
+      switch(stat.format)
+      {
+        case VK_PIPELINE_EXECUTABLE_STATISTIC_FORMAT_BOOL32_KHR:
+          line += stat.value.b32 ? "true" : "false";
+          break;
+        case VK_PIPELINE_EXECUTABLE_STATISTIC_FORMAT_INT64_KHR:
+          line += std::to_string(stat.value.i64);
+          break;
+        case VK_PIPELINE_EXECUTABLE_STATISTIC_FORMAT_UINT64_KHR:
+          line += std::to_string(stat.value.u64);
+          break;
+        default:
+          line += fmt::format("{:.3g}", stat.value.f64);
+          break;
+      }
+    }
+    LOGI("%s pipeline executable %u (%s): %s\n", label, i, executables[i].name, line.c_str());
+  }
 }
 
 
@@ -1050,6 +1264,8 @@ void PathTracer::createRtxPipeline(Resources& resources)
   VkPipelineCreateFlags flags = resources.settings.opacityMicromapSupported ?
                                     VkPipelineCreateFlags(VK_PIPELINE_CREATE_RAY_TRACING_OPACITY_MICROMAP_BIT_KHR) :
                                     VkPipelineCreateFlags(0);
+  if(m_capturePipelineStats)
+    flags |= VK_PIPELINE_CREATE_CAPTURE_STATISTICS_BIT_KHR;
 
   // Assemble the shader stages and recursion depth info into the ray tracing pipeline
   VkRayTracingPipelineCreateInfoKHR rtPipelineCreateInfo{
@@ -1149,6 +1365,7 @@ void PathTracer::createRtxPipeline(Resources& resources)
       valid ? ((feedback.flags & VK_PIPELINE_CREATION_FEEDBACK_APPLICATION_PIPELINE_CACHE_HIT_BIT) ? "CACHE HIT" : "cache miss") :
               "cache status unknown";
   LOGI("RTX pipeline creation: %s, deferred=%s (%.2f ms)\n", cacheStatus, wasDeferred ? "yes" : "no", elapsedMs);
+  logPipelineStatistics(rtxPipeline, "RTX");
 
   // Create the Shading Binding Table
   {
@@ -1180,6 +1397,7 @@ void PathTracer::createRtxPipeline(Resources& resources)
       m_rtxPipeline = rtxPipeline;
       m_sbtBuffer   = sbtBuffer;
       m_sbtRegions  = sbtRegions;
+      ++m_pipelineGeneration;
     }
   }
 }
@@ -1212,9 +1430,12 @@ bool PathTracer::compileShader(Resources& resources, bool fromFile)
   // (the slow part - the driver can take several seconds per RTX pipeline). On miss we
   // proceed with the normal compile path and the new entry will be stored on the next
   // variant switch.
+  // The key is read once: it depends on the frame (see makeVariantKey()), and the macros below and
+  // m_compiled must describe the same variant.
+  const VariantKey key = makeVariantKey(resources);
   if(fromFile && !m_skipVariantCache)
   {
-    if(swapVariant(resources, makeVariantKey(resources)))
+    if(swapVariant(resources, key))
     {
       LOGI("[PathTracer] Variant cache hit.\n");
       return true;
@@ -1263,7 +1484,7 @@ bool PathTracer::compileShader(Resources& resources, bool fromFile)
         // Ray queries against a BLAS with an opacity micromap need an explicit opt-in (see gltf_pathtrace.slang).
         {"USE_OMM", std::to_string(wantOpacityMicromapShader(resources) ? 1 : 0)},
     };
-    nvvkgltf::appendPathTracerDlssShaderMacro(macros, resources.currentFeatureSet, isDlssEnabled());
+    nvvkgltf::appendPathTracerDlssShaderMacro(macros, resources.currentFeatureSet, key.dlss);
 
     // Scene-aware optimal mode: set every GLTF_USE_* to 0 or 1 from SceneFeatureSet.
     // Never pass MAT_EXT_X=0 (that would change GltfShadeMaterial layout while the host
@@ -1313,17 +1534,17 @@ bool PathTracer::compileShader(Resources& resources, bool fromFile)
   // Record which variant this compile is, so getPendingCompileWork() can tell whether the settings
   // still match it. A from-file compile follows the live settings. The embedded SPIR-V fallback
   // mirrors the CMake build (see CMakeLists.txt): not optimal, all-on features, USE_GUIDE_SHADER=1
-  // iff DLSS/OptiX is available at build time, and USE_DLSS_SHADER=0 (DLSS is never active at
+  // iff DLSS/OptiX/OIDN is available at build time, and USE_DLSS_SHADER=0 (DLSS is never active at
   // startup; it engages later and triggers a from-file recompile).
   {
     std::lock_guard<std::mutex> lock(m_compileMutex);
-#if defined(USE_DLSS) || defined(USE_OPTIX_DENOISER)
+#if defined(USE_DLSS) || defined(USE_OPTIX_DENOISER) || defined(USE_OIDN_DENOISER)
     constexpr bool kEmbeddedDlssGuide = true;
 #else
     constexpr bool kEmbeddedDlssGuide = false;
 #endif
     if(compiledFromFile)
-      m_compiled = makeVariantKey(resources);
+      m_compiled = key;
     else
       m_compiled = VariantKey{.dlssGuide = kEmbeddedDlssGuide};
 
@@ -1336,6 +1557,10 @@ bool PathTracer::compileShader(Resources& resources, bool fromFile)
 
 //--------------------------------------------------------------------------------------------------
 // The variant the current settings ask for -- the variant-cache key compileShader() looks up.
+// DLSS's guide captures cost every sample, so they are compiled in only for the frames DLSS renders:
+// with OptiX or OIDN also on, frame 0, while the frames after it run the regular variant. Each camera
+// start and stop is then a cached-variant swap in prepareFrame(); a moving camera stays on DLSS's.
+// While DLSS is still loading, its variant is compiled ahead of its first frame.
 PathTracer::VariantKey PathTracer::makeVariantKey(const Resources& resources) const
 {
   return VariantKey{
@@ -1343,7 +1568,7 @@ PathTracer::VariantKey PathTracer::makeVariantKey(const Resources& resources) co
       resources.settings.visualization != shaderio::Visualization::eRendered,
       wantOpacityMicromapShader(resources),
       resources.settings.optimalShader,
-      isDlssEnabled(),
+      isDlssEnabled() && (!isAccumulationDenoiserEnabled() || resources.frameCount == 0),
       resources.currentFeatureSet.has(nvvkgltf::SceneFeatureSet::eDlssGuide),
       resources.settings.optimalShader ? resources.currentFeatureSet : nvvkgltf::SceneFeatureSet{},
 #if defined(USE_DLSS)
@@ -1371,8 +1596,8 @@ bool PathTracer::tryRestoreCachedVariant(Resources& resources)
       return false;
   }
   const bool hit = swapVariant(resources, key);
-  if(hit)
-    LOGI("[PathTracer] Variant cache hit (swapped in place).\n");
+  if(hit)  // debug level: with DLSS-RR and OptiX or OIDN, every camera start and stop swaps
+    LOGD("[PathTracer] Variant cache hit (swapped in place).\n");
   return hit;
 }
 
@@ -1462,6 +1687,7 @@ bool PathTracer::swapVariant(Resources& resources, const VariantKey& newKey)
         m_rqPipeline  = it->rqPipeline;
         m_sbtBuffer   = it->sbtBuffer;
         m_sbtRegions  = it->sbtRegions;
+        ++m_pipelineGeneration;
       }
       else
       {
@@ -1521,25 +1747,63 @@ void PathTracer::destroyVariantCache(Resources& resources)
 
 
 //--------------------------------------------------------------------------------------------------
+// Auto SPP starts over from one sample per frame, e.g. on a new target: the throughput search measures again
+void PathTracer::restartAdaptiveSampling()
+{
+  m_adaptiveSamples  = MIN_SAMPLES_PER_PIXEL;
+  m_throughputSearch = {};
+  m_frameRateControl.restart();
+}
+
+//--------------------------------------------------------------------------------------------------
 // Update adaptive sampling based on frame timing
 void PathTracer::updateAdaptiveSampling(Resources& resources)
 {
-  // Don't update adaptive sampling if DLSS is enabled
-  if(isDlssEnabled())
+  // DLSS alone traces one sample per frame. With OptiX or OIDN, its frame 0 does (setupPushConstant),
+  // and Auto SPP climbs over the frames after it from the reset below.
+  if(isDlssEveryFrame())
     return;
 
   if(!m_adaptiveSampling || !m_profilerTimeline)
     return;
 
-  // Reset samples when frame count resets to 0 (scene change, etc.)
+  // Another pipeline renders the frames (Rendering Pipeline, SER, Optimize Shader, a shader reload):
+  // its cost per sample differs, so the count is found again, which also shows the change in throughput
+  const uint64_t pipelineKey = (uint64_t(m_pipelineGeneration.load()) << 1) | uint64_t(m_renderTechnique);
+  if(pipelineKey != m_adaptivePipelineKey)
+  {
+    m_adaptivePipelineKey = pipelineKey;
+    restartAdaptiveSampling();
+  }
+
+  // Wall time since the previous rendered frame: once the count is steady, what a frame costs end to
+  // end, the path trace and everything else in the frame (tonemapper, submit, the CPU loop)
+  const auto   now        = std::chrono::steady_clock::now();
+  const double wallMs     = std::chrono::duration<double, std::milli>(now - m_lastAdaptiveFrameTime).count();
+  m_lastAdaptiveFrameTime = now;
+
+  // Reset samples when frame count resets to 0 (scene change, etc.), so the first frames after a change
+  // stay responsive. The throughput search keeps what it found: it serves runs nobody interacts with.
   if(resources.frameCount == 0)
   {
-    m_pushConst.numSamples = MIN_SAMPLES_PER_PIXEL;
+    if(m_performanceTarget != PerformanceTarget::eThroughput)
+    {
+      m_adaptiveSamples = MIN_SAMPLES_PER_PIXEL;
+      m_frameRateControl.restart();  // a new view: climb again to its count
+    }
     return;
   }
 
   // Don't adjust on the first few frames to allow for stabilization
   if(resources.frameCount < 5)
+    return;
+
+  // The profiler reports a GPU time frames after it was recorded. The throughput search compares counts,
+  // so it waits until every frame the time can come from traced the current count (not a frame ended
+  // early on a stop, nor the count before). The frame-rate targets step by one, where that lag is small.
+  if(m_performanceTarget == PerformanceTarget::eThroughput
+     && std::any_of(m_recentFrameSamples.begin(), m_recentFrameSamples.end(),
+                    [&](int samples) { return samples != m_adaptiveSamples; }))
     return;
 
   // Get timing information for the path tracing section
@@ -1554,21 +1818,14 @@ void PathTracer::updateAdaptiveSampling(Resources& resources)
     // Convert from microseconds to milliseconds
     double currentFrameTimeMs = timerInfo.gpu.last / 1000.0;
 
-    // Adjust samples based on performance target
-    double targetTime = getTargetFrameTimeMs();
-    if(currentFrameTimeMs < targetTime * 0.8 && m_pushConst.numSamples < MAX_SAMPLES_PER_PIXEL)
-    {
-      // We have headroom, increase samples
-      m_pushConst.numSamples++;
-    }
-    else if(currentFrameTimeMs > targetTime * 1.1 && m_pushConst.numSamples > MIN_SAMPLES_PER_PIXEL)
-    {
-      // We're over budget, decrease samples
-      m_pushConst.numSamples--;
-    }
-
-    // Clamp to valid range
-    m_pushConst.numSamples = std::clamp(m_pushConst.numSamples, MIN_SAMPLES_PER_PIXEL, MAX_SAMPLES_PER_PIXEL);
+    // Throughput counts the whole frame: several samples per frame pay off by sharing the per-frame
+    // work, which the path-trace timer does not see
+    if(m_performanceTarget == PerformanceTarget::eThroughput)
+      m_adaptiveSamples =
+          m_throughputSearch.update(m_adaptiveSamples, wallMs, getTargetFrameTimeMs(), MAX_ADAPTIVE_SAMPLES_PER_PIXEL);
+    else
+      m_adaptiveSamples = m_frameRateControl.update(m_adaptiveSamples, currentFrameTimeMs, getTargetFrameTimeMs(),
+                                                    MIN_SAMPLES_PER_PIXEL, MAX_ADAPTIVE_SAMPLES_PER_PIXEL);
   }
 }
 
@@ -1590,14 +1847,17 @@ void PathTracer::updateStatistics(Resources& resources)
     // This tells the user how much rendering work is being done per real-world second
     const float MEGA_SCALE_FACTOR = 1000000.0f;  // Convert to mega-sample-pixels
     float       megaSamplePixelsPerSecond =
-        (static_cast<float>(m_pushConst.numSamples) * static_cast<float>(totalPixels) / MEGA_SCALE_FACTOR) / wallClockFrameTime;
+        (static_cast<float>(m_frameSamples) * static_cast<float>(totalPixels) / MEGA_SCALE_FACTOR) / wallClockFrameTime;
 
     // Update rolling average with wall-clock throughput for this frame
     m_throughputRollingAvg.addValue(megaSamplePixelsPerSecond);
   }
 
   // Track total samples accumulated
-  m_totalSamplesAccumulated += m_pushConst.numSamples;
+  m_totalSamplesAccumulated += m_frameSamples;
+  std::rotate(m_recentFrameSamples.begin(), m_recentFrameSamples.begin() + 1, m_recentFrameSamples.end());
+  m_recentFrameSamples.back()  = m_frameSamples;
+  resources.accumulatedSamples = m_totalSamplesAccumulated;
 }
 
 void PathTracer::renderRayQuery(VkCommandBuffer cmd, VkExtent2D renderingSize, Resources& resources)
@@ -1629,7 +1889,7 @@ void PathTracer::renderRayQuery(VkCommandBuffer cmd, VkExtent2D renderingSize, R
   pushDescriptorSet(cmd, resources, VK_PIPELINE_BIND_POINT_COMPUTE);
 
   // Dispatch the compute shader
-  VkExtent2D numGroups = nvvk::getGroupCounts(renderingSize, WORKGROUP_SIZE);
+  VkExtent2D numGroups = nvvk::getGroupCounts(renderingSize, VkExtent2D{PT_WORKGROUP_X, PT_WORKGROUP_Y});
   vkCmdDispatch(cmd, numGroups.width, numGroups.height, 1);
 }
 
@@ -1705,10 +1965,14 @@ void PathTracer::setupPushConstant(VkCommandBuffer cmd, Resources& resources, Vk
   // Current frame count, can be overridden by DLSS
   int frameCount = resources.frameCount;
 
-  // Handle frame reset detection (needed for both adaptive and non-adaptive modes)
-  if(resources.frameCount == 0)
+  // Handle frame reset detection (needed for both adaptive and non-adaptive modes). Frame 1 after
+  // DLSS's frame 0 starts over too: DLSS's denoised image is no sample of the accumulation.
+  if(resources.frameCount == 0 || (resources.frameCount == 1 && m_dlssFrame0))
   {
-    m_totalSamplesAccumulated = 0;  // Reset sample counter when scene/camera changes
+    // Reset sample counter when scene/camera changes. Resources' copy too: what runs before
+    // updateStatistics() this frame (the OptiX denoiser) must not see the previous accumulation's count.
+    m_totalSamplesAccumulated    = 0;
+    resources.accumulatedSamples = 0;
   }
 
   // Adjust focal distance if auto-focus is enabled
@@ -1718,10 +1982,12 @@ void PathTracer::setupPushConstant(VkCommandBuffer cmd, Resources& resources, Vk
         static_cast<float>(glm::length(resources.cameraManip->getEye() - resources.cameraManip->getCenter()));
   }
 
+  // Samples per frame: the setting (ptSamples), Auto SPP's count, or 1 with DLSS
+  int samplesPerFrame = m_adaptiveSampling ? m_adaptiveSamples : m_pushConst.numSamples;
 #if defined(USE_DLSS)
   const bool useDlss = getEffectiveDlssEnabled(resources);
   if(useDlss)
-    m_pushConst.numSamples = 1;
+    samplesPerFrame = 1;
 
   // Halton jitter and frame-index counter.
   const Dlss::FrameContext fc = m_dlss->beginFrame();
@@ -1738,10 +2004,6 @@ void PathTracer::setupPushConstant(VkCommandBuffer cmd, Resources& resources, Vk
   vkCmdUpdateBuffer(cmd, resources.bFrameInfo.buffer, offsetof(shaderio::SceneFrameInfo, jitter), sizeof(glm::vec2), &fc.jitter);
 #endif
 
-#if defined(USE_OPTIX_DENOISER)
-  // Set useOptixDenoiser based on EFFECTIVE state (false when both enabled and frameCount == 0)
-  bool useOptixDenoiser = getEffectiveOptixEnabled(resources);
-#endif
   m_pushConst.frameCount = frameCount;
   m_pushConst.renderSize = {renderingSize.width, renderingSize.height};
   // First-frame flag must use resources.frameCount so depth and ObjectID are written on app frame 0 and after
@@ -1752,9 +2014,30 @@ void PathTracer::setupPushConstant(VkCommandBuffer cmd, Resources& resources, Vk
 #if defined(USE_DLSS)
   m_pushConst.flags |= useDlss ? shaderio::ePtUseDlss : 0;
 #endif
+  // Guides of the denoiser of the accumulation (OptiX or OIDN, one at a time, never with DLSS): accumulated
+  // like the color into that denoiser's images, over the samples since they last restarted. Each
+  // denoiser is told whether its guides are written, so a denoiser turned on restarts them.
+  bool denoiserGuides      = false;
+  m_pushConst.guideSamples = 0;
 #if defined(USE_OPTIX_DENOISER)
-  m_pushConst.flags |= useOptixDenoiser ? shaderio::ePtUseOptixDenoiser : 0;
+  const bool useOptixDenoiser = getEffectiveOptixEnabled(resources);
+  const int  optixGuides      = m_optix->updateGuideState(useOptixDenoiser, m_totalSamplesAccumulated);
+  if(useOptixDenoiser)
+    m_pushConst.guideSamples = optixGuides;
+  denoiserGuides |= useOptixDenoiser;
 #endif
+#if defined(USE_OIDN_DENOISER)
+  const bool useOidnDenoiser = getEffectiveOidnEnabled(resources);
+  const int  oidnGuides      = m_oidn->updateGuideState(useOidnDenoiser, m_totalSamplesAccumulated);
+  if(useOidnDenoiser)
+    m_pushConst.guideSamples = oidnGuides;
+  denoiserGuides |= useOidnDenoiser;
+#endif
+  m_pushConst.flags |= denoiserGuides ? shaderio::ePtDenoiserGuides : 0;
+  // The frame ends exactly on Max Samples and on the counts --outputSamples saves, whatever the
+  // samples per frame
+  m_frameSamples           = sample_schedule::frameSamples(m_totalSamplesAccumulated, samplesPerFrame,
+                                                           resources.settings.maxSamples, resources.sampleStops);
   m_pushConst.totalSamples = m_totalSamplesAccumulated;
   m_pushConst.frameInfo    = (shaderio::SceneFrameInfo*)resources.bFrameInfo.address;
   m_pushConst.gltfScene    = (shaderio::GltfScene*)resources.sceneVk.sceneDesc().address;
@@ -1778,25 +2061,102 @@ void PathTracer::setupPushConstant(VkCommandBuffer cmd, Resources& resources, Vk
   const glm::mat4 projInv = glm::inverse(resources.cameraManip->getPerspectiveMatrix());
   m_pushConst.pixelAngle  = 2.0f * std::abs(projInv[1][1]) / std::max(static_cast<float>(renderingSize.height), 1.0f);
 
-  vkCmdPushConstants(cmd, m_pipelineLayout, VK_SHADER_STAGE_ALL, 0, sizeof(shaderio::PathtracePushConstant), &m_pushConst);
+  // numSamples is the setting (ptSamples); the shader gets this frame's count
+  shaderio::PathtracePushConstant pushConst = m_pushConst;
+  pushConst.numSamples                      = m_frameSamples;
+  vkCmdPushConstants(cmd, m_pipelineLayout, VK_SHADER_STAGE_ALL, 0, sizeof(shaderio::PathtracePushConstant), &pushConst);
 }
 
 //--------------------------------------------------------------------------------------------------
 // Returns true iff DLSS will actually denoise this frame (strict): NGX is up, the inner GBuffer
-// is populated, the user enabled DLSS-RR, AND the OptiX-exclusivity rule lets DLSS run.
+// is populated, the user enabled DLSS-RR, AND the OptiX/OIDN-exclusivity rule lets DLSS run.
 bool PathTracer::getEffectiveDlssEnabled(const Resources& resources) const
 {
 #if defined(USE_DLSS)
-  bool dlssActive = m_dlss->isActive();
-#if defined(USE_OPTIX_DENOISER)
-  bool optixEnabled = m_optix->isEnabled();
-  if(dlssActive && optixEnabled)
+  const bool dlssActive = m_dlss->isActive();
+  if(dlssActive && isAccumulationDenoiserEnabled())
     return resources.frameCount == 0;
-#endif
   return dlssActive;
 #else
   return false;
 #endif
+}
+
+//--------------------------------------------------------------------------------------------------
+bool PathTracer::isAccumulationDenoiserEnabled() const
+{
+  bool enabled = false;
+#if defined(USE_OPTIX_DENOISER)
+  enabled |= m_optix->isEnabled();
+#endif
+#if defined(USE_OIDN_DENOISER)
+  enabled |= m_oidn->isEnabled();
+#endif
+  return enabled;
+}
+
+//--------------------------------------------------------------------------------------------------
+// The DLSS hand-off: the accumulation denoiser it hands off to, the denoises so far, and when it ends
+std::optional<DenoiserHandoff::Denoiser> PathTracer::handoffDenoiser(const Resources& resources) const
+{
+#if defined(USE_OPTIX_DENOISER)
+  if(getEffectiveOptixEnabled(resources))
+    return DenoiserHandoff::Denoiser{.view         = DisplayBuffer::eOptixDenoised,
+                                     .image        = m_optix->getDescriptorImageInfo(OptiXDenoiser::eGBufferDenoised),
+                                     .autoDenoise  = m_optix->isAutoDenoiseActive(),
+                                     .denoiseCount = accumulationDenoiseCount()};
+#endif
+#if defined(USE_OIDN_DENOISER)
+  if(getEffectiveOidnEnabled(resources))
+    return DenoiserHandoff::Denoiser{.view         = DisplayBuffer::eOidnDenoised,
+                                     .image        = m_oidn->getDescriptorImageInfo(OidnDenoiser::eGBufferDenoised),
+                                     .autoDenoise  = m_oidn->isAutoDenoiseActive(),
+                                     .denoiseCount = accumulationDenoiseCount()};
+#endif
+  return std::nullopt;
+}
+
+uint32_t PathTracer::accumulationDenoiseCount() const
+{
+  uint32_t count = 0;
+#if defined(USE_OPTIX_DENOISER)
+  count += m_optix->denoiseCount();
+#endif
+#if defined(USE_OIDN_DENOISER)
+  count += m_oidn->denoiseCount();
+#endif
+  return count;
+}
+
+int PathTracer::handoffEnd(const Resources& resources) const
+{
+  return (m_dlssFrame0 && m_handoff.spp() > 0) ? std::min(m_handoff.spp(), resources.settings.maxSamples) : 0;
+}
+
+const VkDescriptorImageInfo* PathTracer::handoffImage(const Resources& resources) const
+{
+  const DisplayBuffer view = resources.settings.displayBuffer;
+  if(view != DisplayBuffer::eOptixDenoised && view != DisplayBuffer::eOidnDenoised)
+    return nullptr;
+  return m_handoff.displayImage();
+}
+
+//--------------------------------------------------------------------------------------------------
+bool PathTracer::keepOneAccumulationDenoiser(Resources& resources)
+{
+  bool restart = false;
+#if defined(USE_OPTIX_DENOISER) && defined(USE_OIDN_DENOISER)
+  if(m_optix->isEnabled() && m_oidn->isEnabled())
+  {
+    if(!m_optixWasOn && m_oidnWasOn)  // OptiX was turned on while OIDN was
+      m_oidn->disable(resources);
+    else
+      restart = m_optix->disable(resources);
+  }
+  m_optixWasOn = m_optix->isEnabled();
+  m_oidnWasOn  = m_oidn->isEnabled();
+#endif
+  return restart;
 }
 
 //--------------------------------------------------------------------------------------------------
@@ -1820,6 +2180,25 @@ bool PathTracer::getEffectiveOptixEnabled(const Resources& resources) const
 
   // Normal behavior when DLSS is off
   return optixEnabled;
+#else
+  return false;
+#endif
+}
+
+//--------------------------------------------------------------------------------------------------
+// Determine if OIDN should write its guides and denoise this frame. Same exclusivity rule as OptiX:
+// with DLSS-RR also engaged, DLSS owns frame 0 and OIDN takes 1+.
+bool PathTracer::getEffectiveOidnEnabled(const Resources& resources) const
+{
+#if defined(USE_OIDN_DENOISER)
+  const bool oidnEnabled = m_oidn->isEnabled();
+#if defined(USE_DLSS)
+  const auto s           = m_dlss->state();
+  const bool dlssEngaged = (s == Dlss::State::eLoading || s == Dlss::State::eActive);
+  if(dlssEngaged && oidnEnabled)
+    return resources.frameCount > 0;
+#endif
+  return oidnEnabled;
 #else
   return false;
 #endif

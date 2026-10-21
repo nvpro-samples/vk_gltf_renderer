@@ -32,6 +32,13 @@ cmake -B build -DBUILD_TESTING=ON -DGLTF_SAMPLE_ASSETS_PATH=/path/to/glTF-Sample
 The environment variable of the same name is only read when the cache entry does not exist yet, so
 setting it after the first configure has no effect — pass `-D` (or delete the cache entry) instead.
 
+### glTF 2.1 fixtures
+
+No official sample asset uses glTF 2.1 yet, so `test_gltf_2_1.cpp` loads small files that
+`tests/gltf_2_1/generate_fixtures.py` writes into the build tree. Only the script is committed; the
+test build reruns it when it changes. This needs Python 3 at configure time, otherwise the 2.1 tests
+skip. See [docs/gltf_2_1.md](../docs/gltf_2_1.md#5-test-fixtures).
+
 ## Running Tests
 
 ### Via CTest (recommended)

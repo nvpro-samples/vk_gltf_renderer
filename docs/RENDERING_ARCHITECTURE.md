@@ -122,7 +122,7 @@ parseScene():
   1. Snapshot current render-node state (worldMatrix, materialID, renderPrimID, visible)
   2. clearParsedData()                    -- wipe render nodes, primitives, lights
   3. createMissingTangentsForModel()      -- ensure tangent attributes exist (stabilizes primitive keys)
-  4. primMap = buildPrimitiveKeyMap()     -- register unique primitives in deterministic order
+  4. primMap = buildPrimitiveKeyMap()     -- register unique primitives (by Scene::primitiveKey) in deterministic order
                                             (by mesh index, then primitive index — not traversal order)
   5. For each root node in current scene:
        traverseSceneGraph(depth-first):
@@ -140,14 +140,21 @@ parseScene():
 ```
 handleRenderNode(nodeID, worldMatrix, primMap):
   if node has no mesh → skip, continue traversal
+    (a placing node with an instance set is reached through the traversal's anyNode callback)
   createRenderNodesForNode(nodeID, worldMatrix, visible=true, primMap):
-    for each primitive in mesh:
-      renderPrimID = primMap[primitiveKey]       -- deduplicated primitive index
+    if node has an instance set (glTF 2.1 external asset, docs/external_assets.md):
+      one RenderNode per (entry, primitive of the entry's mesh), worldMatrix = world × entry's local
+    else for each primitive in mesh:
+      renderPrimID = render primitive of (mesh, primitive)  -- deduplicated, from buildPrimitiveKeyMap
       build RenderNode { worldMatrix, materialID, renderPrimID, refNodeID, skinID, visible }
       if node has EXT_mesh_gpu_instancing:
-        handleGpuInstancing() → create N RenderNodes (one per instance transform)
+        one RenderNode per instance, worldMatrix = world × instance
       else:
         register single RenderNode in m_renderNodeRegistry
+
+  A node drawn more than once (instancing, instance set) keeps one local matrix per render node,
+  in registry order, in Scene::getRenderNodeLocalMatrices(): every world-matrix update (CPU serial,
+  CPU parallel, GPU update_render_instances) computes world(node) × local.
 ```
 
 ### Example Scene Graph → RenderNodes:
@@ -381,6 +388,32 @@ geometry: a pointer back to the `tinygltf::Primitive`, vertex/index counts, and 
 owning `meshID`.
 
 **Purpose:** Deduplicated geometry - if two nodes use same mesh, they share RenderPrimitives.
+
+**Identity:** `Scene::primitiveKey` decides which mesh primitives share one: by default their
+attribute and index accessor indices. In a scene with glTF 2.1 external assets it is the data the
+accessors read (buffer, byte offset, stride, count, format), so files that each declare accessors
+over the same bytes of a shared `.bin` share one RenderPrimitive and one BLAS
+([external_assets.md](external_assets.md) §6). Skinned and morphed primitives keep the index key:
+skinning and morphing write the RenderPrimitive's vertex buffers. Several mesh primitives may map to
+one RenderPrimitive, so `meshID` is only the first mesh that uses it; the per-mesh table
+(`Scene::getMeshRenderPrimitive`) answers which RenderPrimitive draws a given mesh primitive.
+
+**Deformed primitives are per pose.** Skinning and morphing write the vertices for one pose: a
+skin, and morph weights (`Scene::getMorphWeights`: the node's `weights`, else the mesh's; a
+`weights` animation channel writes the node's). `Scene::assignDeformedRenderPrimitives` gives each
+pose of a primitive its own RenderPrimitive (the same `tinygltf::Primitive`, own vertex buffers and
+BLAS, `nodeID` set), so a copy is made only when one primitive is drawn in several poses:
+- static drawers share the per-mesh RenderPrimitive: nodes that don't skin it, or only morph it with
+  the default weights of the mesh it was made from, and instance sets;
+- nodes of another mesh reading the same accessors, with other default weights, share a pose per mesh;
+- read-only copies of one placed node (`Scene::kPlacedSourceKey`) share one pose: placements animate
+  in lockstep, so a crowd of one character is skinned and ray traced once;
+- any other node that skins the primitive, or morphs it with weights of its own, has its own pose
+  (two skins on one mesh, as in RecursiveSkeletons).
+
+Copies are appended after the per-mesh RenderPrimitives in node order. `AnimationSystem` makes one
+skin task per skinned RenderPrimitive and one morph task per RenderPrimitive with morph targets,
+weighted or not: a target without a weight blends with 0 until an animation gives it one.
 
 **Indexing:** `renderNode.renderPrimID` → `m_renderPrimitives[renderPrimID]`
 
@@ -639,7 +672,7 @@ triggers a GPU device-lost, so compaction is skipped for animated scenes as a wo
 | **Reparent** | ✅ Modified | ✅ Transforms only | ✅ Surgical upload (transforms) | ✅ Update instances |
 | **Split mesh** | ✅ Modified | ✅ Full rebuild | ✅ Surgical upload (changed indices) | ✅ Update instances |
 | **Merge mesh** | ✅ Modified | ✅ Full rebuild | ✅ Surgical upload (changed indices) | ✅ Update instances |
-| **Material change** | ✅ Modified | ✅ Partial update | ✅ Surgical upload | Usually none; RTX instance flags may update for alpha-mode / double-sided edits |
+| **Material change** | ✅ Modified | ✅ Partial update | ✅ Surgical upload | Usually none; an edit that changes a material's RTX instance flags (opacity, culling) updates the instances that use it (`SceneRtx::updateInstanceFlagsCache()`) |
 
 **Key:** `parseScene()` always does a full CPU rebuild, but its internal diff sets precise dirty flags
 so the GPU sync is surgical -- only changed render node indices, new materials, etc. are uploaded.

@@ -32,6 +32,7 @@
 #ifndef USE_OMM
 #define USE_OMM 0
 #endif
+// clang-format off: the SPIR-V ids (%ommEnable) must stay as written
 #if USE_OMM
 #define RAYQUERY_USE_OPACITY_MICROMAP(entryPoint)                                                                      \
   spirv_asm                                                                                                            \
@@ -44,6 +45,7 @@
 #else
 #define RAYQUERY_USE_OPACITY_MICROMAP(entryPoint)
 #endif
+// clang-format on
 
 // This is a debug flag to enable/disable debug output
 // For example, to use print statements in the shader, set this to true.
@@ -67,7 +69,6 @@ static bool doDebug = false;
 #include "nvshaders/bsdf_functions.h.slang"
 #include "nvshaders/hdr_env_sampling.h.slang"
 #include "nvshaders/light_contrib.h.slang"
-#include "nvshaders/normal_compress.h.slang"
 #include "nvshaders/pbr_ggx_microfacet.h.slang"
 #include "nvshaders/ray_utils.h.slang"
 #include "nvshaders/sample_blur.h.slang"
@@ -308,12 +309,12 @@ PathStepResult pathTraceOneBounce(IRaytracer raytracer, inout RayDesc ray, inout
 #endif  // USE_DLSS_SHADER
 
     //-----------------------------------------------------------------------
-    // First-hit captures (NDC-depth always; DLSS/OptiX guide buffers when on).
+    // First-hit captures (NDC-depth always; denoiser guide buffers when on).
     //-----------------------------------------------------------------------
     if(firstRay)
     {
       // Always record the first hit position; drives the NDC depth output used by
-      // selection/picking, independent of DLSS/OptiX.
+      // selection/picking, independent of the denoisers.
       pt.firstHitPos = hit.pos;
 
 #if USE_GUIDE_SHADER
@@ -325,12 +326,12 @@ PathStepResult pathTraceOneBounce(IRaytracer raytracer, inout RayDesc ray, inout
         pt.firstHitPosPrev = mul(float4(objPos, 1.0), pushConst.prevRenderNodeObjectToWorld[payload.rnodeID]).xyz;
       }
 
-      // Base-color guide albedo (shared by DLSS and OptiX). Stored temporarily, written at end to
+      // Base-color guide albedo (shared by DLSS and the other denoisers). Stored temporarily, written at end to
       // reduce live state.
       float3 guideAlbedo = pbrMat.baseColor.xyz;
 #if USE_DLSS_SHADER
       // #DLSS specular guide - specular albedo + clear-glass albedo refinement. DLSS-only quality
-      // path; OptiX needs neither, so it is compiled out of the OptiX/no-denoiser variant.
+      // path; the other denoisers need neither, so it is compiled out of their variant.
       // Apply KHR_materials_specular energy conservation clamping for DLSS guide buffer
       // Spec formula: dielectric_f0 = min(f0_from_ior * specularColor, 1.0) * specular
       float  f0_from_ior          = pow((pbrMat.ior2 - pbrMat.ior1) / (pbrMat.ior2 + pbrMat.ior1), 2.0F);
@@ -338,7 +339,7 @@ PathStepResult pathTraceOneBounce(IRaytracer raytracer, inout RayDesc ray, inout
       float3 specularAlbedo = EnvBRDFApprox2(specularColorClamped, pbrMat.roughness.x, dot(pbrMat.N, ray.Direction));
       float3 guideNormal    = pbrMat.N;
       float  guideRoughness = pbrMat.roughness.x;
-      if(USE_DLSS_TRANSP == 1 && !hasFlag(pushConst.flags, PathtracerFlags::ePtUseOptixDenoiser) && dlssIsClearGlass(pbrMat))
+      if(USE_DLSS_TRANSP == 1 && !hasFlag(pushConst.flags, PathtracerFlags::ePtDenoiserGuides) && dlssIsClearGlass(pbrMat))
       {
         // #DLSS primary surface replacement: describe what is seen through the glass. The albedo
         // keeps the glass's Fresnel share; depth and motion come from the replaced surface.
@@ -702,6 +703,33 @@ SampleResult samplePixel(IRaytracer raytracer,
 }
 
 //-----------------------------------------------------------------------
+// Antialiasing: position of a sample inside the pixel, a Gaussian around its center. Every sample
+// of a pixel uses it, so the converged image does not depend on the samples per frame.
+//-----------------------------------------------------------------------
+float2 gaussianSubpixelJitter(inout uint seed)
+{
+  return float2(0.5f, 0.5f) + ANTIALIASING_STANDARD_DEVIATION * sampleGaussian(float2(rand(seed), rand(seed)));
+}
+
+#if USE_GUIDE_SHADER
+// Adds one sample's denoiser guides. The normal is the world-space shading normal, zero on a miss.
+// Where nothing is hit, the albedo is the normalized background color, as Open Image Denoise
+// recommends for emitters: that radiance is signal, not noise.
+void addDenoiserGuides(SampleResult sampleResult, inout float3 albedoSum, inout float3 normalSum)
+{
+  float3 albedo = sampleResult.guideOutput.albedo.xyz;
+  if(sampleResult.radiance.w <= 0.0f)
+  {
+    const float3 background = max(sampleResult.radiance.xyz, float3(0.0f));
+    const float  maxComp    = max(background.x, max(background.y, background.z));
+    albedo                  = maxComp > 0.0f ? saturate(background / maxComp) : float3(0.0f);
+  }
+  albedoSum += albedo;
+  normalSum += sampleResult.guideOutput.normalRoughness.xyz;
+}
+#endif  // USE_GUIDE_SHADER
+
+//-----------------------------------------------------------------------
 // Per-pixel accumulation and GBuffer output
 //-----------------------------------------------------------------------
 void processPixel(IRaytracer raytracer, float2 samplePos, float2 imageSize)
@@ -718,7 +746,8 @@ void processPixel(IRaytracer raytracer, float2 samplePos, float2 imageSize)
   }
 
   // Initialize the random number
-  uint seed = xxhash32(uint3(uint2(samplePos.xy), pushConst.frameCount));
+  // pushConst.seed selects another sequence (0: the default one), e.g. for a reference independent of a test render
+  uint seed = xxhash32(uint3(uint2(samplePos.xy), uint(pushConst.frameCount) + uint(pushConst.seed) * 0x9E3779B9u));
 
   bool firstFrame = hasFlag(pushConst.flags, PathtracerFlags::ePtFirstFrame);
 
@@ -733,8 +762,7 @@ void processPixel(IRaytracer raytracer, float2 samplePos, float2 imageSize)
   }
   else
   {
-    // Add the jitter to the subpixel jitter
-    subpixelJitter += ANTIALIASING_STANDARD_DEVIATION * sampleGaussian(float2(rand(seed), rand(seed)));
+    subpixelJitter = gaussianSubpixelJitter(seed);
   }
 
   // Sampling n times the pixel
@@ -742,20 +770,37 @@ void processPixel(IRaytracer raytracer, float2 samplePos, float2 imageSize)
                                           pushConst.frameInfo->viewInv, pushConst.focalDistance, pushConst.aperture);
   float4 pixelColor = sampleResult.radiance;
 
-  // DLSS uses only one sample per pixel (it does its own temporal accumulation), so the
-  // multi-sample loop is compiled out in the DLSS variant to reduce register pressure.
-  // USE_DLSS_SHADER is true only when DLSS is actually active; for the OptiX and no-denoiser
-  // paths it is 0, so the loop is compiled in and honors the user's samples-per-pixel setting.
-#if !USE_DLSS_SHADER
+#if USE_GUIDE_SHADER
+  // The denoiser guides average every sample of the frame, like the color
+  const bool denoiserGuides = hasFlag(pushConst.flags, PathtracerFlags::ePtDenoiserGuides);
+  float3     albedoSum      = float3(0.0f);
+  float3     normalSum      = float3(0.0f);
+  int        guideCount     = 0;
+  if(denoiserGuides)
+  {
+    addDenoiserGuides(sampleResult, albedoSum, normalSum);
+    guideCount++;
+  }
+#endif
+
+  // The frame traces exactly the samples the host counts (numSamples): the host decides, per frame.
+  // A frame DLSS denoises gets 1 (DLSS does its own temporal accumulation); with OptiX or OIDN also
+  // on, the frames after DLSS's frame 0 get Auto SPP's or ptSamples' count.
   for(int s = 1; s < pushConst.numSamples; s++)
   {
-    subpixelJitter = float2(rand(seed), rand(seed));
+    subpixelJitter = gaussianSubpixelJitter(seed);  // the same pixel filter as the first sample
     sampleResult   = samplePixel(raytracer, seed, samplePos, subpixelJitter, imageSize, pushConst.frameInfo->projInv,
                                  pushConst.frameInfo->viewInv, pushConst.focalDistance, pushConst.aperture);
     pixelColor += sampleResult.radiance;
+#if USE_GUIDE_SHADER
+    if(denoiserGuides)
+    {
+      addDenoiserGuides(sampleResult, albedoSum, normalSum);
+      guideCount++;
+    }
+#endif
   }
   pixelColor /= pushConst.numSamples;
-#endif  // !USE_DLSS_SHADER
 
 
   // NDC depth from first-hit world position (Vulkan [0,1] range, 1.0 = far/miss).
@@ -777,8 +822,10 @@ void processPixel(IRaytracer raytracer, float2 samplePos, float2 imageSize)
   }
 
   // Saving result
-  if(firstFrame || hasFlag(pushConst.flags, PathtracerFlags::ePtUseDlss))
-  {  // First frame, replace the value in the buffer
+  // Nothing accumulated yet (the first frame, or the first after DLSS's frame 0): replace the value in
+  // the buffer, never weigh it by 0, which an infinite value would turn into NaN
+  if(firstFrame || pushConst.totalSamples == 0 || hasFlag(pushConst.flags, PathtracerFlags::ePtUseDlss))
+  {
     outImages[int(OutputImage::eResultImage)][int2(samplePos)] = pixelColor;
   }
   else
@@ -792,7 +839,7 @@ void processPixel(IRaytracer raytracer, float2 samplePos, float2 imageSize)
 
 #if USE_DLSS_SHADER
   // #DLSS - Storing the GBuffer for the DLSS denoiser (DLSS-only variant; the specular guide targets
-  // do not exist in the OptiX/no-denoiser build).
+  // do not exist in the build for the other denoisers or none).
   if(hasFlag(pushConst.flags, PathtracerFlags::ePtUseDlss))
   {
     // Combined camera + instance motion. w selects the projection model: surface hits use w=1 (the
@@ -825,21 +872,28 @@ void processPixel(IRaytracer raytracer, float2 samplePos, float2 imageSize)
 #endif  // USE_DLSS_SHADER
 
 #if USE_GUIDE_SHADER
-  if(hasFlag(pushConst.flags, PathtracerFlags::ePtUseOptixDenoiser))
+  if(denoiserGuides)
   {
-    // Transform normal from world space to camera space for OptiX denoiser
-    // OptiX requires normals in camera space (right-handed, -Z forward, Y up, X right).
-    // On primary misses the guide normal is zero, so fall back to a valid forward-facing
-    // normal to avoid normalizing/compressing a degenerate vector.
-    float3 cameraNormal = float3(0.0f, 0.0f, 1.0f);
-    if(hasSolidHit)
+    // The guides of the denoiser of the accumulation are averaged over the samples like the color,
+    // so their edges are anti-aliased (and blurred by depth of field) the same way. They have their
+    // own sample count: they restart when the denoiser is turned on, while the color goes on. Each
+    // denoiser converts them to what it reads.
+    const float3 albedo = albedoSum / float(guideCount);
+    const float3 normal = normalSum / float(guideCount);
+    const int2   pixel  = int2(samplePos);
+    if(firstFrame || pushConst.guideSamples == 0)
     {
-      float3 worldNormal = sampleResult.guideOutput.normalRoughness.xyz;
-      cameraNormal       = normalize(mul(float3x3(pushConst.frameInfo->viewMatrix), worldNormal));
+      outImages[int(OutputImage::eDenoiserAlbedo)][pixel] = float4(albedo, 1.0f);
+      outImages[int(OutputImage::eDenoiserNormal)][pixel] = float4(normal, 1.0f);
     }
-    uint normalEncoded = compressUnitVec(cameraNormal);
-    outImages[int(OutputImage::eOptixAlbedoNormal)][int2(samplePos)] =
-        float4(sampleResult.guideOutput.albedo.xyz, asfloat(normalEncoded));
+    else
+    {
+      const float weight = float(guideCount) / float(pushConst.guideSamples + guideCount);
+      outImages[int(OutputImage::eDenoiserAlbedo)][pixel] =
+          lerp(outImages[int(OutputImage::eDenoiserAlbedo)][pixel], float4(albedo, 1.0f), weight);
+      outImages[int(OutputImage::eDenoiserNormal)][pixel] =
+          lerp(outImages[int(OutputImage::eDenoiserNormal)][pixel], float4(normal, 1.0f), weight);
+    }
   }
 #endif  // USE_GUIDE_SHADER
 }
@@ -848,7 +902,7 @@ void processPixel(IRaytracer raytracer, float2 samplePos, float2 imageSize)
 // RAY-QUERY COMPUTE
 //-----------------------------------------------------------------------
 [shader("compute")]
-[numthreads(WORKGROUP_SIZE, WORKGROUP_SIZE, 1)]
+[numthreads(PT_WORKGROUP_X, PT_WORKGROUP_Y, 1)]
 void computeMain(uint3 threadIdx: SV_DispatchThreadID)
 {
   RAYQUERY_USE_OPACITY_MICROMAP(computeMain);

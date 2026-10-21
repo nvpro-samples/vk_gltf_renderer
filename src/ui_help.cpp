@@ -43,9 +43,9 @@ namespace ui::help {
 namespace {
 
 constexpr const char* kRepositoryUrl = "https://github.com/nvpro-samples/vk_gltf_renderer";
-constexpr const char* kUserGuideUrl = "https://github.com/nvpro-samples/vk_gltf_renderer/blob/master/docs/user-guide.md";
-constexpr const char* kReleasesUrl = "https://github.com/nvpro-samples/vk_gltf_renderer/releases";
-constexpr const char* kIssuesUrl   = "https://github.com/nvpro-samples/vk_gltf_renderer/issues";
+constexpr const char* kUserGuideUrl  = "https://github.com/nvpro-samples/vk_gltf_renderer/blob/main/docs/user-guide.md";
+constexpr const char* kReleasesUrl   = "https://github.com/nvpro-samples/vk_gltf_renderer/releases";
+constexpr const char* kIssuesUrl     = "https://github.com/nvpro-samples/vk_gltf_renderer/issues";
 
 constexpr const char* kShortcutsWindow = ICON_MS_KEYBOARD " Keyboard & Mouse###HelpShortcuts";
 constexpr const char* kAboutWindow     = ICON_MS_INFO " About###HelpAbout";

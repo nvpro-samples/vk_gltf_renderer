@@ -90,6 +90,13 @@ constexpr bool kIsFloatArithmetic =
 template <typename T>
 constexpr bool kIsFloatOrMatrixArithmetic = kIsFloatArithmetic<T> || kIsMatrix<T>;
 
+// The operand set applyUnary/applyBinary accept. Kept as one variable template on purpose: MSVC
+// 19.44 mis-evaluates the inline `(FloatOnly && X<T>) || (!FloatOnly && Y<T>)` inside their
+// generic visit lambdas, rejecting operands both traits accept (math/neg on a float4x4 returned
+// monostate). A single variable template is evaluated correctly.
+template <bool FloatOnly, typename T>
+constexpr bool kIsUnaryBinaryOperand = FloatOnly ? kIsFloatOrMatrixArithmetic<T> : kIsArithmetic<T>;
+
 // Applies `f` (a plain scalar function) to every component of `v`, all the way down to individual
 // floats/ints - needed because glm's free functions (floor, min, ...) don't accept matrix
 // arguments the way this spec still wants componentwise semantics for them (a mat4's "component"
@@ -145,7 +152,7 @@ InteractivityValue applyUnary(const InteractivityValue& a, F&& f)
   return std::visit(
       [&](auto&& av) -> InteractivityValue {
         using T = std::decay_t<decltype(av)>;
-        if constexpr((FloatOnly && kIsFloatOrMatrixArithmetic<T>) || (!FloatOnly && kIsArithmetic<T>))
+        if constexpr(kIsUnaryBinaryOperand<FloatOnly, T>)
           return InteractivityValue(applyComponentwise(av, f));
         else
           return std::monostate{};
@@ -161,7 +168,7 @@ InteractivityValue applyBinary(const InteractivityValue& a, const InteractivityV
   return std::visit(
       [&](auto&& av) -> InteractivityValue {
         using T = std::decay_t<decltype(av)>;
-        if constexpr((FloatOnly && kIsFloatOrMatrixArithmetic<T>) || (!FloatOnly && kIsArithmetic<T>))
+        if constexpr(kIsUnaryBinaryOperand<FloatOnly, T>)
           return InteractivityValue(applyComponentwiseBinary(av, std::get<T>(b), f));
         else
           return std::monostate{};

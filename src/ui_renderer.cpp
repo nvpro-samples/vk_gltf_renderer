@@ -175,6 +175,30 @@ void GltfRenderer::mouseClickedInViewport()
   }
 }
 
+// AnchorCameraManipulator::AnchorRequest: called from camera_controls::update() inside the
+// "Viewport" window when an anchored drag or wheel step begins. Like a click, it only captures the ray; onRender()
+// records the pick and updateAnchorPickState() answers the manipulator.
+bool GltfRenderer::requestAnchorPick(const glm::dvec2& screenPos)
+{
+  const nvvkgltf::Scene* scene = m_resources.getScene();
+  if(m_busy.isBusy() || scene == nullptr || !scene->valid() || m_resources.sceneRtx.topLevelAS() == VK_NULL_HANDLE)
+    return false;
+
+  // A new request supersedes one still in flight: the manipulator only waits for the latest, and an
+  // older answer would otherwise be taken for it (e.g. a wheel pick becoming a drag's anchor).
+  m_pendingAnchorResult.reset();
+
+  const ImVec2 cursorPos = ImGui::GetCursorScreenPos();
+  const ImVec2 avail     = ImGui::GetContentRegionAvail();
+  m_pendingAnchorPick    = nvvk::RayPicker::PickInfo{
+         .modelViewInv   = glm::inverse(m_cameraManip->getViewMatrix()),
+         .perspectiveInv = glm::inverse(m_cameraManip->getPerspectiveMatrix()),
+         .isOrthographic = (m_cameraManip->getProjectionType() == nvutils::CameraManipulator::Orthographic) ? 1 : 0,
+         .pickPos        = {(screenPos.x - cursorPos.x) / avail.x, (screenPos.y - cursorPos.y) / avail.y},
+  };
+  return true;
+}
+
 // Applies a completed async ray-pick result (see m_pendingClickPick's comment in renderer.hpp for
 // the full pipeline) - selection, and on a double click, camera recenter. Exactly the logic that
 // used to run inline in mouseClickedInViewport() right after its now-removed blocking GPU wait.
@@ -317,6 +341,14 @@ void GltfRenderer::updateSelectionFromPick(int renderNodeIdx, const glm::vec3& s
     return;
   }
 
+  // An instance of a placed external asset drawn without a node of its own: select its placing node.
+  if(scene->isInstanceSetRenderNode(renderNodeIdx))
+  {
+    m_sceneSelection.selectNode(renderNodes[renderNodeIdx].refNodeID, selectionPoint, selectionRayOrigin);
+    m_sceneBrowser.focusOnSelection();
+    return;
+  }
+
   // Regular case: select the picked primitive.
   const auto& renderNode = renderNodes[renderNodeIdx];
   int         nodeID     = renderNode.refNodeID;
@@ -350,8 +382,8 @@ nvutils::Bbox GltfRenderer::getRenderNodeBbox(int renderNodeIndex)
 
   glm::mat4 nodeWorld = scene->computeNodeWorldMatrix(renderNode.refNodeID);
 
-  // Extension: Instance local matrices for KHR_mesh_gpu_instancing
-  const auto& gpuInstMap = scene->getGpuInstanceLocalMatrices();
+  // Nodes drawn more than once (EXT_mesh_gpu_instancing, instance sets): one local matrix per render node.
+  const auto& gpuInstMap = scene->getRenderNodeLocalMatrices();
   auto        instIt     = gpuInstMap.find(renderNode.refNodeID);
   if(instIt != gpuInstMap.end() && !instIt->second.empty())
   {
@@ -360,7 +392,8 @@ nvutils::Bbox GltfRenderer::getRenderNodeBbox(int renderNodeIndex)
     {
       if(rnList[k] == renderNodeIndex)
       {
-        nodeWorld = nodeWorld * instIt->second[k % instIt->second.size()];
+        if(k < instIt->second.size())
+          nodeWorld = nodeWorld * instIt->second[k];
         break;
       }
     }
@@ -420,9 +453,13 @@ void GltfRenderer::windowTitle()
     {
       filename = "No Scene";
     }
-    std::string text = fmt::format("{} {} - {}x{} | {:.0f} FPS / {:.3f}ms | Frame {}", nvutils::utf8FromPath(filename),
-                                   APP_VERSION_STRING, size.width, size.height, ImGui::GetIO().Framerate,
-                                   1000.F / ImGui::GetIO().Framerate, m_resources.frameCount);
+    // The path tracer's progress is its samples per pixel: frames hold a varying number of them
+    std::string progress = fmt::format("Frame {}", m_resources.frameCount);
+    if(m_resources.settings.renderSystem == RenderingMode::ePathtracer)
+      progress = fmt::format("{} / {} spp | {}", m_resources.accumulatedSamples, m_resources.settings.maxSamples, progress);
+    std::string text =
+        fmt::format("{} {} - {}x{} | {} | {:.0f} FPS / {:.3f}ms", nvutils::utf8FromPath(filename), APP_VERSION_STRING,
+                    size.width, size.height, progress, ImGui::GetIO().Framerate, 1000.F / ImGui::GetIO().Framerate);
 
     glfwSetWindowTitle(m_app->getWindowHandle(), text.c_str());
     dirty_timer = 0;
@@ -854,15 +891,18 @@ void GltfRenderer::renderUI()
       const tinygltf::Model& model = m_resources.getScene()->getModel();
       ImGui::Text("Delete node '%s'?", model.nodes[m_pendingDeleteNode].name.c_str());
 
-      const auto& gpuInstMap = m_resources.getScene()->getGpuInstanceLocalMatrices();
-      auto        instIt     = gpuInstMap.find(m_pendingDeleteNode);
-      if(instIt != gpuInstMap.end() && !instIt->second.empty())
+      // One local matrix per render node, so per primitive for an EXT_mesh_gpu_instancing mesh.
+      const tinygltf::Node& pending    = model.nodes[m_pendingDeleteNode];
+      const auto&           gpuInstMap = m_resources.getScene()->getRenderNodeLocalMatrices();
+      auto                  instIt     = gpuInstMap.find(m_pendingDeleteNode);
+      if(instIt != gpuInstMap.end() && !instIt->second.empty() && pending.mesh >= 0)
       {
+        const size_t primitives = std::max<size_t>(1, model.meshes[pending.mesh].primitives.size());
         ImGui::TextColored(ImVec4(1.f, 0.6f, 0.2f, 1.f),
                            ICON_MS_WARNING
                            " This node uses EXT_mesh_gpu_instancing (%zu instances).\n"
                            "Deleting it will remove ALL instances.",
-                           instIt->second.size());
+                           instIt->second.size() / primitives);
       }
 
       ImGui::Text("This will delete the node and all its children.");
@@ -1636,10 +1676,7 @@ void GltfRenderer::renderMenu()
     std::filesystem::path filename = getSaveImage();
     if(!filename.empty())
     {
-      Resources::ImageType imageType =
-          (filename.extension() == ".hdr") ? Resources::ImageType::eImgRendered : Resources::ImageType::eImgTonemapped;
-
-      m_app->saveImageToFile(m_resources.gBuffers.getColorImage(imageType), m_resources.gBuffers.getSize(), filename);
+      saveViewportImage(filename);
     }
   }
 

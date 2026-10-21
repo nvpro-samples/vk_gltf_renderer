@@ -149,7 +149,7 @@ VisualizationResult applyVisualization(inout PbrMaterial pbrMat,
       overrideColor = float3(pbrMat.diffuseTransmissionFactor);
       return VisualizationResult::eColorOverride;
     case Visualization::eDiffuseTransmissionColor:
-      overrideColor = pbrMat.diffuseTransmissionColor;
+      overrideColor = pbrMat.diffuseTransmissionColorFactor;
       return VisualizationResult::eColorOverride;
     case Visualization::eOpacityMicromap:
       if(ommState < 0)

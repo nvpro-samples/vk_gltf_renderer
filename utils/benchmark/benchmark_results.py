@@ -93,7 +93,10 @@ def _add_measured_window_from_progress(summary: dict[str, str], records: Iterabl
     total_accum_frames = _parse_int(result.get("effective_spp"), 0) // pt_samples
     if total_accum_frames <= 0:
         frames = _parse_int(result.get("frames"), end_frame)
-        max_frames = max(_parse_int(result.get("maxFrames"), frames), 0)
+        if "maxSamples" in result:
+            max_frames = max(_parse_int(result.get("maxSamples"), 0), 0) // pt_samples
+        else:  # builds before the cap counted samples per pixel
+            max_frames = max(_parse_int(result.get("maxFrames"), frames), 0)
         total_accum_frames = min(frames, max_frames)
     measured_accum_frames = min(max(total_accum_frames - start_frame, 0), measured_frames)
     measured_effective_spp = measured_accum_frames * pt_samples
@@ -116,12 +119,14 @@ def _parse_legacy_headless_summary(log_text: str) -> dict[str, str] | None:
         if "HEADLESS_SUMMARY" not in line:
             continue
         values = dict(re.findall(r"([A-Za-z_]+)=([^\s]+)", line))
-        required = ["frames", "maxFrames", "ptSamples", "effective_spp", "wall_ms", "ms_per_frame"]
+        required = ["frames", "ptSamples", "effective_spp", "wall_ms", "ms_per_frame"]
         if not all(key in values for key in required):
             continue
 
         result = {key: values[key] for key in required}
         for key in [
+            "maxSamples",
+            "maxFrames",  # builds before the cap counted samples per pixel
             "measured_effective_spp",
             "total_wall_ms",
             "total_ms_per_frame",
@@ -151,7 +156,8 @@ def parse_headless_summary(log_text: str) -> dict[str, str] | None:
             continue
         fields = [
             "frames",
-            "maxFrames",
+            "maxSamples",
+            "maxFrames",  # builds before the cap counted samples per pixel
             "ptSamples",
             "effective_spp",
             "measured_effective_spp",

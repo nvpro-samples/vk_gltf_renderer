@@ -299,11 +299,16 @@ PbrMaterial evaluateMaterial(in GltfShadeMaterial material, MeshState state, Tex
   pbrMat.attenuationColor    = material.attenuationColor;
   pbrMat.attenuationDistance = material.attenuationDistance;
   pbrMat.thickness           = material.thicknessFactor;
+#ifdef RASTER_PIPELINE
+  // KHR_materials_volume: per-fragment thickness = thicknessFactor * thicknessTexture.g. It stands
+  // in for the path length through the medium, which only the rasterizer cannot measure; a traced
+  // ray gets it from hitT. thicknessFactor alone selects thin-walled vs. volume, so the path
+  // tracer must not let a zero texel turn a volume thin-walled.
   if(isTexturePresent(material.thicknessTexture))
   {
-    // KHR_materials_volume spec: per-fragment thickness = thicknessFactor * thicknessTexture.g.
     pbrMat.thickness *= getTexture(images, samplers, texInfos[material.thicknessTexture], state.tc, state.texGrad).g;
   }
+#endif
 #endif
 
 #if GLTF_USE_SPECULAR
@@ -471,10 +476,10 @@ PbrMaterial evaluateMaterial(in GltfShadeMaterial material, MeshState state, Tex
     pbrMat.diffuseTransmissionFactor *=
         getTexture(images, samplers, texInfos[material.diffuseTransmissionTexture], state.tc, state.texGrad).a;
   }
-  pbrMat.diffuseTransmissionColor = material.diffuseTransmissionColor;
+  pbrMat.diffuseTransmissionColorFactor = material.diffuseTransmissionColorFactor;
   if(isTexturePresent(material.diffuseTransmissionColorTexture))
   {
-    pbrMat.diffuseTransmissionColor *=
+    pbrMat.diffuseTransmissionColorFactor *=
         getTexture(images, samplers, texInfos[material.diffuseTransmissionColorTexture], state.tc, state.texGrad).rgb;
   }
 #endif
@@ -562,9 +567,9 @@ PbrMaterial evaluateMaterial(in GltfShadeMaterial material, MeshState state, Tex
         // Each of the two diffuse lobes now carries contributions the spec colors differently, so
         // each takes the energy-weighted average of its own two shares. Both shares of a lobe have
         // the same Lambertian shape, so averaging their colors is exact, not an approximation.
-        float3 diffuseBaseColor         = pbrMat.baseColor;
-        pbrMat.diffuseTransmissionColor = lerp(pbrMat.diffuseTransmissionColor, multiscatterColor,
-                                               forwardWeight / max(baseTransWeight + forwardWeight, 1e-6));
+        float3 diffuseBaseColor               = pbrMat.baseColor;
+        pbrMat.diffuseTransmissionColorFactor = lerp(pbrMat.diffuseTransmissionColorFactor, multiscatterColor,
+                                                     forwardWeight / max(baseTransWeight + forwardWeight, 1e-6));
         pbrMat.baseColor = lerp(diffuseBaseColor, multiscatterColor, backwardWeight / max(baseReflWeight + backwardWeight, 1e-6));
 
         // ...but baseColor also tints the residual specular BTDF, which the spec leaves at the

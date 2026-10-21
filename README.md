@@ -21,7 +21,7 @@ Built in C++ on [nvpro_core2](https://github.com/nvpro-samples/nvpro_core2) with
 - **glTF PBR material reference** — Monte Carlo path tracer with NEE, MIS, and adaptive sampling for physically accurate glTF PBR material evaluation.
 - **35 glTF extensions** — Anisotropy, clearcoat, transmission, volume, sheen, iridescence, dispersion, retroreflection, Draco, interactivity, opacity micromaps, IES light profiles, and more.
 - **glTF 2.1 complex scenes (preview)** — Compose multi-file scenes with External Assets: reference glTF/GLB files as instances that share geometry, with nested references, cycle detection, and file aliases — re-externalized on save.
-- **AI denoising** — DLSS Ray Reconstruction and OptiX AI Denoiser produce clean images at interactive rates.
+- **AI denoising** — DLSS Ray Reconstruction, OptiX AI Denoiser and Open Image Denoise (on Vulkan, through [vk_oidn](https://github.com/nvpro-samples/vk_oidn)) produce clean images at interactive rates.
 - **Agentic AI generation (optional)** — Local **ComfyUI** bridge that *beautifies* the current render or *generates an HDRI* environment from a text prompt.
 - **Rasterizer preview** — Fast PBR rasterizer shares scene resources for instant iteration during editing.
 - **Developer tools** — GPU profiler, memory tracker, shader hot-reload (Ctrl+Shift+R), headless batch mode.
@@ -74,6 +74,7 @@ cmake --build build
 |---|---|---|
 | `USE_DLSS` | `ON` | Enable DLSS Ray Reconstruction integration |
 | `USE_OPTIX_DENOISER` | `ON` | Enable OptiX AI Denoiser (requires CUDA Toolkit) |
+| `USE_OIDN_DENOISER` | `ON` | Enable the Open Image Denoise denoiser (downloads the vk_oidn SDK package) |
 | `USE_DRACO` | `ON` | Enable Draco mesh compression support |
 | `BUILD_TESTING` | `OFF` | Build unit tests and benchmarks |
 | `SHADER_DEBUG_LEVEL` | `2` | Slang debug info in the embedded shaders. `2`+ enables Nsight source-level shader debugging but crashes AMD's Vulkan driver; release binaries are built with `0` |
@@ -83,7 +84,7 @@ cmake --build build
 - **Ray tracing**: High-quality path tracing reference for glTF PBR materials — Monte Carlo global illumination, next event estimation, multiple importance sampling, and adaptive sampling.
 - Profiler, GPU monitor, GPU memory tracking, and statistics.
 - Shader hot-reload (Ctrl+Shift+R) for developers who want to experiment.
-- AI denoisers: DLSS Ray Reconstruction and OptiX AI Denoiser.
+- AI denoisers: DLSS Ray Reconstruction, OptiX AI Denoiser and Open Image Denoise (vk_oidn).
 - Optional agentic AI generation via a local ComfyUI bridge: beautify the current render, or generate an HDRI environment from a text prompt (see [ComfyUI Agentic Setup](docs/comfyui-agentic-setup.md)).
 - Rasterizer fallback for fast scene interaction and editing.
 - A scene asset editor with hierarchy operations, a transform gizmo, material editing, merging, and saving back to glTF (non-destructive).
@@ -206,7 +207,7 @@ For the architecture, bridge directory layout, and request/response protocol beh
 Early support for the [glTF 2.1 complex-scene](https://www.khronos.org/blog/introducing-gltf-2.1-with-complex-scenes) composition features — the standardized successor to the earlier glTFX / External Reference proposals:
 
 - ✅ External Assets — reference other glTF/GLB files from scene nodes (`node.externalAsset`) and instantiate them at load time
-- ✅ Multiple instances of the same asset share geometry (meshes / BLAS)
+- ✅ Multiple instances of the same asset share geometry (meshes / BLAS), across every file that references it: each file is loaded once per scene, and static content is drawn without copying its nodes
 - ✅ Nested external assets — recursive resolution with cycle detection
 - ✅ Unified file references — top-level `files` array (external `uri`)
 - ✅ File aliases — inner-URI redirection for shared or overridden resources
@@ -229,6 +230,7 @@ See [External Assets](docs/external_assets.md) for design details.
 - [Developer Guide](docs/developer.md) — architecture overview, source map, material system, and testing.
 - [Rendering Architecture](docs/RENDERING_ARCHITECTURE.md) — data flow from glTF model to GPU, BLAS/TLAS acceleration structures, and render nodes.
 - [External Assets](docs/external_assets.md) — glTF 2.1 complex scenes: reference / merge / edit / save mechanics.
+- [glTF 2.1](docs/gltf_2_1.md) — what the renderer supports so far, how it follows a draft spec, the tinygltf fork, and the 2.1 test fixtures.
 - [Agentic Workflow](docs/agentic-workflow.md) — architecture, filesystem bridge protocol, and roadmap behind the optional AI generation feature.
 - [Benchmarking](docs/benchmarking.md) — headless timing and scripted GPU benchmarks.
 

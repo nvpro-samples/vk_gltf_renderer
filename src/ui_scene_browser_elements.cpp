@@ -332,6 +332,7 @@ void UiSceneBrowser::ensureElementRegistry()
       const int          idx = int(m_scene->getModel().materials.size());
       tinygltf::Material mat = m_scene->getModel().materials[i];
       mat.name += "_copy";
+      mat.uid.clear();  // copies don't keep the glTF 2.1 uid, which is unique per file
       m_undoStack->executeCommand(std::make_unique<MaterialLifecycleCommand>(*m_scene, idx, mat, true, "Duplicate material"));
       markCachesDirty();
       m_selection->selectMaterial(idx);
@@ -811,16 +812,20 @@ void UiSceneBrowser::ensureElementStats()
   m_materialRefs.assign(model.materials.size(), 0);
   m_samplerRefs.assign(model.samplers.size(), 0);
 
-  // Triangles per mesh: sum over unique render primitives, mode-aware (0 for POINTS/LINE*, count-2 for
-  // TRIANGLE_STRIP/FAN) so a mesh built from non-triangle primitives doesn't get a fabricated count.
-  for(const nvvkgltf::RenderPrimitive& rp : m_scene->getRenderPrimitives())
-  {
-    if(rp.meshID < 0 || rp.meshID >= int(m_meshTriangles.size()))
-      continue;
-    const int mode = rp.pPrimitive ? rp.pPrimitive->mode : TINYGLTF_MODE_TRIANGLES;
-    const int tris = int(uigltf::primitiveTriangleCountForMode(mode, rp.indexCount > 0 ? rp.indexCount : rp.vertexCount));
-    m_meshTriangles[rp.meshID] += tris;
-  }
+  // Triangles per mesh: sum over its primitives' render primitives, mode-aware (0 for POINTS/LINE*,
+  // count-2 for TRIANGLE_STRIP/FAN) so a mesh built from non-triangle primitives doesn't get a
+  // fabricated count. Per mesh primitive, not per render primitive: meshes may share one.
+  for(int mesh = 0; mesh < int(model.meshes.size()); mesh++)
+    for(size_t p = 0; p < model.meshes[mesh].primitives.size(); p++)
+    {
+      const int rpID = m_scene->getMeshRenderPrimitive(mesh, p);
+      if(rpID < 0)
+        continue;
+      const nvvkgltf::RenderPrimitive& rp   = m_scene->getRenderPrimitive(rpID);
+      const int                        mode = model.meshes[mesh].primitives[p].mode;
+      m_meshTriangles[mesh] +=
+          int(uigltf::primitiveTriangleCountForMode(mode, rp.indexCount > 0 ? rp.indexCount : rp.vertexCount));
+    }
 
   // Instances + material usage: walk nodes carrying a mesh, count instanced primitive->material usages.
   for(const tinygltf::Node& node : model.nodes)

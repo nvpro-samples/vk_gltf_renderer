@@ -57,17 +57,17 @@ static const int   VOLUME_FREE_BUDGET  = 64;      // Scatter events before Russi
 static const float RR_PCONT_CAP_VOLUME = 0.999f;  // Maximum Russian Roulette probability inside a volume
 
 //-----------------------------------------------------------------------
-// Denoiser guide buffers (shared by DLSS and OptiX)
+// Denoiser guide buffers (shared by DLSS, OptiX and OIDN)
 //
 // Guide-buffer scratch (GuideOutput / GuideScratch + the helpers further down + the
 // per-bounce captures in pathTraceOneBounce) only exists when USE_GUIDE_SHADER is
-// defined (set by CMake when USE_DLSS or USE_OPTIX_DENOISER is ON, or by the runtime
+// defined (set by CMake when USE_DLSS, USE_OPTIX_DENOISER or USE_OIDN_DENOISER is ON, or by the runtime
 // scene-aware variant rebuild). When it's off we drop those scratch fields from
 // PathTracerState and SampleResult to shrink per-thread live state.
 //
 // Two-tier split inside the guide block:
-//   USE_GUIDE_SHADER : albedo + normalRoughness (+ motion/depth). Consumed by DLSS and
-//                      OptiX, so present whenever any denoiser guide is required.
+//   USE_GUIDE_SHADER : albedo + normalRoughness (+ motion/depth). Consumed by DLSS, OptiX
+//                      and OIDN, so present whenever any denoiser guide is required.
 //   USE_DLSS_SHADER  : specularAlbedo + specularHitDist (+ their per-bounce capture).
 //                      DLSS-only; OptiX needs neither, so they are compiled out of the
 //                      OptiX/no-denoiser variant to shrink live state further.
@@ -252,7 +252,9 @@ float getOpacity(GltfRenderNode renderNode, GltfRenderPrimitive renderPrim, int 
       GltfTextureInfo texInfo = texInfos[mat.pbrDiffuseTexture];
       float2          uv = getInterpolatedVertexTexCoord(renderPrim, texInfo.texCoord, triangleIndex, barycentrics);
       uv                 = applyTextureTransform(texInfo, uv);
-      baseColorAlpha *= allImages[NonUniformResourceIndex(texInfo.index)].SampleLevel(allSamplers[NonUniformResourceIndex(texInfo.samplerIndex)], uv, 0.0f).a;
+      baseColorAlpha *= allImages[NonUniformResourceIndex(texInfo.index)]
+                            .SampleLevel(allSamplers[NonUniformResourceIndex(texInfo.samplerIndex)], uv, 0.0f)
+                            .a;
     }
   }
   else
@@ -265,7 +267,9 @@ float getOpacity(GltfRenderNode renderNode, GltfRenderPrimitive renderPrim, int 
       float2          uv = getInterpolatedVertexTexCoord(renderPrim, texInfo.texCoord, triangleIndex, barycentrics);
       uv                 = applyTextureTransform(texInfo, uv);
 
-      baseColorAlpha *= allImages[NonUniformResourceIndex(texInfo.index)].SampleLevel(allSamplers[NonUniformResourceIndex(texInfo.samplerIndex)], uv, 0.0f).a;
+      baseColorAlpha *= allImages[NonUniformResourceIndex(texInfo.index)]
+                            .SampleLevel(allSamplers[NonUniformResourceIndex(texInfo.samplerIndex)], uv, 0.0f)
+                            .a;
     }
   }
 
@@ -283,6 +287,17 @@ float getOpacity(GltfRenderNode renderNode, GltfRenderPrimitive renderPrim, int 
 //-----------------------------------------------------------------------
 // Shadow transmission
 //-----------------------------------------------------------------------
+
+//-----------------------------------------------------------------------
+// Sample a material texture at a shadow-ray hit (LOD 0: a shadow ray carries no footprint)
+//-----------------------------------------------------------------------
+float4 sampleShadowTexture(GltfRenderPrimitive renderPrim, GltfTextureInfo texInfo, uint3 indices, float3 barycentrics)
+{
+  float2 uv = getInterpolatedVertexTexCoord(renderPrim, texInfo.texCoord, indices, barycentrics);
+  uv        = applyTextureTransform(texInfo, uv);
+  return allImages[NonUniformResourceIndex(texInfo.index)].SampleLevel(allSamplers[NonUniformResourceIndex(texInfo.samplerIndex)],
+                                                                       uv, 0.0f);
+}
 
 //-----------------------------------------------------------------------
 // Calculate the transmission of a ray through a surface
@@ -310,14 +325,42 @@ float3 getShadowTransmission(GltfRenderNode      renderNode,
   GltfShadeMaterial  mat       = materials[matIndex];
   GltfTextureInfo*   texInfos  = pushConst.gltfScene->textureInfos;
 
+  // Textures only scale the factors down, so a low factor is final without sampling.
   float tFactor = mat.transmissionFactor;
-
   if(tFactor <= MIN_TRANSMISSION)
   {
     return float3(0.0);
   }
 
   uint3 indices = getTriangleIndices(renderPrim, triangleID);
+
+  // From here on, follow evaluateMaterial texel by texel, so the shadow ray agrees with the surface.
+  if(isTexturePresent(mat.transmissionTexture))
+    tFactor *= sampleShadowTexture(renderPrim, texInfos[mat.transmissionTexture], indices, barycentrics).r;
+
+  // thicknessFactor alone selects thin-walled vs. volume; the thickness texture is a rasterizer
+  // stand-in for the path length, which a traced ray measures (hitT).
+  float thickness = 0.0;
+#if GLTF_USE_VOLUME
+  thickness = mat.thicknessFactor;
+#endif
+
+#if GLTF_USE_SCATTER
+  // Thin-walled KHR_materials_scatter turns `scatterStrength` of the transmission into a diffuse
+  // lobe (see evaluateMaterial), which a straight-through shadow ray must not pass.
+  if(thickness <= 0.0 && mat.scatterStrengthFactor > 0.0)
+  {
+    float scatterStrength = mat.scatterStrengthFactor;
+    if(isTexturePresent(mat.scatterStrengthTexture))
+      scatterStrength *= sampleShadowTexture(renderPrim, texInfos[mat.scatterStrengthTexture], indices, barycentrics).a;
+    tFactor *= 1.0 - scatterStrength;
+  }
+#endif
+
+  if(tFactor <= MIN_TRANSMISSION)
+  {
+    return float3(0.0);
+  }
 
   float3 normal;
   {
@@ -341,7 +384,7 @@ float3 getShadowTransmission(GltfRenderNode      renderNode,
   currentTransmission *= (1.0F - fresnel);
 
 #if GLTF_USE_VOLUME
-  if(mat.thicknessFactor > 0.0)
+  if(thickness > 0.0)
   {
     if(isInside)
     {
@@ -364,11 +407,7 @@ float3 getShadowTransmission(GltfRenderNode      renderNode,
     float metallic  = mat.pbrMetallicFactor;
     if(isTexturePresent(mat.pbrMetallicRoughnessTexture))
     {
-      GltfTextureInfo texInfo = texInfos[mat.pbrMetallicRoughnessTexture];
-      float2          uv      = getInterpolatedVertexTexCoord(renderPrim, texInfo.texCoord, indices, barycentrics);
-      uv                      = applyTextureTransform(texInfo, uv);
-
-      float4 mr_sample = allImages[NonUniformResourceIndex(texInfo.index)].SampleLevel(allSamplers[NonUniformResourceIndex(texInfo.samplerIndex)], uv, 0.0f);
+      float4 mr_sample = sampleShadowTexture(renderPrim, texInfos[mat.pbrMetallicRoughnessTexture], indices, barycentrics);
       roughness *= mr_sample.g;
       metallic *= mr_sample.b;
     }
@@ -1216,9 +1255,13 @@ float computeMeshWireframe(float4x4 objectToWorld, float3 v0, float3 v1, float3 
 // Camera and selection ray
 //-----------------------------------------------------------------------
 
+// Box-Muller transform: two uniform numbers in [0, 1] to two independent standard normal values.
+// rand() returns exactly 0 once in 2^32 draws, and log(0) would make the sample infinite and the
+// camera ray NaN. The floor is the smallest non-zero value rand() returns, which keeps r finite
+// (about 6.7). It must be a normal float: a denormal such as 1e-38 is flushed to zero on the GPU.
 float2 sampleGaussian(float2 u)
 {
-  const float r     = sqrt(-2.0f * log(max(1e-38f, u.x)));
+  const float r     = sqrt(-2.0f * log(max(u.x, 2.3283064e-10f)));
   const float theta = 2.0f * M_PI * u.y;
   return r * float2(cos(theta), sin(theta));
 }

@@ -295,8 +295,10 @@ static VkGeometryInstanceFlagsKHR getInstanceFlag(const tinygltf::Material& mat)
     instanceFlags |= VK_GEOMETRY_INSTANCE_FORCE_OPAQUE_BIT_KHR;
   }
 
-  // Need to skip the cull flag in traceray_rtx for double sided materials
-  if(mat.doubleSided == 1 || volume.thicknessFactor > 0.0F || transmission.factor > 0.0F)
+  // Need to skip the cull flag in traceray_rtx for double sided materials, and for any material a
+  // path can transmit through: the ray then reaches the far side of the object from behind.
+  if(mat.doubleSided == 1 || volume.thicknessFactor > 0.0F || transmission.factor > 0.0F
+     || diffuseTransmission.diffuseTransmissionFactor > 0.0F)
   {
     instanceFlags |= VK_GEOMETRY_INSTANCE_TRIANGLE_FACING_CULL_DISABLE_BIT_KHR;
   }
@@ -397,12 +399,14 @@ void nvvkgltf::SceneRtx::cmdCreateBuildTopLevelAccelerationStructure(VkCommandBu
 
 //--------------------------------------------------------------------------------------------------
 // Update the per-material instance flags cache. Uses df.materials for surgical updates when only
-// a few materials changed; falls back to full rebuild when the material count changes.
+// a few materials changed; falls back to full rebuild when the material count changes. A material
+// whose flags changed (e.g. an edit that makes it transmissive) marks its render nodes dirty, so
+// syncTopLevelAS() writes the new flags into their TLAS instances.
 // Must be called before syncFromScene() clears df.materials.
-void nvvkgltf::SceneRtx::updateInstanceFlagsCache(const nvvkgltf::Scene& scene)
+void nvvkgltf::SceneRtx::updateInstanceFlagsCache(nvvkgltf::Scene& scene)
 {
-  const auto& materials = scene.getModel().materials;
-  const auto& dirtyMats = scene.getDirtyFlags().materials;
+  const std::vector<tinygltf::Material>& materials = scene.getModel().materials;
+  nvvkgltf::Scene::DirtyFlags&           df        = scene.getDirtyFlags();
 
   if(m_instanceFlagsCache.size() != materials.size())
   {
@@ -410,12 +414,28 @@ void nvvkgltf::SceneRtx::updateInstanceFlagsCache(const nvvkgltf::Scene& scene)
     for(size_t i = 0; i < materials.size(); i++)
       m_instanceFlagsCache[i] = getInstanceFlag(materials[i]);
   }
-  else if(!dirtyMats.empty())
+  else if(!df.materials.empty())
   {
-    for(int idx : dirtyMats)
+    std::unordered_set<int> changedMats;
+    for(int idx : df.materials)
     {
-      if(idx >= 0 && idx < static_cast<int>(materials.size()))
-        m_instanceFlagsCache[idx] = getInstanceFlag(materials[idx]);
+      if(idx < 0 || idx >= static_cast<int>(materials.size()))
+        continue;
+      const VkGeometryInstanceFlagsKHR flags = getInstanceFlag(materials[idx]);
+      if(flags != m_instanceFlagsCache[idx])
+      {
+        m_instanceFlagsCache[idx] = flags;
+        changedMats.insert(idx);
+      }
+    }
+    if(!changedMats.empty())
+    {
+      const std::vector<nvvkgltf::RenderNode>& renderNodes = scene.getRenderNodes();
+      for(size_t i = 0; i < renderNodes.size(); i++)
+      {
+        if(changedMats.contains(renderNodes[i].materialID))
+          df.renderNodesRtx.insert(static_cast<int>(i));
+      }
     }
   }
 }

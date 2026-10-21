@@ -62,7 +62,7 @@ restart accumulation without a trigger, `vk_gltf_reload_shaders` resets it.
 
 Names are grouped by prefix: `pt*` path tracer, `tm*` tonemapper, `hdr*`, `sky*`, `plain*`,
 `gradient*` and `env*` environment (plus `sunAzimuth` / `sunElevation`, unprefixed because the sun
-is shared by every sky type), `dlss*`/`optix*` denoisers, `dbg*` debug views, `ui*` panels and
+is shared by every sky type), `dlss*`/`optix*`/`oidn*` denoisers, `dbg*` debug views, `ui*` panels and
 gizmo.
 
 A parameter that names *state* the renderer reads each frame takes effect immediately. A parameter
@@ -91,14 +91,22 @@ inflated by occasional scheduling outliers and will hide a real change.
 The window is sampled per frame after a reset, so it describes only what is running now — unlike
 the profiler's own running average, which spans the whole session.
 
+**Read the register count too.** When the device has `VK_KHR_pipeline_executable_properties`, every
+path-tracer pipeline build logs what the driver compiled — `RQ pipeline executable 0 (CS): Register
+Count=…, Local Memory Size=…, Shared Memory Size=…` (`PathTracer::logPipelineStatistics`; read it
+with `nvpro_get_logs`). Registers decide how many warps an SM holds, and that decides most of this
+kernel's speed; a spill shows as local or shared memory the shader never declared. NVIDIA's driver
+reports the ray-query pipeline only, not the ray tracing one; use an Nsight Graphics GPU Trace for
+that.
+
 ## Limitations and traps
 
 - **A parameter can be set and have no effect.** Automatic exposure cannot tell which values are
   read only at start-up (`size`, `device`, `frames`, …). Those accept a write and change nothing.
   The server instructions list the settings that do take effect live.
 - **An idle renderer records no timers.** The profiler rebuilds its snapshot each frame from the
-  sections that actually ran, so once accumulation stops at `ptMaxFrames` the timer list goes empty
-  and `vk_gltf_measure` times out. Raise `ptMaxFrames` to keep drawing.
+  sections that actually ran, so once accumulation stops at `ptMaxSamples` the timer list goes empty
+  and `vk_gltf_measure` times out. Raise `ptMaxSamples` to keep drawing.
 - **The scene keeps warming up after the write returns.** `scenefile` completes CPU-side and
   installs the Vulkan resources before the write returns, but BLAS/TLAS builds and the initial
   data uploads are queued into a background pipeline that drains one submission per frame in

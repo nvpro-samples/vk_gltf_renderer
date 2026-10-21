@@ -260,9 +260,9 @@ void AnimationVk::createGpuBuffers(nvvk::CmdUploaderInterface& staging, const Sc
     {
       const RenderPrimitive&     renderPrim = scn.getRenderPrimitive(mr.renderPrimID);
       const tinygltf::Primitive& primitive  = *renderPrim.pPrimitive;
-      const tinygltf::Mesh&      mesh       = model.meshes[renderPrim.meshID];
 
-      uint32_t numTargets = static_cast<uint32_t>(std::min(primitive.targets.size(), mesh.weights.size()));
+      // Every target, weighted or not: an animation may give a node more weights than it starts with.
+      uint32_t               numTargets = static_cast<uint32_t>(primitive.targets.size());
       std::vector<glm::vec3> allPosDeltas;
       std::vector<glm::vec3> allNrmDeltas;
       std::vector<glm::vec3> allTanDeltas;
@@ -439,18 +439,11 @@ void AnimationVk::dispatchAnimation(VkCommandBuffer cmd, nvvk::CmdUploaderInterf
     if(mr.renderPrimID < 0 || mr.basePositions.empty() || gpu.numTargets == 0)
       continue;
 
-    const auto&           renderPrim = scn.getRenderPrimitive(mr.renderPrimID);
-    const tinygltf::Mesh& mesh       = model.meshes[renderPrim.meshID];
-
-    std::vector<float> weights(gpu.numTargets, 0.0f);
-    uint32_t           safeCount = std::min(gpu.numTargets, static_cast<uint32_t>(mesh.weights.size()));
-    if(safeCount < gpu.numTargets)
-    {
-      LOGW("Morph prim %zu: mesh.weights count (%zu) < gpu.numTargets (%u); extra targets will use weight 0\n", mi,
-           mesh.weights.size(), gpu.numTargets);
-    }
-    for(uint32_t t = 0; t < safeCount; t++)
-      weights[t] = static_cast<float>(mesh.weights[t]);
+    // A target without a weight has weight 0, as on the CPU path (computeMorphTargets).
+    const std::vector<double>& source = scn.getMorphWeights(scn.getRenderPrimitive(mr.renderPrimID));
+    std::vector<float>         weights(gpu.numTargets, 0.0f);
+    for(uint32_t t = 0; t < std::min(gpu.numTargets, static_cast<uint32_t>(source.size())); t++)
+      weights[t] = static_cast<float>(source[t]);
 
     assert(gpu.weightsOffset + weights.size() * sizeof(float) <= m_morphWeightsBuffer.bufferSize);
     staging.appendBuffer(m_morphWeightsBuffer, gpu.weightsOffset, std::span(weights));

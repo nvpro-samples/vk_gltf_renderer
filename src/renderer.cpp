@@ -50,6 +50,7 @@
 #define IMGUI_DEFINE_MATH_OPERATORS
 
 #include <glm/gtx/quaternion.hpp>  // glm::rotation
+#include <algorithm>
 #include <cmath>
 #include <cstdio>
 #include <ctime>
@@ -212,7 +213,9 @@ GltfRenderer::GltfRenderer(nvutils::ParameterRegistry* paramReg, const nvutils::
                  &m_resources.settings.optimalShader, Persist::eYes);
   m_settings.add({"useSolidBackground", "Use solid color background"}, &m_resources.settings.useSolidBackground, Persist::eYes, true);
   m_settings.addVector({"solidBackgroundColor", "Solid Background Color"}, &m_resources.settings.solidBackgroundColor, Persist::eYes);
-  m_settings.add({"ptMaxFrames", "Maximum number of iterations"}, &m_resources.settings.maxFrames, Persist::eYes);
+  // Bounds mirror the "Max Samples" slider in PathTracer::onUIRender.
+  m_settings.add({"ptMaxSamples", "Path tracer: stop accumulating at this many samples per pixel"},
+                 &m_resources.settings.maxSamples, Persist::eYes, 1, 1000000);
   // Not persisted: a scripted or headless run must not change what the next interactive session plays.
   m_settings.add(
       {.name = "animPlay",
@@ -221,6 +224,11 @@ GltfRenderer::GltfRenderer(nvutils::ParameterRegistry* paramReg, const nvutils::
       &m_animPlay, Persist::eNo);
   // Headless-only output path: consumed at start-up, so remembering it would be misleading.
   m_settings.add({"output", "Output image file path for headless mode"}, &m_resources.headlessOutputPath, Persist::eNo);
+  m_settings.add({"outputSamples",
+                  "Path tracer: also save the output image each time the displayed image reaches one of these "
+                  "samples per pixel, e.g. \"1,2,4,8\". Written as <output>_<spp>spp<ext> (see --output); the "
+                  "count is that of the image shown, denoised or not"},
+                 &m_outputSamples, Persist::eNo);
 
   // Tonemapper. Ranges match the UI sliders in nvgui/tonemapper.cpp, so a script or an agent is
   // bounded the same way the user is. tmBrightness and tmVignette were once tmGamma and
@@ -584,8 +592,7 @@ GltfRenderer::GltfRenderer(nvutils::ParameterRegistry* paramReg, const nvutils::
                         [this](const std::filesystem::path& filename) {
                           if(m_app)
                           {
-                            m_app->saveImageToFile(m_resources.gBuffers.getColorImage(Resources::eImgTonemapped),
-                                                   m_resources.gBuffers.getSize(), filename);
+                            saveViewportImage(filename);
                           }
                         },
                     .saveUiScreenshot =
@@ -605,7 +612,8 @@ GltfRenderer::GltfRenderer(nvutils::ParameterRegistry* paramReg, const nvutils::
                 });
 
   // Initialize camera manipulator
-  m_cameraManip           = std::make_shared<nvutils::CameraManipulator>();
+  m_cameraManip = std::make_shared<AnchorCameraManipulator>();
+  m_cameraManip->setAnchorRequest([this](const glm::dvec2& screenPos) { return requestAnchorPick(screenPos); });
   m_resources.cameraManip = m_cameraManip;  // Share with resources
 }
 
@@ -710,6 +718,7 @@ void GltfRenderer::onAttach(nvapp::Application* app)
 
   // Ray picker
   m_rayPicker.init(&m_resources.allocator);
+  m_anchorPicker.init(&m_resources.allocator);
 
   // Tonemapper
   m_resources.tonemapper.init(&m_resources.allocator, tonemapper_slang);
@@ -989,9 +998,14 @@ bool GltfRenderer::isAutomatedRun() const
   return isHeadlessMode() || isBenchmarkMode();
 }
 
-void GltfRenderer::alignMaxFramesForHeadless(uint32_t headlessFrames)
+void GltfRenderer::alignMaxSamplesForHeadless(uint32_t headlessFrames)
 {
-  BenchmarkController::alignMaxFramesForHeadless(m_resources.settings.maxFrames, headlessFrames);
+  // An explicit --ptMaxSamples is the point of the run (e.g. --frames 2000 --ptMaxSamples 1024)
+  if(m_parameterParser && m_parameterParser->wasParsed("ptMaxSamples"))
+    return;
+  const int samplesPerFrame =
+      m_pathTracer.m_adaptiveSampling ? PathTracer::MAX_ADAPTIVE_SAMPLES_PER_PIXEL : m_pathTracer.m_pushConst.numSamples;
+  BenchmarkController::alignMaxSamplesForHeadless(m_resources.settings.maxSamples, headlessFrames, samplesPerFrame);
 }
 
 void GltfRenderer::applyHeadlessDefaults()
@@ -999,13 +1013,17 @@ void GltfRenderer::applyHeadlessDefaults()
   if(!(m_parameterParser && m_parameterParser->wasParsed("animPlay")))
     m_animPlay = false;
   m_resources.animationControl.play = m_animPlay;
+  // Nobody watches a headless frame: Auto SPP aims at throughput rather than a frame rate
+  if(!(m_parameterParser && m_parameterParser->wasParsed("ptPerformanceTarget")))
+    m_pathTracer.m_performanceTarget = PathTracer::PerformanceTarget::eThroughput;
 }
 
 BenchmarkController::HeadlessFrameInfo GltfRenderer::benchmarkFrameInfo() const
 {
   return {.totalFrames = m_app ? m_app->getHeadlessFrameCount() : 0,
-          .maxFrames   = m_resources.settings.maxFrames,
-          .ptSamples   = m_pathTracer.m_pushConst.numSamples,
+          .maxSamples  = m_resources.settings.maxSamples,
+          .ptSamples   = m_pathTracer.samplesPerFrame(),
+          .samples     = m_resources.accumulatedSamples,
           .imageSize   = m_resources.gBuffers.getSize()};
 }
 
@@ -1036,11 +1054,141 @@ std::vector<BenchmarkController::MemorySample> GltfRenderer::benchmarkMemorySamp
   return samples;
 }
 
+//--------------------------------------------------------------------------------------------------
+// End of a headless run: the cost of the AI denoisers that ran. OIDN is GPU time inside the frame;
+// OptiX runs outside it (queue drain, copies, CUDA), so its breakdown is host wall time.
+void GltfRenderer::logDenoiserTimings() const
+{
+#if defined(USE_OIDN_DENOISER)
+  if(const OidnDenoiser* oidn = m_pathTracer.getOidnDenoiser(); oidn && oidn->hasValidDenoisedOutput() && oidn->getGpuTimeMs() > 0.0)
+    LOGI("DENOISER_TIMING oidn gpu_ms=%.3f\n", oidn->getGpuTimeMs());
+#endif
+#if defined(USE_OPTIX_DENOISER)
+  if(const OptiXDenoiser* optix = m_pathTracer.getOptiXDenoiser(); optix && optix->hasValidDenoisedOutput())
+  {
+    const OptiXDenoiser::Timings t = optix->getTimings();
+    LOGI("DENOISER_TIMING optix total_ms=%.3f drain_ms=%.3f copy_in_ms=%.3f invoke_ms=%.3f invoke_gpu_ms=%.3f copy_out_ms=%.3f\n",
+         t.totalMs, t.drainMs, t.copyInMs, t.invokeMs, t.invokeGpuMs, t.copyOutMs);
+  }
+#endif
+}
+
+std::filesystem::path GltfRenderer::headlessOutputPathOrDefault() const
+{
+  return m_resources.headlessOutputPath.empty() ? nvutils::getExecutablePath().replace_extension(".jpg") : m_resources.headlessOutputPath;
+}
+
+//--------------------------------------------------------------------------------------------------
+// --outputSamples: the samples per pixel of the image the tonemapper shows. A denoised image counts
+// the samples it was denoised from (OptiX runs one frame behind, OIDN in the same frame). Returns
+// -1 for an image that is not a path-traced accumulation (the DLSS hand-off's blend included).
+int GltfRenderer::displayedImageSamples(DisplayBuffer& source) const
+{
+  source = m_resources.settings.displayBuffer;
+  if(m_resources.settings.renderSystem == RenderingMode::ePathtracer && m_pathTracer.handoffImage(m_resources))
+    return -1;
+#if defined(USE_OPTIX_DENOISER)
+  if(const OptiXDenoiser* optix = m_pathTracer.getOptiXDenoiser();
+     source == DisplayBuffer::eOptixDenoised && optix && optix->hasValidDenoisedOutput())
+    return optix->denoisedSamples();
+#endif
+#if defined(USE_OIDN_DENOISER)
+  if(const OidnDenoiser* oidn = m_pathTracer.getOidnDenoiser();
+     source == DisplayBuffer::eOidnDenoised && oidn && oidn->hasValidDenoisedOutput())
+    return oidn->denoisedSamples();
+#endif
+  if(source == DisplayBuffer::eAgenticBeautified)
+    return -1;
+  source = DisplayBuffer::eRendered;  // what runTonemapPass falls back to
+  return m_resources.accumulatedSamples;
+}
+
+//--------------------------------------------------------------------------------------------------
+// --outputSamples: parse the counts when the option changed. They are also stops for the path tracer
+// (Resources::sampleStops): a frame ends exactly on each, so none is stepped over, whatever the samples
+// per frame. Called before the frame renders.
+void GltfRenderer::refreshSampleTargets()
+{
+  SampleCapture& capture = m_sampleCapture;
+  if(capture.parsedFrom == m_outputSamples)
+    return;
+  capture          = {.parsedFrom = m_outputSamples};
+  std::string list = m_outputSamples;
+  std::replace(list.begin(), list.end(), ',', ' ');
+  std::istringstream stream(list);
+  for(int value; stream >> value;)
+    if(value > 0)
+      capture.targets.push_back(value);
+  std::sort(capture.targets.begin(), capture.targets.end());
+  capture.targets.erase(std::unique(capture.targets.begin(), capture.targets.end()), capture.targets.end());
+  m_resources.sampleStops = capture.targets;
+}
+
+//--------------------------------------------------------------------------------------------------
+// --outputSamples: one run saves a whole convergence series instead of one run per sample count.
+// When the accumulation restarts, the counts from the current one on are captured again, so the saved
+// files always come from the last accumulation. When another image is shown (e.g. the first denoised
+// one), the current count is captured again from it, and the counts no image reached yet still are.
+// A count skipped over (several samples per frame, a denoiser interval) is saved at the first image
+// past it, named by its actual count.
+void GltfRenderer::updateSampleCaptures()
+{
+  SampleCapture& capture = m_sampleCapture;
+  refreshSampleTargets();
+  if(capture.targets.empty() || m_resources.settings.renderSystem != RenderingMode::ePathtracer)
+    return;
+
+  // A .hdr capture saves the rendered image, never a denoiser's (saveViewportImage): name it after
+  // that image's samples, not after the denoised one on screen, which OptiX keeps a frame behind.
+  const bool    linear = nvutils::extensionMatches(headlessOutputPathOrDefault(), ".hdr");
+  DisplayBuffer source{};
+  const int     samples = linear ? m_resources.accumulatedSamples : displayedImageSamples(source);
+  if(linear)
+    source = DisplayBuffer::eRendered;
+  if(samples <= 0)
+    return;
+  const size_t current = std::lower_bound(capture.targets.begin(), capture.targets.end(), samples) - capture.targets.begin();
+  if(samples < capture.lastSamples)  // the accumulation restarted
+    capture.next = current;
+  else if(int(source) != capture.lastSource)  // another image: keep the counts not saved yet
+    capture.next = std::min(capture.next, current);
+  capture.lastSamples = samples;
+  capture.lastSource  = int(source);
+
+  if(capture.next < capture.targets.size() && capture.targets[capture.next] <= samples)
+  {
+    while(capture.next < capture.targets.size() && capture.targets[capture.next] <= samples)
+      capture.next++;
+    const std::filesystem::path output = headlessOutputPathOrDefault();
+    capture.pending                    = output.parent_path()
+                      / (output.stem().string() + "_" + std::to_string(samples) + "spp" + output.extension().string());
+  }
+}
+
+//--------------------------------------------------------------------------------------------------
+// The frame is submitted: save the image updateSampleCaptures() asked for. saveImageToFile records
+// its copy on the same queue and waits for it, so it sees this frame's tonemapped image.
+void GltfRenderer::onPostRender()
+{
+  if(m_sampleCapture.pending.empty() || !m_app)
+    return;
+  saveViewportImage(m_sampleCapture.pending);
+  m_sampleCapture.pending.clear();
+}
+
+// One rule for every way the viewport is saved (File > Save Image, --output, --outputSamples, the
+// benchmark screenshot): a .hdr file gets the linear rendered image, so it can be measured; any
+// other extension gets what the screen shows.
+void GltfRenderer::saveViewportImage(const std::filesystem::path& filename)
+{
+  const Resources::ImageType imageType =
+      nvutils::extensionMatches(filename, ".hdr") ? Resources::eImgRendered : Resources::eImgTonemapped;
+  m_app->saveImageToFile(m_resources.gBuffers.getColorImage(imageType), m_resources.gBuffers.getSize(), filename);
+}
+
 void GltfRenderer::saveHeadlessOutputImage()
 {
-  std::string                 outputPath = m_resources.headlessOutputPath.empty() ?
-                                               nvutils::getExecutablePath().replace_extension(".jpg").string() :
-                                               m_resources.headlessOutputPath.string();
+  std::string                 outputPath = headlessOutputPathOrDefault().string();
   const std::filesystem::path parentDir  = std::filesystem::path(outputPath).parent_path();
   if(!parentDir.empty() && !std::filesystem::exists(parentDir))
   {
@@ -1051,7 +1199,7 @@ void GltfRenderer::saveHeadlessOutputImage()
     LOGE("GltfRenderer::saveHeadlessOutputImage(): application is not set; cannot save image to %s\n", outputPath.c_str());
     return;
   }
-  m_app->saveImageToFile(m_resources.gBuffers.getColorImage(Resources::eImgTonemapped), m_resources.gBuffers.getSize(), outputPath);
+  saveViewportImage(outputPath);
 }
 
 // Consume a pending image/texture-set change (import/replace/remove/reload/sampler/undo) at the very
@@ -1330,8 +1478,9 @@ void GltfRenderer::onRender(VkCommandBuffer cmd)
   // (this is instance-motion-vector territory - see docs/denoising.md). Hover/click are ticked in the
   // same block since they already had to run before the graph tick (a same-frame hover/select feeds
   // this tick), and moving them doesn't change their own correctness.
-  updateHoverState();      // KHR_interactivity: poll HoverPicker, notify onHoverIn/onHoverOut before this tick
-  updateClickPickState();  // Poll the previous click's async ray-pick, apply it once ready (see m_pendingClickPick)
+  updateHoverState();       // KHR_interactivity: poll HoverPicker, notify onHoverIn/onHoverOut before this tick
+  updateClickPickState();   // Poll the previous click's async ray-pick, apply it once ready (see m_pendingClickPick)
+  updateAnchorPickState();  // Same for the camera anchor of a Shift+drag (see m_pendingAnchorPick)
   // KHR_interactivity: pointer/set writes flow into `changed` via the dirty-flags path below
   // (Scene::markNodeDirty etc.), but an animation/start-driven pose (applied synchronously inside
   // this call via reconcileAnimationGpuState()) clears those same dirty flags before that path ever
@@ -1373,6 +1522,7 @@ void GltfRenderer::onRender(VkCommandBuffer cmd)
 
   // Check for changes
   bool changed{false};
+  changed |= m_pathTracer.keepOneAccumulationDenoiser(m_resources);  // OptiX or OIDN, not both
   changed |= interactivityAnimationApplied;
   changed |= updateAnimation(cmd);  // Update the animation
   changed |= updateSceneChanges(cmd);
@@ -1380,6 +1530,7 @@ void GltfRenderer::onRender(VkCommandBuffer cmd)
   {
     resetFrame();
   }
+  refreshSampleTargets();                    // --outputSamples: the stops this frame may end on
   bool frameChanged = updateFrameCounter();  // Check if the frame counter has changed
 
   if(changed || frameChanged)
@@ -1478,6 +1629,15 @@ void GltfRenderer::onRender(VkCommandBuffer cmd)
       LOGI("Rendering finished: %f ms\n", m_cpuTimer.getMilliseconds());
       m_cpuTimePrinted = true;
     }
+    // Auto denoise the final image of the accumulation
+    if(m_resources.settings.renderSystem == RenderingMode::ePathtracer && m_resources.accumulationComplete())
+    {
+      m_pathTracer.onAccumulationComplete(cmd, m_resources);
+      // A headless run given --ptMaxSamples is done: this frame shows the final image (and its
+      // denoise, which OptiX makes on this first idle frame), and --frames is only an upper bound.
+      if(isHeadlessMode() && m_parameterParser && m_parameterParser->wasParsed("ptMaxSamples") && m_app)
+        m_app->close();
+    }
   }
 
   // Apply the post-processing effects
@@ -1494,6 +1654,7 @@ void GltfRenderer::onRender(VkCommandBuffer cmd)
       }
 #endif
   silhouette(cmd);
+  updateSampleCaptures();  // --outputSamples: the image is final for this frame
   // KHR_interactivity hover detection: record this frame's cursor readback after silhouette's own
   // read of eImgSelection (see HoverPicker::requestReadback's comment for why that ordering avoids
   // any extra synchronization). Skipped entirely when the cursor isn't over the viewport.
@@ -1513,6 +1674,13 @@ void GltfRenderer::onRender(VkCommandBuffer cmd)
         PendingClickResult{.semaphoreState = nvvk::SemaphoreState::makeFixed(m_app->getFrameSignalSemaphore()),
                            .isDoubleClick  = m_pendingClickPick->isDoubleClick};
     m_pendingClickPick.reset();
+  }
+  if(m_pendingAnchorPick)
+  {
+    m_pendingAnchorPick->tlas = m_resources.sceneRtx.topLevelAS();
+    m_anchorPicker.run(cmd, *m_pendingAnchorPick);
+    m_pendingAnchorResult = nvvk::SemaphoreState::makeFixed(m_app->getFrameSignalSemaphore());
+    m_pendingAnchorPick.reset();
   }
   if(!isAutomatedRun())
   {
@@ -1543,6 +1711,10 @@ void GltfRenderer::onUIMenu()
 void GltfRenderer::onLastHeadlessFrame()
 {
   m_benchmark.logHeadlessSummary(benchmarkFrameInfo());
+  logDenoiserTimings();
+  if(m_sampleCapture.next < m_sampleCapture.targets.size())
+    LOGW("--outputSamples: %d spp and above were not reached (the image has %d spp); raise --frames\n",
+         m_sampleCapture.targets[m_sampleCapture.next], m_sampleCapture.lastSamples);
   saveHeadlessOutputImage();
   m_benchmark.finishHeadlessTiming();
 }
@@ -1794,6 +1966,11 @@ bool GltfRenderer::dlssGuideRequired() const
 
 #if defined(USE_OPTIX_DENOISER)
   if(const OptiXDenoiser* optix = m_pathTracer.getOptiXDenoiser(); optix && optix->isEnabled())
+    return true;
+#endif
+
+#if defined(USE_OIDN_DENOISER)
+  if(const OidnDenoiser* oidn = m_pathTracer.getOidnDenoiser(); oidn && oidn->isEnabled())
     return true;
 #endif
 
@@ -2749,8 +2926,8 @@ bool GltfRenderer::runTonemapPass(VkCommandBuffer cmd, bool skipBeautifiedOverla
   }
 #endif
 
-  // OptiX denoised output (path-tracer only). Routed via the global DisplayBuffer toggle the
-  // OptiXDenoiser writes when the user clicks its thumbnail; behavior is unchanged.
+  // OptiX / OIDN denoised output (path-tracer only). Routed via the global DisplayBuffer toggle the
+  // denoisers write when they denoise or the user clicks their thumbnail.
 #if defined(USE_OPTIX_DENOISER)
   if(m_resources.settings.renderSystem == RenderingMode::ePathtracer && m_resources.settings.displayBuffer == DisplayBuffer::eOptixDenoised)
   {
@@ -2762,6 +2939,26 @@ bool GltfRenderer::runTonemapPass(VkCommandBuffer cmd, bool skipBeautifiedOverla
     }
   }
 #endif
+#if defined(USE_OIDN_DENOISER)
+  if(m_resources.settings.renderSystem == RenderingMode::ePathtracer && m_resources.settings.displayBuffer == DisplayBuffer::eOidnDenoised)
+  {
+    const OidnDenoiser* oidn = m_pathTracer.getOidnDenoiser();
+    if(oidn && oidn->hasValidDenoisedOutput())
+    {
+      inputBuffer         = oidn->getDescriptorImageInfo(OidnDenoiser::eGBufferDenoised);
+      inputBuffer.sampler = m_resources.linearSampler;
+    }
+  }
+#endif
+  // The DLSS hand-off, shown in place of the denoiser's view while OptiX or OIDN takes over from DLSS
+  if(m_resources.settings.renderSystem == RenderingMode::ePathtracer)
+  {
+    if(const VkDescriptorImageInfo* handoff = m_pathTracer.handoffImage(m_resources))
+    {
+      inputBuffer         = *handoff;
+      inputBuffer.sampler = m_resources.linearSampler;
+    }
+  }
 
 #if defined(USE_DLSS)
   // Displaying or not DLSS guide buffer.
@@ -2985,6 +3182,14 @@ void GltfRenderer::setDlssHardwareAvailability(bool rrAvailable, bool srAvailabl
 void GltfRenderer::setSerAvailable(bool available)
 {
   m_resources.settings.serHardwareAvailable = available;
+}
+
+//--------------------------------------------------------------------------------------------------
+// Names of the extensions enabled on the device. Call before the path tracer is attached: the
+// vk_oidn denoiser picks its optional features (tensor cores, ...) from them.
+void GltfRenderer::setDeviceExtensions(std::vector<std::string> extensions)
+{
+  m_resources.deviceExtensions = std::move(extensions);
 }
 
 //--------------------------------------------------------------------------------------------------
@@ -3304,6 +3509,9 @@ void GltfRenderer::cleanupScene()
   // semaphore/readback settles, applying a pick result to the wrong node indices.
   m_pendingClickPick.reset();
   m_pendingClickResult.reset();
+  m_pendingAnchorPick.reset();
+  m_pendingAnchorResult.reset();
+  m_cameraManip->cancelAnchor();  // Not resolveAnchor(): a miss would replay queued wheel steps
   m_hoveredNodeIndex = -1;
 
   // Reset memory statistics for the new scene
@@ -3508,6 +3716,16 @@ void GltfRenderer::createVulkanScene()
   }
 
   buildAccelerationStructures();
+
+  // One line to compare scenes by: ray tracing size, and the GPU memory the scene was given (the BLAS
+  // before compaction, which runs later on non-animated scenes).
+  const nvvkgltf::Scene& scene = *m_resources.getScene();
+  constexpr double       kMB   = 1024.0 * 1024.0;
+  LOGI("Scene: %zu render primitives (BLAS), %zu render nodes (TLAS instances); GPU memory: scene %.1f MB, ray tracing %.1f MB (BLAS %.1f MB)\n",
+       scene.getRenderPrimitives().size(), scene.getRenderNodes().size(),
+       sumTrackerCurrentBytes(m_resources.sceneVk.getMemoryTracker()) / kMB,
+       sumTrackerCurrentBytes(m_resources.sceneRtx.getMemoryTracker()) / kMB,
+       m_resources.sceneRtx.getMemoryTracker().getStats("BLAS").currentBytes / kMB);
 }
 
 //--------------------------------------------------------------------------------------------------
@@ -3984,7 +4202,7 @@ bool GltfRenderer::updateFrameCounter()
     ref_camera = currentCamera;
   }
 
-  if(m_resources.frameCount >= m_resources.settings.maxFrames)
+  if(m_resources.accumulationComplete())
   {
     return false;
   }
@@ -4128,6 +4346,7 @@ void GltfRenderer::destroyResources()
   m_resources.samplerPool.deinit();
   m_resources.staging.deinit();
   m_rayPicker.deinit();
+  m_anchorPicker.deinit();
   m_resources.allocator.deinit();
 }
 
@@ -4378,6 +4597,22 @@ void GltfRenderer::updateClickPickState()
   const bool isDoubleClick = m_pendingClickResult->isDoubleClick;
   m_pendingClickResult.reset();
   applyClickPickResult(m_rayPicker.getResult(), isDoubleClick);
+}
+
+// Non-blocking poll of the camera anchor ray-pick, the same way as updateClickPickState().
+void GltfRenderer::updateAnchorPickState()
+{
+  if(!m_pendingAnchorResult || !m_pendingAnchorResult->testSignaled(m_device))
+    return;
+
+  m_pendingAnchorResult.reset();
+  const nvvk::RayPicker::PickResult pickResult = m_anchorPicker.getResult();
+  if(pickResult.instanceID < 0 || pickResult.hitT <= 0.F)
+  {
+    m_cameraManip->resolveAnchor(std::nullopt);
+    return;
+  }
+  m_cameraManip->resolveAnchor(glm::dvec3(pickResult.worldRayOrigin + pickResult.worldRayDirection * pickResult.hitT));
 }
 
 // Script-driven hover for UI scenario tests (`hovernode <id>` / `clearhover` -> nodeIndex -1) -

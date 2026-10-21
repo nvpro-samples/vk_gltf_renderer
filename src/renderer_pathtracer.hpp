@@ -21,7 +21,11 @@
 
 #include "settings_registry.hpp"
 
+#include <array>
+#include <atomic>
+#include <chrono>
 #include <mutex>
+#include <optional>
 #include <thread>
 
 #include <glm/glm.hpp>
@@ -31,7 +35,9 @@
 
 #include <nvvk/sbt_generator.hpp>
 #include <nvutils/profiler.hpp>
+#include "denoiser_handoff.hpp"
 #include "renderer_base.hpp"
+#include "sample_schedule.hpp"
 #include "utils.hpp"
 #include "pipeline_cache_util.hpp"
 #include "scene_feature_detection.hpp"
@@ -45,6 +51,11 @@
 // #OPTIX
 #if defined(USE_OPTIX_DENOISER)
 #include "optix_denoiser.hpp"
+#endif
+
+// #OIDN
+#if defined(USE_OIDN_DENOISER)
+#include "oidn_denoiser.hpp"
 #endif
 
 
@@ -61,11 +72,21 @@ public:
   };
 
   void onAttach(Resources& resources, nvvk::ProfilerGpuTimer* profiler) override;
-  void setProfilerTimeline(nvutils::ProfilerTimeline* timeline) { m_profilerTimeline = timeline; }
+  void setProfilerTimeline(nvutils::ProfilerTimeline* timeline)
+  {
+    m_profilerTimeline = timeline;
+#if defined(USE_OIDN_DENOISER)
+    m_oidn->setProfilerTimeline(timeline);
+#endif
+  }
   void onDetach(Resources& resources) override;
   void onResize(VkCommandBuffer cmd, const VkExtent2D& size, Resources& resources) override;
   bool onUIRender(Resources& resources) override;
   void onRender(VkCommandBuffer cmd, Resources& resources) override;
+  // Called instead of onRender() while the accumulation is complete
+  void onAccumulationComplete(VkCommandBuffer cmd, Resources& resources);
+  // The DLSS hand-off's image, to show instead of the denoiser's view (null when not shown)
+  const VkDescriptorImageInfo* handoffImage(const Resources& resources) const;
   void onSceneInvalidated(Resources& resources) override;
   void notifyDlssContentReset(Resources& resources) override;
 
@@ -124,8 +145,8 @@ public:
     bool visualize = false;  // True when the debug-visualization code is compiled in (USE_VISUALIZE).
     bool omm       = false;  // True when the ray-query entry points opt in to opacity micromaps (USE_OMM).
     bool optimal   = false;  // True when the shader is the scene-aware optimized build.
-    bool dlss      = false;  // True when DLSS is active (drives USE_DLSS_SHADER: sample-loop gate).
-    bool dlssGuide = false;  // True when guide-buffer capture is compiled in (USE_GUIDE_SHADER: DLSS or OptiX).
+    bool dlss      = false;  // True on the frames DLSS renders (drives USE_DLSS_SHADER: DLSS's guide captures).
+    bool dlssGuide = false;  // True when guide-buffer capture is compiled in (USE_GUIDE_SHADER: DLSS, OptiX or OIDN).
     nvvkgltf::SceneFeatureSet features{};  // only meaningful when `optimal == true`
     int dlssTransparency = 0;  // USE_DLSS_TRANSP the pipeline was specialized with (Dlss::TransparencyMode).
 
@@ -173,10 +194,36 @@ public:
   RenderTechnique m_renderTechnique{RenderTechnique::RayTracing};
 
   // Adaptive sampling for performance optimization
-  void                       updateAdaptiveSampling(Resources& resources);
+  void                                  updateAdaptiveSampling(Resources& resources);
+  void                                  restartAdaptiveSampling();
+  sample_schedule::ThroughputSearch     m_throughputSearch;       // Auto SPP's Throughput target
+  sample_schedule::FrameRateControl     m_frameRateControl;       // Auto SPP's frame-rate targets
+  std::chrono::steady_clock::time_point m_lastAdaptiveFrameTime;  // When the previous frame was rendered
+#if defined(USE_OPTIX_DENOISER)
+  // The "Optix denoiser" profiler section's GPU time: the CUDA-measured invoke, per in-flight frame slot
+  std::array<double, nvutils::ProfilerTimeline::MAX_FRAME_DELAY> m_optixGpuUs{};
+  nvutils::ProfilerTimeline::GpuTimeProvider                     m_optixTimeProvider{
+                          .apiName       = "CUDA",
+                          .frameFunction = [this](nvutils::ProfilerTimeline::FrameSectionID sec, double& gpuTime) {
+        gpuTime = m_optixGpuUs[sec.subFrame];
+        return true;
+      }};
+#endif
+  bool                       m_optixWasOn{false};  // keepOneAccumulationDenoiser(): last frame's state
+  bool                       m_oidnWasOn{false};
+  // DLSS-RR rendered frame 0 of this accumulation, and an accumulation denoiser (OptiX, OIDN) takes the
+  // frames after it: DLSS's image is no sample of the accumulation, and the hand-off blends from it
+  bool                       m_dlssFrame0{false};
+  DenoiserHandoff            m_handoff;
+  std::atomic<uint32_t>      m_pipelineGeneration{0};   // Bumped whenever a new or swapped pipeline is installed
+  uint64_t                   m_adaptivePipelineKey{0};  // Pipeline (generation, technique) Auto SPP was found with
   nvutils::ProfilerTimeline* m_profilerTimeline{nullptr};
   bool                       m_adaptiveSampling{true};
-  int                        m_totalSamplesAccumulated{0};  // Track total samples separately
+  int m_adaptiveSamples{MIN_SAMPLES_PER_PIXEL};  // Auto SPP's samples per frame; ptSamples keeps the user's value
+  int m_totalSamplesAccumulated{0};              // Track total samples separately
+  int m_frameSamples{1};  // Samples per pixel traced this frame: ptSamples, fewer on a frame that ends on a stop
+  // Samples traced by the last frames, as far back as the profiler's GPU times lag (Auto SPP)
+  std::array<int, nvutils::ProfilerTimeline::MAX_FRAME_DELAY + 1> m_recentFrameSamples{};
 
   nvsamples::RollingAverage<float, 100> m_throughputRollingAvg;  // Rolling average of mega-sample-pixels per second (MSPP/s)
 
@@ -186,12 +233,16 @@ public:
     eInteractive = 0,  // 60 FPS - for real-time interaction
     eBalanced    = 1,  // 30 FPS - good balance of responsiveness and quality
     eQuality     = 2,  // 15 FPS - prioritize quality convergence
-    eMaxQuality  = 3   // 10 FPS - maximum GPU utilization for fastest convergence
+    eMaxQuality  = 3,  // 10 FPS - maximum GPU utilization for fastest convergence
+    eThroughput  = 4   // Lowest GPU time per sample, frames up to 10 FPS - offline renders (headless default)
   };
 
   PerformanceTarget    m_performanceTarget{PerformanceTarget::eBalanced};  // Default to balanced for path tracing
-  static constexpr int MAX_SAMPLES_PER_PIXEL = 100;
-  static constexpr int MIN_SAMPLES_PER_PIXEL = 1;
+  static constexpr int MAX_SAMPLES_PER_PIXEL = 100;  // ptSamples, the samples per frame set by hand
+  // Auto SPP's ceiling. Higher than the slider: the controller bounds the frame time, and small or
+  // simple images need many samples per frame to keep the GPU busy (headless throughput).
+  static constexpr int MAX_ADAPTIVE_SAMPLES_PER_PIXEL = 1024;
+  static constexpr int MIN_SAMPLES_PER_PIXEL          = 1;
 
   double getTargetFrameTimeMs() const
   {
@@ -204,11 +255,29 @@ public:
       case PerformanceTarget::eQuality:
         return 1000.0 / 15.0;  // 66.67ms
       case PerformanceTarget::eMaxQuality:
-        return 1000.0 / 10.0;  // 100ms
+      case PerformanceTarget::eThroughput:  // the longest frame the search may try
+        return 1000.0 / 10.0;               // 100ms
       default:
         return 1000.0 / 30.0;
     }
   }
+
+  // One accumulated-image denoiser at a time (OptiX or OIDN): both would denoise the same image, and
+  // only one result can be shown. The one turned on last stays on; when both come on together
+  // (ImGui.ini, the command line), OIDN does. Called every frame; returns true when the accumulation
+  // must restart.
+  bool keepOneAccumulationDenoiser(Resources& resources);
+
+  // Samples per frame the next frame traces before it ends on a stop: Auto SPP's count, the
+  // setting (ptSamples), or 1 when DLSS renders every frame
+  int samplesPerFrame() const
+  {
+    return isDlssEveryFrame() ? 1 : (m_adaptiveSampling ? m_adaptiveSamples : m_pushConst.numSamples);
+  }
+
+  // DLSS-RR renders every frame, one sample each. Not with OptiX or OIDN also on: DLSS renders only
+  // frame 0, and the frames they take trace the samples Auto SPP or Samples per Frame ask for.
+  bool isDlssEveryFrame() const { return isDlssEnabled() && !isAccumulationDenoiserEnabled(); }
 
   // True when the user has DLSS-RR enabled
   bool isDlssEnabled() const
@@ -238,8 +307,19 @@ public:
   const OptiXDenoiser*           getOptiXDenoiser() const { return m_optix.get(); }
 #endif
 
+  // #OIDN - Implementation of the vk_oidn denoiser (Open Image Denoise on Vulkan)
+#if defined(USE_OIDN_DENOISER)
+  std::unique_ptr<OidnDenoiser> m_oidn;
+  OidnDenoiser*                 getOidnDenoiser() { return m_oidn.get(); }
+  const OidnDenoiser*           getOidnDenoiser() const { return m_oidn.get(); }
+#endif
+
 
 private:
+  // VK_KHR_pipeline_executable_properties: log each pipeline build's statistics (register count, spills)
+  void logPipelineStatistics(VkPipeline pipeline, const char* label) const;
+  bool m_capturePipelineStats{false};
+
   // What the live shader / pipeline lack for the current settings (see getPendingCompileWork()).
   struct PendingCompileWork
   {
@@ -259,8 +339,18 @@ private:
   void               setupPushConstant(VkCommandBuffer cmd, Resources& resources, VkExtent2D renderingSize);
   // Determine if DLSS should actively denoise this frame
   bool getEffectiveDlssEnabled(const Resources& resources) const;
+  // A denoiser of the accumulated image (OptiX or OIDN) is on
+  bool isAccumulationDenoiserEnabled() const;
+  // The accumulation denoiser on this frame, for the DLSS hand-off; nullopt when none is
+  std::optional<DenoiserHandoff::Denoiser> handoffDenoiser(const Resources& resources) const;
+  // Denoises made so far by OptiX and OIDN together
+  uint32_t accumulationDenoiseCount() const;
+  // Samples per pixel the DLSS hand-off ends at (its setting, at most Max Samples); 0 without one
+  int handoffEnd(const Resources& resources) const;
   // Determine if OptiX should actively denoise this frame
   bool getEffectiveOptixEnabled(const Resources& resources) const;
+  // Determine if OIDN should write its guides and denoise this frame
+  bool getEffectiveOidnEnabled(const Resources& resources) const;
   // Upscale selection ID and depth from render resolution to display resolution (OptiX 2x mode)
   void upscaleSelectionAndDepth(VkCommandBuffer cmd, Resources& resources);
   // Size m_depthStaging / m_depthCopyBuffer to the G-buffer (no-op unless m_depthViaStaging).

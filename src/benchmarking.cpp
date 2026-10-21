@@ -195,17 +195,18 @@ void BenchmarkController::registerParameters(nvutils::ParameterRegistry* paramet
 }
 
 //--------------------------------------------------------------------------------------------------
-// Ensure the path-tracer accumulation budget (maxFrames) is at least as large
-// as the number of frames the headless run will render. Without this, the
+// Ensure the path-tracer accumulation cap (maxSamples) holds the samples the
+// headless run can render: --frames x the samples per frame. Without this, the
 // accumulator would stop refining before the captured screenshot is taken and
 // the result would be noisier than expected.
-void BenchmarkController::alignMaxFramesForHeadless(int& maxFrames, uint32_t headlessFrames)
+void BenchmarkController::alignMaxSamplesForHeadless(int& maxSamples, uint32_t headlessFrames, int samplesPerFrame)
 {
-  const int minMaxFrames = static_cast<int>(headlessFrames);
-  if(maxFrames < minMaxFrames)
+  const int64_t needed = std::min<int64_t>(int64_t(headlessFrames) * std::max(samplesPerFrame, 1), INT32_MAX);
+  if(maxSamples < needed)
   {
-    LOGW("maxFrames (%d) is less than headless --frames (%u); setting maxFrames to %u\n", maxFrames, headlessFrames, headlessFrames);
-    maxFrames = minMaxFrames;
+    LOGW("ptMaxSamples (%d) is less than headless --frames (%u) x %d spp per frame; setting it to %lld\n", maxSamples,
+         headlessFrames, samplesPerFrame, static_cast<long long>(needed));
+    maxSamples = static_cast<int>(needed);
   }
 }
 
@@ -226,10 +227,11 @@ void BenchmarkController::beginHeadlessTimingIfNeeded(bool isHeadless, const Hea
   m_headlessMeasuredTimingActive = false;
   m_headlessFramesDone           = 0;
   m_headlessMeasuredStartFrame   = 0;
+  m_headlessMeasuredStartSamples = 0;
   m_headlessLastProgressLogMs    = 0.0;
 
-  LOGI("HEADLESS_START frames=%u maxFrames=%d ptSamples=%d\n", info.totalFrames, info.maxFrames, info.ptSamples);
-  emitJsonLine({{"type", "headless_start"}, {"frames", info.totalFrames}, {"maxFrames", info.maxFrames}, {"ptSamples", info.ptSamples}});
+  LOGI("HEADLESS_START frames=%u maxSamples=%d ptSamples=%d\n", info.totalFrames, info.maxSamples, info.ptSamples);
+  emitJsonLine({{"type", "headless_start"}, {"frames", info.totalFrames}, {"maxSamples", info.maxSamples}, {"ptSamples", info.ptSamples}});
 }
 
 //--------------------------------------------------------------------------------------------------
@@ -245,16 +247,18 @@ void BenchmarkController::updateHeadlessProgressIfNeeded(const HeadlessFrameInfo
   }
 
   ++m_headlessFramesDone;
-  const double elapsedMs   = m_headlessWallTimer.getMilliseconds();
-  const bool   onInterval  = (m_headlessFramesDone % kHeadlessLogEveryNFrames) == 0;
-  const bool   onTime      = (elapsedMs - m_headlessLastProgressLogMs) >= kHeadlessLogMinIntervalMs;
-  const bool   firstOrLast = m_headlessFramesDone == 1 || m_headlessFramesDone >= info.totalFrames;
+  const double elapsedMs  = m_headlessWallTimer.getMilliseconds();
+  const bool   onInterval = (m_headlessFramesDone % kHeadlessLogEveryNFrames) == 0;
+  const bool   onTime     = (elapsedMs - m_headlessLastProgressLogMs) >= kHeadlessLogMinIntervalMs;
+  // --frames 0 has no last frame: the run ends when --ptMaxSamples is reached (or on close)
+  const bool firstOrLast = m_headlessFramesDone == 1 || (info.totalFrames > 0 && m_headlessFramesDone >= info.totalFrames);
 
   if(!m_headlessMeasuredTimingActive && m_headlessFramesDone >= kHeadlessWarmupFrames)
   {
     m_headlessMeasuredTimer.reset();
     m_headlessMeasuredTimingActive = true;
     m_headlessMeasuredStartFrame   = m_headlessFramesDone;
+    m_headlessMeasuredStartSamples = info.samples;
   }
 
   if(!firstOrLast && !onInterval && !onTime)
@@ -262,13 +266,19 @@ void BenchmarkController::updateHeadlessProgressIfNeeded(const HeadlessFrameInfo
     return;
   }
 
-  const float pct =
+  // Whichever ends the run first: the frames, or the samples cap
+  const float framePct =
       info.totalFrames > 0 ? 100.0F * static_cast<float>(m_headlessFramesDone) / static_cast<float>(info.totalFrames) : 0.0F;
+  const float samplePct =
+      info.maxSamples > 0 ? 100.0F * static_cast<float>(info.samples) / static_cast<float>(info.maxSamples) : 0.0F;
+  const float  pct        = std::min(std::max(framePct, samplePct), 100.0F);
   const double msPerFrame = m_headlessFramesDone > 0 ? elapsedMs / static_cast<double>(m_headlessFramesDone) : 0.0;
 
-  LOGI("HEADLESS_PROGRESS app_frame %u/%u (%.0f%%) elapsed_ms=%.1f ms_per_frame=%.2f\n", m_headlessFramesDone,
-       info.totalFrames, pct, elapsedMs, msPerFrame);
+  LOGI("HEADLESS_PROGRESS spp %d/%d app_frame %u/%u (%.0f%%) elapsed_ms=%.1f ms_per_frame=%.2f\n", info.samples,
+       info.maxSamples, m_headlessFramesDone, info.totalFrames, pct, elapsedMs, msPerFrame);
   emitJsonLine({{"type", "headless_progress"},
+                {"spp", info.samples},
+                {"maxSamples", info.maxSamples},
                 {"app_frame", m_headlessFramesDone},
                 {"frames", info.totalFrames},
                 {"percent", roundTo(pct, 1000.0)},
@@ -281,10 +291,9 @@ void BenchmarkController::updateHeadlessProgressIfNeeded(const HeadlessFrameInfo
 // Emit the final headless summary: wall time, ms/frame, and the equivalent
 // path-tracing throughput in megasamples per second.
 //
-// effective_spp accounts for both the number of accumulated frames (capped to
-// maxFrames so we don't count frames that no longer contribute) and the
-// per-frame sample count, giving a single figure of merit comparable across
-// runs at different resolutions.
+// effective_spp is the samples per pixel the final image holds: it already
+// accounts for the maxSamples cap, adaptive sampling and accumulation restarts,
+// giving a single figure of merit comparable across runs at different resolutions.
 void BenchmarkController::logHeadlessSummary(const HeadlessFrameInfo& info)
 {
   if(!m_headlessTimingActive)
@@ -292,13 +301,14 @@ void BenchmarkController::logHeadlessSummary(const HeadlessFrameInfo& info)
     return;
   }
 
+  // The frames rendered: fewer than --frames when --ptMaxSamples ended the run, and --frames 0 has no count
+  const uint32_t completedFrames = info.totalFrames > 0 ? std::min(m_headlessFramesDone, info.totalFrames) : m_headlessFramesDone;
   const double totalWallMs     = m_headlessWallTimer.getMilliseconds();
-  const double totalMsPerFrame = info.totalFrames > 0 ? totalWallMs / static_cast<double>(info.totalFrames) : 0.0;
+  const double totalMsPerFrame = completedFrames > 0 ? totalWallMs / static_cast<double>(completedFrames) : 0.0;
 
-  const uint32_t completedFrames = std::min(m_headlessFramesDone, info.totalFrames);
-  uint32_t       warmupFrames    = 0;
-  uint32_t       measuredFrames  = completedFrames;
-  double         measuredWallMs  = totalWallMs;
+  uint32_t warmupFrames   = 0;
+  uint32_t measuredFrames = completedFrames;
+  double   measuredWallMs = totalWallMs;
   if(m_headlessMeasuredTimingActive && completedFrames >= m_headlessMeasuredStartFrame)
   {
     warmupFrames   = m_headlessMeasuredStartFrame;
@@ -309,25 +319,26 @@ void BenchmarkController::logHeadlessSummary(const HeadlessFrameInfo& info)
   const double measuredWallSec    = measuredWallMs / 1000.0;
   const double measuredMsPerFrame = measuredFrames > 0 ? measuredWallMs / static_cast<double>(measuredFrames) : 0.0;
 
-  const int accumFrames = std::min(static_cast<int>(info.totalFrames), std::max(info.maxFrames, 0));
-  const int measuredAccumFrames = std::clamp(accumFrames - static_cast<int>(warmupFrames), 0, static_cast<int>(measuredFrames));
-  const int      effectiveSpp         = accumFrames * std::max(info.ptSamples, 1);
-  const int      measuredEffectiveSpp = measuredAccumFrames * std::max(info.ptSamples, 1);
+  const int effectiveSpp = std::max(info.samples, 0);
+  // Samples added after the warmup. A restart after the warmup leaves fewer: all of them are measured then.
+  const int      measuredEffectiveSpp = (warmupFrames > 0 && effectiveSpp >= m_headlessMeasuredStartSamples) ?
+                                            effectiveSpp - m_headlessMeasuredStartSamples :
+                                            effectiveSpp;
   const uint64_t pixels = static_cast<uint64_t>(info.imageSize.width) * static_cast<uint64_t>(info.imageSize.height);
   const double   measuredSamples = static_cast<double>(pixels) * static_cast<double>(measuredEffectiveSpp);
   const double   throughputMSps  = measuredWallSec > 0.0 ? measuredSamples / measuredWallSec / 1e6 : 0.0;
   const double   sppPerSec = measuredWallSec > 0.0 ? static_cast<double>(measuredEffectiveSpp) / measuredWallSec : 0.0;
 
   LOGI(
-      "HEADLESS_SUMMARY frames=%u maxFrames=%d ptSamples=%d effective_spp=%d measured_effective_spp=%d "
+      "HEADLESS_SUMMARY frames=%u maxSamples=%d ptSamples=%d effective_spp=%d measured_effective_spp=%d "
       "resolution=%ux%u wall_ms=%.3f ms_per_frame=%.3f total_wall_ms=%.3f total_ms_per_frame=%.3f "
       "warmup_frames=%u measured_frames=%u throughput_MSps=%.3f spp_per_sec=%.2f\n",
-      info.totalFrames, info.maxFrames, info.ptSamples, effectiveSpp, measuredEffectiveSpp, info.imageSize.width,
+      completedFrames, info.maxSamples, info.ptSamples, effectiveSpp, measuredEffectiveSpp, info.imageSize.width,
       info.imageSize.height, measuredWallMs, measuredMsPerFrame, totalWallMs, totalMsPerFrame, warmupFrames,
       measuredFrames, throughputMSps, sppPerSec);
   emitJsonLine({{"type", "headless_summary"},
-                {"frames", info.totalFrames},
-                {"maxFrames", info.maxFrames},
+                {"frames", completedFrames},
+                {"maxSamples", info.maxSamples},
                 {"ptSamples", info.ptSamples},
                 {"effective_spp", effectiveSpp},
                 {"measured_effective_spp", measuredEffectiveSpp},

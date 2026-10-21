@@ -1188,6 +1188,10 @@ void UiSceneBrowser::showNodeContextMenu(int nodeIdx)
           {
             m_undoStack->clear();  // model mutated outside the command system
             markCachesDirty();
+            // Unlocked copies of a skinned or morphed node no longer share one render primitive:
+            // the renderer recreates vertex buffers, BLAS and animation buffers to match.
+            if(m_onGeometryChanged)
+              m_onGeometryChanged();
           }
         }
         ImGui::SetItemTooltip("Break the external-asset link and unlock all instances of this asset for editing (saved inline on next save)");

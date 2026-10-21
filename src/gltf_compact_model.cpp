@@ -98,7 +98,7 @@ void collectOpacityMicromapAccessors(const tinygltf::Model& model, std::set<int>
 // node.extensions["EXT_mesh_gpu_instancing"]["attributes"] as a JSON object. These are ordinary
 // accessor references but they do not live on any primitive/skin/animation, so the standard walk
 // misses them; without this, compaction drops or renumbers those accessors and re-parsing throws
-// out_of_range from accessors.at() (see nvvkgltf::Scene::handleGpuInstancing).
+// out_of_range from accessors.at() (see nvvkgltf::Scene::gpuInstancingMatrices).
 void collectGpuInstancingAccessors(const tinygltf::Model& model, std::set<int>& usedAccessors)
 {
   for(const auto& node : model.nodes)

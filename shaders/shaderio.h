@@ -31,6 +31,13 @@
 NAMESPACE_SHADERIO_BEGIN()
 
 #define WORKGROUP_SIZE 16
+// The ray-query path tracer's workgroup (computeMain), apart from WORKGROUP_SIZE because its size
+// steers how the compiler budgets registers for that one large kernel. At 16x16 (256 threads) the
+// kernel with the DLSS guides got 202 registers and 8 warps per SM; at 128 threads or fewer, 168
+// registers with a small spill and 12 warps -- ~25% faster path tracing with DLSS, ~6-18% without
+// (RTX PRO 4500 Blackwell). The shape among those barely matters; 8x8 keeps rays coherent.
+#define PT_WORKGROUP_X 8
+#define PT_WORKGROUP_Y 8
 #define SILHOUETTE_WORKGROUP_SIZE 16
 
 
@@ -64,16 +71,18 @@ enum class EnvSystem
 // Output image types
 enum OutputImage
 {
-  eResultImage = 0,        // Output image (RGBA32)
-  eSelectImage,            // Selection image (R32)
-  eDlssAlbedo = 2,         // Diffuse albedo (RGBA8)
-  eDlssSpecAlbedo,         // Specular albedo (RGBA32)
-  eDlssNormalRoughness,    // Normal and roughness (RGBA32)
-  eDlssMotion,             // Motion (RGBA32)
-  eDlssDepth,              // Depth (R32)
-  eDlssSpecularHitDist,    // Specular hit distance (R16F)
-  eNrMask,                 // NR per-material control mask (RGBA16F)
-  eOptixAlbedoNormal = 2,  // Albedo/encoded normal (RGBA32)
+  eResultImage = 0,      // Output image (RGBA32)
+  eSelectImage,          // Selection image (R32)
+  eDlssAlbedo = 2,       // Diffuse albedo (RGBA8)
+  eDlssSpecAlbedo,       // Specular albedo (RGBA32)
+  eDlssNormalRoughness,  // Normal and roughness (RGBA32)
+  eDlssMotion,           // Motion (RGBA32)
+  eDlssDepth,            // Depth (R32)
+  eDlssSpecularHitDist,  // Specular hit distance (R16F)
+  eNrMask,               // NR per-material control mask (RGBA16F)
+  eDenoiserAlbedo = 2,   // Accumulated albedo guide of the denoiser of the accumulation (RGBA32)
+  eDenoiserNormal = 3,   // Accumulated world-space normal guide (RGBA32). Both alias DLSS slots: the
+                         // images of the denoiser on (OptiX or OIDN) are bound there, never with DLSS
 };
 
 // Binding points for descriptors
@@ -94,13 +103,21 @@ enum BindingPoints
 
 enum OptixBindingPoints
 {
-  eInRgba = 0,      // Incoming image (RGBA32)
-  eInAlbedoNormal,  // Incoming albedo/normal (RGBA32)
-  eOutRgba,         // Outgoing image in buffer
-  eOutAlbedo,       // Outgoing albedo in buffer
-  eOutNormal,       // Outgoing normal in buffer
+  eInRgba = 0,  // Incoming image (RGBA32)
+  eInAlbedo,    // Incoming accumulated albedo guide (RGBA32)
+  eInNormal,    // Incoming accumulated world-space normal guide (RGBA32)
+  eOutRgba,     // Outgoing image in buffer
+  eOutAlbedo,   // Outgoing albedo in buffer
+  eOutNormal,   // Outgoing normal in buffer
 };
 
+// DLSS hand-off (denoiser_handoff.slang): storage images, in VK_IMAGE_LAYOUT_GENERAL
+enum DenoiserHandoffBindings
+{
+  eHandoffDlss,      // In: DLSS's image, kept from frame 0 (RGBA32F)
+  eHandoffDenoised,  // In: the accumulation denoiser's image (RGBA32F)
+  eHandoffOut,       // Out: the image shown (RGBA16F)
+};
 
 // Binding points for descriptors
 enum SilhouetteBindings
@@ -260,9 +277,9 @@ struct SceneFrameInfo
 enum PathtracerFlags
 {
   ePtUseDlss            = 1 << 0,
-  ePtUseOptixDenoiser   = 1 << 1,
   ePtFirstFrame         = 1 << 2,
   ePtShadowTransmission = 1 << 3,  // Biased: shadow rays pass straight through transmissive surfaces
+  ePtDenoiserGuides     = 1 << 4,  // Accumulate the albedo/normal guides (eDenoiserAlbedo, eDenoiserNormal)
 };
 
 
@@ -279,11 +296,20 @@ struct PathtracePushConstant
   float           aperture              = 0.0f;    // Aperture for depth of field
   int             flags                 = 0;       // Bit flags: see PathtracerFlags
   float           pixelAngle            = 0.0f;    // Angular size of one pixel (radians) for ray-cone footprint LOD
+  int             seed                  = 0;       // Random sequence: another value gives independent noise
+  int             guideSamples          = 0;       // Samples in the denoiser guides (0: replace them)
   float2          mouseCoord            = {0, 0};  // Mouse coordinates (use for debug)
   uint2           renderSize = {0, 0};          // Traced region: smaller than the output images under OptiX 2x upscale
   SceneFrameInfo* frameInfo;                    // Camera info (incl. SceneFrameInfo::jitter when DLSS is active)
   GltfScene*      gltfScene;                    // GLTF scene
   float4x4*       prevRenderNodeObjectToWorld;  // #DLSS instance motion: previous-frame objectToWorld per render node
+};
+
+// OptiX: copy of the images to the linear buffers it reads (optix_image_to_buffer.slang)
+struct OptixCopyPushConstant
+{
+  uint2           imageSize;  // Input (render) size
+  SceneFrameInfo* frameInfo;  // View matrix: the guide normal is converted to camera space
 };
 
 // Push constant
@@ -320,6 +346,11 @@ struct SkyBackgroundPushConstant
   SceneFrameInfo* frameInfo;  // Sky type + parameters + intensity/rotation, and the camera
   int             mode;       // SkyBackgroundMode
   int             _pad[3];
+};
+
+struct DenoiserHandoffPushConstant
+{
+  float weight = 0.0F;  // Share of the denoised image (handoffWeight)
 };
 
 struct SilhouettePushConstant

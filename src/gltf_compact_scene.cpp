@@ -29,7 +29,9 @@
 #include "tinygltf_utils.hpp"
 #include <nvutils/logger.hpp>
 #include <algorithm>
+#include <functional>
 #include <set>
+#include <string>
 #include <vector>
 
 namespace nvvkgltf {
@@ -259,7 +261,8 @@ struct UsedResources
 
 // Phase 1: Walk the scene graph top-down and collect every referenced resource index.
 // Cascade: scenes → nodes → meshes → materials → textures → images/samplers; plus skins, cameras, lights, animations.
-void collectReferencedResources(const tinygltf::Model& model, UsedResources& used)
+// `extraMeshes` are used though no node points at them (the meshes instance sets draw).
+void collectReferencedResources(const tinygltf::Model& model, UsedResources& used, const std::vector<int>& extraMeshes = {})
 {
   // 1. Traverse all scenes → nodes to collect mesh/skin/camera/light references
   for(const auto& scene : model.scenes)
@@ -303,6 +306,10 @@ void collectReferencedResources(const tinygltf::Model& model, UsedResources& use
       traverseNode(rootNodeIdx);
     }
   }
+
+  for(size_t m = 0; m < extraMeshes.size(); m++)
+    if(extraMeshes[m] >= 0)
+      used.meshes.insert(extraMeshes[m]);
 
   // 2. Collect material references from used meshes
   for(int meshIdx : used.meshes)
@@ -380,13 +387,16 @@ void collectReferencedResources(const tinygltf::Model& model, UsedResources& use
         isUsed = true;
         break;
       }
-      if(channel.target_path == "pointer" && channel.extensions.count("KHR_animation_pointer"))
+      if(channel.target_path == "pointer" && channel.target_extensions.count("KHR_animation_pointer"))
       {
-        const tinygltf::Value& ext = channel.extensions.at("KHR_animation_pointer");
+        const tinygltf::Value& ext = channel.target_extensions.at("KHR_animation_pointer");
         if(ext.Has("pointer") && ext.Get("pointer").IsString())
         {
-          std::string pointer = ext.Get("pointer").Get<std::string>();
-          if(pointer.find("/materials/") != std::string::npos
+          const std::string pointer = ext.Get("pointer").Get<std::string>();
+          const bool        nodePointer =
+              pointer.starts_with("/nodes/")
+              && tinygltf::utils::parsePointerIndexAndRest(pointer, std::char_traits<char>::length("/nodes/")).first >= 0;
+          if(nodePointer || pointer.find("/materials/") != std::string::npos
              || pointer.find("/extensions/KHR_lights_punctual/lights/") != std::string::npos)
           {
             isUsed = true;
@@ -398,6 +408,28 @@ void collectReferencedResources(const tinygltf::Model& model, UsedResources& use
     if(isUsed)
       used.animations.insert(static_cast<int>(animIdx));
   }
+}
+
+// A KHR_animation_pointer channel addressing "/nodes/<i>/...": follows node i through `remapNode`.
+// Returns false if that node is gone (drop the channel). Pointers to other resources are kept as
+// they are.
+// TODO: compaction renumbers materials, meshes, cameras and lights without rewriting the pointers
+// that address them ("/materials/<i>/..."); only node pointers are remapped so far.
+bool remapNodePointer(tinygltf::AnimationChannel& channel, const std::function<int(int)>& remapNode)
+{
+  const tinygltf::ExtensionMap::iterator ext = channel.target_extensions.find("KHR_animation_pointer");
+  if(ext == channel.target_extensions.end() || !ext->second.Has("pointer") || !ext->second.Get("pointer").IsString())
+    return true;
+  const std::string      pointer = ext->second.Get("pointer").Get<std::string>();
+  constexpr const char*  kNodes  = "/nodes/";
+  if(!pointer.starts_with(kNodes))
+    return true;
+  const std::pair<int, std::string> parsed = tinygltf::utils::parsePointerIndexAndRest(pointer, std::char_traits<char>::length(kNodes));
+  const int                         node   = remapNode(parsed.first);
+  if(node < 0)
+    return false;
+  ext->second.Get<tinygltf::Value::Object>()["pointer"] = tinygltf::Value(kNodes + std::to_string(node) + parsed.second);
+  return true;
 }
 
 // Build old→new index remapping: entries in usedSet get consecutive new indices; others stay -1.
@@ -592,6 +624,16 @@ void removeExternalAssetContent(tinygltf::Model& model)
 {
   const int nodeCount = static_cast<int>(model.nodes.size());
 
+  // Instance sets are runtime data: the placing nodes that draw one keep what the file says, and
+  // lose the marker. A placement drawn through an instance set brought its file's resources
+  // without any node, so it needs the compaction below too.
+  bool placedContent = false;
+  for(tinygltf::Node& node : model.nodes)
+  {
+    placedContent = placedContent || nvvkgltf::Scene::getInstanceSetIndex(node) >= 0;
+    nvvkgltf::Scene::clearInstanceSetMarker(node);
+  }
+
   // Flag the merged (marked) nodes for removal.
   std::vector<char> keep(nodeCount, 1);
   bool              anyRemoved = false;
@@ -603,7 +645,7 @@ void removeExternalAssetContent(tinygltf::Model& model)
       anyRemoved = true;
     }
   }
-  if(!anyRemoved)
+  if(!anyRemoved && !placedContent)
     return;  // no external-asset content merged in; nothing to strip
 
   // old -> new node index for the survivors.
@@ -664,8 +706,8 @@ void removeExternalAssetContent(tinygltf::Model& model)
     skin.skeleton = remap(skin.skeleton);
   }
 
-  // Animation channels: drop those targeting removed nodes; keep only animations that still have
-  // channels by rebuilding the list.
+  // Animation channels: drop those targeting removed nodes (by target_node, or by a
+  // KHR_animation_pointer "/nodes/<i>" pointer); keep only animations that still have channels.
   std::vector<tinygltf::Animation> keptAnimations;
   keptAnimations.reserve(model.animations.size());
   for(auto& anim : model.animations)
@@ -674,6 +716,12 @@ void removeExternalAssetContent(tinygltf::Model& model)
     channels.reserve(anim.channels.size());
     for(auto& ch : anim.channels)
     {
+      if(ch.target_path == "pointer")  // KHR_animation_pointer: no target_node, the node is in the pointer
+      {
+        if(remapNodePointer(ch, remap))
+          channels.push_back(ch);
+        continue;
+      }
       const int m = remap(ch.target_node);
       if(m >= 0)
       {
@@ -788,6 +836,7 @@ void flattenExternalAssets(tinygltf::Model& model)
     // and remove the read-only provenance marker so the merged content is fully owned/editable.
     node.externalAsset = -1;
     nvvkgltf::Scene::clearExternalAssetMarker(node);
+    nvvkgltf::Scene::clearInstanceSetMarker(node);  // Scene::save materialized the sets first
   }
 
   // The merged geometry now stands on its own; the external-asset tables are no longer referenced.
@@ -881,9 +930,20 @@ bool Scene::compactModel()
   // instead undercounts editor-created lights and makes needsCompaction miss them.
   const size_t origLight = m_model.lights.size();
 
-  // Phase 1: Collect all referenced resources via top-down scene graph traversal
+  // Phase 1: Collect all referenced resources via top-down scene graph traversal, plus the meshes
+  // instance sets draw, which no node points at.
+  std::vector<int> instanceSetMeshes;
+  for(size_t n = 0; n < m_model.nodes.size(); n++)
+  {
+    const int set = getInstanceSetIndex(m_model.nodes[n]);
+    if(set < 0 || set >= static_cast<int>(m_instanceSets.size()))
+      continue;
+    const std::vector<InstanceSet::Entry>& entries = m_instanceSets[set].entries;
+    for(size_t e = 0; e < entries.size(); e++)
+      instanceSetMeshes.push_back(entries[e].mesh);
+  }
   UsedResources used;
-  collectReferencedResources(m_model, used);
+  collectReferencedResources(m_model, used, instanceSetMeshes);
 
   // Geometry compaction (::compactModel) consolidates everything into a single buffer[0], so a model
   // that still spans more than one buffer — e.g. a primitive added in the editor appended its geometry
@@ -922,6 +982,13 @@ bool Scene::compactModel()
   std::vector<tinygltf::Light>     newLights     = extractUsedElements(m_model.lights, used.lights);
 
   // Phase 4: Rewrite all index references to use new indices
+  for(size_t s = 0; s < m_instanceSets.size(); s++)
+  {
+    std::vector<InstanceSet::Entry>& entries = m_instanceSets[s].entries;
+    for(size_t e = 0; e < entries.size(); e++)
+      if(entries[e].mesh >= 0 && entries[e].mesh < static_cast<int>(meshRemap.size()))
+        entries[e].mesh = meshRemap[entries[e].mesh];
+  }
   updateAllReferences(m_model, newMeshes, newMaterials, newTextures, meshRemap, materialRemap, textureRemap, imageRemap,
                       samplerRemap, skinRemap, cameraRemap, lightRemap, used.lights);
 

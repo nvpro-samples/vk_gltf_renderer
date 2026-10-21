@@ -30,6 +30,7 @@
 #include <charconv>
 #include <cstdlib>
 #include <cstring>
+#include <numeric>
 #include <unordered_set>
 
 #include <glm/gtx/norm.hpp>
@@ -553,7 +554,7 @@ KHR_materials_diffuse_transmission tinygltf::utils::getDiffuseTransmission(const
   {
     tinygltf::utils::getValue(*ext, "diffuseTransmissionFactor", gmat.diffuseTransmissionFactor);
     tinygltf::utils::getValue(*ext, "diffuseTransmissionTexture", gmat.diffuseTransmissionTexture);
-    tinygltf::utils::getArrayValue(*ext, "diffuseTransmissionColor", gmat.diffuseTransmissionColor);
+    tinygltf::utils::getArrayValue(*ext, "diffuseTransmissionColorFactor", gmat.diffuseTransmissionColorFactor);
     tinygltf::utils::getValue(*ext, "diffuseTransmissionColorTexture", gmat.diffuseTransmissionColorTexture);
   }
   return gmat;
@@ -564,7 +565,8 @@ void tinygltf::utils::setDiffuseTransmission(tinygltf::Material& tmat, const KHR
   tinygltf::Value& ext = tinygltf::utils::ensureExtension(tmat.extensions, KHR_MATERIALS_DIFFUSE_TRANSMISSION_EXTENSION_NAME);
   tinygltf::utils::setValue(ext, "diffuseTransmissionFactor", diffuseTransmission.diffuseTransmissionFactor);
   tinygltf::utils::setValue(ext, "diffuseTransmissionTexture", diffuseTransmission.diffuseTransmissionTexture);
-  tinygltf::utils::setArrayValue(ext, "diffuseTransmissionColor", 3, glm::value_ptr(diffuseTransmission.diffuseTransmissionColor));
+  tinygltf::utils::setArrayValue(ext, "diffuseTransmissionColorFactor", 3,
+                                 glm::value_ptr(diffuseTransmission.diffuseTransmissionColorFactor));
   tinygltf::utils::setValue(ext, "diffuseTransmissionColorTexture", diffuseTransmission.diffuseTransmissionColorTexture);
 }
 
@@ -754,7 +756,15 @@ std::string tinygltf::utils::generatePrimitiveKey(const tinygltf::Primitive& pri
   {
     o << kv.first << ":" << kv.second << " ";
   }
-  o << "indices:" << primitive.indices;
+  o << "indices:" << primitive.indices << " mode:" << primitive.mode;
+  // Morph targets are part of the geometry: primitives over the same base accessors with other
+  // targets blend to other shapes.
+  for(size_t t = 0; t < primitive.targets.size(); t++)
+  {
+    o << " target" << t << ":";
+    for(const auto& kv : primitive.targets[t])
+      o << kv.first << ":" << kv.second << " ";
+  }
   return o.str();
 }
 
@@ -878,7 +888,7 @@ std::vector<int> tinygltf::utils::getTextureImageSources(const tinygltf::Texture
 void tinygltf::utils::remapTextureExtensionImageSources(tinygltf::Texture& texture, const std::vector<int>& imageRemap)
 {
   auto safeRemap = [&imageRemap](int oldIdx) -> int {
-    return (oldIdx >= 0 && oldIdx < static_cast<int>(imageRemap.size())) ? imageRemap[oldIdx] : oldIdx;
+    return oldIdx < static_cast<int>(imageRemap.size()) ? imageRemap[oldIdx] : -1;  // past the end: invalid
   };
 
   for(const char* extName : kTextureImageSourceExtensionNames)
@@ -892,25 +902,6 @@ void tinygltf::utils::remapTextureExtensionImageSources(tinygltf::Texture& textu
     const int idx = ext.Get("source").GetNumberAsInt();
     if(idx >= 0)
       ext.Get<tinygltf::Value::Object>()["source"] = tinygltf::Value(safeRemap(idx));
-  }
-}
-
-void tinygltf::utils::offsetTextureExtensionImageSources(tinygltf::Texture& texture, int imageIndexDelta)
-{
-  if(imageIndexDelta == 0)
-    return;
-
-  for(const char* extName : kTextureImageSourceExtensionNames)
-  {
-    auto it = texture.extensions.find(extName);
-    if(it == texture.extensions.end())
-      continue;
-    tinygltf::Value& ext = it->second;
-    if(!ext.Has("source"))
-      continue;
-    const int idx = ext.Get("source").GetNumberAsInt();
-    if(idx >= 0)
-      ext.Get<tinygltf::Value::Object>()["source"] = tinygltf::Value(idx + imageIndexDelta);
   }
 }
 
@@ -1025,18 +1016,29 @@ void tinygltf::utils::simpleCreateTangents(tinygltf::Model& model, tinygltf::Pri
   const size_t  numVertices = tinygltf::utils::getVertexCount(model, primitive);
   const int32_t numFaces    = static_cast<int32_t>(indexCount / 3);
 
-  std::vector<uint32_t>      indexStorage;
-  std::vector<glm::vec3>     positionStorage;
-  std::vector<glm::vec3>     normalStorage;
-  std::vector<glm::vec2>     uvStorage;
-  std::span<const uint32_t>  indices   = getAccessorData(model, model.accessors[primitive.indices], &indexStorage);
+  std::vector<uint32_t>     indexStorage;
+  std::vector<glm::vec3>    positionStorage;
+  std::vector<glm::vec3>    normalStorage;
+  std::vector<glm::vec2>    uvStorage;
+  std::span<const uint32_t> indices;
+  if(primitive.indices >= 0)
+  {
+    indices = getAccessorData(model, model.accessors[primitive.indices], &indexStorage);
+  }
+  else
+  {
+    // Non-indexed primitive: vertices are consumed in order.
+    indexStorage.resize(numVertices);
+    std::iota(indexStorage.begin(), indexStorage.end(), 0u);
+    indices = indexStorage;
+  }
   std::span<const glm::vec3> positions = getAttributeData3(model, primitive, "POSITION", &positionStorage);
   std::span<const glm::vec3> normals   = getAttributeData3(model, primitive, "NORMAL", &normalStorage);
   std::span<const glm::vec2> uvs       = getAttributeData3(model, primitive, "TEXCOORD_0", &uvStorage);
   // Must not be complex, since we write to it
   std::span<glm::vec4> tangents = getAttributeData3<glm::vec4>(model, primitive, "TANGENT", nullptr);
 
-  if(tangents.data() == nullptr || positions.data() == nullptr)
+  if(tangents.data() == nullptr || positions.data() == nullptr || indices.size() < indexCount)
   {
     LOGE("Attributes are missing\n");
     return;

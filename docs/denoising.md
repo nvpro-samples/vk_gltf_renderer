@@ -1,4 +1,4 @@
-# Denoising & Upscaling — DLSS, OptiX, and Motion Vectors
+# Denoising & Upscaling — DLSS, OptiX, OIDN, and Motion Vectors
 
 > **For contributors and agents.** Conceptual map of the AI denoise/upscale backends and the
 > guide-buffer + motion-vector pipeline they consume. Exact formats, flags, and struct fields live
@@ -9,6 +9,9 @@
 - **DLSS** — Ray Reconstruction (RR) and Super Resolution (SR): `src/dlss.{cpp,hpp}` (app adapter,
   jitter, guide buffers, UI) over `src/dlss_wrapper.{cpp,hpp}` (project-independent NGX/Vulkan wrapper).
 - **OptiX AI Denoiser** — `src/optix_denoiser.{cpp,hpp}` (+ CUDA interop in `src/vk_cuda*`).
+- **OIDN AI Denoiser** — `src/oidn_denoiser.{cpp,hpp}` over [vk_oidn](https://github.com/nvpro-samples/vk_oidn),
+  which runs the Intel Open Image Denoise networks with Vulkan compute shaders. CMake downloads the
+  prebuilt SDK package of the release pinned by `VK_OIDN_VERSION`; nothing of vk_oidn is built here.
 - The **path tracer** (`renderer_pathtracer`) is the reference producer of the guide buffers; the
   **rasterizer** produces a subset for DLSS-SR.
 
@@ -54,11 +57,105 @@ the enum for the authoritative list and formats):
 | `eDlssSpecularHitDist` | Specular hit distance, captured at the first reflection bounce | `pInSpecularHitDistance` (optional) |
 
 - **DLSS-SR** uses only color + depth + motion — the material guides above are RR-only.
-- **OptiX** uses a single combined guide, `eOptixAlbedoNormal` (albedo + camera-space encoded
-  normal, written on the OptiX branch of `processPixel`). It deliberately **aliases enum index 2**
-  with `eDlssAlbedo`: DLSS and OptiX are mutually exclusive, so they share the slot.
+- **OptiX and OIDN** share one shader path for their guides: `eDenoiserAlbedo` and
+  `eDenoiserNormal` (world-space normal), written when `ePtDenoiserGuides` is set. The shader does
+  not know which denoiser reads them: each owns its own two images, and the path tracer binds those
+  of the denoiser on that frame to the two slots, which **alias** `eDlssAlbedo` and
+  `eDlssSpecAlbedo` (OptiX and OIDN are exclusive, and neither writes guides on a DLSS frame).
+  Unlike DLSS's, these guides are **accumulated** like the color, averaging every sample of each
+  frame, so their edges are anti-aliased (and blurred by depth of field) the same way, as Open Image
+  Denoise requires and OptiX's noise-free guides allow. They keep a sample count of their own
+  (`PathtracePushConstant::guideSamples`, from `GuideAccumulation` in `src/denoiser_schedule.hpp`):
+  they restart when they were not written on the previous frame, for instance when the denoiser is
+  turned on mid-accumulation, while the color goes on. Where nothing is hit, the albedo is the
+  normalized background color, the way the vk_oidn sample treats emitters, and the normal is zero.
+  OIDN reads them as they are; OptiX's copy pass (`optix_image_to_buffer.slang`) converts the normal
+  to normalized camera space, (0,0,0) where nothing was hit, as the OptiX Programming Guide asks.
 - Guides are produced at DLSS **render** resolution every frame while the denoiser is active; the
   main-GBuffer depth/selection are only written on frame 0 / after a reset.
+
+## Accumulated-image denoisers (OptiX, OIDN)
+
+OptiX and OIDN denoise the path tracer's accumulated image, not each frame. Both share the same
+scheduling: **Auto** runs each time the accumulation reaches a multiple of N samples per pixel
+(`AutoDenoiseSchedule`, `src/denoiser_schedule.hpp`), so the same interval gives the same image
+quality whatever the samples per frame, and once more on the final image when the accumulation
+reaches **Max Samples**, so the image left on screen is denoised from all its samples. **Denoise
+Now** runs on demand, and the result is shown through the `DisplayBuffer` override of the
+tonemapper input (`GltfRenderer::runTonemapPass`). With DLSS-RR also
+engaged, DLSS owns frame 0 and the accumulated-image denoisers take over from frame 1
+(`PathTracer::getEffectiveDlssEnabled` and its OptiX / OIDN counterparts), blending from DLSS's
+image: see [DLSS hand-off](#dlss-hand-off).
+
+Only one of them is on at a time (`PathTracer::keepOneAccumulationDenoiser`): both would denoise
+the same image, and only one result can be shown. Turning one on turns the other off; when both come
+on together (ImGui.ini, the command line), OIDN stays on.
+
+They differ in where the work runs:
+
+- **OptiX** runs on CUDA. `OptiXDenoiser::denoiseOneShot` waits for the queue, copies the images
+  into exported buffers, denoises, and copies the result back, in temporary command buffers. It
+  therefore always denoises the *previous* frame's accumulation. The frame that completes the
+  accumulation is the last one the path tracer renders, so its image is denoised on the first idle
+  frame after it (`PathTracer::onAccumulationComplete`); a headless run needs one frame past the cap
+  for it. None of this is in the frame's command buffer, so a Vulkan GPU timer cannot see it. The
+  Profiler window's *Optix denoiser* row therefore takes its GPU time from CUDA events around the
+  invoke (the Vulkan copies excluded), comparable to OIDN's row; its CPU time is the host wall time,
+  the wait for the frames in flight included. `OptiXDenoiser::getTimings` breaks the wall time down
+  (queue drain, copies, invoke), shown under the OptiX settings.
+- **OIDN** records `vkoidn::Denoiser::cmdDenoise` in the frame's own command buffer, right after the
+  path tracer (`OidnDenoiser::updateDenoiser`), reading the storage images directly. A frame is
+  denoised in that same frame, without host waits, so an interval of 1 denoises interactively, and
+  the frame that reaches the cap is denoised in that frame too. Like OptiX's, its Profiler row
+  (*OIDN denoiser*) is a frame section present on every frame OIDN is on, empty on the frames that
+  do not denoise; the GPU time in its settings and in `DENOISER_TIMING` keeps only the frames that
+  did (`OidnDenoiser::readGpuTime`). The network is created per size,
+  quality and guide set (`OidnDenoiser::ensureTargets`); creating it records the upload of its
+  weights. vk_oidn's device extensions are requested by
+  `OidnDenoiser::requestDeviceExtensions` from the device-selection callback in `src/main.cpp`, and
+  its context picks its optional features (tensor cores through `VK_KHR_cooperative_matrix`) from
+  the enabled extension list (`Resources::deviceExtensions`).
+
+## DLSS hand-off
+
+With DLSS-RR and OptiX or OIDN both on, every frame of a moving camera is a frame 0, denoised by
+DLSS. Once the camera stops, the accumulation denoiser takes the frames after it, and its first
+images, made of few samples, are worse than DLSS's. `DenoiserHandoff` (`src/denoiser_handoff.{hpp,cpp}`)
+blends from one to the other instead of switching:
+
+- **DLSS's image is kept.** Frame 1, before the path tracer overwrites `eImgRendered`, copies it into
+  an image of the same format. This happens once per camera stop, never while moving.
+  `PathTracer::m_dlssFrame0` says DLSS actually rendered frame 0 (not while it is still loading).
+- **It is no sample of the accumulation.** Frame 1 restarts the sample count
+  (`PathTracer::setupPushConstant`), whether or not the hand-off is on, so the accumulated image and
+  its spp hold path-traced samples only. This also keeps OptiX's 2x upscale from reading DLSS's
+  display-size image as its half-size input (`OptiXDenoiser::updateDenoiser`).
+- **The frames after it run the regular shader.** DLSS's guide captures (`USE_DLSS_SHADER`) cost
+  every sample, so they are compiled in only for the frames DLSS renders
+  (`PathTracer::makeVariantKey`). Each camera start and stop swaps the two cached variants in
+  `PathTracer::prepareFrame`: a queue wait, no recompile. A moving camera stays on DLSS's. The first
+  time a combination is used, the missing variant compiles behind the BusyWindow, which restarts the
+  accumulation.
+- **The image shown** is `lerp(dlss, denoised, handoffWeight(spp, end))` (`denoiser_schedule.hpp`),
+  computed by `shaders/denoiser_handoff.slang`, with `end` the **DLSS Hand-off** setting
+  (`dlssHandoffSpp`), capped at Max Samples so the final image is always the denoised one alone.
+  The weight is a smoothstep over the samples per pixel: low while the denoised image is still
+  blotchy, exactly 1 at `end`. It follows the accumulation every frame, not only when a denoise lands.
+  Until the first denoise of the accumulation, DLSS's image is shown, past `end` too while Auto will
+  make one (OptiX denoises one frame behind); from then on, the pass stops.
+- **The denoises come sooner.** Until `end`, Auto denoises each time the samples per pixel double,
+  and once at `end` (`AutoDenoiseSchedule::isDue`), then at its interval. Each doubling halves the
+  noise variance, so each denoise is a visible step. The schedule stays in samples per pixel, not in
+  time, so headless runs give the same images.
+- **Shown in place of the denoiser's view.** The capture sets the `DisplayBuffer` to the denoiser's,
+  and `runTonemapPass` takes the hand-off's image while `PathTracer::handoffImage` has one. Picking
+  **Rendered**, turning the denoiser off, or a new accumulation ends the hand-off; without Auto there
+  is none. `--outputSamples` saves nothing during the blend, which is no accumulation of a known
+  count: the counts it skips are saved with the first image after it. Set `--dlssHandoffSpp 0` to
+  measure the denoiser alone at low sample counts.
+
+The blend image is RGBA16F, clamped to the half-float range (a sun disk exceeds it); the kept DLSS
+image is RGBA32F, copied as is.
 
 ## Motion vectors — what is and isn't captured
 

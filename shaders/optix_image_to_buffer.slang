@@ -19,17 +19,19 @@
 
 // Compute shader to copy Vulkan images to linear buffers for OptiX denoiser
 // This shader reads from tiled images and writes to linear buffers that can be
-// exported to CUDA/OptiX. It also decompresses normals that were compressed in
-// the path tracer.
+// exported to CUDA/OptiX. The path tracer accumulates the albedo and the world-space
+// normal guides (the same guides as for OIDN); OptiX wants normalized camera-space
+// normals, (0,0,0) where nothing was hit, so the normal is converted here.
 
-#include "nvshaders/normal_compress.h.slang"
 #include "shaderio.h"
 
 // Bindings
 [[vk::binding(OptixBindingPoints::eInRgba)]]
 Texture2D<float4> inResultImage;  // RGB rendered image
-[[vk::binding(OptixBindingPoints::eInAlbedoNormal)]]
-Texture2D<float4> inAlbedoNormalImage;  // Albedo (RGB) + compressed normal (A)
+[[vk::binding(OptixBindingPoints::eInAlbedo)]]
+Texture2D<float4> inAlbedoImage;  // Accumulated albedo guide
+[[vk::binding(OptixBindingPoints::eInNormal)]]
+Texture2D<float4> inNormalImage;  // Accumulated world-space normal guide
 [[vk::binding(OptixBindingPoints::eOutRgba, 0)]]
 RWStructuredBuffer<float4> outRgbBuffer;  // Output RGB buffer (linear)
 [[vk::binding(OptixBindingPoints::eOutAlbedo, 0)]]
@@ -37,13 +39,8 @@ RWStructuredBuffer<float4> outAlbedoBuffer;  // Output Albedo buffer (linear)
 [[vk::binding(OptixBindingPoints::eOutNormal, 0)]]
 RWStructuredBuffer<float4> outNormalBuffer;  // Output Normal buffer (linear)
 
-struct PushConstant
-{
-  uint2 imageSize;
-};
-
 [[vk::push_constant]]
-ConstantBuffer<PushConstant> pushConst;
+ConstantBuffer<OptixCopyPushConstant> pushConst;
 
 [shader("compute")]
 [numthreads(16, 16, 1)]
@@ -62,15 +59,14 @@ void main(uint3 threadIdx: SV_DispatchThreadID)
   float4 rgbColor           = inResultImage[pixelCoord];
   outRgbBuffer[bufferIndex] = rgbColor;
 
-  // Read albedo + compressed normal
-  float4 albedoNormal = inAlbedoNormalImage[pixelCoord];
-
   // Write albedo (RGB channels, set alpha to 1.0 for OptiX)
-  outAlbedoBuffer[bufferIndex] = float4(albedoNormal.rgb, 1.0);
+  outAlbedoBuffer[bufferIndex] = float4(inAlbedoImage[pixelCoord].rgb, 1.0);
 
-  // Decompress normal from alpha channel
-  uint   encodedNormal = asuint(albedoNormal.a);
-  float3 normal        = decompressUnitVec(encodedNormal);
+  // Camera space: right-handed, -Z forward, Y up, X right. The average of the samples' normals is
+  // shorter than 1 on edges; it is renormalized, and stays zero where no sample hit anything.
+  float3 normal = mul(float3x3(pushConst.frameInfo->viewMatrix), inNormalImage[pixelCoord].xyz);
+  float  len    = length(normal);
+  normal        = len > 1e-6f ? normal / len : float3(0.0f);
 
   // Write normal (XYZ in RGB, alpha = 1.0)
   outNormalBuffer[bufferIndex] = float4(normal, 1.0);

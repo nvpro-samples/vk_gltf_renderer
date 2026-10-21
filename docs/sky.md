@@ -420,10 +420,14 @@ which is a scene edit and is recorded like any other transform.
   bake itself. See `nvvk::HdrIbl::updateFromGpuImage`.
 - **Per atmosphere change:** the LUT precompute, on top of a commit. It is the largest single cost
   in the system and does not run at any other time.
-- **Per primary hit, when aerial perspective is on:** a sixteen-step march through the segment
-  between the eye and the surface, plus, in the path tracer, one shadow ray toward the sun. Measured on a 10 km terrain at 1920x1080: **5.6 ms**, against a
+- **Per primary hit, when aerial perspective is on:** a march through the segment between the eye
+  and the surface, one step per 250 m between one and sixteen (longer segments lengthen the
+  sixteen steps), plus, in the path tracer,
+  one shadow ray toward the sun. Measured on a 10 km terrain at 1920x1080: **5.6 ms**, against a
   715 ms frame — under 1% there, and the number to weigh if a froxel volume is ever added, since
-  that is what a volume would replace.
+  that is what a volume would replace. An interior a few metres deep needs a single step; with a
+  fixed sixteen it was the most expensive feature of a path-traced room (about 1.6 ms of 9 ms with
+  RTX+SER, 2.8 ms of 12 ms without SER).
 
 Edits are previewed and committed on a settle rather than per frame — see
 [developer.md § Environment Lighting](developer.md#environment-lighting). For the physical sky the

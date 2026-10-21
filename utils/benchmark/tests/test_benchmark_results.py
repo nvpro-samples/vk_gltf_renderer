@@ -14,10 +14,10 @@ from benchmark_results import compare_csv, parse_benchmark, parse_headless_summa
 class BenchmarkResultTests(unittest.TestCase):
     def test_parse_headless_summary_prefers_json_record(self) -> None:
         log_text = (
-            "HEADLESS_SUMMARY frames=1 maxFrames=1 ptSamples=1 effective_spp=1 "
+            "HEADLESS_SUMMARY frames=1 maxSamples=1 ptSamples=1 effective_spp=1 "
             "resolution=16x16 wall_ms=999.0 ms_per_frame=999.0\n"
             'BENCHMARK_JSON {"schema":1,"type":"headless_summary","frames":500,'
-            '"maxFrames":500,"ptSamples":5,"effective_spp":2500,"resolution_w":1920,'
+            '"maxSamples":2500,"ptSamples":5,"effective_spp":2500,"resolution_w":1920,'
             '"resolution_h":1080,"wall_ms":123.456,"ms_per_frame":0.247,'
             '"throughput_MSps":42.5,"spp_per_sec":20.25}\n'
         )
@@ -28,6 +28,7 @@ class BenchmarkResultTests(unittest.TestCase):
         assert summary is not None
         self.assertEqual(summary["frames"], "500")
         self.assertEqual(summary["ptSamples"], "5")
+        self.assertEqual(summary["maxSamples"], "2500")
         self.assertEqual(summary["wall_ms"], "123.456")
         self.assertEqual(summary["throughput_MSps"], "42.5")
 
@@ -60,6 +61,7 @@ class BenchmarkResultTests(unittest.TestCase):
         self.assertIsNotNone(summary)
         assert summary is not None
         self.assertEqual(summary["frames"], "500")
+        self.assertEqual(summary["maxFrames"], "500")  # a log from a build before the cap counted samples
         self.assertEqual(summary["resolution_w"], "1920")
         self.assertEqual(summary["spp_per_sec"], "40.49")
 
@@ -70,7 +72,7 @@ class BenchmarkResultTests(unittest.TestCase):
             'BENCHMARK_JSON {"schema":1,"type":"headless_progress","app_frame":11,'
             '"frames":11,"elapsed_ms":600.0,"ms_per_frame":54.545,"percent":100.0}\n'
             'BENCHMARK_JSON {"schema":1,"type":"headless_summary","frames":11,'
-            '"maxFrames":11,"ptSamples":1,"effective_spp":11,"resolution_w":10,'
+            '"maxSamples":11,"ptSamples":1,"effective_spp":11,"resolution_w":10,'
             '"resolution_h":10,"wall_ms":1000.0,"ms_per_frame":90.909,'
             '"throughput_MSps":0.001,"spp_per_sec":11.0}\n'
         )

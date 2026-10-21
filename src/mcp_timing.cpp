@@ -72,7 +72,7 @@ double median(std::vector<double> values)
 // is one translation unit: nothing outside it needs to know these exist.
 
 // The profiler rebuilds its snapshot every frame from the sections that actually ran, so a timer
-// is only listed while it is being recorded. An idle renderer (accumulation complete, maxFrames
+// is only listed while it is being recorded. An idle renderer (accumulation complete, ptMaxSamples
 // reached) reports nothing, which looks like a missing timer rather than a paused one -- so give
 // rendering a moment to resume before believing an empty list.
 std::vector<std::string> GltfRenderer::profilerTimerNames() const
@@ -188,7 +188,7 @@ TimerMeasurement GltfRenderer::measureTimer(const std::string& name, int warmup,
                                                       "timer '" + name
                                       + "' produced no GPU samples. Either the name is wrong (see "
                                         "vk_gltf_list_timers) or the renderer is idle -- accumulation "
-                                        "stops at maxFrames, and a stopped renderer records no timers.");
+                                        "stops at ptMaxSamples, and a stopped renderer records no timers.");
   }
 
   std::vector<double> samples;
@@ -235,7 +235,7 @@ std::shared_ptr<nvmcp::Element> createTimingMcpServer(const McpTimingCreateInfo&
                       "Every command-line parameter is exposed, but many are only read at start-up and writing "
                       "them changes nothing. The ones that take effect live, and that a timing run should pin, "
                       "are: ptAdaptiveSampling (false, for a fixed-cost frame), ptSamples, ptTechnique, ptUseSER, "
-                      "ptOptimalShader, dlssEnable, ptMaxDepth, ptMaxFrames, and envSystem (not None -- that "
+                      "ptOptimalShader, dlssEnable, ptMaxDepth, ptMaxSamples, and envSystem (not None -- that "
                       "removes all environment light).",
       .port         = info.port,
   });

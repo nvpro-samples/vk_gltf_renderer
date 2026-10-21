@@ -26,12 +26,13 @@ C++20. Host and device share structs via `shaders/shaderio.h`.
 | Understand overall architecture, app lifecycle, source map | [docs/developer.md](docs/developer.md) |
 | Scene data flow: Model → RenderNodes → GPU SSBO / BLAS / TLAS | [docs/RENDERING_ARCHITECTURE.md](docs/RENDERING_ARCHITECTURE.md) |
 | glTF 2.1 multi-file scenes, read-only flagging, re-externalize on save | [docs/external_assets.md](docs/external_assets.md) |
+| Any other glTF 2.1 work: status, `PROVISIONAL` markers for draft-spec choices, the tinygltf fork, test fixtures | [docs/gltf_2_1.md](docs/gltf_2_1.md) |
 | KHR_interactivity behavior graphs: node execution, event wiring, coverage status | [docs/interactivity.md](docs/interactivity.md) |
 | Sky models: physical atmosphere, gradient, units and calibration, the sun, glTF mapping | [docs/sky.md](docs/sky.md) |
 | Environment *pipeline*: the analytic bake, lighting vs background fields, preview/commit | [docs/developer.md](docs/developer.md) (§ Environment Lighting) |
 | MCP shader timing: enabling `--mcp`, the tool surface, measuring a change | [docs/mcp.md](docs/mcp.md) |
 | Runtime behavior, editor workflows, features | [docs/user-guide.md](docs/user-guide.md) |
-| DLSS / OptiX denoising, motion vectors, jitter/reset (incl. why animated meshes ghost) | [docs/denoising.md](docs/denoising.md) |
+| DLSS / OptiX / OIDN denoising, motion vectors, jitter/reset (incl. why animated meshes ghost) | [docs/denoising.md](docs/denoising.md) |
 | Headless timing / scripted GPU benchmarks | [docs/benchmarking.md](docs/benchmarking.md) |
 | Capture the UI (panels + viewport) or script-drive selection to review UI/UX | [docs/benchmarking.md](docs/benchmarking.md) (§ UI inspection) |
 | Test suite: running (CTest vs. direct), adding tests, benchmarks | [tests/README.md](tests/README.md) |
@@ -49,11 +50,12 @@ with the code, the code wins (fix the doc — see "Keep the docs true").
 | You need… | Grep / read this (authoritative) |
 |---|---|
 | Supported glTF extensions | `m_supportedExtensions` in `src/gltf_scene.cpp` |
+| glTF versions that load, the version a save writes, what counts as a 2.1 feature | `src/gltf_version.cpp` |
 | Visualization / debug modes | `enum Visualization` in `shaders/shaderio.h` |
 | Environment types | `enum EnvSystem` in `shaders/shaderio.h`, and the picker in `src/ui_renderer.cpp` |
 | Command-line / MCP / persisted settings (names, defaults, whether they persist) | `m_settings.add(...)` in `src/renderer*.cpp`, plus `parameterRegistry.add(...)` in `src/main.cpp` and `src/benchmarking.cpp` |
 | Menu commands, their labels and keyboard shortcuts (including Esc in presentation mode and the file-drop modifiers) | `GltfRenderer::registerCommands()` in `src/ui_renderer.cpp` (the `ui::CommandRegistry`, `src/ui_commands.hpp`) — menus, toolbar, key handling and Help > Keyboard & Mouse all read it |
-| Viewport mouse bindings (camera drags, wheel, click to select, double-click to set the point of interest) and camera movement keys | `kBindings` in `src/camera_controls.cpp` — the viewport input handling (`camera_controls::update()`), `mouseClickedInViewport()` and Help's Camera tab all read it |
+| Viewport mouse bindings (camera drags, wheel, click to select, double-click to set the point of interest) and camera movement keys | `kBindings` in `src/camera_controls.cpp` — the manipulator, the viewport input handling, `mouseClickedInViewport()` and Help's Camera tab all read it |
 | Menu layout, UI panels | menu/UI builders in `src/ui_renderer.cpp` (and other `src/ui_*`) |
 | Elements-list categories, columns, CRUD | `ensureElementRegistry()` (the `ElementTypeDesc` array) in `src/ui_scene_browser_elements.cpp` |
 | Material extension gates | `MAT_EXT_*` in `shaders/gltf_material_config.h`, `GLTF_USE_*` in `shaders/gltf_eval_config.h` |
@@ -68,7 +70,9 @@ with the code, the code wins (fix the doc — see "Keep the docs true").
   `Rasterizer`), plus a separate `Silhouette` compute pass, all orchestrated by
   `renderer.cpp` (`GltfRenderer`).
 - `src/gltf_scene*.{cpp,hpp}` — scene loading, GPU upload (`SceneVk`),
-  acceleration structures (`SceneRtx`), editing, animation, merge, compaction.
+  acceleration structures (`SceneRtx`), editing, animation, merge, compaction. glTF 2.1 external
+  assets are placed by `gltf_scene_external_assets.cpp`, each referenced file loaded once per scene
+  and static content drawn as instance sets.
 - `src/env_baker.*`, `src/gltf_environment_sky.*` — the analytic sky bake (an authored or
   physical sky becomes the same lat-long image + alias table an HDR file would) and
   `OMI_environment_sky` load/save.
@@ -89,7 +93,10 @@ with the code, the code wins (fix the doc — see "Keep the docs true").
   shaders and time a GPU pass, so an agent can measure a shader change. Loading
   and every other setting go through the parameter registry instead. Built only
   when `NVPRO2_ENABLE_nvmcp` is on. See [docs/mcp.md](docs/mcp.md).
-- `src/dlss*`, `src/optix_denoiser*`, `src/vk_cuda*` — AI denoisers + CUDA interop.
+- `src/dlss*`, `src/optix_denoiser*`, `src/oidn_denoiser*`, `src/vk_cuda*` — AI denoisers + CUDA interop
+  (OIDN runs on Vulkan compute through the prebuilt [vk_oidn](https://github.com/nvpro-samples/vk_oidn) package).
+  `src/denoiser_handoff*` blends from DLSS-RR's image to OptiX / OIDN's when both are on
+  ([docs/denoising.md](docs/denoising.md#dlss-hand-off)).
 - `src/gizmo_*` — transform gizmo, grid, overlays.
 - `shaders/*.slang` + `shaders/shaderio.h` — GPU code and host/device structs.
 
@@ -183,10 +190,11 @@ you are expected to keep them that way:
 | Scene sync / dirty-flag / BLAS-TLAS data flow | [docs/RENDERING_ARCHITECTURE.md](docs/RENDERING_ARCHITECTURE.md) |
 | App lifecycle, source layout, material fork, build/test | [docs/developer.md](docs/developer.md) + this file |
 | A user-facing feature, menu, or shortcut | [docs/user-guide.md](docs/user-guide.md); a command or shortcut goes in `registerCommands()` (Help lists it from there) — see developer.md § Add a command |
-| DLSS/OptiX, motion-vector / jitter / reset behavior | [docs/denoising.md](docs/denoising.md) |
+| DLSS/OptiX/OIDN, motion-vector / jitter / reset behavior | [docs/denoising.md](docs/denoising.md) |
 | A sky model, its units, the sun, or the `OMI_environment_sky` mapping | [docs/sky.md](docs/sky.md) |
 | Environment sources, the sky bake, or the lighting/background split | [docs/developer.md](docs/developer.md) + [docs/user-guide.md](docs/user-guide.md) |
 | glTF 2.1 external-asset load/save/edit behavior | [docs/external_assets.md](docs/external_assets.md) |
+| Other glTF 2.1 support, a draft-spec assumption, or the tinygltf fork | [docs/gltf_2_1.md](docs/gltf_2_1.md) (status, patch log); mark draft-spec choices `PROVISIONAL(...)` and add a fixture to `tests/gltf_2_1/generate_fixtures.py` |
 | KHR_interactivity node coverage, execution model, event wiring | [docs/interactivity.md](docs/interactivity.md) |
 | MCP tools or the timing measurement | [docs/mcp.md](docs/mcp.md) |
 | Headless/benchmark flags or output format | [docs/benchmarking.md](docs/benchmarking.md), `utils/benchmark/README.md` |
@@ -226,7 +234,7 @@ cmake --build build
 ./_bin/Release/vk_gltf_renderer
 ```
 
-Key CMake options: `USE_DLSS`, `USE_OPTIX_DENOISER`, `USE_DRACO`,
+Key CMake options: `USE_DLSS`, `USE_OPTIX_DENOISER`, `USE_OIDN_DENOISER`, `USE_DRACO`,
 `NVPRO2_ENABLE_nvmcp` (all `ON`; the last one adds the `--mcp` endpoint and fetches
 cpp-mcp at configure time — see [docs/mcp.md](docs/mcp.md)),
 `BUILD_TESTING` (`OFF` — turn on to build unit tests + benchmarks; `ctest` runs the

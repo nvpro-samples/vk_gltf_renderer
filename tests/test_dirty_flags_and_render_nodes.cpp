@@ -629,3 +629,69 @@ TEST_F(DirtyFlagsTest, MergePreservesExistingTexturesAndAppendsAtTail)
   for(size_t i = 0; i < texturesBefore; ++i)
     EXPECT_EQ(scene.getModel().textures[i].source, textureSourcesBefore[i]) << "existing texture " << i << " must be unchanged";
 }
+
+//--------------------------------------------------------------------------------------------------
+// Scene bounds of degenerate (flat or point-like) content
+//--------------------------------------------------------------------------------------------------
+
+// One triangle mesh, instanced by a node translated by `translation`. The accessor's min/max are
+// what the scene bounds read, so they match the vertex data.
+static std::filesystem::path writeSingleTriangleScene(const std::filesystem::path& dir,
+                                                      const char*                  fileName,
+                                                      const char*                  translation,
+                                                      const char*                  minMax,
+                                                      const char*                  base64Positions)
+{
+  const auto path = dir / fileName;
+  std::ofstream(path) << R"({
+  "asset": {"version": "2.0"},
+  "scene": 0,
+  "scenes": [{"nodes": [0]}],
+  "nodes": [{"mesh": 0, "translation": )"
+                      << translation << R"(}],
+  "meshes": [{"primitives": [{"attributes": {"POSITION": 0}}]}],
+  "accessors": [{"bufferView": 0, "componentType": 5126, "count": 3, "type": "VEC3", )"
+                      << minMax << R"(}],
+  "bufferViews": [{"buffer": 0, "byteLength": 36}],
+  "buffers": [{"byteLength": 36, "uri": "data:application/octet-stream;base64,)"
+                      << base64Positions << R"("}]
+})";
+  return path;
+}
+
+// A 100 x 100 ground plane at y = 2 must keep its size: it is not a 2-unit scene.
+TEST_F(DirtyFlagsTest, PlanarSceneKeepsItsExtents)
+{
+  nvvkgltf::Scene scene;
+  ASSERT_TRUE(scene.load(writeSingleTriangleScene(tempDir, "plane.gltf", "[10, 2, 0]", R"("min": [-50, 0, -50], "max": [50, 0, 50])",
+                                                  "AABIwgAAAAAAAEjCAABIQgAAAAAAAEjCAABIwgAAAAAAAEhC")));
+  scene.setCurrentScene(0);
+
+  const nvutils::Bbox bounds = scene.getSceneBounds();
+  EXPECT_FLOAT_EQ(bounds.min().x, -40.0f);
+  EXPECT_FLOAT_EQ(bounds.max().x, 60.0f);
+  EXPECT_FLOAT_EQ(bounds.min().z, -50.0f);
+  EXPECT_FLOAT_EQ(bounds.max().z, 50.0f);
+
+  // The flat axis gets a thin slab, centered on the plane, so the box is a volume.
+  EXPECT_TRUE(bounds.isVolume());
+  EXPECT_FLOAT_EQ(bounds.center().y, 2.0f);
+  EXPECT_GT(bounds.max().y - bounds.min().y, 0.0f);
+  EXPECT_LT(bounds.max().y - bounds.min().y, 1.0f) << "the slab must stay thin relative to the plane";
+}
+
+// A scene whose geometry collapses to one point is framed around that point, not around the origin.
+TEST_F(DirtyFlagsTest, PointSceneIsCenteredOnThePoint)
+{
+  nvvkgltf::Scene scene;
+  ASSERT_TRUE(scene.load(writeSingleTriangleScene(tempDir, "point.gltf", "[1, 0, 0]", R"("min": [3, 4, 5], "max": [3, 4, 5])",
+                                                  "AABAQAAAgEAAAKBAAABAQAAAgEAAAKBAAABAQAAAgEAAAKBA")));
+  scene.setCurrentScene(0);
+
+  const nvutils::Bbox bounds = scene.getSceneBounds();
+  EXPECT_TRUE(bounds.isVolume());
+  EXPECT_FLOAT_EQ(bounds.center().x, 4.0f);
+  EXPECT_FLOAT_EQ(bounds.center().y, 4.0f);
+  EXPECT_FLOAT_EQ(bounds.center().z, 5.0f);
+  EXPECT_GT(bounds.radius(), 0.0f);
+}

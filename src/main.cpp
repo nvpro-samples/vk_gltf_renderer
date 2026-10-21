@@ -252,7 +252,7 @@ auto main(int argc, char** argv) -> int
 
   if(appInfo.headless)
   {
-    elemGltfRenderer->alignMaxFramesForHeadless(appInfo.headlessFrameCount);
+    elemGltfRenderer->alignMaxSamplesForHeadless(appInfo.headlessFrameCount);
     elemGltfRenderer->applyHeadlessDefaults();
   }
 
@@ -313,6 +313,7 @@ auto main(int argc, char** argv) -> int
   VkPhysicalDeviceRayTracingInvocationReorderFeaturesEXT reorderFeature{VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_RAY_TRACING_INVOCATION_REORDER_FEATURES_EXT};
   VkPhysicalDeviceOpacityMicromapFeaturesKHR ommFeature{VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_OPACITY_MICROMAP_FEATURES_KHR};
   VkPhysicalDeviceDeviceAddressCommandsFeaturesKHR addressCmdFeature{VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_DEVICE_ADDRESS_COMMANDS_FEATURES_KHR};
+  VkPhysicalDevicePipelineExecutablePropertiesFeaturesKHR pipelineExecFeature{VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_PIPELINE_EXECUTABLE_PROPERTIES_FEATURES_KHR};
   // clang-format on
 
   // Requesting the extensions and features needed
@@ -330,6 +331,7 @@ auto main(int argc, char** argv) -> int
       {VK_EXT_RAY_TRACING_INVOCATION_REORDER_EXTENSION_NAME, &reorderFeature, false},
       {VK_KHR_DEVICE_ADDRESS_COMMANDS_EXTENSION_NAME, &addressCmdFeature, false},  // Optional: required by VK_KHR_opacity_micromap
       {VK_KHR_OPACITY_MICROMAP_EXTENSION_NAME, &ommFeature, false},                // Optional: Opacity Micromap (OMM)
+      {VK_KHR_PIPELINE_EXECUTABLE_PROPERTIES_EXTENSION_NAME, &pipelineExecFeature, false},  // Optional: path-tracer register counts in the log
   };
 
   // Only request the graphics queue
@@ -444,6 +446,22 @@ auto main(int argc, char** argv) -> int
 #endif
 
 
+#if defined(USE_OIDN_DENOISER)
+  // #OIDN - Request the device extensions vk_oidn can use (VK_KHR_cooperative_matrix for the tensor
+  // cores when supported), after whatever the callback above already asks for.
+  {
+    const std::optional<std::function<bool(VkInstance, VkPhysicalDevice, nvvk::ContextInitInfo&)>> previousCallback =
+        vkSetup.postSelectPhysicalDeviceCallback;
+    vkSetup.postSelectPhysicalDeviceCallback = [previousCallback](VkInstance instance, VkPhysicalDevice physicalDevice,
+                                                                  nvvk::ContextInitInfo& info) {
+      if(previousCallback && !(*previousCallback)(instance, physicalDevice, info))
+        return false;
+      OidnDenoiser::requestDeviceExtensions(instance, physicalDevice, info);
+      return true;
+    };
+  }
+#endif
+
   // Create the Vulkan context
   nvvk::Context vkContext;
   if(vkContext.init(vkSetup) != VK_SUCCESS)
@@ -486,6 +504,18 @@ auto main(int argc, char** argv) -> int
       && (addressCmdFeature.deviceAddressCommands == VK_TRUE);  // micromaps are created with vkCreateAccelerationStructure2KHR
   // A scene that carries micromaps on hardware without OMM says so when it loads (createVulkanScene).
   elemGltfRenderer->setOpacityMicromapAvailable(ommHardware, useOpacityMicromap);
+
+  // Names of the extensions the device was created with (the vk_oidn denoiser picks its features from them)
+  {
+    std::vector<std::string> deviceExtensions;
+    for(size_t i = 0; i < vkContext.contextInfo.deviceExtensions.size(); i++)
+    {
+      const char* name = vkContext.contextInfo.deviceExtensions[i].extensionName;
+      if(vkContext.hasExtensionEnabled(name))
+        deviceExtensions.push_back(std::string(name));
+    }
+    elemGltfRenderer->setDeviceExtensions(std::move(deviceExtensions));
+  }
 
 
   // Application information

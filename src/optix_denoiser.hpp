@@ -37,8 +37,10 @@
 // Vulkan-CUDA interop
 #include "vk_cuda.hpp"
 
+#include "denoiser_schedule.hpp"
 #include "gpu_memory_tracker.hpp"
 #include "resources.hpp"
+#include "utils.hpp"
 
 //-------------------------------------------------------------------------------------------------------
 // OptiXDenoiser
@@ -64,7 +66,7 @@
 //    denoiser.denoiseOneShot(resources);
 //
 // 4. Manual denoising (advanced control):
-//    DenoisingInputs inputs = {renderedImage, albedoNormalImage};
+//    DenoisingInputs inputs = {renderedImage, albedoImage, normalImage, frameInfoAddress};
 //    DenoisingOutputs outputs = {outputImage};
 //    denoiser.prepareDenoisingInputs(cmd, inputs);
 //    denoiser.executeDenoising();
@@ -110,8 +112,10 @@ public:
   // GBuffer indices for OptiX denoiser-owned RenderTarget outputs
   enum GBufferIndex
   {
-    eGBufferDenoised     = 0,  // Denoised output
-    eGBufferAlbedoNormal = 1,  // Albedo+Normal guide buffer
+    eGBufferDenoised = 0,  // Denoised output
+    eGBufferAlbedo   = 1,  // Accumulated albedo guide (written by the path tracer)
+    eGBufferNormal   = 2,  // Accumulated world-space normal guide (written by the path tracer)
+    eGBufferCount
   };
 
   // Staging GBuffer indices (half-res copies for upscale blit)
@@ -135,17 +139,19 @@ public:
 
   struct Settings
   {
-    bool      enable              = false;
-    bool      autoDenoiseEnabled  = true;  // Automatically denoise every N frames
-    int       autoDenoiseInterval = 50;    // Denoise at frames 50, 100, 150, etc.
-    ModelKind modelKind           = ModelKind::eAOV;
+    bool      enable             = false;
+    bool      autoDenoiseEnabled = true;  // Automatically denoise every N samples per pixel
+    int       autoDenoiseSpp     = 50;    // Denoise at 50, 100, 150, ... spp
+    ModelKind modelKind          = ModelKind::eAOV;
   };
 
   // Input images for denoising
   struct DenoisingInputs
   {
-    VkDescriptorImageInfo renderedImage;      // RGBA rendered image
-    VkDescriptorImageInfo albedoNormalImage;  // Albedo + normal guide image
+    VkDescriptorImageInfo renderedImage;     // RGBA rendered image
+    VkDescriptorImageInfo albedoImage;       // Accumulated albedo guide
+    VkDescriptorImageInfo normalImage;       // Accumulated world-space normal guide
+    VkDeviceAddress       frameInfoAddress;  // shaderio::SceneFrameInfo: the view matrix for the normal
   };
 
   // Output destination for denoised result
@@ -182,6 +188,13 @@ public:
   // Get the descriptor for the denoised output
   VkDescriptorImageInfo getDescriptorImageInfo(GBufferIndex index) const;
 
+  // The path tracer reports whether it writes the guides this frame; returns the samples already in
+  // them (see GuideAccumulation)
+  int updateGuideState(bool writtenThisFrame, int totalSamples)
+  {
+    return m_guides.update(writtenThisFrame, totalSamples);
+  }
+
   // Staging images at render (half) resolution for upscale blit of selection/depth
   VkImage getStagingSelectionImage() const { return m_upscaleStaging.getColorImage(eStagingSelection); }
   VkImage getStagingDepthImage() const { return m_upscaleStaging.getDepthImage(); }
@@ -203,15 +216,41 @@ public:
 
   // Check if we have a valid denoised output
   bool hasValidDenoisedOutput() const { return m_hasValidOutput; }
+  // Samples per pixel of the image the output was denoised from (one frame behind, see above)
+  int denoisedSamples() const { return m_denoisedSamples; }
 
-  // Update auto-denoise logic (call every frame in render loop)
-  void updateDenoiser(Resources& resources);
+  // Update auto-denoise logic (call every frame in render loop). `dlssFrame0`: DLSS-RR rendered frame 0
+  // of this accumulation; `handoffEnd`: the spp the DLSS hand-off ends at, 0 without (AutoDenoiseSchedule)
+  void updateDenoiser(Resources& resources, bool dlssFrame0 = false, int handoffEnd = 0);
+  // Auto-denoise on an idle frame, the accumulation complete: denoises its final image if the last
+  // denoise was not of it
+  void denoiseFinal(Resources& resources);
 
   const nvvkgltf::GpuMemoryTracker& getExportMemoryTracker() const { return m_exportMemoryTracker; }
+
+  // Cost of denoiseOneShot(), in milliseconds, averaged over the last denoises. The work runs in its
+  // own submissions and on CUDA, outside the frame's command buffer, so the frame's GPU timers do not
+  // see it. Each step is host wall time (submit + wait), except invokeGpuMs (CUDA events).
+  struct Timings
+  {
+    float drainMs     = 0;  // vkQueueWaitIdle: the frames in flight finish before CUDA reads the image
+    float copyInMs    = 0;  // Vulkan: images -> exported buffers
+    float invokeMs    = 0;  // optixDenoiserInvoke + stream synchronize
+    float invokeGpuMs = 0;  // ... of which GPU time of the denoiser
+    float copyOutMs   = 0;  // Vulkan: exported buffer -> denoised image
+    float totalMs     = 0;  // From the request until the denoised image is usable by Vulkan
+  };
+  Timings getTimings() const;
+  // Denoises made so far, and the GPU time of the last one's invoke (CUDA events), for the profiler
+  uint32_t denoiseCount() const { return m_denoiseCount; }
+  float    lastInvokeGpuMs() const { return m_lastInvokeGpuMs; }
 
   // UI controls
   bool onUi(Resources& resources);
   bool onUiActivation(Resources& resources);
+  // Turn off, as the checkbox does. Returns true when the render size changes back (Upscale 2X), which
+  // restarts the accumulation.
+  bool disable(Resources& resources);
   bool onUiSettings(Resources& resources);
   bool onUiPreview(Resources& resources);
 
@@ -241,13 +280,14 @@ private:
   void cleanupBuffers();
 
 private:
-  Settings     m_settings{};
-  VkExtent2D   m_outputSize{};  // Display/output resolution (always full size)
-  VkExtent2D   m_inputSize{};   // Render/input resolution (half for upscale, full for AOV)
-  Availability m_availability         = Availability::eNotChecked;
-  bool         m_hasValidOutput       = false;
-  uint64_t     m_lastAutoDenoiseFrame = 0;  // Track last frame we auto-denoised
-  bool         m_settingsOpen         = false;
+  Settings            m_settings{};
+  VkExtent2D          m_outputSize{};  // Display/output resolution (always full size)
+  VkExtent2D          m_inputSize{};   // Render/input resolution (half for upscale, full for AOV)
+  Availability        m_availability    = Availability::eNotChecked;
+  bool                m_hasValidOutput  = false;
+  int                 m_denoisedSamples = 0;
+  AutoDenoiseSchedule m_autoDenoise;
+  bool                m_settingsOpen = false;
 
   // OptiX context and denoiser
   OptixDeviceContext m_optixContext     = nullptr;
@@ -286,6 +326,13 @@ private:
   // CUDA stream for denoising operations
   CUstream m_cudaStream = nullptr;
 
+  // Timing of denoiseOneShot() (see Timings)
+  CUevent                              m_invokeStart     = nullptr;
+  CUevent                              m_invokeStop      = nullptr;
+  float                                m_lastInvokeGpuMs = 0;
+  uint32_t                             m_denoiseCount    = 0;
+  nvsamples::RollingAverage<float, 30> m_avgDrain, m_avgCopyIn, m_avgInvoke, m_avgInvokeGpu, m_avgCopyOut, m_avgTotal;
+
   // Vulkan resources
   VkDevice m_device = VK_NULL_HANDLE;
 
@@ -294,7 +341,8 @@ private:
   nvvkgltf::GpuMemoryTracker  m_exportMemoryTracker;
 
   // Denoiser-owned outputs (denoised RGB + albedo/normal guide). See GBufferIndex.
-  nvvk::RenderTarget         m_denoiserTarget;
+  nvvk::RenderTarget         m_denoiserTarget;  // See GBufferIndex
+  GuideAccumulation          m_guides;          // Samples in the guide images
   nvvk::RenderTarget         m_upscaleStaging;  // Half-res staging for selection/depth upscale blit (see StagingIndex)
   nvapp::ImTextureVisualizer m_denoisedUi{};
   VkSampler                  m_linearSampler{};

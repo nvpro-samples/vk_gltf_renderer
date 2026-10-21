@@ -2300,6 +2300,7 @@ void UiInspector::renderMaterialOperations(int matIdx, int nodeContext)
     const int          newIdx = static_cast<int>(m_scene->getModel().materials.size());
     tinygltf::Material mat    = m_scene->getModel().materials[matIdx];
     mat.name += "_copy";
+    mat.uid.clear();  // copies don't keep the glTF 2.1 uid, which is unique per file
     if(m_undoStack)
       m_undoStack->executeCommand(std::make_unique<MaterialLifecycleCommand>(*m_scene, newIdx, mat, true, "Duplicate material"));
     else
@@ -2533,7 +2534,7 @@ bool UiInspector::materialDiffuseTransmission(tinygltf::Material& material)
           modif |= PE::DragFloat("Factor", &dt.diffuseTransmissionFactor, 0.01f, 0.0f, 1.0f, "%.3f", 0,
                                  "Percentage of penetrating light that is diffusely transmitted [0,1].\n"
                                  "For thin translucent materials (leaves, paper, candle wax).");
-          modif |= colorEdit3Linear("Color", glm::value_ptr(dt.diffuseTransmissionColor),
+          modif |= colorEdit3Linear("Color", glm::value_ptr(dt.diffuseTransmissionColorFactor),
                                     "Color that modulates the diffusely transmitted light (shown/edited in linear; swatch/wheel perceptual).\n"
                                     "Acts as a transmission-side tint, independent of base color.");
           modif |= renderTextureEditRow("Diffuse Transmission", dt.diffuseTransmissionTexture);

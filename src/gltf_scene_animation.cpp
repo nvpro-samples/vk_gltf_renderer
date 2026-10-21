@@ -197,18 +197,18 @@ void AnimationSystem::parseSamplersAndChannels()
 }
 
 //--------------------------------------------------------------------------------------------------
-// Scan all render primitives for morph targets. For each primitive that has targets and
-// mesh weights, cache the base positions/normals/tangents for blending.
+// Scan all render primitives for morph targets. For each primitive that has targets, cache the
+// base positions/normals/tangents for blending. Weights come from Scene::getMorphWeights; a target
+// without one has weight 0 (the glTF default), until an animation writes it.
 void AnimationSystem::parseMorphPrimitives()
 {
   m_morphPrimitives.clear();
   m_morphResults.clear();
   for(size_t renderPrimID = 0; renderPrimID < m_scene.getRenderPrimitives().size(); renderPrimID++)
   {
-    const auto&                renderPrimitive = m_scene.getRenderPrimitive(renderPrimID);
+    const RenderPrimitive&     renderPrimitive = m_scene.getRenderPrimitive(renderPrimID);
     const tinygltf::Primitive& primitive       = *renderPrimitive.pPrimitive;
-    const tinygltf::Mesh&      mesh            = m_scene.getModel().meshes[renderPrimitive.meshID];
-    if(!primitive.targets.empty() && !mesh.weights.empty())
+    if(!primitive.targets.empty())
     {
       m_morphPrimitives.push_back(uint32_t(renderPrimID));
 
@@ -264,9 +264,11 @@ void AnimationSystem::parseMorphPrimitives()
 }
 
 //--------------------------------------------------------------------------------------------------
-// Scan all render nodes for skinned primitives. For each unique skinned primitive, cache the
+// Scan all render nodes for skinned primitives. For each skinned render primitive, cache the
 // static vertex attributes (weights, joints, positions, normals, tangents) and inverse bind
-// matrices for use by both the GPU compute path and the CPU fallback.
+// matrices for use by both the GPU compute path and the CPU fallback. A skinned render primitive
+// is drawn in one pose only (Scene::assignDeformedRenderPrimitives): by one node, or by the copies
+// of one placed node, which animate in lockstep. A primitive without joints is not skinned.
 void AnimationSystem::parseSkinTasks()
 {
   m_skinTasks.clear();
@@ -279,13 +281,14 @@ void AnimationSystem::parseSkinTasks()
     const auto& rn = rnodes[rnID];
     if(rn.skinID < 0 || !seenPrimIDs.insert(rn.renderPrimID).second)
       continue;
+    const tinygltf::Primitive& primitive = *m_scene.getRenderPrimitive(rn.renderPrimID).pPrimitive;
+    if(rn.skinID >= static_cast<int>(model.skins.size()) || !primitive.attributes.contains("JOINTS_0"))
+      continue;
 
     SkinTask task;
     task.renderPrimID = rn.renderPrimID;
     task.skinID       = rn.skinID;
     task.refNodeID    = rn.refNodeID;
-
-    const tinygltf::Primitive& primitive = *m_scene.getRenderPrimitive(rn.renderPrimID).pPrimitive;
 
     std::vector<glm::vec4> tempW;
     auto                   wSpan = tinygltf::utils::getAttributeData3(model, primitive, "WEIGHTS_0", &tempW);
@@ -512,6 +515,18 @@ T computeCubicInterpolation(const T* values, float t, float keyDelta, size_t ind
   const T&     v1 = values[nextIndex + V];
   return v0 * cV0 + a * cA + b * cB + v1 * cV1;
 }
+
+// A weights channel animates the morph weights of the node it targets, which override its mesh's
+// (Scene::getMorphWeights): other nodes drawing the mesh keep theirs. weightAt(j) is weight j.
+template <class WeightAt>
+void setNodeWeights(tinygltf::Node* gltfNode, const tinygltf::Model& model, size_t count, const WeightAt& weightAt)
+{
+  if(gltfNode == nullptr || gltfNode->mesh < 0 || gltfNode->mesh >= static_cast<int>(model.meshes.size()))
+    return;
+  gltfNode->weights.resize(count);
+  for(size_t j = 0; j < count; j++)
+    gltfNode->weights[j] = weightAt(j);
+}
 }  // namespace
 
 //--------------------------------------------------------------------------------------------------
@@ -555,15 +570,12 @@ void AnimationSystem::handleLinearInterpolation(tinygltf::Node*         gltfNode
       break;
     }
     case AnimationChannel::PathType::eWeights: {
-      if(gltfNode && gltfNode->mesh >= 0 && (size_t)gltfNode->mesh < m_model.meshes.size()
-         && index + 1 < sampler.outputsFloat.size()
+      if(index + 1 < sampler.outputsFloat.size()
          && sampler.outputsFloat[index].size() == sampler.outputsFloat[index + 1].size())
       {
-        tinygltf::Mesh& mesh = m_model.meshes[gltfNode->mesh];
-        if(mesh.weights.size() != sampler.outputsFloat[index].size())
-          mesh.weights.resize(sampler.outputsFloat[index].size());
-        for(size_t j = 0; j < mesh.weights.size(); j++)
-          mesh.weights[j] = glm::mix(sampler.outputsFloat[index][j], sampler.outputsFloat[index + 1][j], t);
+        const std::vector<float>& from = sampler.outputsFloat[index];
+        const std::vector<float>& to   = sampler.outputsFloat[index + 1];
+        setNodeWeights(gltfNode, m_model, from.size(), [&from, &to, t](size_t j) { return glm::mix(from[j], to[j], t); });
       }
       break;
     }
@@ -616,6 +628,11 @@ void AnimationSystem::handleStepInterpolation(tinygltf::Node* gltfNode, Animatio
       break;
     }
     case AnimationChannel::PathType::eWeights:
+      if(index < sampler.outputsFloat.size())
+      {
+        const std::vector<float>& value = sampler.outputsFloat[index];
+        setNodeWeights(gltfNode, m_scene.getModel(), value.size(), [&value](size_t j) { return value[j]; });
+      }
       break;
     case AnimationChannel::PathType::ePointer: {
       if(!sampler.outputsVec4.empty() && index < sampler.outputsVec4.size())
@@ -659,6 +676,23 @@ void AnimationSystem::handleCubicSplineInterpolation(tinygltf::Node*         glt
 
   if(!gltfNode)
     return;
+
+  // Weights: each key holds in-tangents, values and out-tangents of every target, in that order.
+  if(channel.path == AnimationChannel::PathType::eWeights)
+  {
+    if(index + 1 < sampler.outputsFloat.size() && sampler.outputsFloat[index].size() == sampler.outputsFloat[index + 1].size()
+       && sampler.outputsFloat[index].size() % 3 == 0)
+    {
+      const std::vector<float>& key0  = sampler.outputsFloat[index];
+      const std::vector<float>& key1  = sampler.outputsFloat[index + 1];
+      const size_t              count = key0.size() / 3;
+      setNodeWeights(gltfNode, m_scene.getModel(), count, [&key0, &key1, count, t, keyDelta](size_t j) {
+        const float values[6] = {0.0f, key0[count + j], key0[2 * count + j], key1[j], key1[count + j], 0.0f};
+        return computeCubicInterpolation<float>(values, t, keyDelta, 0);
+      });
+    }
+    return;
+  }
 
   if(channel.path == AnimationChannel::PathType::eRotation)
   {
@@ -823,7 +857,7 @@ const SkinningResult& AnimationSystem::getSkinningResult(size_t skinTaskIndex) c
 // CPU morph target blending fallback: accumulate weighted deltas from all active morph targets.
 //
 // For each morph primitive, starts from the cached base geometry and adds position, normal,
-// and tangent deltas scaled by their respective mesh weights. Deltas are read directly from
+// and tangent deltas scaled by their weights (Scene::getMorphWeights). Deltas are read directly from
 // glTF accessors; blending is parallelized per-vertex. Normals are re-normalized after
 // accumulation. Results are stored in MorphResult::blendedPositions/Normals/Tangents.
 void AnimationSystem::computeMorphTargets()
@@ -842,7 +876,7 @@ void AnimationSystem::computeMorphTargets()
     if(renderPrimitive.meshID < 0 || renderPrimitive.meshID >= static_cast<int>(model.meshes.size()))
       continue;
     const tinygltf::Primitive& primitive = *renderPrimitive.pPrimitive;
-    const tinygltf::Mesh&      mesh      = model.meshes[renderPrimitive.meshID];
+    const std::vector<double>& weights   = m_scene.getMorphWeights(renderPrimitive);
 
     const bool hasNormals  = !mr.baseNormals.empty();
     const bool hasTangents = !mr.baseTangents.empty();
@@ -855,9 +889,9 @@ void AnimationSystem::computeMorphTargets()
 
     for(size_t targetIndex = 0; targetIndex < primitive.targets.size(); ++targetIndex)
     {
-      if(targetIndex >= mesh.weights.size())
+      if(targetIndex >= weights.size())
         continue;
-      float weight = float(mesh.weights[targetIndex]);
+      float weight = float(weights[targetIndex]);
       if(weight == 0.0f)
         continue;
 

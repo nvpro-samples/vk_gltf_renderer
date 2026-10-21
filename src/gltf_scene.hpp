@@ -66,6 +66,27 @@ struct RenderPrimitive
   int                  vertexCount = 0;
   int                  indexCount  = 0;
   int                  meshID      = 0;
+  int                  nodeID      = -1;  // the node it is skinned or morphed for; -1 if only static nodes draw it
+};
+
+// glTF 2.1 external assets: what a placing node draws when the file it places is static (nothing
+// skinned, animated, lit, with a camera, placing a file or carrying a node extension). One entry
+// per mesh node of the file, with its transform relative to the placing node. The renderer expands
+// the entries straight into render nodes, so the file's nodes are not copied (see
+// docs/external_assets.md). Built by the placer and never changed; the placing node points at it
+// through Scene::kInstanceSetKey in its extras.
+struct InstanceSet
+{
+  struct Entry
+  {
+    int       mesh = -1;
+    glm::mat4 local{1.0f};
+    int       source = -1;  // into sources: the node data a materialized entry gets back
+  };
+  std::vector<Entry> entries;
+  // The authored data of the placed file's mesh nodes (name, weights, extras), shared by every
+  // placement of that file.
+  std::shared_ptr<const std::vector<tinygltf::Node>> sources;
 };
 
 // glTF 2.1 external asset that was resolved and merged into the model. Records the provenance
@@ -213,6 +234,7 @@ The Scene class is responsible for loading and managing a glTF scene.
 class SceneEditor;
 class AnimationSystem;
 class SceneValidator;
+class ExternalAssetPlacer;
 
 class Scene
 {
@@ -310,6 +332,20 @@ public:
 
   // External assets that were resolved and merged into the model (provenance + read-only ranges).
   const std::vector<nvvkgltf::ReferencedAsset>& getReferencedAssets() const { return m_referencedAssets; }
+  // The instance set a placing node draws (see InstanceSet), or nullptr. Read through a marker in
+  // the node's extras, like kExternalAssetContentKey, so it follows the node through renumbering and
+  // duplication; the marker is never saved.
+  static constexpr const char*     kInstanceSetKey = "NV_placed_instance_set";
+  [[nodiscard]] const InstanceSet* getInstanceSet(int nodeIndex) const;
+  [[nodiscard]] static int         getInstanceSetIndex(const tinygltf::Node& node);
+  static void                      setInstanceSetMarker(tinygltf::Node& node, int instanceSetIndex);
+  static void                      clearInstanceSetMarker(tinygltf::Node& node);
+  // True if the render node draws an instance-set entry rather than a primitive of its node's mesh.
+  [[nodiscard]] bool isInstanceSetRenderNode(int renderNodeIndex) const;
+  // Turn the instance sets of `nodes` (every marked node when empty) into real nodes
+  // of `model`, one per entry, under the placing node, and drop the markers. For saves that need
+  // plain glTF (flatten) and for "Make Editable". `model` is m_model or a copy of it.
+  void materializeInstanceSets(tinygltf::Model& model, const std::unordered_set<int>& nodes = {}) const;
   // True if the scene references at least one external asset (glTF 2.1). When true, save() can
   // write either the referenced (complex) form or a flattened self-contained form.
   [[nodiscard]] bool hasExternalAssets() const { return !m_referencedAssets.empty(); }
@@ -318,6 +354,11 @@ public:
   // duplicate/delete renumbering for free, and is never persisted (re-externalization removes the
   // marked nodes before save). The value is the index into m_referencedAssets.
   static constexpr const char* kExternalAssetContentKey = "NV_external_asset_content";
+  // Where a placed mesh node was copied from, as "<file>#<node>" (content copied as nodes: skinned,
+  // animated). Copies of one node in several placements animate in lockstep and are read-only, so
+  // they share one skinned or morphed render primitive (assignDeformedRenderPrimitives). Set by the
+  // placer, cleared with the read-only marker.
+  static constexpr const char* kPlacedSourceKey = "NV_placed_source";
 
   // Single source of truth for the read-only marker (set/query/clear on a node's `extras`). Static
   // so the merge/flatten/re-externalize passes (which operate on a bare tinygltf::Model) reuse them.
@@ -333,10 +374,11 @@ public:
   }
   static void clearExternalAssetMarker(tinygltf::Node& node)
   {
-    if(!node.extras.IsObject() || !node.extras.Has(kExternalAssetContentKey))
+    if(!node.extras.IsObject() || (!node.extras.Has(kExternalAssetContentKey) && !node.extras.Has(kPlacedSourceKey)))
       return;
     tinygltf::Value::Object obj = node.extras.Get<tinygltf::Value::Object>();
     obj.erase(kExternalAssetContentKey);
+    obj.erase(kPlacedSourceKey);
     // Reset to null when empty so tinygltf does not emit an empty "extras": {}.
     node.extras = obj.empty() ? tinygltf::Value() : tinygltf::Value(std::move(obj));
   }
@@ -397,10 +439,12 @@ public:
   [[nodiscard]] uint64_t getSceneGraphRevision() const { return m_sceneGraphRevision; }
   void                   bumpSceneGraphRevision() { ++m_sceneGraphRevision; }
 
-  // KHR_mesh_gpu_instancing: per-node instance locals (used by GPU transform path).
-  [[nodiscard]] const std::unordered_map<int, std::vector<glm::mat4>>& getGpuInstanceLocalMatrices() const
+  // Nodes drawn more than once: EXT_mesh_gpu_instancing nodes and placing nodes with an instance
+  // set. For such a node, one local matrix per render node, in getRenderNodesForNode() order: the
+  // render node's world matrix is the node's world matrix times it. Nodes drawn once are absent.
+  [[nodiscard]] const std::unordered_map<int, std::vector<glm::mat4>>& getRenderNodeLocalMatrices() const
   {
-    return m_gpuInstanceLocalMatrices;
+    return m_renderNodeLocalMatrices;
   }
 
   //--------------------------------------------------------------------------------------------------
@@ -493,6 +537,13 @@ public:
   const std::vector<nvvkgltf::RenderPrimitive>& getRenderPrimitives() const { return m_renderPrimitives; }
   const nvvkgltf::RenderPrimitive&              getRenderPrimitive(size_t ID) const { return m_renderPrimitives[ID]; }
   [[nodiscard]] size_t                          getNumRenderPrimitives() const { return m_renderPrimitives.size(); }
+  // The render primitive drawing primitive `primitive` of mesh `mesh`, or -1 (not renderable, or a
+  // mesh added since the last parse). Several mesh primitives may share one render primitive. A node
+  // that skins or morphs the primitive may draw a render primitive of its own instead.
+  [[nodiscard]] int getMeshRenderPrimitive(int mesh, size_t primitive) const;
+  // The morph target weights a render primitive is blended with: its node's, or its mesh's when the
+  // node has none (node.weights override mesh.weights).
+  [[nodiscard]] const std::vector<double>& getMorphWeights(const nvvkgltf::RenderPrimitive& renderPrimitive) const;
   // Object-space AABB centroids, parallel to getRenderPrimitives(). Populated once when the
   // primitive set is built from the POSITION accessor min/max; reused by the rasterizer's
   // transparent depth sort to avoid re-parsing tinygltf accessors per frame.
@@ -602,6 +653,7 @@ public:
 
 private:
   friend class SceneEditor;
+  friend class ExternalAssetPlacer;
 
   // Application-supplied writer run by save() on the serialized model; see setPreSaveHook.
   std::function<void(tinygltf::Model&, const std::filesystem::path& destination)> m_preSaveHook;
@@ -620,14 +672,13 @@ private:
 
   void parseScene();
   void clearParsedData();
-  // glTF 2.1: resolve every node.externalAsset by loading the referenced file and merging it in
-  // under that node. Tags merged-in subtrees read-only and records provenance. Returns true if at
-  // least one external asset was merged (so the caller can re-run post-merge passes).
+  // glTF 2.1: resolve every node.externalAsset by placing the referenced file's content under that
+  // node, nested files too, each file loaded once. Tags the
+  // placed nodes read-only and records provenance. Returns true if at least one file was placed.
+  // Implemented in gltf_scene_external_assets.cpp.
   bool resolveExternalAssets();
-  // glTF 2.1: recursively merge (in place) every external asset referenced by `model`, making it
-  // self-contained before it is merged into the scene. Applies file aliases and guards against
-  // reference cycles via `ancestry` (canonical paths currently being resolved up the chain).
-  void flattenReferencedModel(tinygltf::Model& model, const std::filesystem::path& modelDir, std::vector<std::string>& ancestry, int depth);
+  // The same for one node of the scene's own file (runtime referenceScene()).
+  bool placeExternalAsset(int nodeIndex);
   // Tag the appended node range [firstNode, lastNode) read-only and record provenance. Shared by
   // load-time resolveExternalAssets() and runtime referenceScene(). Returns the m_referencedAssets index.
   int recordReferencedAsset(int firstNode, int lastNode, int instanceNode, int externalAssetIndex, int fileIndex, const std::string& uri);
@@ -642,10 +693,15 @@ private:
   using PrimitiveKeyMap = std::map<std::string, int>;
 
   PrimitiveKeyMap buildPrimitiveKeyMap();
+  std::string     primitiveKey(const tinygltf::Primitive& primitive) const;
   int             getMaterialVariantIndex(const tinygltf::Primitive& primitive, int currentVariant);
   void createRenderNodesForNode(int nodeID, const glm::mat4& worldMatrix, bool visible, const PrimitiveKeyMap& primMap);
   bool handleRenderNode(int nodeID, glm::mat4 worldMatrix, const PrimitiveKeyMap& primMap);
-  size_t handleGpuInstancing(const tinygltf::Value& attributes, nvvkgltf::RenderNode renderNode, glm::mat4 worldMatrix, int nodeID, int primIndex);
+  std::vector<glm::mat4> gpuInstancingMatrices(const tinygltf::Value& attributes);
+  void createInstanceSetRenderNodes(int nodeID, const InstanceSet& set, const glm::mat4& worldMatrix, bool visible, const PrimitiveKeyMap& primMap);
+  int  renderPrimitiveOf(int nodeID, int mesh, size_t primitive, const PrimitiveKeyMap& primMap) const;
+  void assignDeformedRenderPrimitives();
+  std::string deformedPoseKey(int nodeID, size_t primitive, int sharedMesh, const std::unordered_set<int>& animatedWeights) const;
   bool handleCameraTraversal(int nodeID, const glm::mat4& worldMatrix);
   bool handleLightTraversal(int nodeID, const glm::mat4& worldMatrix);
   void updateRenderNodesFull();
@@ -708,6 +764,7 @@ private:
   // glTF 2.1 external assets resolved into m_model (provenance). Read-only membership is derived
   // from the per-node extras marker (kExternalAssetContentKey), not tracked by index here.
   std::vector<nvvkgltf::ReferencedAsset> m_referencedAssets;
+  std::vector<InstanceSet>               m_instanceSets;  // see getInstanceSet(); kept across parseScene()
 
   //--------------------------------------------------------------------------------------------------
   // Data Members: Render Data (Built from Model)
@@ -759,7 +816,11 @@ private:
   void       updateWorldMatricesSerial();    // Filtered-root recursive walk (small dirty sets)
   void       updateWorldMatricesParallel();  // Level-by-level parallel (large dirty sets)
 
-  std::unordered_map<int, std::vector<glm::mat4>> m_gpuInstanceLocalMatrices;  // nodeID -> per-instance local transforms (EXT_mesh_gpu_instancing)
+  std::unordered_map<int, std::vector<glm::mat4>> m_renderNodeLocalMatrices;  // see getRenderNodeLocalMatrices()
+  std::vector<std::vector<int>> m_meshRenderPrimitives;  // per mesh primitive, its render primitive or -1 (buildPrimitiveKeyMap)
+  // Per node that skins or morphs a mesh other nodes draw too: its own render primitive per mesh
+  // primitive, used in place of m_meshRenderPrimitives (assignDeformedRenderPrimitives).
+  std::unordered_map<int, std::vector<int>> m_nodeRenderPrimitives;
 
   //--------------------------------------------------------------------------------------------------
   // Data Members: Material Variants

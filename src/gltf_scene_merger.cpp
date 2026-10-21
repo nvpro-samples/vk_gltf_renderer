@@ -29,6 +29,7 @@
 #include <nvutils/logger.hpp>
 #include <algorithm>
 #include <filesystem>
+#include <span>
 #include <unordered_map>
 #include <unordered_set>
 
@@ -126,7 +127,11 @@ static void remapTextureIndicesInValue(tinygltf::Value& val, int textureOffset)
   }
 }
 
-static void remapAndAppendBuffers(tinygltf::Model& base, const tinygltf::Model& imported)
+// Append the imported buffers and return where each one now is in base. sharedBuffers[i] >= 0 means
+// imported buffer i is already base buffer sharedBuffers[i] (the same file, the same bytes): it is not
+// appended, and the buffers after it close up the gap. An empty `sharedBuffers` appends them all at
+// offsets.buffers.
+static std::vector<int> remapAndAppendBuffers(tinygltf::Model& base, const tinygltf::Model& imported, std::span<const int> sharedBuffers)
 {
   // Collect existing buffer URIs to detect clashes
   std::unordered_set<std::string> existingUris;
@@ -136,9 +141,15 @@ static void remapAndAppendBuffers(tinygltf::Model& base, const tinygltf::Model& 
       existingUris.insert(buf.uri);
   }
 
-  for(const auto& buffer : imported.buffers)
+  std::vector<int> bufferRemap(imported.buffers.size());
+  for(size_t i = 0; i < imported.buffers.size(); i++)
   {
-    tinygltf::Buffer buf = buffer;
+    if(i < sharedBuffers.size() && sharedBuffers[i] >= 0)
+    {
+      bufferRemap[i] = sharedBuffers[i];
+      continue;
+    }
+    tinygltf::Buffer buf = imported.buffers[i];
 
     // If the buffer URI already exists, make it unique by adding a suffix
     if(!buf.uri.empty() && existingUris.count(buf.uri))
@@ -155,27 +166,34 @@ static void remapAndAppendBuffers(tinygltf::Model& base, const tinygltf::Model& 
     }
     if(!buf.uri.empty())
       existingUris.insert(buf.uri);
+    bufferRemap[i] = static_cast<int>(base.buffers.size());
     base.buffers.push_back(std::move(buf));
   }
+  return bufferRemap;
 }
 
-static void remapAndAppendBufferViews(tinygltf::Model& base, const tinygltf::Model& imported, const IndexRemapping& offsets)
+static void remapAndAppendBufferViews(tinygltf::Model& base, const tinygltf::Model& imported, const std::vector<int>& bufferRemap)
 {
+  const auto remap = [&bufferRemap](int buffer) {
+    return buffer >= 0 && buffer < static_cast<int>(bufferRemap.size()) ? bufferRemap[buffer] : -1;
+  };
   for(const auto& bufferView : imported.bufferViews)
   {
     tinygltf::BufferView bv = bufferView;
     if(bv.buffer >= 0)
-      bv.buffer += offsets.buffers;
-    if(bv.extensions.count("EXT_meshopt_compression"))
+      bv.buffer = remap(bv.buffer);
+    for(const char* extName : {EXT_MESHOPT_COMPRESSION_EXTENSION_NAME, KHR_MESHOPT_COMPRESSION_EXTENSION_NAME})
     {
-      tinygltf::Value& ext = bv.extensions["EXT_meshopt_compression"];
+      if(!bv.extensions.count(extName))
+        continue;
+      tinygltf::Value& ext = bv.extensions[extName];
       if(ext.Has("buffer"))
       {
         int bufIdx = ext.Get("buffer").GetNumberAsInt();
         if(bufIdx >= 0)
         {
           auto& obj     = ext.Get<tinygltf::Value::Object>();
-          obj["buffer"] = tinygltf::Value(bufIdx + offsets.buffers);
+          obj["buffer"] = tinygltf::Value(remap(bufIdx));
         }
       }
     }
@@ -201,16 +219,30 @@ static void remapAndAppendAccessors(tinygltf::Model& base, const tinygltf::Model
   }
 }
 
-static void remapAndAppendImages(tinygltf::Model& base, const tinygltf::Model& imported, const IndexRemapping& offsets)
+// Append the imported images and return where each one now is in base. sharedImages[i] >= 0 means
+// imported image i is already base image sharedImages[i]: it is not appended, and the images after
+// it close up the gap. An empty `sharedImages` appends them all at offsets.images.
+static std::vector<int> remapAndAppendImages(tinygltf::Model&       base,
+                                             const tinygltf::Model& imported,
+                                             const IndexRemapping&  offsets,
+                                             std::span<const int>   sharedImages)
 {
-  for(const auto& image : imported.images)
+  std::vector<int> imageRemap(imported.images.size());
+  for(size_t i = 0; i < imported.images.size(); i++)
   {
-    tinygltf::Image img = image;
+    if(i < sharedImages.size() && sharedImages[i] >= 0)
+    {
+      imageRemap[i] = sharedImages[i];
+      continue;
+    }
+    imageRemap[i]       = static_cast<int>(base.images.size());
+    tinygltf::Image img = imported.images[i];
     // Remap bufferView index for embedded images (GLB files)
     if(img.bufferView >= 0)
       img.bufferView += offsets.bufferViews;
     base.images.push_back(std::move(img));
   }
+  return imageRemap;
 }
 
 static void remapAndAppendSamplers(tinygltf::Model& base, const tinygltf::Model& imported)
@@ -221,16 +253,19 @@ static void remapAndAppendSamplers(tinygltf::Model& base, const tinygltf::Model&
   }
 }
 
-static void remapAndAppendTextures(tinygltf::Model& base, const tinygltf::Model& imported, const IndexRemapping& offsets)
+static void remapAndAppendTextures(tinygltf::Model&        base,
+                                   const tinygltf::Model&  imported,
+                                   const IndexRemapping&   offsets,
+                                   const std::vector<int>& imageRemap)
 {
   for(const auto& texture : imported.textures)
   {
     tinygltf::Texture tex = texture;
-    if(tex.source >= 0)
-      tex.source += offsets.images;
+    if(tex.source >= 0)  // an index past the imported images is invalid: cleared, not bound to a base image
+      tex.source = tex.source < static_cast<int>(imageRemap.size()) ? imageRemap[tex.source] : -1;
     if(tex.sampler >= 0)
       tex.sampler += offsets.samplers;
-    tinygltf::utils::offsetTextureExtensionImageSources(tex, offsets.images);
+    tinygltf::utils::remapTextureExtensionImageSources(tex, imageRemap);
     base.textures.push_back(std::move(tex));
   }
 }
@@ -367,51 +402,21 @@ static void remapAndAppendNodes(tinygltf::Model& base, const tinygltf::Model& im
       if(child >= 0)
         child += offsets.nodes;
     }
-    if(n.mesh >= 0)
-      n.mesh += offsets.meshes;
-    if(n.camera >= 0)
-      n.camera += offsets.cameras;
     if(n.skin >= 0)
       n.skin += offsets.skins;
-    if(n.extensions.count(KHR_LIGHTS_PUNCTUAL_EXTENSION_NAME))
-    {
-      tinygltf::Value& ext = n.extensions[KHR_LIGHTS_PUNCTUAL_EXTENSION_NAME];
-      if(ext.Has("light"))
-      {
-        int lightIdx = ext.Get("light").GetNumberAsInt();
-        if(lightIdx >= 0)
-        {
-          ext     = tinygltf::Value(lightIdx + offsets.lights);
-          n.light = lightIdx + offsets.lights;  // Scene uses node.light, not only extension
-        }
-      }
-    }
-    if(n.extensions.count(EXT_MESH_GPU_INSTANCING_EXTENSION_NAME))
-    {
-      tinygltf::Value& ext = n.extensions[EXT_MESH_GPU_INSTANCING_EXTENSION_NAME];
-      if(ext.Has("attributes") && ext.Get("attributes").IsObject())
-      {
-        auto& attrs = ext.Get<tinygltf::Value::Object>()["attributes"].Get<tinygltf::Value::Object>();
-        for(auto& attr : attrs)
-        {
-          if(attr.second.IsInt() || attr.second.IsNumber())
-          {
-            int accIdx = attr.second.GetNumberAsInt();
-            if(accIdx >= 0)
-              attr.second = tinygltf::Value(accIdx + offsets.accessors);
-          }
-        }
-      }
-    }
+    SceneMerger::remapNodeResources(n, offsets);
     base.nodes.push_back(std::move(n));
   }
 }
 
-static void remapAndAppendAnimations(tinygltf::Model& base, const tinygltf::Model& imported, const IndexRemapping& offsets)
+// withChannels=false appends the samplers only: the caller adds channels for the node copies it makes.
+static void remapAndAppendAnimations(tinygltf::Model& base, const tinygltf::Model& imported, const IndexRemapping& offsets, bool withChannels = true)
 {
   for(const auto& animation : imported.animations)
   {
     tinygltf::Animation anim = animation;
+    if(!withChannels)
+      anim.channels.clear();
     for(auto& channel : anim.channels)
     {
       if(channel.target_node >= 0)
@@ -522,23 +527,33 @@ static void remapAndAppendMicromaps(tinygltf::Model& base, const tinygltf::Model
 }
 
 // Append every imported resource array (buffers..lights) into base, remapping indices by
-// `offsets`, then union the imported extension-used/required lists into base. Shared by both
-// merge() (wrapper-node variant) and mergeIntoNode() (external-asset variant). Does NOT touch
-// base.nodes' scene wiring -- the caller decides how the imported roots are attached.
-static void appendResourcesAndExtensions(tinygltf::Model& base, const tinygltf::Model& imported, const IndexRemapping& offsets)
+// `offsets`, then union the imported extension-used/required lists into base. Shared by merge()
+// (wrapper-node variant) and appendResources() (external assets). Does NOT touch base.nodes' scene
+// wiring -- the caller decides how the imported roots are attached.
+// withNodes=false appends everything a node may point at, but no nodes, no skins (their joints are
+// nodes) and no animation channels (they target nodes): SceneMerger::appendResources.
+// sharedImages / sharedBuffers: see remapAndAppendImages() / remapAndAppendBuffers().
+static void appendResourcesAndExtensions(tinygltf::Model&       base,
+                                         const tinygltf::Model& imported,
+                                         const IndexRemapping&  offsets,
+                                         bool                   withNodes     = true,
+                                         std::span<const int>   sharedImages  = {},
+                                         std::span<const int>   sharedBuffers = {})
 {
-  remapAndAppendBuffers(base, imported);
-  remapAndAppendBufferViews(base, imported, offsets);
+  const std::vector<int> bufferRemap = remapAndAppendBuffers(base, imported, sharedBuffers);
+  remapAndAppendBufferViews(base, imported, bufferRemap);
   remapAndAppendAccessors(base, imported, offsets);
-  remapAndAppendImages(base, imported, offsets);
+  const std::vector<int> imageRemap = remapAndAppendImages(base, imported, offsets, sharedImages);
   remapAndAppendSamplers(base, imported);
-  remapAndAppendTextures(base, imported, offsets);
+  remapAndAppendTextures(base, imported, offsets, imageRemap);
   remapAndAppendMaterials(base, imported, offsets);
   remapAndAppendMeshes(base, imported, offsets);
-  remapAndAppendSkins(base, imported, offsets);
+  if(withNodes)
+    remapAndAppendSkins(base, imported, offsets);
   remapAndAppendCameras(base, imported);
-  remapAndAppendNodes(base, imported, offsets);
-  remapAndAppendAnimations(base, imported, offsets);
+  if(withNodes)
+    remapAndAppendNodes(base, imported, offsets);
+  remapAndAppendAnimations(base, imported, offsets, withNodes);
   remapAndAppendLights(base, imported);
   remapAndAppendMicromaps(base, imported, offsets);
 
@@ -601,136 +616,52 @@ int SceneMerger::merge(tinygltf::Model&        baseModel,
   return wrapperIdx;
 }
 
-MergeResult SceneMerger::mergeIntoNode(tinygltf::Model&        baseModel,
-                                       const tinygltf::Model&  importedModel,
-                                       int                     targetNodeIndex,
-                                       std::optional<uint32_t> maxTextureCount)
+IndexRemapping SceneMerger::appendResources(tinygltf::Model&       baseModel,
+                                            const tinygltf::Model& importedModel,
+                                            std::span<const int>   sharedImages,
+                                            std::span<const int>   sharedBuffers)
 {
-  if(importedModel.nodes.empty() || importedModel.scenes.empty())
-    return {};
-  if(targetNodeIndex < 0 || targetNodeIndex >= static_cast<int>(baseModel.nodes.size()))
-    return {};
-
-  if(maxTextureCount.has_value())
-  {
-    const size_t combined = baseModel.textures.size() + importedModel.textures.size();
-    if(combined > static_cast<size_t>(*maxTextureCount))
-      return {};
-  }
-
-  IndexRemapping offsets = computeOffsets(baseModel);
-  appendResourcesAndExtensions(baseModel, importedModel, offsets);
-
-  MergeResult result;
-  result.firstNode = offsets.nodes;
-  result.lastNode  = static_cast<int>(baseModel.nodes.size());
-
-  // Attach the imported default-scene roots as children of the existing target node.
-  // (glTF 2.1: "append the externalAsset root node(s) to the array of children for the node.")
-  // Guard against malformed assets: clamp an out-of-range defaultScene to 0 (scenes is non-empty,
-  // checked above), and skip scene-root entries that fall outside the imported node range so we
-  // never attach dangling children or push invalid roots.
-  int defaultScene = importedModel.defaultScene >= 0 ? importedModel.defaultScene : 0;
-  if(defaultScene >= static_cast<int>(importedModel.scenes.size()))
-    defaultScene = 0;
-  const tinygltf::Scene& importedScene     = importedModel.scenes[defaultScene];
-  const int              importedNodeCount = static_cast<int>(importedModel.nodes.size());
-  for(int nodeIdx : importedScene.nodes)
-  {
-    if(nodeIdx < 0 || nodeIdx >= importedNodeCount)
-      continue;
-    const int rootIdx = offsets.nodes + nodeIdx;
-    baseModel.nodes[targetNodeIndex].children.push_back(rootIdx);
-    result.roots.push_back(rootIdx);
-  }
-
-  return result;
+  const IndexRemapping offsets = computeOffsets(baseModel);
+  appendResourcesAndExtensions(baseModel, importedModel, offsets, /*withNodes=*/false, sharedImages, sharedBuffers);
+  return offsets;
 }
 
-MergeResult SceneMerger::instanceSubtree(tinygltf::Model& baseModel, const MergeResult& source, int targetNodeIndex)
+void SceneMerger::remapNodeResources(tinygltf::Node& n, const IndexRemapping& offsets)
 {
-  if(!source.valid())
-    return {};
-  if(targetNodeIndex < 0 || targetNodeIndex >= static_cast<int>(baseModel.nodes.size()))
-    return {};
-  if(source.lastNode > static_cast<int>(baseModel.nodes.size()))
-    return {};
-
-  // The source subtree occupies the contiguous block [firstNode, lastNode); every child/joint
-  // index inside the block refers to another node in the block. A copy therefore only needs to
-  // shift in-block references by a constant delta.
-  const int firstNode = source.firstNode;
-  const int lastNode  = source.lastNode;
-  const int newFirst  = static_cast<int>(baseModel.nodes.size());
-  const int delta     = newFirst - firstNode;
-
-  auto inBlock = [&](int idx) { return idx >= firstNode && idx < lastNode; };
-
-  // Duplicate skins referenced by the block so skinned instances animate independently. Meshes,
-  // materials and accessors are intentionally shared (=> shared render primitives / BLAS).
-  std::unordered_map<int, int> skinMap;
-  for(int i = firstNode; i < lastNode; ++i)
+  if(n.mesh >= 0)
+    n.mesh += offsets.meshes;
+  if(n.camera >= 0)
+    n.camera += offsets.cameras;
+  if(n.extensions.count(KHR_LIGHTS_PUNCTUAL_EXTENSION_NAME))
   {
-    const int s = baseModel.nodes[i].skin;
-    if(s >= 0 && s < static_cast<int>(baseModel.skins.size()) && skinMap.find(s) == skinMap.end())
+    tinygltf::Value& ext = n.extensions[KHR_LIGHTS_PUNCTUAL_EXTENSION_NAME];
+    if(ext.Has("light"))
     {
-      tinygltf::Skin ns = baseModel.skins[s];
-      for(int& j : ns.joints)
+      int lightIdx = ext.Get("light").GetNumberAsInt();
+      if(lightIdx >= 0)
       {
-        if(inBlock(j))
-          j += delta;
-      }
-      if(inBlock(ns.skeleton))
-        ns.skeleton += delta;
-      skinMap[s] = static_cast<int>(baseModel.skins.size());
-      baseModel.skins.push_back(std::move(ns));
-    }
-  }
-
-  // Duplicate the nodes (indexed access stays valid across push_back reallocations).
-  for(int i = firstNode; i < lastNode; ++i)
-  {
-    tinygltf::Node n = baseModel.nodes[i];
-    for(int& c : n.children)
-    {
-      if(inBlock(c))
-        c += delta;
-    }
-    if(n.skin >= 0)
-    {
-      auto it = skinMap.find(n.skin);
-      if(it != skinMap.end())
-        n.skin = it->second;
-    }
-    baseModel.nodes.push_back(std::move(n));
-  }
-
-  // Duplicate animation channels that target the block, retargeted to the copies (samplers shared).
-  for(auto& anim : baseModel.animations)
-  {
-    const size_t originalChannelCount = anim.channels.size();
-    for(size_t ci = 0; ci < originalChannelCount; ++ci)
-    {
-      if(inBlock(anim.channels[ci].target_node))
-      {
-        tinygltf::AnimationChannel nc = anim.channels[ci];
-        nc.target_node += delta;
-        anim.channels.push_back(nc);
+        ext.Get<tinygltf::Value::Object>()["light"] = tinygltf::Value(lightIdx + offsets.lights);
+        n.light = lightIdx + offsets.lights;  // Scene uses node.light, not only extension
       }
     }
   }
-
-  MergeResult result;
-  result.firstNode = newFirst;
-  result.lastNode  = static_cast<int>(baseModel.nodes.size());
-  for(int r : source.roots)
+  if(n.extensions.count(EXT_MESH_GPU_INSTANCING_EXTENSION_NAME))
   {
-    const int rootIdx = r + delta;
-    baseModel.nodes[targetNodeIndex].children.push_back(rootIdx);
-    result.roots.push_back(rootIdx);
+    tinygltf::Value& ext = n.extensions[EXT_MESH_GPU_INSTANCING_EXTENSION_NAME];
+    if(ext.Has("attributes") && ext.Get("attributes").IsObject())
+    {
+      auto& attrs = ext.Get<tinygltf::Value::Object>()["attributes"].Get<tinygltf::Value::Object>();
+      for(auto& attr : attrs)
+      {
+        if(attr.second.IsInt() || attr.second.IsNumber())
+        {
+          int accIdx = attr.second.GetNumberAsInt();
+          if(accIdx >= 0)
+            attr.second = tinygltf::Value(accIdx + offsets.accessors);
+        }
+      }
+    }
   }
-
-  return result;
 }
 
 }  // namespace nvvkgltf

@@ -66,8 +66,9 @@ public:
 
   // ---------- Sync / Update ----------
   // Update the per-material instance flags cache. Call before syncFromScene() clears df.materials,
-  // so that dirty material indices are still available for surgical cache updates.
-  void updateInstanceFlagsCache(const nvvkgltf::Scene& scene);
+  // so that dirty material indices are still available for surgical cache updates. Marks the render
+  // nodes of a material whose flags changed in df.renderNodesRtx, for syncTopLevelAS().
+  void updateInstanceFlagsCache(nvvkgltf::Scene& scene);
   // Sync TLAS from Scene dirty flags (reads + clears renderNodesRtx). Returns true if TLAS was updated.
   [[nodiscard]] bool syncTopLevelAS(VkCommandBuffer cmd, nvvk::CmdUploaderInterface& staging, nvvkgltf::Scene& scene);
 

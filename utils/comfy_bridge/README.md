@@ -5,8 +5,8 @@ local ComfyUI server. The renderer works fully without it.
 
 **Start here:**
 
-- [ComfyUI Agentic setup](https://github.com/nvpro-samples/vk_gltf_renderer/blob/master/docs/comfyui-agentic-setup.md) — install ComfyUI, download models, and run all three processes.
-- [Agentic workflow](https://github.com/nvpro-samples/vk_gltf_renderer/blob/master/docs/agentic-workflow.md) — the request/response protocol and bridge layout.
+- [ComfyUI Agentic setup](https://github.com/nvpro-samples/vk_gltf_renderer/blob/main/docs/comfyui-agentic-setup.md) — install ComfyUI, download models, and run all three processes.
+- [Agentic workflow](https://github.com/nvpro-samples/vk_gltf_renderer/blob/main/docs/agentic-workflow.md) — the request/response protocol and bridge layout.
 
 This folder holds only what a developer editing the adapter needs:
 

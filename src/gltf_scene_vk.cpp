@@ -1147,37 +1147,35 @@ void nvvkgltf::SceneVk::createVertexBuffers(VkCommandBuffer cmd, nvvk::CmdUpload
     updateAttributeBuffer<glm::vec2>("TEXCOORD_1", model, primitive, m_alloc, &staging, vertexBuffers.texCoord1);
     updateAttributeBuffer<glm::vec4>("TANGENT", model, primitive, m_alloc, &staging, vertexBuffers.tangent);
 
-    if(tinygltf::utils::hasElementName(primitive.attributes, "COLOR_0"))
+    // Color is packed into one uint per vertex. A color we can't read (wrong type, a component type
+    // we don't convert, or a failed read) is treated as absent, like the other optional attributes:
+    // no buffer, address 0. Never upload a partly filled buffer, which would turn it black.
+    const auto            colorIt = primitive.attributes.find("COLOR_0");
+    std::vector<uint32_t> packedColors;
+    if(colorIt != primitive.attributes.end() && colorIt->second >= 0
+       && colorIt->second < static_cast<int>(model.accessors.size()))
     {
-      // For color, we need to pack it into a single int
-      const tinygltf::Accessor& accessor = model.accessors[primitive.attributes.at("COLOR_0")];
-      std::vector<uint32_t>     tempIntData(accessor.count);
+      const tinygltf::Accessor& accessor = model.accessors[colorIt->second];
       if(accessor.type == TINYGLTF_TYPE_VEC3)
       {
-        std::vector<glm::vec3>     tempStorage;
-        std::span<const glm::vec3> colors = tinygltf::utils::getAccessorData(model, accessor, &tempStorage);
-        for(size_t i = 0; i < accessor.count; i++)
-        {
-          tempIntData[i] = glm::packUnorm4x8(glm::vec4(colors[i], 1));
-        }
+        std::vector<glm::vec3> tempStorage;
+        for(const glm::vec3& color : tinygltf::utils::getAccessorData(model, accessor, &tempStorage))
+          packedColors.push_back(glm::packUnorm4x8(glm::vec4(color, 1)));
       }
       else if(accessor.type == TINYGLTF_TYPE_VEC4)
       {
-        std::vector<glm::vec4>     tempStorage;
-        std::span<const glm::vec4> colors = tinygltf::utils::getAccessorData(model, accessor, &tempStorage);
-        for(size_t i = 0; i < accessor.count; i++)
-        {
-          tempIntData[i] = glm::packUnorm4x8(colors[i]);
-        }
+        std::vector<glm::vec4> tempStorage;
+        for(const glm::vec4& color : tinygltf::utils::getAccessorData(model, accessor, &tempStorage))
+          packedColors.push_back(glm::packUnorm4x8(color));
       }
-      else
-      {
-        assert(!"Unknown color type");
-      }
-
-      NVVK_CHECK(m_alloc->createBuffer(vertexBuffers.color, std::span(tempIntData).size_bytes(),
+      if(packedColors.size() != accessor.count)
+        packedColors.clear();
+    }
+    if(!packedColors.empty())
+    {
+      NVVK_CHECK(m_alloc->createBuffer(vertexBuffers.color, std::span(packedColors).size_bytes(),
                                        getBufferUsageFlags() | VK_BUFFER_USAGE_2_VERTEX_BUFFER_BIT));
-      NVVK_CHECK(staging.appendBuffer(vertexBuffers.color, 0, std::span(tempIntData)));
+      NVVK_CHECK(staging.appendBuffer(vertexBuffers.color, 0, std::span(packedColors)));
       m_memoryTracker.track(kMemCategoryGeometry, vertexBuffers.color.allocation);
     }
 

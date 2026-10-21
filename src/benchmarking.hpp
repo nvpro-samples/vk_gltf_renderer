@@ -84,8 +84,9 @@ public:
   struct HeadlessFrameInfo
   {
     uint32_t   totalFrames{0};  // Frames the headless run will render
-    int        maxFrames{0};    // Path-tracer accumulation budget
-    int        ptSamples{1};    // Samples per pixel per frame
+    int        maxSamples{0};   // Path-tracer accumulation cap, samples per pixel
+    int        ptSamples{1};    // Samples per pixel per frame (setting; adaptive sampling may vary it)
+    int        samples{0};      // Samples per pixel the accumulated image holds now
     VkExtent2D imageSize{};     // Render target resolution
   };
 
@@ -112,9 +113,9 @@ public:
   // True when the application is running under the benchmark harness.
   [[nodiscard]] bool isBenchmarkMode() const { return m_options.enabled; }
 
-  // Raise maxFrames to at least headlessFrames so path-tracer accumulation
+  // Raise maxSamples to headlessFrames x samplesPerFrame so path-tracer accumulation
   // keeps refining for the whole capture. Logs a warning when it changes.
-  static void alignMaxFramesForHeadless(int& maxFrames, uint32_t headlessFrames);
+  static void alignMaxSamplesForHeadless(int& maxSamples, uint32_t headlessFrames, int samplesPerFrame);
 
   // Begin / update / finalize wall-clock timing for a headless run.
   // beginHeadlessTimingIfNeeded() is idempotent within a single run, and
@@ -144,6 +145,7 @@ private:
   bool                      m_headlessMeasuredTimingActive{false};  // True once warmup is complete
   uint32_t                  m_headlessFramesDone{0};                // Frames completed in the active run
   uint32_t                  m_headlessMeasuredStartFrame{0};        // Completed frames excluded from measured timing
+  int                       m_headlessMeasuredStartSamples{0};      // Samples per pixel accumulated during the warmup
   double                    m_headlessLastProgressLogMs{0.0};       // Wall time of the last progress log
   int                       m_sequenceId{0};                        // Auto-incremented per emitSequenceMemory() call
 };

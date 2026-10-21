@@ -261,7 +261,7 @@ struct KHR_materials_diffuse_transmission
 {
   float                 diffuseTransmissionFactor       = 0.0f;
   tinygltf::TextureInfo diffuseTransmissionTexture      = {};
-  glm::vec3             diffuseTransmissionColor        = {1.0f, 1.0f, 1.0f};
+  glm::vec3             diffuseTransmissionColorFactor  = {1.0f, 1.0f, 1.0f};
   tinygltf::TextureInfo diffuseTransmissionColorTexture = {};
 };
 
@@ -570,14 +570,14 @@ glm::mat4 getNodeMatrix(const tinygltf::Node& node);
 > Generates a unique key for a GLTF primitive based on its attributes.
 
 This function creates a unique string key for the given GLTF primitive by
-concatenating its attribute keys and values. This is useful for caching
-the primitive data, thereby avoiding redundancy.
+concatenating its attribute, index, mode and morph target accessors. This is
+useful for caching the primitive data, thereby avoiding redundancy.
 
 Parameters:
 - primitive: The GLTF primitive for which to generate the key.
 
 Returns:
-- A unique string key representing the primitive's attributes.
+- A unique string key representing the primitive's geometry.
 -------------------------------------------------------------------------------------------------*/
 std::string generatePrimitiveKey(const tinygltf::Primitive& primitive);
 
@@ -727,6 +727,44 @@ Specifically, an accessor is simple if it:
 
 `T` must be `float`, `uint32_t`, `int32_t`, or a GLM vector or matrix type.
 -----------------------------------------------------------------------------------------------*/
+// The glTF component type matching T's scalar type (float, uint32_t or int32_t).
+template <typename T>
+constexpr int gltfComponentTypeOf()
+{
+  using ScalarType = ScalarTypeGetter<T>::type;
+  return std::is_same_v<ScalarType, float>    ? TINYGLTF_COMPONENT_TYPE_FLOAT :
+         std::is_same_v<ScalarType, uint32_t> ? TINYGLTF_COMPONENT_TYPE_UNSIGNED_INT :
+                                                TINYGLTF_COMPONENT_TYPE_INT;
+}
+
+/*-------------------------------------------------------------------------------------------------
+## Function `canReadAccessor<T>`
+> True if `getAccessorData<T>` can read `accessor`: the accessor has as many components as `T`, and
+> its component type is `T`'s own or one it converts (8/16-bit integers, float64).
+
+glTF 2.1 defines component types it does not convert (float16, 64-bit integers, and 32-bit
+integers read as float). Check before relying on the data, instead of getting an empty span back.
+-------------------------------------------------------------------------------------------------*/
+template <typename T>
+bool canReadAccessor(const tinygltf::Accessor& accessor)
+{
+  using ScalarType           = ScalarTypeGetter<T>::type;
+  constexpr int nbComponents = sizeof(T) / sizeof(ScalarType);
+  if(nbComponents != tinygltf::GetNumComponentsInType(accessor.type))
+    return false;
+  switch(accessor.componentType)
+  {
+    case TINYGLTF_COMPONENT_TYPE_BYTE:
+    case TINYGLTF_COMPONENT_TYPE_UNSIGNED_BYTE:
+    case TINYGLTF_COMPONENT_TYPE_SHORT:
+    case TINYGLTF_COMPONENT_TYPE_UNSIGNED_SHORT:
+    case TINYGLTF_COMPONENT_TYPE_DOUBLE:
+      return true;
+    default:
+      return accessor.componentType == gltfComponentTypeOf<T>();
+  }
+}
+
 template <typename T>
 bool isAccessorSimple(const tinygltf::Model& tmodel, const tinygltf::Accessor& accessor)
 {
@@ -735,11 +773,8 @@ bool isAccessorSimple(const tinygltf::Model& tmodel, const tinygltf::Accessor& a
   {
     return false;
   }
-  const auto& bufferView          = tmodel.bufferViews[accessor.bufferView];
-  using ScalarType                = ScalarTypeGetter<T>::type;
-  constexpr int gltfComponentType = (std::is_same_v<ScalarType, float> ? TINYGLTF_COMPONENT_TYPE_FLOAT :  //
-                                         (std::is_same_v<ScalarType, uint32_t> ? TINYGLTF_COMPONENT_TYPE_UNSIGNED_INT :  //
-                                              TINYGLTF_COMPONENT_TYPE_INT));
+  const auto&   bufferView        = tmodel.bufferViews[accessor.bufferView];
+  constexpr int gltfComponentType = gltfComponentTypeOf<T>();
   return (accessor.componentType == gltfComponentType)                          // Must not require conversion
          && (bufferView.byteStride == 0 || bufferView.byteStride == sizeof(T))  // Must not require re-packing
          && !accessor.sparse.isSparse;                                          // Must not be sparse
@@ -914,14 +949,12 @@ inline std::span<T> getAccessorData(tinygltf::Model& model, const tinygltf::Acce
   // The following block of code figures out how to access T.
   using ScalarType                 = ScalarTypeGetter<T>::type;
   constexpr bool toFloat           = std::is_same_v<ScalarType, float>;
-  constexpr int  gltfComponentType = (toFloat ? TINYGLTF_COMPONENT_TYPE_FLOAT :  //
-                                         (std::is_same_v<ScalarType, uint32_t> ? TINYGLTF_COMPONENT_TYPE_UNSIGNED_INT :  //
-                                              TINYGLTF_COMPONENT_TYPE_INT));
+  constexpr int  gltfComponentType = gltfComponentTypeOf<T>();
   // 1, 2, 3, 4, 16 for scalar, VEC2, VEC3, VEC4, MAT4, etc.
   constexpr int nbComponents = sizeof(T) / sizeof(ScalarType);
 
-  // Make sure the input and output have the same number of components
-  if(nbComponents != tinygltf::GetNumComponentsInType(accessor.type))
+  // Wrong number of components, or a component type we don't convert (e.g. glTF 2.1 float16)
+  if(!canReadAccessor<T>(accessor))
   {
     return {};  // Invalid
   }
@@ -997,15 +1030,8 @@ inline std::span<T> getAccessorData(tinygltf::Model& model, const tinygltf::Acce
   }
   else
   {
-    // The component doesn't match T's scalar type and needs to be converted
-    if(!(accessor.componentType == TINYGLTF_COMPONENT_TYPE_BYTE || accessor.componentType == TINYGLTF_COMPONENT_TYPE_UNSIGNED_BYTE
-         || accessor.componentType == TINYGLTF_COMPONENT_TYPE_SHORT || accessor.componentType == TINYGLTF_COMPONENT_TYPE_UNSIGNED_SHORT
-         || accessor.componentType == TINYGLTF_COMPONENT_TYPE_DOUBLE))
-    {
-      assert(!"Unhandled tinygltf component type!");
-      return {};
-    }
-
+    // The component doesn't match T's scalar type and needs to be converted (canReadAccessor
+    // checked it is one of the types handled below).
     const auto& copyElementFn = [&](size_t elementIdx, const unsigned char* pElement) {
       T vecValue{};
 
@@ -1410,15 +1436,10 @@ std::string getTextureUiLabel(const tinygltf::Model& model, int textureIndex);
 /*-------------------------------------------------------------------------------------------------
 ## Function `remapTextureExtensionImageSources`
 > Rewrites `source` inside `EXT_texture_webp`, `MSFT_texture_dds`, and `KHR_texture_basisu` using
-> the same index mapping as `texture.source` during compaction.
+> the same index mapping as `texture.source` (compaction, and appending a merged model's textures).
+> A source past the end of `imageRemap` is invalid and becomes -1.
 -------------------------------------------------------------------------------------------------*/
 void remapTextureExtensionImageSources(tinygltf::Texture& texture, const std::vector<int>& imageRemap);
-
-/*-------------------------------------------------------------------------------------------------
-## Function `offsetTextureExtensionImageSources`
-> Adds `imageIndexDelta` to `source` in WebP / DDS / BasisU extensions (e.g. merge append).
--------------------------------------------------------------------------------------------------*/
-void offsetTextureExtensionImageSources(tinygltf::Texture& texture, int imageIndexDelta);
 
 /*-------------------------------------------------------------------------------------------------
 > Retrieves the visibility of a node using `KHR_node_visibility`.

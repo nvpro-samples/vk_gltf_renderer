@@ -27,6 +27,9 @@
 #include "optix_denoiser.hpp"
 
 #include <algorithm>
+#include <chrono>
+
+#include <fmt/format.h>
 
 // Define OptiX function table (must be in exactly one translation unit)
 #include <optix_function_table_definition.h>
@@ -99,8 +102,9 @@ void OptiXDenoiser::init(Resources& resources)
                                     .alloc  = &resources.allocator,
                                     .colorFormats =
                                         {
-                                            VK_FORMAT_R32G32B32A32_SFLOAT,  // Output denoised image (index 0)
-                                            VK_FORMAT_R32G32B32A32_SFLOAT,  // OptiX Albedo+Normal (index 1)
+                                            VK_FORMAT_R32G32B32A32_SFLOAT,  // eGBufferDenoised
+                                            VK_FORMAT_R32G32B32A32_SFLOAT,  // eGBufferAlbedo
+                                            VK_FORMAT_R32G32B32A32_SFLOAT,  // eGBufferNormal
                                         },
                                     .debugName = "OptiX-IO"}));
 
@@ -311,12 +315,13 @@ void OptiXDenoiser::updateSize(VkCommandBuffer cmd, VkExtent2D size)
   if(m_settings.enable)
   {
     if(m_appMemoryTracker)
-      m_appMemoryTracker->untrack("OptiX/GBuffers", m_denoiserTarget, 2);
+      m_appMemoryTracker->untrack("OptiX/GBuffers", m_denoiserTarget, eGBufferCount);
     NVVK_CHECK(m_denoiserTarget.update(cmd, size));
     m_denoiserTarget.cmdClear(cmd);
     NVVK_DBG_NAME_STR(m_denoiserTarget.getColorImage(), "Optix::m_outputImage");
     if(m_appMemoryTracker)
-      m_appMemoryTracker->track("OptiX/GBuffers", m_denoiserTarget, 2);
+      m_appMemoryTracker->track("OptiX/GBuffers", m_denoiserTarget, eGBufferCount);
+    m_guides.restart();  // the guide images are new
   }
 
   // Compute input (render) resolution based on model kind
@@ -415,6 +420,12 @@ bool OptiXDenoiser::denoiseOneShot(Resources& resources)
   }
   ensureTargets(resources);  // "Denoise Now" can run while the renderer is idle (converged)
 
+  using Clock          = std::chrono::steady_clock;
+  const auto msBetween = [](Clock::time_point a, Clock::time_point b) {
+    return std::chrono::duration<float, std::milli>(b - a).count();
+  };
+  const Clock::time_point tStart = Clock::now();
+
   // IMPORTANT: Wait for ALL GPU operations to complete before denoising
   // This ensures:
   // 1. The latest accumulated samples are in the rendered image
@@ -425,8 +436,10 @@ bool OptiXDenoiser::denoiseOneShot(Resources& resources)
     // before CUDA reads the images. Cannot be replaced with a fence without changing the interop model.
     vkQueueWaitIdle(resources.app->getQueue(0).queue);
   }
+  const Clock::time_point tDrained = Clock::now();
 
   // If the OptiX buffers need to be rebuilt, do it now.
+  const bool rebuilt = m_needRebuildBuffers;  // a one-time cost, kept out of the timings
   if(m_needRebuildBuffers)
   {
     rebuiltBuffers();
@@ -440,12 +453,15 @@ bool OptiXDenoiser::denoiseOneShot(Resources& resources)
   }
 
   // Prepare denoising inputs
+  const Clock::time_point tCopyIn = Clock::now();
   {
     VkCommandBuffer cmd = resources.app->createTempCmdBuffer();
 
     DenoisingInputs inputs = {
-        .renderedImage     = resources.gBuffers.getColorStorageImageInfo(Resources::eImgRendered),
-        .albedoNormalImage = m_denoiserTarget.getColorStorageImageInfo(eGBufferAlbedoNormal),
+        .renderedImage    = resources.gBuffers.getColorStorageImageInfo(Resources::eImgRendered),
+        .albedoImage      = m_denoiserTarget.getColorStorageImageInfo(eGBufferAlbedo),
+        .normalImage      = m_denoiserTarget.getColorStorageImageInfo(eGBufferNormal),
+        .frameInfoAddress = resources.bFrameInfo.address,
     };
 
     if(!prepareDenoisingInputs(cmd, inputs))
@@ -456,6 +472,7 @@ bool OptiXDenoiser::denoiseOneShot(Resources& resources)
   }
 
   // Execute OptiX denoising
+  const Clock::time_point tInvoke = Clock::now();
   {
     if(!executeDenoising())
     {
@@ -464,6 +481,7 @@ bool OptiXDenoiser::denoiseOneShot(Resources& resources)
   }
 
   // Finalize denoised output
+  const Clock::time_point tCopyOut = Clock::now();
   {
     VkCommandBuffer cmd = resources.app->createTempCmdBuffer();
 
@@ -477,8 +495,32 @@ bool OptiXDenoiser::denoiseOneShot(Resources& resources)
     resources.app->submitAndWaitTempCmdBuffer(cmd);
   }
 
-  m_hasValidOutput = true;
+  const Clock::time_point tEnd = Clock::now();
+  if(!rebuilt)
+  {
+    m_avgDrain.addValue(msBetween(tStart, tDrained));
+    m_avgCopyIn.addValue(msBetween(tCopyIn, tInvoke));
+    m_avgInvoke.addValue(msBetween(tInvoke, tCopyOut));
+    m_avgInvokeGpu.addValue(m_lastInvokeGpuMs);
+    m_avgCopyOut.addValue(msBetween(tCopyOut, tEnd));
+    m_avgTotal.addValue(msBetween(tStart, tDrained) + msBetween(tCopyIn, tEnd));
+  }
+
+  // The queue was idle: the image holds the samples of the submitted frames, not of the one being recorded
+  m_hasValidOutput  = true;
+  m_denoisedSamples = resources.accumulatedSamples;
+  ++m_denoiseCount;
   return true;
+}
+
+OptiXDenoiser::Timings OptiXDenoiser::getTimings() const
+{
+  return {.drainMs     = m_avgDrain.getAverage(),
+          .copyInMs    = m_avgCopyIn.getAverage(),
+          .invokeMs    = m_avgInvoke.getAverage(),
+          .invokeGpuMs = m_avgInvokeGpu.getAverage(),
+          .copyOutMs   = m_avgCopyOut.getAverage(),
+          .totalMs     = m_avgTotal.getAverage()};
 }
 
 bool OptiXDenoiser::prepareDenoisingInputs(VkCommandBuffer cmd, const DenoisingInputs& inputs)
@@ -500,7 +542,8 @@ bool OptiXDenoiser::prepareDenoisingInputs(VkCommandBuffer cmd, const DenoisingI
   using namespace shaderio;
   nvvk::WriteSetContainer writeContainer;
   writeContainer.append(m_bindings.getWriteSet(OptixBindingPoints::eInRgba), inputs.renderedImage);
-  writeContainer.append(m_bindings.getWriteSet(OptixBindingPoints::eInAlbedoNormal), inputs.albedoNormalImage);
+  writeContainer.append(m_bindings.getWriteSet(OptixBindingPoints::eInAlbedo), inputs.albedoImage);
+  writeContainer.append(m_bindings.getWriteSet(OptixBindingPoints::eInNormal), inputs.normalImage);
   writeContainer.append(m_bindings.getWriteSet(OptixBindingPoints::eOutRgba), m_rgbBuffer.vkBuffer);
   writeContainer.append(m_bindings.getWriteSet(OptixBindingPoints::eOutAlbedo), m_albedoBuffer.vkBuffer);
   writeContainer.append(m_bindings.getWriteSet(OptixBindingPoints::eOutNormal), m_normalBuffer.vkBuffer);
@@ -508,7 +551,11 @@ bool OptiXDenoiser::prepareDenoisingInputs(VkCommandBuffer cmd, const DenoisingI
                             static_cast<uint32_t>(writeContainer.size()), writeContainer.data());
 
   // Push constants: dispatch at input (render) resolution
-  vkCmdPushConstants(cmd, m_computePipelineLayout, VK_SHADER_STAGE_COMPUTE_BIT, 0, sizeof(VkExtent2D), &m_inputSize);
+  const OptixCopyPushConstant pushConstant{
+      .imageSize = {m_inputSize.width, m_inputSize.height},
+      .frameInfo = reinterpret_cast<SceneFrameInfo*>(inputs.frameInfoAddress),
+  };
+  vkCmdPushConstants(cmd, m_computePipelineLayout, VK_SHADER_STAGE_COMPUTE_BIT, 0, sizeof(OptixCopyPushConstant), &pushConstant);
 
   VkExtent2D groupCounts = nvvk::getGroupCounts(m_inputSize, VkExtent2D{16, 16});
   vkCmdDispatch(cmd, groupCounts.width, groupCounts.height, 1);
@@ -581,11 +628,20 @@ bool OptiXDenoiser::executeDenoising()
     params.hdrAverageColor               = 0;     // Auto-calculated by OptiX (for AOV mode)
     params.temporalModeUsePreviousLayers = 0;     // Not using temporal mode
 
+    // GPU time of the denoiser alone (see Timings)
+    if(!m_invokeStart)
+    {
+      CUDA_CHECK_BOOL(cudaEventCreate(&m_invokeStart));
+      CUDA_CHECK_BOOL(cudaEventCreate(&m_invokeStop));
+    }
+    CUDA_CHECK_BOOL(cudaEventRecord(m_invokeStart, m_cudaStream));
     OPTIX_CHECK(optixDenoiserInvoke(m_denoiser, m_cudaStream, &params, m_stateBuffer.ptr, m_stateBuffer.size, &guide,
                                     &layers, 1, 0, 0, m_scratchBuffer.ptr, m_scratchBuffer.size));
+    CUDA_CHECK_BOOL(cudaEventRecord(m_invokeStop, m_cudaStream));
 
     // Wait for CUDA stream to finish - ensure denoiser completes before returning
     CUDA_CHECK_BOOL(cudaStreamSynchronize(m_cudaStream));
+    CUDA_CHECK_BOOL(cudaEventElapsedTime(&m_lastInvokeGpuMs, m_invokeStart, m_invokeStop));
   }
 
   return true;
@@ -632,8 +688,8 @@ void OptiXDenoiser::createComputePipeline()
   // Shader descriptor set layout (following Tonemapper::init pattern)
   using namespace shaderio;
   m_bindings.addBinding(OptixBindingPoints::eInRgba, VK_DESCRIPTOR_TYPE_SAMPLED_IMAGE, 1, VK_SHADER_STAGE_COMPUTE_BIT);  // inResultImage
-  m_bindings.addBinding(OptixBindingPoints::eInAlbedoNormal, VK_DESCRIPTOR_TYPE_SAMPLED_IMAGE, 1,
-                        VK_SHADER_STAGE_COMPUTE_BIT);  // inAlbedoNormalImage
+  m_bindings.addBinding(OptixBindingPoints::eInAlbedo, VK_DESCRIPTOR_TYPE_SAMPLED_IMAGE, 1, VK_SHADER_STAGE_COMPUTE_BIT);  // inAlbedoImage
+  m_bindings.addBinding(OptixBindingPoints::eInNormal, VK_DESCRIPTOR_TYPE_SAMPLED_IMAGE, 1, VK_SHADER_STAGE_COMPUTE_BIT);  // inNormalImage
   m_bindings.addBinding(OptixBindingPoints::eOutRgba, VK_DESCRIPTOR_TYPE_STORAGE_BUFFER, 1, VK_SHADER_STAGE_COMPUTE_BIT);  // outRgbBuffer
   m_bindings.addBinding(OptixBindingPoints::eOutAlbedo, VK_DESCRIPTOR_TYPE_STORAGE_BUFFER, 1, VK_SHADER_STAGE_COMPUTE_BIT);  // outAlbedoBuffer
   m_bindings.addBinding(OptixBindingPoints::eOutNormal, VK_DESCRIPTOR_TYPE_STORAGE_BUFFER, 1, VK_SHADER_STAGE_COMPUTE_BIT);  // outNormalBuffer
@@ -641,8 +697,8 @@ void OptiXDenoiser::createComputePipeline()
   NVVK_CHECK(m_descriptorPack.init(m_bindings, m_device, 0, VK_DESCRIPTOR_SET_LAYOUT_CREATE_PUSH_DESCRIPTOR_BIT_KHR));
   NVVK_DBG_NAME(m_descriptorPack.getLayout());
 
-  // Push constant for image size
-  VkPushConstantRange pushConstantRange{.stageFlags = VK_SHADER_STAGE_COMPUTE_BIT, .size = sizeof(VkExtent2D)};
+  // Push constant: image size and the frame info (view matrix)
+  VkPushConstantRange pushConstantRange{.stageFlags = VK_SHADER_STAGE_COMPUTE_BIT, .size = sizeof(shaderio::OptixCopyPushConstant)};
 
   // Pipeline layout
   const VkPipelineLayoutCreateInfo pipelineLayoutInfo{
@@ -692,6 +748,13 @@ void OptiXDenoiser::cleanupOptiX()
     m_denoiser = nullptr;
   }
 
+  if(m_invokeStart)
+  {
+    cudaEventDestroy(m_invokeStart);
+    cudaEventDestroy(m_invokeStop);
+    m_invokeStart = m_invokeStop = nullptr;
+  }
+
   if(m_cudaStream)
   {
     cudaStreamDestroy(m_cudaStream);
@@ -721,7 +784,7 @@ void OptiXDenoiser::cleanupOptiX()
 
   if(m_appMemoryTracker)
   {
-    m_appMemoryTracker->untrack("OptiX/GBuffers", m_denoiserTarget, 2);
+    m_appMemoryTracker->untrack("OptiX/GBuffers", m_denoiserTarget, eGBufferCount);
     m_appMemoryTracker->untrack("OptiX/Staging", m_upscaleStaging, 1);
   }
   m_denoisedUi.deinit();
@@ -763,18 +826,18 @@ void OptiXDenoiser::cleanupBuffers()
 void OptiXDenoiser::registerParameters(SettingsRegistry* settings)
 {
   settings->add({"optixEnable", "OptiX Denoiser: Enable OptiX denoiser"}, &m_settings.enable, Persist::eYes);
-  settings->add({"optixAutoDenoiseEnabled", "OptiX Denoiser: Auto-denoise every N frames"},
+  settings->add({"optixAutoDenoiseEnabled", "OptiX Denoiser: Auto-denoise every N samples per pixel and at the max samples"},
                 &m_settings.autoDenoiseEnabled, Persist::eYes);
-  // Bounds mirror the UI (Slider 1..500 in showUI, Combo indices 0..1 for {AOV, Upscale2X}) so
+  // Bounds mirror the UI (Slider 1..1000 in showUI, Combo indices 0..1 for {AOV, Upscale2X}) so
   // CLI, benchmark sequences, and ImGui.ini restore cannot set values the UI would reject.
-  settings->add({"optixAutoDenoiseInterval", "OptiX Denoiser: Auto-denoise interval (frames)"},
-                &m_settings.autoDenoiseInterval, Persist::eYes, 1, 500);
+  settings->add({"optixAutoDenoiseSpp", "OptiX Denoiser: Auto-denoise interval, in samples per pixel"},
+                &m_settings.autoDenoiseSpp, Persist::eYes, 1, 1000);
   settings->add({"optixModelKind", "OptiX Denoiser: Model [AOV:0, Upscale2X:1]"}, (int*)&m_settings.modelKind,
                 Persist::eYes, 0, 1);
 }
 
 
-void OptiXDenoiser::updateDenoiser(Resources& resources)
+void OptiXDenoiser::updateDenoiser(Resources& resources, bool dlssFrame0, int handoffEnd)
 {
   if(!m_settings.enable)
   {
@@ -786,49 +849,53 @@ void OptiXDenoiser::updateDenoiser(Resources& resources)
   // via temp command buffers while the current frame's ray tracing is still recorded
   // (not yet submitted) in the main command buffer. Frame 0 denoises stale data from
   // the previous camera position; frame 1 denoises frame 0's correct data.
-  if(isUpscaleMode() && resources.frameCount <= 1)
+  // When DLSS-RR rendered frame 0, its image is DLSS's display-size output, no input for the
+  // upscaler: frame 1 skips it, and frame 2 denoises frame 1's.
+  const int oneShotUntil = dlssFrame0 ? 2 : 1;
+  if(isUpscaleMode() && resources.frameCount <= oneShotUntil)
   {
-    if(denoiseOneShot(resources))
+    if(!(dlssFrame0 && resources.frameCount == 1) && denoiseOneShot(resources))
     {
-      m_lastAutoDenoiseFrame           = resources.frameCount;
+      m_autoDenoise.markDenoised(resources.accumulatedSamples);
       resources.settings.displayBuffer = DisplayBuffer::eOptixDenoised;
     }
     return;
   }
 
-  // Auto-denoise logic: trigger denoising at frame intervals
-  if(isAutoDenoiseActive() && m_settings.autoDenoiseInterval > 0)
+  // Auto-denoise logic: trigger denoising at sample intervals. The image read holds the samples of the
+  // frames already recorded (resources.accumulatedSamples), not those of the frame being recorded.
+  // An interval of 1 denoises every frame, the first after a reset included: its image is still the
+  // previous frame's, which has no samples of the new accumulation, but denoising it is what keeps a
+  // moving camera (a reset every frame) showing denoised frames instead of raw ones.
+  const bool everyFrame = m_settings.autoDenoiseSpp == 1 && resources.frameCount == 0;
+  if(isAutoDenoiseActive()
+     && (everyFrame || m_autoDenoise.isDue(resources.accumulatedSamples, m_settings.autoDenoiseSpp, false, handoffEnd)))
   {
-    // Reset tracking if frame count went backwards (rendering restarted)
-    if(resources.frameCount < m_lastAutoDenoiseFrame)
+    if(denoiseOneShot(resources))
     {
-      m_lastAutoDenoiseFrame = 0;
-    }
-
-    bool     shouldDenoise   = false;
-    uint64_t currentInterval = resources.frameCount / m_settings.autoDenoiseInterval;
-    uint64_t lastInterval    = m_lastAutoDenoiseFrame / m_settings.autoDenoiseInterval;
-
-    // Check if we've crossed an interval boundary
-    if(currentInterval > lastInterval && resources.frameCount % m_settings.autoDenoiseInterval == 0)
-    {
-      shouldDenoise = true;
-    }
-
-    if(m_settings.autoDenoiseInterval == 1)
-      shouldDenoise = true;
-
-    if(shouldDenoise)
-    {
-      if(denoiseOneShot(resources))
-      {
-        m_lastAutoDenoiseFrame = resources.frameCount;
-        // Automatically switch to display the denoised result
-        resources.settings.displayBuffer = DisplayBuffer::eOptixDenoised;
-        LOGI("Auto-denoise triggered at frame %i\n", resources.frameCount);
-      }
+      m_autoDenoise.markDenoised(resources.accumulatedSamples);
+      // Automatically switch to display the denoised result
+      resources.settings.displayBuffer = DisplayBuffer::eOptixDenoised;
+      const Timings t                  = getTimings();
+      LOGI("Auto-denoise triggered at %d spp (avg %.2f ms: drain %.2f, copy in %.2f, OptiX %.2f [GPU %.2f], copy out %.2f)\n",
+           resources.accumulatedSamples, t.totalMs, t.drainMs, t.copyInMs, t.invokeMs, t.invokeGpuMs, t.copyOutMs);
     }
   }
+}
+
+void OptiXDenoiser::denoiseFinal(Resources& resources)
+{
+  // Being one frame behind, updateDenoiser() never sees the frame that completes the accumulation:
+  // the path tracer is not called again until it restarts. Its image is denoised here, on idle frames.
+  const int samples = resources.accumulatedSamples;
+  if(!isEnabled() || !isAutoDenoiseActive() || !m_autoDenoise.isFinalDue(samples))
+    return;
+  if(denoiseOneShot(resources))
+  {
+    resources.settings.displayBuffer = DisplayBuffer::eOptixDenoised;
+    LOGI("Auto-denoise of the final image at %d spp\n", samples);
+  }
+  m_autoDenoise.markDenoised(samples);  // a failed denoise is not retried every idle frame
 }
 
 bool OptiXDenoiser::onUi(Resources& resources)
@@ -871,10 +938,20 @@ bool OptiXDenoiser::onUiActivation(Resources& resources)
     // every frame, so toggling it keeps the accumulation. Restart it only when the 2x upscale model
     // changes the render size, or when enabling on a converged image: the renderer is idle then, and
     // the guides and the denoise both need rendered frames.
-    const bool converged = resources.frameCount >= resources.settings.maxFrames;
+    const bool converged = resources.accumulationComplete();
     changed              = isUpscaleMode() || (m_settings.enable && !wasEnabled && converged);
   }
   return changed;
+}
+
+bool OptiXDenoiser::disable(Resources& resources)
+{
+  if(!m_settings.enable)
+    return false;
+  m_settings.enable = false;
+  if(resources.settings.displayBuffer == DisplayBuffer::eOptixDenoised)
+    resources.settings.displayBuffer = DisplayBuffer::eRendered;
+  return isUpscaleMode();
 }
 
 bool OptiXDenoiser::onUiSettings(Resources& resources)
@@ -938,12 +1015,28 @@ bool OptiXDenoiser::onUiSettings(Resources& resources)
     PE::Checkbox("Auto", &m_settings.autoDenoiseEnabled);
   if(isAutoDenoiseActive())
   {
-    PE::SliderInt("Interval", &m_settings.autoDenoiseInterval, 1, 500, "%d frames");
-    if(m_settings.autoDenoiseInterval > 1)
-      ImGui::TextDisabled("Next: frame %llu",
-                          ((resources.frameCount / m_settings.autoDenoiseInterval) + 1) * m_settings.autoDenoiseInterval);
+    PE::SliderInt("Interval", &m_settings.autoDenoiseSpp, 1, 1000, "%d spp", ImGuiSliderFlags_Logarithmic,
+                  "Denoise each time the accumulation reaches a multiple of this many samples per pixel.");
+    if(m_settings.autoDenoiseSpp > 1)
+      ImGui::TextDisabled("Next: %d spp", AutoDenoiseSchedule::nextSamples(resources.accumulatedSamples, m_settings.autoDenoiseSpp,
+                                                                           resources.settings.maxSamples));
   }
   PE::end();
+
+  if(m_hasValidOutput)
+  {
+    // Outside the frame's command buffer, so not in the Profiler window
+    const Timings t = getTimings();
+    ImGui::TextDisabled("Denoise: %.2f ms (OptiX GPU %.2f ms)", t.totalMs, t.invokeGpuMs);
+    const std::string detail = fmt::format(
+        "Average of the last denoises, host wall time:\n"
+        "  wait for frames in flight  {:.2f} ms\n"
+        "  copy images to CUDA        {:.2f} ms\n"
+        "  OptiX invoke               {:.2f} ms  (GPU {:.2f} ms)\n"
+        "  copy result back           {:.2f} ms",
+        t.drainMs, t.copyInMs, t.invokeMs, t.invokeGpuMs, t.copyOutMs);
+    nvsamples::denoiserui::tooltip(detail.c_str());
+  }
 
   if(!m_settings.enable)
     ImGui::EndDisabled();

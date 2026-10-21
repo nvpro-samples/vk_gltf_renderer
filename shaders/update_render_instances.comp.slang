@@ -9,12 +9,13 @@
  * SceneRtx::syncTopLevelAS when DirtyFlags::tlasVisibilityNeedsCpuSync is set — avoids staging
  * multi-megabyte mapping buffers when huge subtrees toggle visibility.
  *
- * Matrix math (WHY this matches CPU / glm):
- * - Slang compiles to SPIR-V using HLSL-style semantics: `mul(A, B)` is the matrix product A*B
- *   with column-major `float4x4` storage — the same convention as glTF samples and glm on the host.
- * - Do not use GLSL's `*` operator rules here; SPIR-V matrix ops match HLSL-style `mul` / `OpMatrixTimesMatrix`.
- * - Hierarchy on CPU: world = parentWorld * local. Instancing: final = nodeWorld * instanceLocal
- *   (see Scene::updateWorldMatricesParallel / updateRenderNodesFull). Same order: `mul(nodeWorld, instLocal)`.
+ * Matrix math (WHY the operands look swapped):
+ * - The host uploads glm matrices as they are (column-major), but shaders are compiled with
+ *   `-matrix-layout-row-major` (nvpro_core2 CompilerSlangShader.cmake), so every float4x4 here is
+ *   the transpose of the host matrix, and `mul(A, B)` here is the host's B*A.
+ * - Instancing on the host: final = nodeWorld * instanceLocal (see Scene::updateWorldMatricesParallel
+ *   / updateRenderNodesFull), so here it is `mul(instLocal, nodeWorld)` -- the same reason
+ *   world_matrix_propagate writes `mul(local, parentWorld)` for parentWorld * local.
  *
  * TLAS transform: nvvk::toTransformMatrixKHR transposes the glm mat4 then stores the first 3 rows as
  * row-major 3x4; we use `transpose(worldMat)` then copy three float4 rows into `transform[12]`.
@@ -52,7 +53,7 @@ void main(uint3 dtid: SV_DispatchThreadID)
 
   float4x4 worldMat  = pc.worldMatrices[map.nodeID];
   float4x4 instLocal = pc.gpuInstLocalMatrices[i];
-  worldMat           = mul(worldMat, instLocal);
+  worldMat           = mul(instLocal, worldMat);
 
   // Set the render node (used by the raster)
   GltfRenderNode rn;

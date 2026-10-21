@@ -22,7 +22,7 @@
 1. Launch the app and load a `.gltf`/`.glb` scene (`.obj` files are also accepted and converted to glTF on the fly).
 2. Switch between Rasterizer and Path Tracer in the **Settings** panel.
 3. Load an HDR environment or use Sun and Sky.
-4. Enable a denoiser (DLSS-RR or OptiX) in path tracing mode.
+4. Enable a denoiser (DLSS-RR, OptiX or OIDN) in path tracing mode.
 5. Save a modified scene as `.gltf` or `.glb` from the **File** menu.
 
 ---
@@ -47,9 +47,10 @@ A Monte Carlo path tracer with global illumination, progressive accumulation, an
 | **FireFly Clamp**       | Clamps high-intensity samples to reduce firefly artifacts in early frames.                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                          |
 | **Texture LOD**         | Ray-footprint gradient scale for texture mip selection: 0 always samples mip 0, 1 uses the full physically derived LOD.                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                             |
 | **Shadow Transmission** | Lets shadow rays pass through transmissive surfaces (`KHR_materials_transmission`), tinted by their color and absorption, for brighter glass and colored shadows. A **biased approximation**: refraction is ignored. Off is unbiased, but caustics from small or punctual lights go missing. |
-| **Max Iterations**      | Maximum number of frames accumulated before the renderer stops.                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                     |
-| **Samples**             | Number of samples per pixel per frame. Higher = cleaner but slower per frame.                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                       |
-| **Auto SPP**            | Adaptive sampling: automatically adjusts samples-per-pixel to maintain a target frame rate. Choose between Interactive, Balanced, Quality, and Max Quality presets.                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                 |
+| **Accumulated**         | Progress of the accumulation, in samples per pixel (spp) out of **Max Samples**. The window title shows the same count. Frames carry a varying number of samples (Samples per Frame, Auto SPP), so samples, not frames, measure image quality.                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                      |
+| **Max Samples**         | Samples per pixel at which the renderer stops accumulating (`--ptMaxSamples`). The frame that reaches it traces only the samples still missing, so the image always ends exactly there.                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                             |
+| **Samples per Frame**   | Samples per pixel traced each frame (`--ptSamples`). Higher = fewer frames to reach Max Samples, but slower per frame. A frame ends early to land exactly on Max Samples and on each `--outputSamples` count.                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                       |
+| **Auto SPP**            | Adaptive sampling: sets the samples per frame for a target (Performance Target). Interactive, Balanced, Quality and Max Quality aim at a frame rate: after each camera move the count climbs by one per frame until the path-trace GPU time reaches the target, then holds while the view is still (it steps down if frames run over). Changing the Rendering Pipeline, Use SER or Optimize Shader (or reloading the shaders) starts the climb again, so the change in throughput shows. The status next to the checkbox says whether it is climbing or held; the Samples per Frame slider shows the count traced. Max Throughput (the headless default) searches the samples per frame that render fastest, for offline renders. See [Benchmarking](benchmarking.md).                                                                                                                                                                                                                                                                                                                                   |
 | **Aperture**            | Depth-of-field lens aperture. Set to 0 for a pinhole camera (everything in focus).                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                  |
 | **Auto Focus**          | Automatically sets the focal distance to the camera's interest point (double-click an object to set).                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                               |
 | **Infinite Plane**      | Adds an infinite ground plane with optional **Shadow Catcher** mode. When enabled, the plane subtracts light from the environment and adds only shadows and reflections — ideal for product shots. Surface properties (color, roughness, metallic) are adjustable.                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                  |
@@ -58,7 +59,8 @@ A Monte Carlo path tracer with global illumination, progressive accumulation, an
 
 ![](images/denoisers.jpg)
 
-Two denoisers are available to reduce path tracing noise while preserving detail:
+Three denoisers are available to reduce path tracing noise while preserving detail. DLSS-RR can be
+combined with OptiX or OIDN: see [Combining DLSS-RR with OptiX or OIDN](#combining-dlss-rr-with-optix-or-oidn).
 
 #### DLSS Ray Reconstruction (DLSS-RR)
 
@@ -115,12 +117,36 @@ local structure on a background prop while keeping it on a foreground character.
 
 ![OptiX AI Denoiser settings and output preview](images/optix.png)
 
-- Enable or disable it from the denoiser activation row; the status appears next to the row label.
-- Open the row's settings button, then click **Denoise Now** to denoise the current accumulation, or enable **Auto** to trigger automatically every N frames.
+- Enable or disable it from the denoiser activation row; the status appears next to the row label. OptiX and OIDN are exclusive: enabling one disables the other.
+- Open the row's settings button, then click **Denoise Now** to denoise the current accumulation, or enable **Auto** to trigger automatically every N samples per pixel and once more when the accumulation reaches **Max Samples**.
 - **Model** selects plain denoising or **Denoise + Upscale 2X**, which path traces at half resolution and lets OptiX upscale. The raw render is then quarter-size, so **Auto** is always on in that mode.
 - Use the **Rendered** / **Denoised** viewport toggle in **OptiX Output Preview** to compare the current render with the OptiX result.
 
 **How to enable:** Set `USE_OPTIX_DENOISER=ON` in CMake (enabled by default when CUDA Toolkit is found). OptiX headers are downloaded automatically — no separate SDK install needed. Requires the [CUDA Toolkit](https://developer.nvidia.com/cuda-downloads) (11.0+).
+
+#### OIDN AI Denoiser
+
+[vk_oidn](https://github.com/nvpro-samples/vk_oidn) runs the [Intel Open Image Denoise](https://github.com/RenderKit/oidn) networks with Vulkan compute shaders, using the tensor cores when the GPU exposes `VK_KHR_cooperative_matrix`. It needs no CUDA: the denoising is recorded in the same command buffer as the rendering, so the result has no frame of delay.
+
+- Enable or disable it from the denoiser activation row; the status appears next to the row label. OptiX and OIDN are exclusive: enabling one disables the other.
+- Open the row's settings button, then click **Denoise Now** to denoise the current accumulation, or enable **Auto** to trigger automatically every N samples per pixel and once more when the accumulation reaches **Max Samples**, so the final image is always denoised. An **Interval** of 1 denoises every frame, which keeps the image clean while moving the camera.
+- **Quality** selects the network size: *Fast* is almost twice as fast as *High*.
+- **Guides** selects the guide images given to the network: the color only, with the albedo, or with the albedo and the normal. The path tracer accumulates the guides like the color.
+- The settings show the selected network, whether tensor cores are used, the denoiser memory, and the GPU time of the last automatic denoise (also in the Profiler window as *OIDN denoiser*).
+- Use the **Rendered** / **Denoised** viewport toggle in **OIDN Output Preview** to compare the current render with the OIDN result; the preview also shows the accumulated albedo and normal guides.
+
+**How to enable:** Set `USE_OIDN_DENOISER=ON` in CMake (the default). CMake downloads the prebuilt vk_oidn SDK package for Windows x64 or Linux x64; nothing else is needed.
+
+#### Combining DLSS-RR with OptiX or OIDN
+
+With DLSS-RR and OptiX or OIDN both on, DLSS denoises while the camera moves, and OptiX or OIDN takes
+over once it stops, from the accumulated samples. Their first images come from few samples and look
+worse than DLSS's, so the image does not switch at once: it blends from DLSS's image to the denoised
+one, which is shown alone from **DLSS Hand-off** samples per pixel on (`--dlssHandoffSpp`, 64 by
+default; 0 switches at the first denoise). During the blend, **Auto** denoises each time the samples
+per pixel double, then at its **Interval**; the hand-off needs **Auto** on. **Auto SPP** and **Samples
+per Frame** set the samples of the frames after DLSS's (DLSS-RR alone traces one sample per frame). The setting appears under
+the denoiser rows when both are on, with the blend's progress. See [denoising.md](denoising.md#dlss-hand-off).
 
 ### Opacity Micromap (EXT_mesh_opacity_micromap)
 
@@ -344,17 +370,21 @@ camera uses, and highlights the cell you are using as you hold modifiers and dra
 
 In **Examine** mode the defaults are:
 
-| | No modifier | Ctrl | Alt |
-|---|---|---|---|
-| **Left drag** | Orbit | Pan | Look around |
-| **Middle drag** | Pan | Pan | Pan |
-| **Right drag** | Dolly | Dolly | Dolly |
-| **Wheel** | Dolly | Dolly | Field of view |
+| | No modifier | Shift | Ctrl | Alt |
+|---|---|---|---|---|
+| **Left drag** | Orbit | Orbit the surface | Pan | Look around |
+| **Middle drag** | Pan | Pan, surface follows | Pan | Pan |
+| **Right drag** | Dolly | Dolly to the surface | Dolly | Dolly |
+| **Wheel** | Dolly | Dolly to the surface | Dolly | Field of view |
 
 In **Fly** and **Walk**, a plain left drag looks around and Alt+left drag orbits, and Ctrl+wheel dollies
 without moving the point of interest. With an orthographic camera, dolly and field of view become zoom.
 `W` `A` `S` `D` and the arrow keys move the camera while the cursor is over the viewport, five times
 faster with **Shift**; with Ctrl or Alt held they are application shortcuts instead.
+
+The **Shift** column anchors the motion on the surface under the cursor, picked as the button goes down,
+instead of on the point of interest. The farther the surface, the faster the motion. Over the
+environment, it falls back to the point of interest.
 
 ### Overview
 ![](images/cam_1.png)
@@ -556,14 +586,17 @@ Multiple glTF files can be combined into a single scene:
 
 To keep external files as **references** (glTF 2.1 external assets) instead of embedding them,
 use **File > Reference Scene...** or **Ctrl+Shift + Drag & Drop**. Referenced assets stay
-read-only, repeated references share geometry, and the links are preserved on save. Use the
-context-menu **Make Editable** to break the lock on a referenced subtree, and
+read-only, repeated references share geometry, and the links are preserved on save. A referenced
+file without animation, skins, lights or cameras is drawn without nodes of its own: the scene
+browser shows only the referencing node, and clicking the asset in the viewport selects it. Use the
+context-menu **Make Editable** to break the lock on a referenced subtree (its content then appears
+as nodes), and
 **File > Save Self-Contained As...** to bake references inline into a portable file. See
 [External Assets](external_assets.md) for details.
 
 ### Save and Compact
 
-- **File > Save / Save As** writes the modified scene to `.gltf` or `.glb`, including all edits (transforms, hierarchy changes, material tweaks, merged content, image copying)
+- **File > Save / Save As** writes the modified scene to `.gltf` or `.glb`, including all edits (transforms, hierarchy changes, material tweaks, merged content, image copying). The file is marked glTF 2.1 only when it uses a 2.1 feature (such as external assets); otherwise it is saved as 2.0, so older viewers can open it. Files of a newer glTF 2.x open, but the parts the renderer doesn't know are not kept when you save.
 - **Tools > Compact Scene** removes orphaned resources (unused meshes, materials, textures, images, accessors, buffer views, buffers) left behind by delete/merge operations and consolidates all geometry into a single buffer — reduces file size, cleans up the model, and collapses the extra buffers that editor operations (e.g. adding a primitive) leave behind. Pre-baked `EXT_mesh_opacity_micromap` data is preserved through compaction so OMM coverage survives the save/compact workflow.
 
 ### Visibility
@@ -799,7 +832,8 @@ vk_gltf_renderer --benchmark 1 --size 1920 1080 --sequencefile utils/benchmark/q
   --scenefile shader_ball.gltf --hdrfile std_env.hdr
 ```
 
-See [Benchmarking](benchmarking.md) for headless A/B timing and the script format. The optional
+See [Benchmarking](benchmarking.md) for headless A/B timing, the script format, and `--outputSamples`
+(save a convergence series, e.g. `1,2,4,8,...` samples per pixel, from a single run). The optional
 image-generation bridge (`--agenticBridgeRoot`, `--agenticBridgeInit`, and the **Agentic** window
 on F7) is covered in [ComfyUI Agentic Setup](comfyui-agentic-setup.md).
 
@@ -848,6 +882,10 @@ usage: gltf-material-modifier.py [-h] [--metallic METALLIC] [--roughness ROUGHNE
 - Ensure the [CUDA Toolkit](https://developer.nvidia.com/cuda-downloads) is installed and found by CMake.
 - On Windows, `cudart64_*.dll` is delay-loaded — the application starts without it, but the denoiser tab will show as unavailable.
 - OptiX headers are auto-downloaded; no separate OptiX SDK install is needed.
+
+**OIDN AI Denoiser unavailable**
+- vk_oidn needs 16-bit float shader support, `VK_KHR_push_descriptor` and a few core Vulkan 1.3 features; a line in the log says when its context could not be created, and why.
+- The prebuilt vk_oidn package exists for Windows x64 and Linux x64 only; on other platforms CMake disables `USE_OIDN_DENOISER` with a warning.
 
 **Shader hot-reload fails (Ctrl+Shift+R)**
 - Hot-reload requires the Slang compiler and shader source files to be accessible at runtime.

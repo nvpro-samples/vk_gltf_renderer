@@ -43,6 +43,8 @@ set(TEST_SOURCES
     test_extensions_metadata.cpp
     # KHR_materials_scatter host-side contract (defaults, clamping, legacy alias, round-trip)
     test_materials_scatter.cpp
+    # KHR_materials_diffuse_transmission property names (spec key, legacy fallback, round-trip)
+    test_materials_diffuse_transmission.cpp
     # Procedural primitives (plane/cube/sphere) + new/empty-scene workflow
     test_primitives.cpp
     # Agentic workflow bridge contract
@@ -57,6 +59,10 @@ set(TEST_SOURCES
     test_interactivity_hover_select.cpp
     # AnimationPointerSystem: partial texture-extension writes preserve sibling fields
     test_animation_pointer.cpp
+    # glTF 2.1 conformance against the generated fixtures in gltf_2_1/
+    test_gltf_2_1.cpp
+    # glTF 2.1 uid: copies, merge collisions, validator
+    test_uid.cpp
     # Image decoding (WebP path of the shared loader)
     test_image_loader.cpp
     # Phase 1 (env pipeline): CPU-only unit test for nvvk::buildEnvAliasmap (Vose)
@@ -69,6 +75,10 @@ set(TEST_SOURCES
     # Phase 5a: NOAA sun position, checked against astronomy rather than recorded output
     test_sun_position.cpp
     ${CMAKE_SOURCE_DIR}/src/sun_position.cpp
+    # OptiX / OIDN auto-denoise schedule: interval multiples and the final image (header only)
+    test_denoiser_schedule.cpp
+    # Path tracer samples per frame: ending on stops, the Auto SPP controller (header only)
+    test_sample_schedule.cpp
     # Need tinygltf implementation
     ${CMAKE_SOURCE_DIR}/src/tiny_stb_implementation.cpp
     # Optional external generation bridge
@@ -83,7 +93,9 @@ set(TEST_SOURCES
     ${CMAKE_SOURCE_DIR}/src/gltf_image_loader.cpp
     ${CMAKE_SOURCE_DIR}/src/gltf_scene_animation.cpp
     ${CMAKE_SOURCE_DIR}/src/gltf_scene_validator.cpp
+    ${CMAKE_SOURCE_DIR}/src/gltf_version.cpp
     ${CMAKE_SOURCE_DIR}/src/gltf_scene_merger.cpp
+    ${CMAKE_SOURCE_DIR}/src/gltf_scene_external_assets.cpp
     ${CMAKE_SOURCE_DIR}/src/tinygltf_converter.cpp
     ${CMAKE_SOURCE_DIR}/src/tinygltf_utils.cpp
     ${CMAKE_SOURCE_DIR}/src/gltf_animation_pointer.cpp
@@ -102,9 +114,30 @@ set(TEST_SOURCES
 # Create test executable
 add_executable(${TEST_NAME} ${TEST_SOURCES})
 
+# glTF 2.1 fixtures: generated into the build tree by gltf_2_1/generate_fixtures.py, never committed.
+# Without Python the folder stays empty and test_gltf_2_1.cpp skips.
+set(GLTF_2_1_FIXTURES_DIR ${CMAKE_CURRENT_BINARY_DIR}/gltf_2_1)
+find_package(Python3 COMPONENTS Interpreter)
+if(Python3_Interpreter_FOUND)
+    set(GLTF_2_1_GENERATOR ${CMAKE_CURRENT_SOURCE_DIR}/gltf_2_1/generate_fixtures.py)
+    add_custom_command(
+        OUTPUT ${GLTF_2_1_FIXTURES_DIR}/.generated
+        COMMAND ${CMAKE_COMMAND} -E rm -rf ${GLTF_2_1_FIXTURES_DIR}
+        COMMAND ${Python3_EXECUTABLE} -I ${GLTF_2_1_GENERATOR} ${GLTF_2_1_FIXTURES_DIR}
+        DEPENDS ${GLTF_2_1_GENERATOR}
+        COMMENT "Generating glTF 2.1 test fixtures"
+        VERBATIM)
+    add_custom_target(gltf_2_1_fixtures DEPENDS ${GLTF_2_1_FIXTURES_DIR}/.generated)
+    set_target_properties(gltf_2_1_fixtures PROPERTIES FOLDER "Tests")
+    add_dependencies(${TEST_NAME} gltf_2_1_fixtures)
+else()
+    message(WARNING "Python 3 not found: glTF 2.1 test fixtures are not generated and their tests will skip.")
+endif()
+
 # Add compile definitions for tinygltf
 target_compile_definitions(${TEST_NAME} PRIVATE
     GLTF_SAMPLE_ASSETS_PATH="${GLTF_SAMPLE_ASSETS_PATH}"
+    GLTF_2_1_FIXTURES_DIR="${GLTF_2_1_FIXTURES_DIR}"
 )
 
 # Add Draco support if enabled
@@ -185,7 +218,9 @@ add_executable(${BENCHMARK_NAME}
     ${CMAKE_SOURCE_DIR}/src/gltf_image_loader.cpp
     ${CMAKE_SOURCE_DIR}/src/gltf_scene_animation.cpp
     ${CMAKE_SOURCE_DIR}/src/gltf_scene_validator.cpp
+    ${CMAKE_SOURCE_DIR}/src/gltf_version.cpp
     ${CMAKE_SOURCE_DIR}/src/gltf_scene_merger.cpp
+    ${CMAKE_SOURCE_DIR}/src/gltf_scene_external_assets.cpp
     ${CMAKE_SOURCE_DIR}/src/tinygltf_converter.cpp
     ${CMAKE_SOURCE_DIR}/src/tinygltf_utils.cpp
     ${CMAKE_SOURCE_DIR}/src/gltf_create_tangent.cpp

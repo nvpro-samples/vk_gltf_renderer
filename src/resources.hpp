@@ -30,6 +30,7 @@
 #include <memory>
 #include <string>
 #include <unordered_set>
+#include <vector>
 
 #include <glm/glm.hpp>
 #include <glm/gtc/quaternion.hpp>
@@ -66,12 +67,13 @@ enum class RenderingMode
 
 // Which special view the user wants in the viewport. The DLSS guide-buffer entries that used
 // to live here are gone -- DLSS guide selection is now encapsulated inside the Dlss class
-// (see Dlss::activeGuideImage() in dlss.hpp). What remains are only the two app-level overrides
-// of the rendered output: the regular renderer output, or the OptiX denoised image.
+// (see Dlss::activeGuideImage() in dlss.hpp). What remains are the app-level overrides of the
+// rendered output: the regular renderer output, an AI-denoised image, or the agentic result.
 enum class DisplayBuffer
 {
   eRendered,           // Final rendered image (default)
   eOptixDenoised,      // OptiX Denoised output (handled via OptiXDenoiser::getDescriptorImageInfo)
+  eOidnDenoised,       // vk_oidn Denoised output (handled via OidnDenoiser::getDescriptorImageInfo)
   eAgenticBeautified,  // External image-to-image result from the agentic bridge
 };
 
@@ -175,7 +177,7 @@ struct Settings
   glm::vec3 silhouetteColor      = {0.933f, 0.580f, 0.180f};  // Color of the silhouette
   bool      useSolidBackground   = false;                     // Use solid background color
   glm::vec3 solidBackgroundColor = {0.0f, 0.0f, 0.0f};        // Solid background color
-  int       maxFrames            = {500};                     // Maximum number of frames to render
+  int       maxSamples           = {2000};  // Path tracer: stop accumulating at this many samples per pixel
   // Sun position as the UI and the command line express it. Resources::sunDirection stays the
   // single source of truth; these are kept in sync with it both ways (see syncSunAngles).
   float sunAzimuth   = 90.0f;  // degrees
@@ -318,9 +320,10 @@ struct Resources
 
   nvapp::Application* app{nullptr};
 
-  VkInstance              instance{};
-  nvvk::ResourceAllocator allocator{};  // Vulkan Memory Allocator
-  nvvk::FrameUploader     staging;      // Per-frame + load-path staging copies (records into caller cmd)
+  VkInstance               instance{};
+  std::vector<std::string> deviceExtensions;  // Extensions enabled on the device (set at startup; read by vk_oidn)
+  nvvk::ResourceAllocator  allocator{};       // Vulkan Memory Allocator
+  nvvk::FrameUploader      staging;           // Per-frame + load-path staging copies (records into caller cmd)
 
   nvvk::SamplerPool      samplerPool{};    // Texture Sampler Pool
   VkCommandPool          commandPool{};    // Command pool for secondary command buffer
@@ -375,6 +378,8 @@ struct Resources
   shaderio::TonemapperData                    tonemapperData{.autoExposure = 1};  // Tonemapper data
   std::shared_ptr<nvutils::CameraManipulator> cameraManip;         // Camera manipulator (owned by GltfRenderer)
   std::filesystem::path                       headlessOutputPath;  // --output: override for headless image save path
+  int accumulatedSamples{0};     // Path tracer: samples per pixel in eImgRendered as of the last recorded frame
+  std::vector<int> sampleStops;  // Path tracer: sorted counts a frame must end on (--outputSamples)
 
   // Pipeline
   std::array<nvvk::DescriptorBindings, 2> descriptorBinding{};    // Descriptor bindings: 0: textures, 1: tlas
@@ -389,6 +394,15 @@ struct Resources
   InteractivityControl interactivityControl{};
 
   int frameCount{0};
+
+  // The accumulation is complete: rendering stops until the next reset (resetFrame). The path tracer
+  // stops when its image holds settings.maxSamples samples per pixel. The frame bound stops a renderer
+  // that adds no samples (the rasterizer, or a path tracer with nothing to trace); a frame that does
+  // render adds at least one sample, so it never cuts an accumulation short.
+  bool accumulationComplete() const
+  {
+    return (frameCount >= 0 && accumulatedSamples >= settings.maxSamples) || frameCount >= settings.maxSamples;
+  }
 
   // Monotonic count of completed onRender() calls since the app started - unlike frameCount above
   // (which resets to -1 on every dirty-flag/camera-move reset, by design, to avoid ghosting), this

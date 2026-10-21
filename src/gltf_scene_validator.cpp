@@ -27,12 +27,15 @@
 #include "gltf_scene_validator.hpp"
 
 #include <functional>
+#include <unordered_map>
 
 #include <fmt/format.h>
 #include <tinygltf/tiny_gltf.h>
 
 #include <nvutils/logger.hpp>
 #include <nvutils/timers.hpp>
+
+#include "tinygltf_utils.hpp"
 
 namespace nvvkgltf {
 

@@ -28,7 +28,7 @@ def build_parser() -> argparse.ArgumentParser:
     )
     headless_p.add_argument("--scene", type=str, required=True, help="Scene .gltf path")
     headless_p.add_argument("--hdr", type=str, default="std_env.hdr")
-    headless_p.add_argument("--frames", type=int, default=500, help="App frames and maxFrames (must match)")
+    headless_p.add_argument("--frames", type=int, default=500, help="App frames to render; the app raises its accumulation cap to cover them")
     headless_p.add_argument(
         "--spp",
         type=int,

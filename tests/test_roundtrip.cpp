@@ -21,9 +21,23 @@
 #include "gltf_scene.hpp"
 #include "gltf_scene_validator.hpp"
 #include "common/test_utils.hpp"
+#include "nvutils/file_operations.hpp"
 #include <filesystem>
 
 using namespace gltf_test;
+
+namespace {
+// Plain tinygltf load of a .gltf, without the Scene: what is actually in the file.
+tinygltf::Model readRawGltf(const std::filesystem::path& file)
+{
+  tinygltf::TinyGLTF loader;
+  tinygltf::Model    model;
+  std::string        err, warn;
+  const std::string  fileUtf8 = nvutils::utf8FromPath(file);
+  EXPECT_TRUE(loader.LoadASCIIFromFile(&model, &err, &warn, fileUtf8)) << fileUtf8 << ": " << err;
+  return model;
+}
+}  // namespace
 
 // Phase 2A: Round-Trip Testing
 // Load → Validate → Save → Reload → Validate → Compare
@@ -106,6 +120,66 @@ TEST_F(RoundTripTest, SimpleCube)
 
   auto resourcePath = assetsPath / "Models/Box/glTF/Box.gltf";
   ASSERT_TRUE(testRoundTrip(resourcePath));
+}
+
+// Multiple scenes are deprecated in glTF 2.1 (#35), but must still load: the file's `scene` is the
+// one shown, and a save keeps every scene and the default.
+TEST_F(RoundTripTest, MultipleScenes)
+{
+  auto assetsPath = TestResources::getSampleAssetsPath();
+  if(assetsPath.empty())
+  {
+    GTEST_SKIP() << "glTF-Sample-Assets not found at: " << GLTF_SAMPLE_ASSETS_PATH;
+  }
+
+  nvvkgltf::Scene scene;
+  ASSERT_TRUE(scene.load(assetsPath / "Models/MultipleScenes/glTF/MultipleScenes.gltf"));
+  ASSERT_EQ(scene.getModel().scenes.size(), 2u);
+  // The file's "scene": 1, not the first one. Each scene holds one node: scene 0 node 0, scene 1 node 1.
+  EXPECT_EQ(scene.getCurrentScene(), 1);
+  ASSERT_EQ(scene.getRenderNodes().size(), 1u);
+  EXPECT_EQ(scene.getRenderNodes()[0].refNodeID, 1);
+
+  scene.setCurrentScene(0);
+  EXPECT_EQ(scene.getCurrentScene(), 0);
+  ASSERT_EQ(scene.getRenderNodes().size(), 1u);
+  EXPECT_EQ(scene.getRenderNodes()[0].refNodeID, 0);
+
+  ASSERT_TRUE(scene.save(tempDir / "multiple_scenes.gltf"));
+  nvvkgltf::Scene reloaded;
+  ASSERT_TRUE(reloaded.load(tempDir / "multiple_scenes.gltf"));
+  EXPECT_EQ(reloaded.getModel().scenes.size(), 2u);
+  EXPECT_EQ(reloaded.getModel().defaultScene, 1);
+  EXPECT_EQ(reloaded.getModel().asset.version, "2.0");  // no 2.1 feature, so the deprecation doesn't apply
+}
+
+// Images stored as data: URIs must survive a .gltf save (they used to make the writer fail).
+TEST_F(RoundTripTest, EmbeddedImages)
+{
+  const std::filesystem::path assetsPath = TestResources::getSampleAssetsPath();
+  if(assetsPath.empty())
+  {
+    GTEST_SKIP() << "glTF-Sample-Assets not found at: " << GLTF_SAMPLE_ASSETS_PATH;
+  }
+
+  const std::filesystem::path resourcePath = assetsPath / "Models/BoxTextured/glTF-Embedded/BoxTextured.gltf";
+  ASSERT_TRUE(testRoundTrip(resourcePath));
+
+  // Still embedded with the same pixels: tinygltf decodes a data: URI on load and clears `uri`, so
+  // an image with no buffer view and no file next to the .gltf (checked below) was a data: URI.
+  const tinygltf::Model original = readRawGltf(resourcePath);
+  const tinygltf::Model saved    = readRawGltf(tempDir / "roundtrip.gltf");
+  ASSERT_EQ(saved.images.size(), original.images.size());
+  for(size_t i = 0; i < saved.images.size(); i++)
+  {
+    EXPECT_EQ(saved.images[i].bufferView, -1) << "image " << i;
+    EXPECT_EQ(saved.images[i].mimeType, original.images[i].mimeType) << "image " << i;
+    EXPECT_EQ(saved.images[i].width, original.images[i].width) << "image " << i;
+    EXPECT_EQ(saved.images[i].height, original.images[i].height) << "image " << i;
+    EXPECT_TRUE(saved.images[i].image == original.images[i].image) << "image " << i << ": pixels differ";
+  }
+  for(const auto& entry : std::filesystem::directory_iterator(tempDir))
+    EXPECT_NE(entry.path().extension(), ".png") << "image written to " << entry.path().string();
 }
 
 TEST_F(RoundTripTest, ValidationDetectsInvalidNode)

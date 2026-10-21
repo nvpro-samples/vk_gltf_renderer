@@ -695,6 +695,59 @@ TEST(InteractivityEvalMatrix, NegAndEqSupportMatrices)
   EXPECT_TRUE(std::get<bool>(evaluateNodeOutput(instanceEq, 0, "value")));
 }
 
+// The operand guard in applyUnary/applyBinary was miscompiled by MSVC 19.44 (see
+// kIsUnaryBinaryOperand): it silently rejected a type the traits accept, and which type depended
+// on instantiation order. So sweep every operand type through every guard variant: the result
+// must keep the operand's type, and only the float-only ops may reject int.
+TEST(InteractivityEvalMatrix, OperandGuardsAcceptEverySpecType)
+{
+  struct TypeCase
+  {
+    const char* signature;
+    int         components;
+    size_t      variantIndex;
+  };
+  const TypeCase types[] = {
+      {"int", 1, InteractivityValue(int32_t{}).index()},
+      {"float", 1, InteractivityValue(float{}).index()},
+      {"float2", 2, InteractivityValue(glm::vec2{}).index()},
+      {"float3", 3, InteractivityValue(glm::vec3{}).index()},
+      {"float4", 4, InteractivityValue(glm::vec4{}).index()},
+      {"float2x2", 4, InteractivityValue(glm::mat2{}).index()},
+      {"float3x3", 9, InteractivityValue(glm::mat3{}).index()},
+      {"float4x4", 16, InteractivityValue(glm::mat4{}).index()},
+  };
+  struct OpCase
+  {
+    const char* op;
+    bool        binary;
+    bool        floatOnly;
+  };
+  // neg: applyUnary<false>, floor: applyUnary<true>, add: applyBinary<false>, div: applyBinary<true>
+  // (int div takes its own overload first, so it is still expected to keep int).
+  const OpCase ops[] = {{"math/neg", false, false}, {"math/floor", false, true}, {"math/add", true, false}, {"math/div", true, true}};
+
+  for(const OpCase& op : ops)
+  {
+    for(const TypeCase& type : types)
+    {
+      tinygltf::Value::Array ones(type.components, tinygltf::Value(1.0));
+      tinygltf::Value        operand = obj({{"value", tinygltf::Value(ones)}, {"type", tinygltf::Value(0)}});
+      auto                   graph   = singleNodeGraph(op.op, {type.signature},
+                                   op.binary ? obj({{"a", operand}, {"b", operand}}) : obj({{"a", operand}}));
+      ASSERT_TRUE(graph.has_value()) << op.op << " " << type.signature;
+      InteractivityGraphInstance instance(*graph);
+      const InteractivityValue   v = evaluateNodeOutput(instance, 0, "value");
+
+      const bool rejectsInt = op.floatOnly && std::string(op.op) != "math/div";
+      if(rejectsInt && std::string(type.signature) == "int")
+        EXPECT_TRUE(std::holds_alternative<std::monostate>(v)) << op.op << " " << type.signature;
+      else
+        EXPECT_EQ(v.index(), type.variantIndex) << op.op << " " << type.signature;
+    }
+  }
+}
+
 // math/eMathMix's "c" (interpolation coefficient) was hard-restricted to a bare scalar float, but
 // spec has it match a/b's type exactly (floatN c or floatNxN c) - found the same way.
 TEST(InteractivityEval, MixSupportsPerComponentCoefficient)

@@ -319,6 +319,7 @@ int SceneEditor::duplicateNode(int originalIndex, bool reparse)
     const tinygltf::Skin& origSkin = m_scene.m_model.skins[dupNode.skin];
     tinygltf::Skin        newSkin  = origSkin;
     newSkin.name                   = origSkin.name.empty() ? "skin_copy" : origSkin.name + "_copy";
+    newSkin.uid.clear();  // copies don't keep the glTF 2.1 uid, which is unique per file
 
     for(int& jointIdx : newSkin.joints)
     {
@@ -423,6 +424,9 @@ int SceneEditor::duplicateNodeRecursive(int originalIndex, int newParentIndex, s
   std::vector<int> originalChildren    = newNode.children;
   glm::mat4        originalLocalMatrix = m_scene.m_nodesLocalMatrices[originalIndex];
   glm::mat4        originalWorldMatrix = m_scene.m_nodesWorldMatrices[originalIndex];
+
+  // A copy is a new object: it must not keep the original's glTF 2.1 uid, which is unique per file.
+  newNode.uid.clear();
 
   newNode.children.clear();
 
@@ -802,6 +806,21 @@ bool SceneEditor::makeExternalAssetEditable(int nodeIndex)
   // instance nodes drop their `externalAsset` link, so the now-owned content is saved inline instead
   // of being re-externalized. Geometry/materials remain SHARED between the instances by design --
   // editing a shared material therefore affects all instances of the asset, which is the intent.
+  // Placements drawn through an instance set have no nodes: make them first, so they are unlocked
+  // and owned with the rest.
+  std::unordered_set<int> placedNodes;
+  for(int n = 0; n < static_cast<int>(m_scene.m_model.nodes.size()); ++n)
+  {
+    const int nea = m_scene.m_model.nodes[n].externalAsset;
+    if(nea < 0 || nea >= static_cast<int>(m_scene.m_model.externalAssets.size()) || m_scene.m_model.externalAssets[nea].file != fileIndex)
+      continue;
+    std::vector<int> subtree{n};
+    collectDescendantIndices(n, subtree);
+    placedNodes.insert(subtree.begin(), subtree.end());
+  }
+  if(!placedNodes.empty())
+    m_scene.materializeInstanceSets(m_scene.m_model, placedNodes);
+
   int unlockedInstances = 0;
   for(int n = 0; n < static_cast<int>(m_scene.m_model.nodes.size()); ++n)
   {
@@ -832,6 +851,10 @@ bool SceneEditor::makeExternalAssetEditable(int nodeIndex)
     m_scene.m_referencedAssets.clear();
 
   LOGI("Made external asset editable (file %d): unlocked %d instance(s)\n", fileIndex, unlockedInstances);
+  // Rebuild the render primitives and nodes: placements drawn without nodes are nodes now, and
+  // unlocked copies of a skinned or morphed node no longer share one pose (Scene::kPlacedSourceKey).
+  if(unlockedInstances > 0)
+    m_scene.parseScene();
   return unlockedInstances > 0;
 }
 
@@ -1608,6 +1631,7 @@ int SceneEditor::duplicateMeshForNode(int meshIndex, int nodeIndex)
 
   tinygltf::Mesh newMesh = m_scene.m_model.meshes[meshIndex];
   newMesh.name += "_copy";
+  newMesh.uid.clear();  // copies don't keep the glTF 2.1 uid, which is unique per file
 
   int newIndex = static_cast<int>(m_scene.m_model.meshes.size());
   m_scene.m_model.meshes.push_back(newMesh);
@@ -1647,6 +1671,7 @@ int SceneEditor::splitPrimitiveMaterial(int nodeIndex, int primIndex)
 
   tinygltf::Mesh newMesh = m_scene.m_model.meshes[meshIdx];
   newMesh.name += "_copy";
+  newMesh.uid.clear();  // copies don't keep the glTF 2.1 uid, which is unique per file
   int newMeshIdx = static_cast<int>(m_scene.m_model.meshes.size());
   m_scene.m_model.meshes.push_back(newMesh);
   m_scene.m_model.nodes[nodeIndex].mesh = newMeshIdx;
@@ -1661,6 +1686,7 @@ int SceneEditor::splitPrimitiveMaterial(int nodeIndex, int primIndex)
 
   tinygltf::Material newMat = m_scene.m_model.materials[origMatIdx];
   newMat.name += "_copy";
+  newMat.uid.clear();  // copies don't keep the glTF 2.1 uid, which is unique per file
   int newMatIdx = static_cast<int>(m_scene.m_model.materials.size());
   m_scene.m_model.materials.push_back(newMat);
 

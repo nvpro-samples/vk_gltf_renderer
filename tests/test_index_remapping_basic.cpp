@@ -24,6 +24,8 @@
 
 #include <gtest/gtest.h>
 #include <filesystem>
+#include <fstream>
+#include <set>
 #include "gltf_scene.hpp"
 #include "gltf_scene_editor.hpp"
 #include "gltf_scene_animation.hpp"
@@ -846,4 +848,59 @@ TEST_F(IndexRemappingTest, DuplicateCreatesRenderNodes)
 
   // Validate
   EXPECT_TRUE(scene2.validator().validateModel().valid);
+}
+
+//--------------------------------------------------------------------------------------------------
+// Merging keeps a node's KHR_lights_punctual object an object, with its light index rebased
+//--------------------------------------------------------------------------------------------------
+// The lights the nodes of `model` point at, checking that each KHR_lights_punctual node extension
+// agrees with node.light.
+static std::set<int> nodeLights(const tinygltf::Model& model)
+{
+  std::set<int> lights;
+  for(size_t n = 0; n < model.nodes.size(); n++)
+  {
+    const tinygltf::Node&                                  node = model.nodes[n];
+    const tinygltf::ExtensionMap::const_iterator ext  = node.extensions.find("KHR_lights_punctual");
+    if(ext == node.extensions.end())
+      continue;
+    EXPECT_TRUE(ext->second.IsObject()) << node.name;
+    if(ext->second.IsObject())
+      EXPECT_EQ(ext->second.Get("light").GetNumberAsInt(), node.light) << node.name;
+    lights.insert(node.light);
+  }
+  return lights;
+}
+
+TEST_F(IndexRemappingTest, MergeRebasesNodeLight)
+{
+  // A scene with one light, merged twice: the second copy's node points at light 1.
+  const std::string lit  = R"({
+    "asset": {"version": "2.0"},
+    "extensionsUsed": ["KHR_lights_punctual"],
+    "extensions": {"KHR_lights_punctual": {"lights": [{"type": "point", "intensity": 2.0}]}},
+    "scene": 0, "scenes": [{"nodes": [0]}],
+    "nodes": [{"name": "lamp", "extensions": {"KHR_lights_punctual": {"light": 0}}}]
+  })";
+  const fs::path    file = tempDir / "lamp.gltf";
+  {
+    std::ofstream out(file);
+    out << lit;
+  }
+
+  nvvkgltf::Scene scene;
+  ASSERT_TRUE(scene.load(file));
+  ASSERT_GE(scene.mergeScene(file), 0);
+
+  const std::set<int> bothLights = {0, 1};
+  EXPECT_EQ(nodeLights(scene.getModel()), bothLights);
+  EXPECT_EQ(scene.getModel().lights.size(), 2u);
+
+  // And it survives a save: both lights are written, and each node still points at its own.
+  const fs::path saved = tempDir / "lamps.gltf";
+  ASSERT_TRUE(scene.save(saved));
+  nvvkgltf::Scene reloaded;
+  ASSERT_TRUE(reloaded.load(saved));
+  EXPECT_EQ(nodeLights(reloaded.getModel()), bothLights);
+  EXPECT_EQ(reloaded.getModel().lights.size(), 2u);
 }

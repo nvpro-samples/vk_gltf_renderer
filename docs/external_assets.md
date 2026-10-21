@@ -1,15 +1,17 @@
 # External Assets (glTF 2.1 complex scenes)
 
-> **For contributors and agents.** Authoritative design of glTF 2.1 external-asset load / merge / edit / save. Concept-level; the symbols cited in `src/` are the source of truth for the details.
+> **For contributors and agents.** Authoritative design of glTF 2.1 external-asset load / place / edit / save. Concept-level; the symbols cited in `src/` are the source of truth for the details.
 
 How `vk_gltf_renderer` loads, renders, edits, and saves glTF **2.1 external assets** — the
 feature that lets one glTF file reference and instantiate *other* glTF files. This document is the
 authoritative description of the mechanism; read it before touching the code paths below.
 
-> **TL;DR** — A referencing (`externalAsset`) node's target file is loaded and **merged** into the
-> single runtime `tinygltf::Model`, attached as children of that node. Merged-in nodes are flagged
+> **TL;DR** — A referencing (`externalAsset`) node's target file is loaded **once per scene** and
+> its resources appended to the single runtime `tinygltf::Model`. Its content is then **placed**
+> under every node that references it, at every nesting level: static content as an **instance
+> set** on the placing node (no nodes), anything else as copied nodes. Placed nodes are flagged
 > **read-only** by a marker written into each node's `extras`. On save, that marker is used to
-> either strip the merged content back out (**re-externalize**, the default) or strip only the
+> either strip the placed content back out (**re-externalize**, the default) or strip only the
 > references and keep the geometry (**flatten**).
 
 ---
@@ -17,7 +19,7 @@ authoritative description of the mechanism; read it before touching the code pat
 ## 1. The glTF 2.1 data model
 
 Three additions to core glTF, parsed/serialized by our fork of tinygltf
-(`nvpro_core2/third_party/tinygltf/tiny_gltf.h`, branch `mkl/externalAssets`):
+(`nvpro_core2/third_party/tinygltf/tiny_gltf.h`; see [gltf_2_1.md §4](gltf_2_1.md#4-tinygltf-fork)):
 
 | JSON | tinygltf | Meaning |
 |------|----------|---------|
@@ -26,11 +28,12 @@ Three additions to core glTF, parsed/serialized by our fork of tinygltf
 | `node.externalAsset`         | `Node::externalAsset` (int, `-1` = none)    | A node instantiating `externalAssets[externalAsset]` at its transform. |
 
 A file with `node.externalAsset` set is a **complex scene**. The node carrying it is the
-**instance node** (editable); everything loaded from the referenced file is **merged content**
-(read-only).
+**instance node** or **placing node** (editable); everything loaded from the referenced file is
+**placed content** (read-only).
 
-> Note: tinygltf here is the **v2** header. v2 is in maintenance mode (sunset after mid-2026), but
-> the whole renderer is built on v2, so external-asset support lives in v2. The runtime-only
+> Note: tinygltf here is the C++ **v2** header, which upstream has replaced with an experimental C
+> API. The renderer is built on v2, so external-asset support lives in our v2 fork (see
+> [gltf_2_1.md §4](gltf_2_1.md#4-tinygltf-fork)). The runtime-only
 > read-only marker is deliberately **not** a `Node` struct field (see §4) so the shared header is
 > not polluted for a single application.
 
@@ -38,68 +41,196 @@ A file with `node.externalAsset` set is a **complex scene**. The node carrying i
 
 ## 2. End-to-end flow
 
-```text
-LOAD  (Scene::load, gltf_scene.cpp)
-  loadGltfFile(top.gltf) ────────────────► m_model (has files/externalAssets, node.externalAsset)
-  resolveExternalAssets()  ◄── the merge step (§3)
-      for each unique file:
-          load child.gltf
-          mergeIntoNode(child, firstRefNode)         → append child, attach roots as children
-          instanceSubtree(...) for extra ref nodes   → share geometry (§3)
-          recordReferencedAsset(...) → record provenance + stamp read-only marker into each merged node's extras (§4)
-  parseScene()  → build RenderNodes / RenderPrimitives (dedup → shared BLAS)  (§6)
+Three views: loading (what the placer turns a placing node into), rendering (how that becomes
+render nodes, BLAS and TLAS), and saving. Section numbers point at the details.
 
-EDIT  (SceneEditor + UI)
-  every mutator checks isNodeReadOnly() and refuses to touch merged content (§5)
+**Load** (`Scene::load` → `resolveExternalAssets`, §3). Each referenced file is loaded and its
+resources appended once per load (blue); the placer only makes nodes or instance sets. The
+green/orange split decides the load cost: an instance set makes no node at all.
 
-SAVE  (Scene::save(filename, selfContained), gltf_scene.cpp)
-  work on a COPY of m_model (live scene untouched):
-    selfContained == false  → removeExternalAssetContent()  (re-externalize, default) (§7)
-    selfContained == true   → flattenExternalAssets()       (bake, portable)          (§7)
+```mermaid
+flowchart TD
+    A["Scene::load<br/>root .gltf"] --> B["resolveExternalAssets<br/>each node with externalAsset"]
+    B --> C["ExternalAssetPlacer::place<br/>(placing node, depth)"]
+
+    C --> D{"Cycle or<br/>too deep?"}
+    D -->|yes| W1["warn, skip<br/>load continues"]
+    D -->|no| E{"File in cache?<br/>key = canonical path + aliases"}
+
+    subgraph "acquire: once per file, per load"
+        E -->|no| F["load + validate<br/>meshopt decode"]
+        F --> G["share images<br/>with same resolved file"]
+        G --> H["SceneMerger::appendResources<br/>meshes, materials, accessors,<br/>animation samplers - no nodes"]
+    end
+    E -->|yes| L
+    H --> L{"Content static?<br/>no skin, animation, light,<br/>camera, nested placement<br/>or node extension"}
+    F -.->|missing / invalid| W2["warn once,<br/>place nothing"]
+
+    L -->|yes| M["InstanceSet on the placing node<br/>entry per mesh node:<br/>mesh + transform in the file"]
+    L -->|no| N["copyTree per root<br/>read-only nodes, shared meshes"]
+
+    N --> P{"Node places<br/>a file itself?"}
+    P -->|yes| C
+    P -->|no| Q["skins and animation channels<br/>bound to this copy"]
+
+    M --> R["record provenance<br/>read-only markers"]
+    Q --> R
+    R --> S["parseScene"]
+
+    style M fill:#28a745,color:#fff
+    style N fill:#fd7e14,color:#fff
+    style H fill:#0066cc,color:#fff
 ```
 
-The runtime `m_model` always holds the fully-merged scene; the two save transforms run on a
+**Render** (`parseScene`, §6; data flow in [RENDERING_ARCHITECTURE.md](RENDERING_ARCHITECTURE.md)).
+`EXT_mesh_gpu_instancing` and instance sets share one table of per-render-node local matrices, so
+the CPU and GPU transform paths handle both alike.
+
+```mermaid
+flowchart TD
+    A["parseScene"] --> B["buildPrimitiveKeyMap<br/>one RenderPrimitive per unique<br/>geometry = one BLAS"]
+    A --> C["traverse scene graph"]
+
+    C --> D{"Node kind"}
+    D -->|"mesh"| E["one RenderNode per primitive"]
+    D -->|"mesh + EXT_mesh_gpu_instancing"| F["RenderNode per primitive x instance<br/>local matrix = instance"]
+    D -->|"placing node with InstanceSet"| G["RenderNode per entry x primitive<br/>local matrix = entry"]
+
+    F --> H[("getRenderNodeLocalMatrices<br/>node to one local per render node")]
+    G --> H
+
+    E --> I["RenderNode<br/>world, material, primitive, refNode"]
+    F --> I
+    G --> I
+
+    B --> J["BLAS per RenderPrimitive"]
+    I --> K["TLAS instance per RenderNode"]
+    J --> K
+
+    subgraph "every frame something moves"
+        L["animation, gizmo"] --> M{"Transform path"}
+        M -->|CPU| N["world = node world x local"]
+        M -->|GPU| O["update_render_instances<br/>mul instLocal, nodeWorld"]
+        N --> P["TLAS refit"]
+        O --> P
+    end
+    H --> M
+
+    style G fill:#28a745,color:#fff
+    style J fill:#0066cc,color:#fff
+```
+
+**Edit** (`SceneEditor` + UI, §5): every mutator checks `isNodeReadOnly()` and refuses to touch
+placed content; picking an instance-set entry selects its placing node.
+
+**Save** (`Scene::save(filename, selfContained)`, §7), always on a copy of the model: the default
+form writes back what was authored, the self-contained form writes the expansion as core glTF.
+
+```mermaid
+flowchart LR
+    A["Scene::save<br/>on a copy of the model"] --> B{"selfContained?"}
+
+    B -->|"no (default)"| C["removeExternalAssetContent"]
+    C --> C1["drop instance-set markers"]
+    C1 --> C2["remove read-only nodes"]
+    C2 --> C3["compact: drop the placed<br/>meshes, materials, accessors"]
+    C3 --> C4["file = placing nodes<br/>+ files table"]
+
+    B -->|yes| D["materializeInstanceSets<br/>one plain node per entry"]
+    D --> D2["flattenExternalAssets<br/>drop links and markers"]
+    D2 --> D3["file = self-contained<br/>glTF"]
+
+    style C4 fill:#28a745,color:#fff
+    style D3 fill:#0066cc,color:#fff
+```
+
+The runtime `m_model` always holds the fully-placed scene; the two save transforms run on a
 throwaway copy.
 
 ---
 
-## 3. Merging references (`resolveExternalAssets` + `SceneMerger`)
+## 3. Placing references (`resolveExternalAssets` + `ExternalAssetPlacer`)
 
-`Scene::resolveExternalAssets()` (`gltf_scene.cpp`) runs inside `load()`, **after** `loadGltfFile`
-and **before** `parseScene`. Algorithm:
+`Scene::resolveExternalAssets()` (`gltf_scene_external_assets.cpp`) runs inside `load()`, **after**
+`loadGltfFile` and **before** `parseScene`. It hands every node of the loaded file that has an
+`externalAsset` to an `ExternalAssetPlacer`, which:
 
-1. **Group** referencing nodes by the `files[]` index they resolve to (via `externalAssets[]`).
-   This is captured up front, before any merge appends nodes.
-2. For each unique file: resolve its `uri` relative to the parent asset, load it with
-   `loadGltfFile`, and validate.
-3. **Merge once** under the *first* referencing node with `SceneMerger::mergeIntoNode`.
-4. **Instance** the merged subtree under each *additional* referencing node with
-   `SceneMerger::instanceSubtree`.
-5. **Tag** every merged node read-only via `recordReferencedAsset` (which stamps the marker through `setExternalAssetMarker`) (§4).
+1. **Resolves** the reference (`externalAssets[i].file` → `files[j].uri`, percent-decoded, relative
+   to the file that names it) and checks the cycle and depth rules (below).
+2. **Acquires** the file: the first time a file is needed it is loaded (with the referencing entry's
+   aliases), validated, meshopt-decoded, its image URIs rebased (below), and its resources appended
+   to the scene model with `SceneMerger::appendResources` — buffers to meshes, materials, cameras,
+   lights, micromaps and animation samplers, but **no nodes**. Only its JSON is kept afterwards.
+   The cache key is the canonical path **and the alias context**: aliases belong to the referencing
+   file, so the same file reached with other aliases is another entry.
+3. **Places** it under the referencing node, in one of two ways:
+   - **Static content** — no node of the file's default scene is skinned, animated, a light or a
+     camera, places a file, or carries an extension (which may need a node of its own, e.g.
+     `EXT_mesh_gpu_instancing`). The placing node gets an **instance set**
+     (`nvvkgltf::InstanceSet`, found through `Scene::kInstanceSetKey` in its `extras`): one entry
+     per mesh node of the file, with the mesh and its transform relative to the file's scene. No
+     node is copied; the renderer expands the entries straight into render nodes (§6). Most kit
+     pieces, buildings and props are static, so this is what keeps a city of many placements cheap
+     to load.
+   - **Anything else** — the file's default-scene roots and their descendants are copied under the
+     referencing node as read-only nodes, which point at the shared resources through the file's
+     offsets (`SceneMerger::remapNodeResources`). A node of the placed file that has an
+     `externalAsset` places its own file inside the copy, recursively, through the same cache.
+     Skins that target copied nodes, and animation channels, are duplicated per copy, so each
+     placement animates on its own.
+4. **Tags** every node it created read-only via `recordReferencedAsset` (which stamps the marker
+   through `setExternalAssetMarker`) (§4).
 
-Before a file is merged, `rebaseImageUris` rewrites its relative image URIs to be relative to the
-folder of the model it is merged into. Images are later found through the scene-wide image search
+So a file is loaded and its geometry uploaded once per load, however many nodes and files place it:
+a kit piece used by every district of a city is one set of meshes, one `RenderPrimitive` per
+primitive, one BLAS (§6). A node with `externalAsset` keeps its own `mesh`/`camera` only when its
+file could not be loaded; otherwise they are cleared (spec: `externalAsset` takes precedence). The
+editor's **Reference Scene** (`referenceScene`) creates such a node and places it the same way. The
+`External assets:` log line counts the files loaded, images and buffers shared, placements, instance
+sets and nodes created.
+
+Before a file's resources are appended, `rebaseImageUris` rewrites its relative image URIs to be
+relative to the folder of the scene. Images are later found through the scene-wide image search
 paths, where the first match wins, so without this two assets using the same relative name for
 different images (e.g. every Kenney kit's `Textures/colormap.png`) would both get the first one. The
-same rebase runs at every nesting level (`flattenReferencedModel`), for **Import/Merge Scene**
-(`mergeScene`), and for the editor's reference (`referenceScene`).
+same rebase runs for **Import/Merge Scene** (`mergeScene`).
 
-The instance node's own `mesh`/`camera` are cleared (spec: `externalAsset` takes precedence).
+The placer then **shares images between files**: an image of the file whose URI resolves, through
+those search paths, to the same file on disk as an image already in the scene model is not appended;
+the file's textures (and the `source` of their image extensions, e.g. `MSFT_texture_dds`) point at
+the existing image instead (`ExternalAssetPlacer::shareImages`, `appendResources`' `sharedImages`).
+Every Kenney kit piece reading its kit's `Textures/colormap.png` thus uploads it once per kit, not
+once per piece. Only external files are shared: `data:` and bufferView images stay one per file.
+Both save forms keep the sharing — the compaction drops nothing a texture still reads, and image
+relocation already copies a shared source file once (§7).
+
+**Buffers are shared the same way**, for the files of a *library* layout: each file declares its own
+bufferViews and accessors into one `.bin` that several files name (e.g. every district of a city
+reading `library/kenney.bin`). A buffer whose URI resolves to the same file on disk as a buffer
+already in the scene model, and whose bytes are equal, is not appended; the file's bufferViews read
+the existing buffer (`ExternalAssetPlacer::shareBuffers`, `appendResources`' `sharedBuffers`). The
+bytes are compared because decoding (meshopt, Draco) may have rewritten a file's copy. The `.bin` is
+then held once, and accessors of different files over the same bytes read the same buffer range,
+which is what lets the renderer share their geometry (§6). GLB and `data:` buffers stay one per file.
+
+Cycle detection uses the **placement path** — the canonical paths of the files from the scene down
+to the file being placed. A file already on its own path is a back-edge: it is logged
+(`reference cycle detected`) and skipped. The same file in two branches is not a cycle
+(`A→B→D`, `A→C→D` is fine; `A↔B`, `A→B→C→A`, self-reference and child→root are caught). A
+depth limit (`kMaxPlacementDepth`) stops anything deeper, and a node budget (`kMaxPlacedNodes`)
+stops runaway multiplication of nested placements, both with a warning. A file that is missing,
+unreadable or requires an unsupported extension is skipped with one warning; the load goes on. The
+test fixtures are in `tests/gltf_2_1/generate_fixtures.py` (`external/`, `placement/`), the tests
+`Gltf21Test.ExternalAssets_*` and `Gltf21Test.Placement_*`.
 
 ### `SceneMerger` (`gltf_scene_merger.{hpp,cpp}`)
 
-- **`mergeIntoNode(base, imported, targetNode)`** — appends *all* of `imported`'s resources
-  (buffers, accessors, meshes, materials, skins, animations, nodes, …) into `base` with every
-  index rebased by an `IndexRemapping` offset table, then attaches the imported default-scene
-  **root nodes as children of `targetNode`** (no synthetic wrapper node — this matches the spec:
-  *"append the externalAsset root node(s) to the array of children for the node"*). Returns a
-  `MergeResult { firstNode, lastNode, roots }`.
-- **`instanceSubtree(base, source, targetNode)`** — creates another instance of an
-  already-merged subtree **sharing geometry**: it copies the node hierarchy (and duplicates skins
-  and animation channels so instances animate independently) but leaves `mesh`/`material`/
-  `accessor` indices pointing at the shared, already-appended resources. Because the copies
-  reference the same accessors, `parseScene` deduplicates them to the same `RenderPrimitive` and
-  hence the **same BLAS** — instancing, not duplication.
+- **`appendResources(base, imported, sharedImages)`** / **`remapNodeResources(node, offsets)`** —
+  what the placer uses: append everything a node may point at, with every index rebased (images
+  listed in `sharedImages` are mapped onto existing base images instead of appended), and return the
+  offsets; then rebase the indices a copied node holds (mesh, camera, light,
+  `EXT_mesh_gpu_instancing` accessors). Nodes, skins and channels are the caller's.
+- **`merge(base, imported)`** — the whole-scene merge behind **Import/Merge Scene**.
 
 > **Why merge into one model?** The renderer is hard-bound to a single `tinygltf::Model`: all GPU
 > arrays (materials/textures/vertex/index buffers) are flat and indexed into that one model, and
@@ -120,42 +251,22 @@ The instance node's own `mesh`/`camera` are cleared (spec: `externalAsset` takes
 > appears) or cross-links it to the wrong resource (non-empty base). **If you add a glTF extension
 > that stores any index, add its remapping here in the same change.**
 
-### Nested references & cycle detection
-
-A referenced file may itself reference other files. Before a child is merged, it is made
-self-contained by `Scene::flattenReferencedModel` (`gltf_scene.cpp`), which recursively resolves the
-child's own `externalAsset`s (loading, alias-applying, and merging them in place) so only one level
-of merging ever happens against the runtime `m_model`.
-
-Cycle detection uses a **DFS ancestry stack** — the canonical paths of the files currently on the
-resolution chain:
-
-1. `resolveExternalAssets` seeds the `ancestry` list with the canonicalized top-level scene file, so
-   a child that references back to the root is caught.
-2. Before loading each child, its path is canonicalized (`weakly_canonical(absolute(path))`) and
-   checked against `ancestry`. A match is a back-edge → the reference is logged
-   (`reference cycle detected`) and **skipped**.
-3. The canonical key is pushed before recursing and popped after, so it is a true path stack. As a
-   result **diamonds are not false positives** (`A→B→D`, `A→C→D` is fine) — only genuine cycles
-   (`A↔B`, `A→B→C→A`, self-reference, child→root) are flagged.
-4. A hard depth backstop (`kMaxExternalAssetDepth`) stops runaway recursion even if the path
-   check is defeated (see caveat in §9).
-
 ---
 
 ## 4. Read-only flagging (the `extras` marker)
 
-Merged nodes must be recognisable as read-only *for the lifetime of the runtime model*, surviving
+Placed nodes must be recognisable as read-only *for the lifetime of the runtime model*, surviving
 node renumbering (delete) and copying (duplicate). The mechanism:
 
 - **Marker:** `Scene::kExternalAssetContentKey` = `"NV_external_asset_content"`, written into each
-  merged node's **`extras`** (`gltf_scene.cpp`, `recordReferencedAsset`/`setExternalAssetMarker`). Its value is
+  placed node's **`extras`** (`gltf_scene.cpp`, `recordReferencedAsset`/`setExternalAssetMarker`). Its value is
   the index into `Scene::m_referencedAssets` (provenance: source URI + `file`/`externalAsset`
   indices).
 - **Query:** `Scene::isNodeReadOnly(nodeIndex)` returns `node.extras.Has(marker)`;
-  `Scene::isMeshReadOnly(meshIndex)` returns true if any read-only node uses that mesh.
+  `Scene::isMeshReadOnly(meshIndex)` returns true if any read-only node or instance set uses that
+  mesh.
 - The **instance node itself is NOT marked** — it stays editable (you can move/rotate/scale the
-  whole reference). Only the merged descendants are marked.
+  whole reference). Only the placed descendants are marked; an instance set has no nodes to mark.
 
 ### Why `extras` and not a set or a struct field
 
@@ -163,10 +274,11 @@ node renumbering (delete) and copying (duplicate). The mechanism:
   node array — the previous implementation had exactly this bug.
 - A field on `tinygltf::Node` would pollute the **shared** tinygltf header for one app.
 - `extras` lives *inside* the node, so it is copied by `duplicateNode` and travels through
-  `deleteNode` renumbering automatically — zero bookkeeping. It is standard glTF app-data.
+  `deleteNode` renumbering automatically — zero bookkeeping. It is standard glTF app-data. The
+  instance-set marker (`Scene::kInstanceSetKey`) lives there for the same reason.
 
 > ⚠️ **Invariant — never replace a node's `extras` wholesale.** Any code that does
-> `node.extras = tinygltf::Value(newObject)` will wipe the marker, un-tagging merged content. Such
+> `node.extras = tinygltf::Value(newObject)` will wipe the marker, un-tagging placed content. Such
 > a node then leaks into saves and **duplicates on reload**. Always *merge* keys into the existing
 > `extras` object. (`applyRenderCameraToNode` in `gltf_scene.cpp` had this bug — it now preserves
 > existing extras.)
@@ -178,7 +290,7 @@ node renumbering (delete) and copying (duplicate). The mechanism:
 The marker is enforced so referenced content cannot be edited, while the instance node stays free.
 
 - **Editor** (`gltf_scene_editor.cpp`): `blockIfNodeReadOnly(nodeIndex, op)` early-returns (with a
-  log) from every mutator that could change merged content — `setNodeTRS`, `renameNode`,
+  log) from every mutator that could change placed content — `setNodeTRS`, `renameNode`,
   `duplicateNode`, `deleteNode`, `setNodeParent`, `setNode*`/`clearNode*` (mesh/camera/skin),
   `duplicateMeshForNode`, `split`/`mergePrimitiveMaterial`. `setPrimitiveMaterial` is mesh-keyed so
   it guards via `isMeshReadOnly`. Undo commands and drag-drop route through these methods, so they
@@ -191,16 +303,49 @@ The marker is enforced so referenced content cannot be edited, while the instanc
     context-menu mutations (duplicate/delete/add-child/rename) for read-only nodes. The per-node
     viewport gizmo instead routes through `SceneEditor::setNodeTRS`, which is guarded by
     `blockIfNodeReadOnly`.
+  - Picking a render node of an instance set selects its placing node (`ui_renderer.cpp`).
+- **Make Editable** (node context menu, `SceneEditor::makeExternalAssetEditable`) breaks the lock
+  for every scene node placing the same file: their instance sets become nodes first
+  (`Scene::materializeInstanceSets`, §6), then it clears their `externalAsset` and the marker of
+  everything placed under them, so the content is saved inline. The command is not undoable; it
+  clears the undo stack.
 
 ---
 
 ## 6. Rendering / instancing
 
-`parseScene` builds one **`RenderPrimitive`** per unique geometry (dedup key = attribute + index
-accessor indices) and one **`RenderNode`** per (node, primitive) instance. Ray tracing builds one
-BLAS per `RenderPrimitive` and one TLAS instance per `RenderNode`. Because `instanceSubtree` shares
-accessors across references, N references to the same file yield **one BLAS, N TLAS instances** —
-verify with the BLAS count when a file is referenced more than once.
+`parseScene` builds one **`RenderPrimitive`** per unique geometry and one **`RenderNode`** per
+(node, primitive) instance. The dedup key (`Scene::primitiveKey`) is the attribute and index accessor
+indices, except in a scene with external assets, where it is the data each accessor reads: buffer,
+byte offset, stride, count and format. Files that declare their own accessors over one shared `.bin`
+(§3) then share a `RenderPrimitive`, as placements of one file do. Skinned and morphed primitives
+keep the index key, since skinning and morphing write the `RenderPrimitive`'s own vertices; so do
+sparse accessors. Placements of one skinned or animated file are copied as nodes but share the
+file's skinned and morphed `RenderPrimitive`s and their skinning: each copied mesh node carries its
+source (`Scene::kPlacedSourceKey`), and read-only copies of one source node animate in lockstep, so
+one pose drawn at each placement is the right picture. **Make Editable** clears the marker, after
+which each copy deforms on its own (RENDERING_ARCHITECTURE.md, "Deformed primitives"). A scene
+without external assets keeps the index key. A placing node with an
+instance set (§3) has no mesh of its own: it gets one render node per (entry, primitive), registered
+under the placing node with no primitive index (`Scene::isInstanceSetRenderNode`). Like the render
+nodes of an `EXT_mesh_gpu_instancing` node, each keeps a local matrix in
+`Scene::getRenderNodeLocalMatrices()`, so moving the placing node moves every entry on the CPU and
+GPU transform paths alike. A save writes the placing node as authored; a flattened save and
+**Make Editable** turn the set into one plain node per entry (`Scene::materializeInstanceSets`),
+with the name, morph weights and extras its node had in the placed file (`InstanceSet::sources`,
+shared by every placement of that file). **Compact Scene** (`Scene::compactModel`) keeps the meshes
+only instance sets draw and renumbers their entries.
+
+Ray tracing builds one BLAS per `RenderPrimitive` and one TLAS instance per `RenderNode`. Because
+every placement of a file points at the same appended accessors, N placements of the same file, from
+any number of files, yield **one BLAS, N TLAS instances**; so do N files reading the same bytes of a
+shared `.bin`. Verify with the BLAS count (the `Scene:` line of the log) when a file is placed more
+than once.
+
+The draft `uid` doesn't serve here: it is unique within its file only, so the same uid in two files
+says nothing about their content. A reference to an object of another file would pair the file with
+the uid, which core glTF 2.1 doesn't define; the buffer file and byte range is the identity a
+library file already states.
 
 ---
 
@@ -213,11 +358,13 @@ verify with the BLAS count when a file is referenced more than once.
 
 Writes the **complex-scene** form (small top file that references the external files):
 
-1. Remove every node with the marker, remapping all node-index references (children, scene roots,
-   skin joints/skeleton, animation channel targets; empty animations erased).
+1. Drop the instance-set markers, and remove every node with the read-only marker, remapping all
+   node-index references (children, scene roots, skin joints/skeleton, animation channel targets;
+   empty animations erased).
 2. Run the resource-compaction cascade (`collectReferencedResources` → remap tables →
    `extractUsedElements` → `updateAllReferences` → `::compactModel`) to drop the now-orphaned
-   meshes/materials/skins/animations/accessors/etc.
+   meshes/materials/skins/animations/accessors/etc. It runs whenever placed content existed, nodes
+   or instance sets, since an instance set's meshes are orphaned without any node being removed.
 3. Drop any buffer no `bufferView` references (a geometry-less complex scene has **no** buffer; an
    empty `byteLength: 0` buffer is invalid glTF and fails to load).
 
@@ -226,9 +373,10 @@ geometry, no markers.
 
 ### Flatten — `flattenExternalAssets(model)` (`selfContained == true`)
 
-Produces a **portable** self-contained file (shareable without the referenced assets): keeps the
-merged geometry inline and instead strips every *reference* — clears `node.externalAsset`, removes
-the marker from `extras`, and clears the `files`/`externalAssets` tables. The former instance nodes
+Produces a **portable** self-contained file (shareable without the referenced assets): instance
+sets first become plain nodes (`Scene::materializeInstanceSets`, §6), then it keeps the placed
+geometry inline and instead strips every *reference* — clears `node.externalAsset`, removes the
+markers from `extras`, and clears the `files`/`externalAssets` tables. The former instance nodes
 become ordinary transform nodes.
 
 Both functions live in `gltf_compact_scene.cpp` (declared in `gltf_compact_model.hpp`) and run on a
@@ -250,9 +398,11 @@ by canonical source path so a file shared by several entries is copied at most o
 
 | Concern | Location |
 |---|---|
-| Parse/serialize `files`/`externalAssets`/`node.externalAsset` | `tiny_gltf.h` (nvpro_core2, branch `mkl/externalAssets`) |
-| Resolve + merge on load | `Scene::resolveExternalAssets`, `gltf_scene.cpp` |
-| Merge / instance primitives | `SceneMerger::mergeIntoNode`, `SceneMerger::instanceSubtree`, `MergeResult`, `gltf_scene_merger.{hpp,cpp}` |
+| Parse/serialize `files`/`externalAssets`/`node.externalAsset` | `tiny_gltf.h` (nvpro_core2; fork branch `nv/all-fixes`) |
+| Resolve + place on load | `Scene::resolveExternalAssets`, `ExternalAssetPlacer`, `gltf_scene_external_assets.cpp` |
+| Append resources / remap a copied node | `SceneMerger::appendResources`, `SceneMerger::remapNodeResources`, `gltf_scene_merger.{hpp,cpp}` |
+| Load a file, aliases, image rebase, meshopt | `nvvkgltf::detail`, `gltf_scene_loading.hpp` |
+| Instance sets | `InstanceSet`, `Scene::getInstanceSet`, `Scene::isInstanceSetRenderNode`, `Scene::materializeInstanceSets`, `ExternalAssetPlacer::staticTree` / `addInstanceSet` |
 | Read-only marker + queries | `Scene::kExternalAssetContentKey`, `isNodeReadOnly`, `isMeshReadOnly`, `ReferencedAsset`, `gltf_scene.{hpp,cpp}` |
 | Editor guards | `SceneEditor::blockIfNodeReadOnly` + guarded mutators, `gltf_scene_editor.cpp` |
 | UI (badge / disabled controls / gizmo skip) | `ui_inspector.cpp`, `ui_scene_browser.cpp` |
@@ -267,12 +417,32 @@ by canonical source path so a file shared by several entries is copied at most o
   in a `bufferView`/`data:` URI is skipped (only `uri`-backed alias targets are honored).
 - **Save to a different folder** does not relocate/copy the referenced files or rewrite relative
   `file.uri`s (fine for save-in-place).
+- **Animated, skinned, lit content, and content that places a file, is copied as nodes** per
+  placement, each with its own animation channels: a crowd of identical characters evaluates its
+  animation once per character. Instanced raster draws are also still to do.
+- **Library geometry is shared only through the same `.bin` file** (§3, §6). Two files reading
+  identical bytes from two different `.bin` files, or from GLB or `data:` buffers, keep one
+  `RenderPrimitive` each. Skinned and morphed primitives keep the accessor-index key, so they are
+  never shared across files; within one file a primitive drawn in several poses has one
+  `RenderPrimitive` per pose (§6).
+- **Placements of one skinned file draw one pose** (§6). Right while they play the file's animation
+  in lockstep, which is all a read-only placement can do; per-placement animation state would need
+  a pose (vertex buffers + BLAS) per placement.
+- **Only image entries are shared, not textures or samplers.** Two files reading the same image
+  file share its scene image (§3), but each keeps its own texture and sampler entries. An embedded
+  image (`data:` URI, or a bufferView in a `.glb`) is never shared, even when its bytes are identical.
+- **A placed file's `KHR_materials_variants` are not merged**, and its `KHR_animation_pointer`
+  channels are dropped (with a warning). A skin whose joints lie outside the placed tree draws
+  unskinned.
+- **The file cache lives for one load** (or one Reference Scene); referencing a file again later
+  appends its resources again.
 - **Cycle detection is path-string based.** The ancestry check (§3) compares canonical paths with a
   case-sensitive string compare, and `weakly_canonical` does not normalize a path to its on-disk
   casing. On case-insensitive filesystems (Windows) a cycle reached through differently-cased paths
   (`a.gltf` ↔ `A.gltf`) or via hardlinks can slip past the check. In that case the
-  `kMaxExternalAssetDepth = 16` backstop still terminates recursion (with redundant merges and a
+  `kMaxPlacementDepth` backstop still terminates recursion (with redundant placements and a
   warning) rather than hanging.
 
-Implemented (glTF 2.1): nested external assets are resolved recursively with a cycle guard,
-`FileAlias` inner-URI redirection is applied at load time, and `file.uri` is percent-decoded.
+Implemented (glTF 2.1): nested external assets are resolved recursively with a cycle guard, each
+file once per load, `FileAlias` inner-URI redirection is applied at load time, and `file.uri` is
+percent-decoded.

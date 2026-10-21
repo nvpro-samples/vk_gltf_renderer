@@ -61,6 +61,7 @@ list(APPEND CMAKE_MODULE_PATH "${CMAKE_CURRENT_SOURCE_DIR}/cmake")
 option(USE_DLSS               "Enable DLSS-RR denoiser (Windows/RTX; downloads NGX SDK)."             ON)
 option(USE_DLSSNR             "Enable DLSS Neural Rendering (beta; requires DLSS beta SDK)."          ON)
 option(USE_OPTIX_DENOISER     "Enable OptiX denoiser as alternative to DLSS (requires CUDAToolkit)."  ON)
+option(USE_OIDN_DENOISER      "Enable the vk_oidn denoiser (Open Image Denoise on Vulkan; downloads its SDK package)." ON)
 option(USE_DRACO              "Enable Draco mesh compression when importing glTF."                    ON)
 option(USE_AGENTIC            "Build the optional Agentic bridge (ComfyUI HDRI + beautify)."          ON)
 option(USE_DEFAULT_SCENE      "Load a bundled default scene at startup."                              OFF)
@@ -102,6 +103,9 @@ option(DLSS_USE_DEVELOP_LIBRARIES "Use DLSS dev DLLs with debug overlay instead 
 
 # OptiX headers-only SDK (downloaded from github.com/NVIDIA/optix-dev).
 set(OptiX_VERSION      "9.1.0"   CACHE STRING "OptiX headers version to download.")
+
+# vk_oidn release (github.com/nvpro-samples/vk_oidn). Only its prebuilt SDK package is used.
+set(VK_OIDN_VERSION    "0.2.0")
 
 # ---- Shader compilation knobs ------------------------------------------------------
 # Slang debug/opt levels applied to every shader in this project.
@@ -224,6 +228,7 @@ file(GLOB EXE_SOURCES CONFIGURE_DEPENDS
 list(FILTER EXE_SOURCES EXCLUDE REGEX "dlss*")
 list(FILTER EXE_SOURCES EXCLUDE REGEX "vk_cuda*")
 list(FILTER EXE_SOURCES EXCLUDE REGEX "optix_denoiser*")
+list(FILTER EXE_SOURCES EXCLUDE REGEX "oidn_denoiser*")
 
 # Optional Agentic bridge: exclude its sources (agentic*.cpp/.hpp, ui_agentic.cpp)
 # when the feature is off. The renderer guards its integration points on USE_AGENTIC.
@@ -317,7 +322,7 @@ set(SHADER_CAPABILITIES
   nonuniformqualifier            # NonUniformResourceIndex on the bindless texture/sampler arrays
 )
 
-# Probe DLSS / OptiX backend availability here (before compile_slang) so the
+# Probe DLSS / OptiX / OIDN backend availability here (before compile_slang) so the
 # shader defines and the C++ compile flags stay in lockstep. The full link/source
 # wiring for these backends lives further down.
 if(USE_DLSS)
@@ -359,6 +364,34 @@ if(USE_OPTIX_DENOISER AND CUDAToolkit_FOUND)
   set(OPTIX_DENOISER_AVAILABLE ON)
 endif()
 
+# vk_oidn: Open Image Denoise networks run by Vulkan compute shaders. The prebuilt SDK package of the
+# release holds the header and static libraries with the compiled Slang kernels and network weights,
+# so nothing of vk_oidn is built here. It provides the vk_oidn::vk_oidn target.
+set(OIDN_DENOISER_AVAILABLE OFF)
+if(USE_OIDN_DENOISER)
+  if(WIN32)
+    set(VK_OIDN_PACKAGE        vk_oidn-${VK_OIDN_VERSION}-windows-x64.zip)
+  elseif(CMAKE_SYSTEM_NAME STREQUAL "Linux" AND CMAKE_SYSTEM_PROCESSOR MATCHES "x86_64|AMD64")
+    set(VK_OIDN_PACKAGE        vk_oidn-${VK_OIDN_VERSION}-linux-x64.tar.gz)
+  endif()
+  if(VK_OIDN_PACKAGE)
+    include(FetchContent)
+    FetchContent_Declare(vk_oidn_sdk
+      URL      https://github.com/nvpro-samples/vk_oidn/releases/download/v${VK_OIDN_VERSION}/${VK_OIDN_PACKAGE}
+      DOWNLOAD_EXTRACT_TIMESTAMP TRUE
+    )
+    FetchContent_MakeAvailable(vk_oidn_sdk)
+    find_package(vk_oidn ${VK_OIDN_VERSION} EXACT CONFIG QUIET PATHS ${vk_oidn_sdk_SOURCE_DIR} NO_DEFAULT_PATH)
+  endif()
+  if(vk_oidn_FOUND)
+    set(OIDN_DENOISER_AVAILABLE ON)
+  elseif(vk_oidn_CONSIDERED_VERSIONS)
+    message(WARNING "vk_oidn SDK package reports version ${vk_oidn_CONSIDERED_VERSIONS}, expected ${VK_OIDN_VERSION} - OIDN denoiser disabled")
+  else()
+    message(WARNING "vk_oidn ${VK_OIDN_VERSION} SDK package not available for this platform - OIDN denoiser disabled")
+  endif()
+endif()
+
 # Nsight Aftermath is optional and picked up by nvpro_core2 via the
 # NSIGHT_AFTERMATH_SDK env variable. Its Find module runs in nvpro_core2's
 # subdirectory scope, so NsightAftermath_FOUND isn't visible here. Read the
@@ -375,7 +408,7 @@ endif()
 # Shader gates:
 #   HAS_DLSS_MOTION  : makes gltf_raster.slang emit SV_TARGET2 motion vectors for DLAA.
 #   USE_GUIDE_SHADER : enables the path tracer's per-bounce guide buffers
-#                      (albedo + normalRoughness) consumed by DLSS AND OptiX.
+#                      (albedo + normalRoughness) consumed by DLSS, OptiX and OIDN.
 #   USE_DLSS_SHADER  : DLSS-only path (drops per-frame MS loop to relieve register
 #                      pressure). Defaults off in the embedded shader; the runtime
 #                      rebuild flips it on when DLSS actually engages.
@@ -384,7 +417,7 @@ set(SHADER_EXTRA_FLAGS "-I${NVSHADERS_DIR}")
 if(DLSS_AVAILABLE)
   list(APPEND SHADER_EXTRA_FLAGS "-DHAS_DLSS_MOTION=1")
 endif()
-if(DLSS_AVAILABLE OR OPTIX_DENOISER_AVAILABLE)
+if(DLSS_AVAILABLE OR OPTIX_DENOISER_AVAILABLE OR OIDN_DENOISER_AVAILABLE)
   list(APPEND SHADER_EXTRA_FLAGS "-DUSE_GUIDE_SHADER=1")
 endif()
 
@@ -452,6 +485,19 @@ if(USE_OPTIX_DENOISER)
   else()
     message(WARNING "CUDAToolkit not found - OptiX denoiser disabled")
   endif()
+endif()
+
+
+#####################################################################################
+# vk_oidn link/source wiring. Availability was probed above (shader gate in lockstep).
+#####################################################################################
+if(OIDN_DENOISER_AVAILABLE)
+  target_compile_definitions(${PROJECT_NAME} PRIVATE USE_OIDN_DENOISER)
+  target_sources(${PROJECT_NAME} PRIVATE
+    ${CMAKE_CURRENT_SOURCE_DIR}/src/oidn_denoiser.cpp
+    ${CMAKE_CURRENT_SOURCE_DIR}/src/oidn_denoiser.hpp
+  )
+  target_link_libraries(${PROJECT_NAME} PRIVATE vk_oidn::vk_oidn)
 endif()
 
 
@@ -719,6 +765,11 @@ if(OPTIX_DENOISER_AVAILABLE)
 else()
   _summary_line("CUDA Toolkit"       "(disabled)")
 endif()
+if(OIDN_DENOISER_AVAILABLE)
+  _summary_line("vk_oidn"            "${VK_OIDN_VERSION} (SDK package)")
+else()
+  _summary_line("vk_oidn"            "(disabled)")
+endif()
 _summary_line("WebP"                 "${WebP_VERSION}")
 _summary_line("Draco"                "main (tracking branch)")
 _summary_line("RapidJSON"            "master (tracking branch)")
@@ -732,6 +783,7 @@ _summary_section("Feature toggles")
 _summary_feature("USE_DLSS"           ${USE_DLSS}           ${DLSS_AVAILABLE})
 _summary_feature("USE_DLSSNR"         ${USE_DLSSNR}         ${DLSSNR_AVAILABLE})
 _summary_feature("USE_OPTIX_DENOISER" ${USE_OPTIX_DENOISER} ${OPTIX_DENOISER_AVAILABLE})
+_summary_feature("USE_OIDN_DENOISER"  ${USE_OIDN_DENOISER}  ${OIDN_DENOISER_AVAILABLE})
 _summary_bool("USE_DRACO"            ${USE_DRACO})
 _summary_bool("USE_AGENTIC"          ${USE_AGENTIC})
 _summary_bool("USE_DEFAULT_SCENE"    ${USE_DEFAULT_SCENE})

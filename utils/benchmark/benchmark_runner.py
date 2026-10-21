@@ -180,8 +180,7 @@ def _run_single_headless(
         "1080",
         "--frames",
         str(frames),
-        "--ptMaxFrames",
-        str(frames),
+        # No accumulation cap: a headless run raises it to cover --frames (ptMaxSamples, or ptMaxFrames in older builds)
         "--ptSamples",
         str(spp),
         "--ptAdaptiveSampling",

@@ -131,14 +131,15 @@ public:
   void                                        registerRecentFilesHandler();
   void                                        setDlssHardwareAvailability(bool rrAvailable, bool srAvailable);
   void                                        setSerAvailable(bool available);
+  void                                        setDeviceExtensions(std::vector<std::string> extensions);
   void                                        setOpacityMicromapAvailable(bool hardware, bool enabled);
 #ifdef USE_AGENTIC
   /// Override the optional Agentic bridge root (from --agenticBridgeRoot). Applied
   /// to the controller once it is initialized in onAttach.
   void setAgenticBridgeRoot(const std::filesystem::path& root);
 #endif
-  /// Ensures path-tracer accumulation covers the full headless run (--maxFrames >= --frames).
-  void alignMaxFramesForHeadless(uint32_t headlessFrames);
+  /// Unless --ptMaxSamples was given, raises the cap so the accumulation covers the full headless run (--frames).
+  void alignMaxSamplesForHeadless(uint32_t headlessFrames);
   // Headless runs render still images: unless --animPlay was given, animations don't play, since
   // advancing them resets the path tracer's accumulation every frame.
   void applyHeadlessDefaults();
@@ -355,6 +356,7 @@ private:
   void onFileDrop(const std::filesystem::path& filename) override;
   void onLastHeadlessFrame() override;
   void onRender(VkCommandBuffer cmd) override;
+  void onPostRender() override;
   void onResize(VkCommandBuffer cmd, const VkExtent2D& size) override;
   void onUIMenu() override;
   void onUIRender() override;
@@ -396,7 +398,7 @@ private:
   const Dlss* activeDlss() const;
 #endif
 
-  bool  dlssGuideRequired() const;    // True when the path tracer currently needs DLSS/OptiX guide-buffer capture code.
+  bool dlssGuideRequired() const;  // True when the path tracer currently needs DLSS/OptiX/OIDN guide-buffer capture code.
   float defaultFireflyClamp() const;  // Scene-appropriate firefly clamp: HDR luminance integral, else a fixed baseline.
   void  updateGizmoAttachment();
   bool  updateTextures();
@@ -430,6 +432,10 @@ private:
   // Polls m_pendingClickResult's frame semaphore and, once signaled, calls m_rayPicker.getResult()
   // and applies it via applyClickPickResult() - called once per frame, next to updateHoverState().
   void updateClickPickState();
+  // Same for the camera anchor pick: answers m_cameraManip->resolveAnchor() once its frame has signaled.
+  void updateAnchorPickState();
+  // AnchorCameraManipulator::AnchorRequest - queues m_pendingAnchorPick for the next onRender().
+  bool requestAnchorPick(const glm::dvec2& screenPos);
   // Applies a completed ray-pick result: selection (and, on a double click, camera recenter) -
   // the exact logic mouseClickedInViewport() used to run inline, now one to two frames removed
   // from the click itself (see m_pendingClickPick's comment for why).
@@ -442,6 +448,13 @@ private:
   BenchmarkController::HeadlessFrameInfo         benchmarkFrameInfo() const;
   std::vector<BenchmarkController::MemorySample> benchmarkMemorySamples() const;
   void                                           saveHeadlessOutputImage();
+  void saveViewportImage(const std::filesystem::path& filename);  // .hdr: linear render, else tonemapped
+  std::filesystem::path                          headlessOutputPathOrDefault() const;
+  void                                           logDenoiserTimings() const;  // DENOISER_TIMING lines (headless)
+  // --outputSamples: the samples per pixel of the image shown, and which one it is (DisplayBuffer)
+  int displayedImageSamples(DisplayBuffer& source) const;
+  void refreshSampleTargets();  // Before the frame renders: parses the counts, and hands them to the path tracer as stops
+  void updateSampleCaptures();  // After the frame is recorded: schedules a save when a requested count is reached
 
   // updateSceneChanges phase helpers (keep main function readable)
   void updateSceneChanges_BlasRebuild(const nvvkgltf::Scene::DirtyFlags& df);
@@ -544,6 +557,7 @@ private:
   nvapp::Application*        m_app{};               // Application pointer
   VkDevice                   m_device{};            // Convenient
   nvvk::RayPicker            m_rayPicker{};         // Ray picker
+  nvvk::RayPicker            m_anchorPicker{};      // Ray picker for the camera anchor (see m_pendingAnchorPick)
   nvutils::ProfilerTimeline* m_profilerTimeline{};  // Timeline profiler
 #ifdef USE_NVMCP
   // Guards the *lifetime* of m_profilerTimeline (not its contents, which are already mutex-guarded
@@ -552,8 +566,8 @@ private:
   // at that moment. Held for one profiler call at a time, never across a wait for a frame.
   mutable std::mutex m_profilerTimelineMutex;
 #endif
-  nvvk::ProfilerGpuTimer                      m_profilerGpuTimer{};  // GPU profiler
-  std::shared_ptr<nvutils::CameraManipulator> m_cameraManip;         // Camera manipulator
+  nvvk::ProfilerGpuTimer                   m_profilerGpuTimer{};  // GPU profiler
+  std::shared_ptr<AnchorCameraManipulator> m_cameraManip;         // Camera manipulator
 
   nvutils::PerformanceTimer m_cpuTimer;               // CPU performance timer (path-tracer accumulation window)
   bool                      m_cpuTimePrinted{false};  // Track if CPU time has been printed
@@ -596,7 +610,18 @@ private:
   bool m_todDrivesSun{false};
   // --animPlay: whether animations play. Re-applied to animationControl.play on every scene load,
   // which resets the animation state. Off by default in headless runs (applyHeadlessDefaults).
-  bool                  m_animPlay{true};
+  bool m_animPlay{true};
+  // --outputSamples: save the output image when the displayed image reaches these samples per pixel
+  std::string m_outputSamples;
+  struct SampleCapture
+  {
+    std::string           parsedFrom;       // m_outputSamples the targets were parsed from
+    std::vector<int>      targets;          // Sorted, unique
+    size_t                next{0};          // First target not saved yet
+    int                   lastSamples{-1};  // Displayed image of the previous frame
+    int                   lastSource{-1};   // DisplayBuffer of the previous frame
+    std::filesystem::path pending;          // Saved in onPostRender, once the frame is submitted
+  } m_sampleCapture;
   bool                  m_envPreviewPending{false};  // Record a colour-only re-bake into this frame
   bool                  m_envCommitOwed{false};      // Previewed at least once; owes a commit once the edits stop
   bool                  m_envOwnedByBaker{false};    // hdrIbl currently points at EnvBaker's image, not a loaded file
@@ -660,6 +685,13 @@ private:
     bool                 isDoubleClick;
   };
   std::optional<PendingClickResult> m_pendingClickResult;
+
+  // Async ray-pick of the camera anchor (Shift+drag, see camera_controls.hpp), on the same pattern as
+  // the click pick above but with its own picker, since a Shift+click also queues a selection pick.
+  // The answer goes to AnchorCameraManipulator::resolveAnchor(), and a dropped pick must answer too,
+  // or the drag waiting on it stays frozen. A new request drops the answer of one still in flight.
+  std::optional<nvvk::RayPicker::PickInfo> m_pendingAnchorPick;
+  std::optional<nvvk::SemaphoreState>      m_pendingAnchorResult;
 
   // Non-blocking GPU loading pipeline (see timeline_pipeline.hpp for details).
   // Worker threads enqueue command buffers; the main thread calls poll() each frame.

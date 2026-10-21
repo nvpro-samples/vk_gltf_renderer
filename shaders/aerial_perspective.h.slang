@@ -97,14 +97,18 @@ AerialMarch marchAerialPerspective(SkyAtmosphereParameters atmosphere,
                                    float3                  sunDirection,
                                    float2                  u)
 {
-  // Sixteen steps. The segment is short and the air along it varies slowly, so the integrand is
-  // nearly linear; the per-step integration below is analytic rather than a Riemann sum, which is
-  // what lets the count stay this low.
-  const int kSteps = 16;
+  // One step per quarter kilometre, between one and sixteen: up to 4 km a step is at most 250 m,
+  // beyond that the sixteen steps lengthen with the segment, as every step did before. The air
+  // varies over kilometres (the aerosol's scale height is about 1.2 km), and the per-step
+  // integration below is analytic rather than a Riemann sum, so a step only has to be short against
+  // that scale. A room is metres deep and gets one step.
+  const float kMaxStepKm = 0.25F;
+  const int   kMaxSteps  = 16;
 
-  const float  d   = length(displacement);
-  const float3 dir = displacement / d;
-  const float  nu  = dot(dir, sunDirection);
+  const float  d      = length(displacement);
+  const float3 dir    = displacement / d;
+  const float  nu     = dot(dir, sunDirection);
+  const int    kSteps = clamp(int(ceil(d / kMaxStepKm)), 1, kMaxSteps);
 
   // Angular terms are constant along a straight segment, so they leave the loop.
   const float rayleighPhase = RayleighPhaseFunction(nu);

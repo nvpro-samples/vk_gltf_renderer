@@ -18,6 +18,7 @@ This project is developer-oriented: the **RTX path tracer** is the primary high-
 For the internal data-flow walkthrough (Model -> RenderNodes -> GPU/TLAS), including how ray tracing acceleration structures are built, see [Rendering Architecture](RENDERING_ARCHITECTURE.md).
 
 For how glTF 2.1 external assets (complex scenes) are merged, flagged read-only, and re-externalized/flattened on save, see [External Assets](external_assets.md).
+For glTF 2.1 support as a whole (status, `PROVISIONAL` markers, the tinygltf fork, test fixtures), see [glTF 2.1](gltf_2_1.md).
 
 ---
 
@@ -127,6 +128,7 @@ src/
 ├── renderer.cpp/hpp            # Main renderer orchestrator (GltfRenderer)
 ├── renderer_base.hpp           # BaseRenderer: abstract base for PathTracer / Rasterizer
 ├── renderer_pathtracer.cpp/hpp # Monte Carlo path tracer (Vulkan ray tracing + ray query)
+├── sample_schedule.hpp         # Samples per frame: ending on stops (cap, --outputSamples), the Auto SPP controller
 ├── renderer_rasterizer.cpp/hpp # Forward PBR rasterizer
 ├── renderer_silhouette.cpp/hpp # Selection highlight (compute shader)
 ├── env_image_loader.cpp/hpp    # Decodes .hdr / .exr lat-longs to float RGBA for HdrIbl
@@ -136,9 +138,9 @@ src/
 ├── mcp_timing.cpp/hpp          # Optional MCP endpoint (--mcp): recompile shaders, time a
 │                               #   GPU pass over a window (docs/mcp.md)
 ├── hover_picker.cpp/hpp        # Async G-buffer readback for KHR_interactivity hover detection
-├── camera_controls.cpp/hpp     # Viewport bindings table (drags, wheel, clicks, keys -> action) and the
-│                               #   per-frame input handling that drives the camera manipulator from it;
-│                               #   Help's Camera tab reads the same table
+├── camera_controls.cpp/hpp     # Viewport bindings table (drags, wheel, clicks, keys -> action), the manipulator
+│                               #   that dispatches from it (Shift pivots on the ray-picked point), and
+│                               #   the per-frame input handling; Help's Camera tab reads the same table
 ├── settings_registry.hpp       # One declaration per setting -> CLI + benchmark sequences + ImGui.ini;
 │                               #   also captures each declaration-time default (Reset All to Default)
 ├── resources.hpp               # Shared Vulkan resources and settings (`nvvk::FrameUploader` staging)
@@ -152,8 +154,11 @@ src/
 ├── gltf_scene_animation.cpp/hpp# AnimationSystem: playback/interpolation (CPU), via Scene::animation()
 ├── gltf_scene_animation_vk.cpp/hpp # GPU compute skinning / morph target animation
 ├── gltf_scene_transform_vk.cpp/hpp # GPU compute world-matrix propagation
-├── gltf_scene_merger.cpp/hpp   # Merge two glTF scenes
+├── gltf_scene_merger.cpp/hpp   # Merge two glTF scenes; append a file's resources (external assets)
+├── gltf_scene_external_assets.cpp # glTF 2.1 external assets: file cache, placement, instance sets (ExternalAssetPlacer)
+├── gltf_scene_loading.hpp      # Shared file loading helpers (aliases, image rebase, meshopt)
 ├── gltf_scene_validator.cpp/hpp# Scene validation
+├── gltf_version.cpp/hpp        # glTF asset versions: what loads, what a save declares, 2.1 feature detection
 ├── gltf_compact_*.cpp/hpp      # Orphan resource removal / buffer compaction
 ├── gltf_create_tangent.cpp/hpp # Tangent space generation (UV gradient + MikkTSpace)
 ├── gltf_material_cache.cpp/hpp # CPU-side material cache
@@ -192,6 +197,9 @@ src/
 ├── dlss.cpp/hpp                # DLSS adapter (Ray Reconstruction + Super Resolution)
 ├── dlss_wrapper.cpp/hpp        # NGX / DLSS SDK wrapper (project-independent)
 ├── optix_denoiser.cpp/hpp      # OptiX AI Denoiser integration
+├── oidn_denoiser.cpp/hpp       # Open Image Denoise on Vulkan (vk_oidn) integration
+├── denoiser_schedule.hpp       # Auto-denoise interval shared by OptiX and OIDN, DLSS hand-off weight
+├── denoiser_handoff.cpp/hpp    # DLSS hand-off: blend from DLSS-RR's image to OptiX / OIDN's
 ├── vk_cuda.cpp/hpp             # Vulkan-CUDA interop (shared memory/semaphores)
 │
 ├── gizmo_transform_vk.cpp/hpp  # 3D translate/rotate/scale gizmo
@@ -236,6 +244,7 @@ shaders/
 ├── gizmo_visuals.slang         # Transform gizmo overlays
 ├── gizmo_visuals_shaderio.h.slang # Gizmo shader I/O
 ├── optix_image_to_buffer.slang # OptiX denoiser buffer conversion
+├── denoiser_handoff.slang      # DLSS hand-off blend of two images
 ├── gltf_light_ies.h.slang      # EXT_lights_ies: photometric-profile falloff lookup
 ├── sky_background.h.slang      # Background (sun-bearing) field for authored skies; shared by both paths
 ├── sky_background.slang        # Rasterizer background pass that draws it
@@ -350,7 +359,7 @@ selected by `PbrMaterial::thickness` (i.e. by `KHR_materials_volume`), matching 
   the Kulla-Conty single-scatter albedo. The transport that consumes it is
   `handleVolumeScatter()` in [`pathtrace_functions.h.slang`](../shaders/pathtrace_functions.h.slang).
 
-Two things about the volume transport are worth knowing before touching it:
+Some things about the transport are worth knowing before touching it:
 
 - glTF media are **homogeneous**, so the free-flight distance is sampled analytically per spectral
   channel and combined with the balance heuristic — not with delta tracking against a majorant.
@@ -367,7 +376,15 @@ Two things about the volume transport are worth knowing before touching it:
 - Surfaces with a diffuse transmission lobe are lit from **both** hemispheres, so `sampleLights()`
   takes a flag that disables the punctual-light hemisphere rejection in
   `singleLightContribution()`. Without it, a light behind a backlit leaf or sheet contributes
-  nothing.
+  nothing. For the same reason `SceneRtx` disables back-face culling on them (`getInstanceFlag()`):
+  a diffusely transmitted ray reaches the far wall of a closed object from behind.
+- Straight-through shadow transmission (`getShadowTransmission()`) only passes the **specular**
+  part of the transmission, so in thin-walled mode it is scaled by `1 - scatterStrength`. It samples
+  the transmission and scatter-strength textures at the hit, so a shadow ray agrees with
+  `evaluateMaterial()` texel by texel.
+- The thickness texture is a rasterizer-only stand-in for the path length through the medium:
+  `evaluateMaterial()` applies it under `RASTER_PIPELINE` only. In the path tracer the ray measures
+  that length, and `thicknessFactor` alone selects thin-walled vs. volume.
 
 The rasterizer cannot trace inside a medium, so `evaluateMaterial()` compiles only the thin-walled
 branch for `RASTER_PIPELINE` — the approximation the scatter spec explicitly permits for renderers
@@ -605,9 +622,9 @@ The viewport's mouse, wheel and movement keys are not commands: they are held do
 clicked rather than pressed. They have a table of their own, `kBindings` in `camera_controls.cpp`;
 each row names an input, the modifiers it needs and those it tolerates, the navigation modes and
 projection it applies to, the action, and the label and tooltip Help shows. For an input, the first
-matching row wins. `camera_controls::update()` replaces `nvapp::ElementCamera::updateCamera()` for
-the viewport and dispatches drags, the wheel and the movement keys from it instead of using
-`nvutils::CameraManipulator`'s own mapping, `mouseClickedInViewport()` takes the click
+matching row wins. `AnchorCameraManipulator` dispatches drags and the wheel from it instead of using
+`nvutils::CameraManipulator`'s own mapping, `camera_controls::update()` replaces
+`nvapp::ElementCamera::updateCamera()` for the viewport, `mouseClickedInViewport()` takes the click
 that selects and the double-click that sets the point of interest from it, and Help > Keyboard &
 Mouse draws its Camera tab (mouse grid, clicks and keys) from it. Rebinding them is a change to that
 table only.

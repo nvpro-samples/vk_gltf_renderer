@@ -58,16 +58,16 @@ constexpr VkBufferUsageFlags kSsboUsage = VK_BUFFER_USAGE_2_STORAGE_BUFFER_BIT |
 constexpr const char* kMemCategoryGraph    = "Xform/Graph";
 constexpr const char* kMemCategoryMatrices = "Xform/Matrices";
 
-// Build a per-render-node array of GPU instance-local matrices (identity for nodes without one).
+// Build a per-render-node array of local matrices (identity for nodes drawn once).
 static void fillPerRenderNodeInstanceLocals(const Scene& scn, std::vector<glm::mat4>& out)
 {
   const auto& rns    = scn.getRenderNodes();
   const auto& reg    = scn.getRenderNodeRegistry();
-  const auto& gpuMap = scn.getGpuInstanceLocalMatrices();
+  const auto& gpuMap = scn.getRenderNodeLocalMatrices();
   out.assign(rns.size(), glm::mat4(1.f));
 
-  // Walk each instanced node's render-node list once: position k in that list is instance
-  // k % count. Searching the list per render node would be quadratic in the instance count.
+  // Walk each such node's render-node list once: position k in that list has local matrix k.
+  // Searching the list per render node would be quadratic in the instance count.
   for(const auto& [nodeID, locals] : gpuMap)
   {
     if(locals.empty())
@@ -77,7 +77,7 @@ static void fillPerRenderNodeInstanceLocals(const Scene& scn, std::vector<glm::m
     {
       const int rnID = rnList[k];
       if(rnID >= 0 && static_cast<size_t>(rnID) < out.size())
-        out[rnID] = locals[k % locals.size()];
+        out[rnID] = k < locals.size() ? locals[k] : glm::mat4(1.f);
     }
   }
 }

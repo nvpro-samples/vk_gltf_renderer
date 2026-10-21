@@ -23,9 +23,10 @@
 //
 // One table, kBindings in camera_controls.cpp, maps every input to an action. Its readers share it,
 // so they cannot disagree:
+//  - AnchorCameraManipulator's mouseMove() and wheel(), which replace nvutils::CameraManipulator's
+//    built-in mapping,
 //  - camera_controls::update(), which feeds the manipulator from ImGui every frame in place of
-//    nvapp::ElementCamera::updateCamera(), replacing nvutils::CameraManipulator's built-in mapping
-//    (mouseMove() and the modifiers wheel() reads),
+//    nvapp::ElementCamera::updateCamera(), and handles the movement keys,
 //  - GltfRenderer::mouseClickedInViewport(), which takes the click that selects and the double-click
 //    that sets the point of interest from it,
 //  - Help > Keyboard & Mouse (ui_help.cpp), which draws its Camera tab from it.
@@ -35,8 +36,11 @@
 // wheel() with Inputs made up to select its dolly, dolly-keeping-the-center or zoom.
 
 #include <cstdint>
+#include <functional>
 #include <optional>
 #include <span>
+#include <utility>
+#include <vector>
 
 #include <imgui.h>
 #include <nvutils/camera_manipulator.hpp>
@@ -94,13 +98,17 @@ enum class Projection : uint8_t
 enum class Action : uint8_t
 {
   // Drags
-  eOrbit,       // About the center of interest
-  ePan,         //
-  eDolly,       // Toward the center of interest; orthographic: zoom
-  eLookAround,  // Turn in place
+  eOrbit,        // About the center of interest
+  ePan,          //
+  eDolly,        // Toward the center of interest; orthographic: zoom
+  eLookAround,   // Turn in place
+  eOrbitAnchor,  // About the surface under the cursor
+  ePanAnchor,    // Keeping the surface under the cursor
+  eDollyAnchor,  // Toward the surface under the cursor
   // Wheel
   eWheelDolly,            // Toward the center of interest; orthographic: zoom
   eWheelDollyKeepCenter,  // Fly / Walk: leave the center of interest in place
+  eWheelDollyAnchor,      // Toward the surface under the cursor
   eWheelZoom,             // Field of view; orthographic: zoom
   // Keys
   eMoveForward,
@@ -114,6 +122,13 @@ enum class Action : uint8_t
   eSelect,              // Select what is under the cursor
   eSetPointOfInterest,  // Move the center of interest to the surface under the cursor
 };
+
+// Picks a surface point when the button goes down (or the wheel turns), see AnchorCameraManipulator.
+constexpr bool isAnchored(Action action)
+{
+  return action == Action::eOrbitAnchor || action == Action::ePanAnchor || action == Action::eDollyAnchor
+         || action == Action::eWheelDollyAnchor;
+}
 
 struct Binding
 {
@@ -143,8 +158,66 @@ const Binding* findAction(Action action);
 // The modifiers ImGui sees held.
 Mods heldMods();
 
+}  // namespace camera_controls
+
+// Camera manipulator driven by the camera_controls table, whose motion can also pivot on the point
+// under the cursor instead of the center of interest (nvutils::CameraManipulator's anchor).
+//
+// The anchored bindings (Shift with a button or the wheel) pick that point. The application answers
+// the pick asynchronously through resolveAnchor() (GltfRenderer records it into the next frame and
+// polls that frame's semaphore). Until then a drag holds still and wheel steps accumulate, instead of
+// moving around the center of interest. A miss falls back to the center of interest.
+class AnchorCameraManipulator : public nvutils::CameraManipulator
+{
+public:
+  // Starts a pick at an absolute screen position. Returns false if no answer will come.
+  using AnchorRequest = std::function<bool(const glm::dvec2& screenPos)>;
+
+  void setAnchorRequest(AnchorRequest request) { m_anchorRequest = std::move(request); }
+
+  // Answers the pending request; nullopt when nothing was hit or the pick was dropped.
+  void resolveAnchor(const std::optional<glm::dvec3>& hit);
+
+  // No mouse button is held: clears the anchor and drops a drag's pending request, so an answer
+  // arriving after the release does not set an anchor (setAnchor() also moves the center of interest).
+  void releaseAnchor();
+
+  // Drops any pending request and queued wheel steps without moving the camera, e.g. on scene teardown.
+  void cancelAnchor();
+
+  void    beginInteraction(const glm::dvec2& pos, const Inputs& inputs) override;
+  Actions mouseMove(glm::dvec2 screenPos, const Inputs& inputs) override;
+  void    wheel(double value, const Inputs& inputs) override;
+
+private:
+  enum class Pending
+  {
+    None,
+    Drag,   // The current anchored drag waits for its anchor
+    Wheel,  // Wheel steps accumulate in m_wheelPending
+  };
+
+  const camera_controls::Binding* findBinding(camera_controls::Input input, camera_controls::Mods held) const;
+
+  // The inherited wheel dolly, toward the anchor when there is one. Steps are applied one at a time
+  // because the inherited response to a step is not linear in its value.
+  void wheelToward(const std::optional<glm::dvec3>& anchor, const std::vector<double>& steps);
+
+  AnchorRequest             m_anchorRequest = {};
+  bool                      m_anchored      = false;  // The current drag began on an anchored binding
+  camera_controls::Mods     m_pressMods     = camera_controls::kModNone;  // Its modifiers, which it keeps
+  Pending                   m_pending       = Pending::None;
+  std::vector<double>       m_wheelPending  = {};            // Wheel steps waiting for the pick
+  std::optional<glm::dvec3> m_wheelAnchor   = std::nullopt;  // Last wheel pick, valid while the view below holds
+  glm::dvec2                m_wheelCursor   = {};
+  glm::dmat4                m_wheelView     = {};  // Any change of view or projection moves the cursor ray
+  glm::dmat4                m_wheelProj     = {};
+};
+
+namespace camera_controls {
+
 // Feeds the camera from ImGui's mouse and keyboard, as the table maps them, while the cursor is over
 // viewportWindow. Call once per frame inside that window; it does not advance the camera animation.
-void update(Manipulator& camera, ImGuiWindow* viewportWindow);
+void update(AnchorCameraManipulator& camera, ImGuiWindow* viewportWindow);
 
 }  // namespace camera_controls

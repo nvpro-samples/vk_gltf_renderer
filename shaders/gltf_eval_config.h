@@ -30,7 +30,7 @@ layout off). Each pair has a compile-time guard below.
 
 // Denoiser guide-buffer compile gates. Both default to 0 so preprocessor #if checks never
 // hit an undefined identifier (Slang warning E15205). The build-time compile defines
-// USE_GUIDE_SHADER=1 via CMake when DLSS/OptiX is available; USE_DLSS_SHADER stays 0 in the
+// USE_GUIDE_SHADER=1 via CMake when DLSS/OptiX/OIDN is available; USE_DLSS_SHADER stays 0 in the
 // embedded shader (DLSS is never active at startup). The runtime from-file recompile sets
 // both explicitly from the active denoiser state.
 #ifndef USE_GUIDE_SHADER
