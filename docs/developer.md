@@ -366,9 +366,9 @@ Some things about the transport are worth knowing before touching it:
   A single majorant makes the low-extinction channels collide (and therefore random-walk) far too
   often; because those extra collisions are lossless, their effective per-collision albedo drifts
   towards 1 and the medium's perceived color shifts away from `multiscatterColor`.
-- `VolumeMedium` stores **absorption**, not extinction, alongside the scattering coefficient. The
-  fields are half floats, and a medium authored near white has σa as a tiny difference of two
-  large numbers — recovering it by subtraction quantizes the albedo straight to 1.
+- `VolumeMedium` stores **absorption**, not extinction, alongside the scattering coefficient. A
+  medium authored near white has σa as a tiny difference of two large numbers — recovering it by
+  subtraction under limited precision quantizes the albedo straight to 1.
 - In-volume Russian roulette has its **own** probability cap (`RR_PCONT_CAP_VOLUME`). A dense,
   high-albedo medium keeps the throughput near 1, so the surface cap would cull fully energetic
   paths at every scatter event and the medium would render far too dark. The cap must stay below
@@ -384,7 +384,21 @@ Some things about the transport are worth knowing before touching it:
   `evaluateMaterial()` texel by texel.
 - The thickness texture is a rasterizer-only stand-in for the path length through the medium:
   `evaluateMaterial()` applies it under `RASTER_PIPELINE` only. In the path tracer the ray measures
-  that length, and `thicknessFactor` alone selects thin-walled vs. volume.
+  that length, and `thicknessFactor` alone selects thin-walled vs. volume. It is also what makes a
+  surface a medium boundary: the path and its shadow rays count themselves inside only across
+  surfaces with a thickness.
+- Light reaching the camera through a medium is attenuated wherever it comes from. The medium in
+  front of a hit (`processVolumeSegment()`) is resolved before the surface's emission is added, and
+  a shadow ray knows the medium it starts in (the path's, from a surface or a scatter point) and
+  attenuates every segment it travels inside one, including the last, up to a light inside the
+  medium. `tests/render/volume_transmittance.py` checks both against analytic transmittance.
+- A path knows it is in a medium only by having crossed into one, so a camera path starts in the
+  medium the camera is in: once per accumulation of a scene with a `KHR_materials_volume` material,
+  `PathTracer::probeCameraMedium()` runs the path tracer's own pipeline for a single thread
+  (`probeCameraMedium()` in [`gltf_pathtrace.slang`](../shaders/gltf_pathtrace.slang)), which
+  follows the center camera ray to the nearest medium boundary and, if it meets it from behind,
+  records that medium for `pathTrace()` to start in. Without it, a camera inside a fog sees no fog
+  in front of it and fog behind the far wall.
 
 The rasterizer cannot trace inside a medium, so `evaluateMaterial()` compiles only the thin-walled
 branch for `RASTER_PIPELINE` — the approximation the scatter spec explicitly permits for renderers

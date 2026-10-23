@@ -33,19 +33,19 @@ struct HitState
   float2 uv[2];                // UV0 and UV1
   float3 tangent;              // Tangent
   float3 bitangent;            // Bitangent
-  float  texelDensity = 0.0;   // UV-to-world area ratio for ray-footprint texture LOD (0 if no UVs)
-  bool   frontFace    = true;  // True if the primitive was hit on its front side (CCW from the ray)
+  float  texelDensity   = 0.0;   // UV-to-world area ratio for ray-footprint texture LOD (0 if no UVs)
+  float  offsetDistance = 0.0;   // How far a ray leaving `pos` steps off the surface along `geonrm` (safeOffsetRay)
+  bool   frontFace      = true;  // True if the primitive was hit on its front side (CCW from the ray)
 };
 
 //-----------------------------------------------------------------------
 // Compute the texel density of a triangle: the ratio of UV-space area to world-space area.
 // Returns sqrt(uvArea / worldArea). When multiplied by a world-space footprint
 // (hitT * pixelAngle), gives the UV-space gradient magnitude for SampleGrad().
-float computeTexelDensity(float3 pos0, float3 pos1, float3 pos2, float2 uv0, float2 uv1, float2 uv2, float4x4 objectToWorld)
+// `we1` and `we2` are the triangle's world-space edges from vertex 0.
+float computeTexelDensity(float3 we1, float3 we2, float2 uv0, float2 uv1, float2 uv2)
 {
-  float3 we1   = mul(float4(pos1 - pos0, 0.0), objectToWorld).xyz;
-  float3 we2   = mul(float4(pos2 - pos0, 0.0), objectToWorld).xyz;
-  float  wArea = length(cross(we1, we2));
+  float wArea = length(cross(we1, we2));
 
   float2 duv1   = uv1 - uv0;
   float2 duv2   = uv2 - uv0;
@@ -53,6 +53,24 @@ float computeTexelDensity(float3 pos0, float3 pos1, float3 pos2, float2 uv0, flo
 
   return sqrt(max(uvArea, 1e-20) / max(wArea, 1e-20));
 }
+
+//-----------------------------------------------------------------------
+// Rounding-error bounds for the self-intersection offset (HitState::offsetDistance)
+
+static const float FLOAT_UNIT_ROUNDOFF = 5.96046448e-8F;  // u = 2^-24, the relative rounding error of one float operation
+
+// Bound on the relative rounding error of `n` chained float operations, gamma(n) in "Physically Based
+// Rendering" (Pharr, Jakob, Humphreys, 4th ed., 6.8.1).
+float roundingGamma(int n)
+{
+  return (n * FLOAT_UNIT_ROUNDOFF) / (1.0F - n * FLOAT_UNIT_ROUNDOFF);
+}
+
+// The hardware ray/triangle test's own rounding, in units of u times the triangle's size. Vulkan does
+// not specify it, so it is measured (tests/render/ray_offset.py): a floor whose shadow rays run along
+// it in object space shadows itself without this term, and is clean from 1. 16 leaves a margin, and
+// still lets a ray from a 100 m floor pass under an object 0.5 mm above it (a leak from about 59).
+static const float RAY_TEST_ERROR_ULPS = 16.0F;
 
 //-----------------------------------------------------------------------
 // Return hit information: position, normal, geonormal, uv, tangent, bitangent
@@ -75,9 +93,37 @@ HitState getHitState(GltfRenderPrimitive renderPrim,  //
   const float3 position = pos0 * barycentrics.x + pos1 * barycentrics.y + pos2 * barycentrics.z;
   hit.pos               = float3(mul(float4(position, 1.0), objectToWorld).xyz);
 
+  // World-space edges: the triangle's size, and its area for the texel density below
+  const float3 worldEdge1 = mul(float4(pos1 - pos0, 0.0), objectToWorld).xyz;
+  const float3 worldEdge2 = mul(float4(pos2 - pos0, 0.0), objectToWorld).xyz;
+  const float3 worldEdge3 = worldEdge2 - worldEdge1;
+
   // Geometric Normal
   const float3 geoNormal = normalize(cross(pos1 - pos0, pos2 - pos0));
   hit.geonrm             = normalize(mul(worldToObject, float4(geoNormal, 0.0)).xyz);
+
+  // How far a ray leaving `pos` must step off the surface not to hit it again, along the geometric
+  // normal -- the only direction that matters to a ray leaving the surface. Two errors add up:
+  //  - `pos`'s own rounding, per component (PBRT 6.8, "Managing Rounding Error"): that of the
+  //    barycentric interpolation, which follows the size of the vertex coordinates, then that of the
+  //    instance transform, which also follows its translation. The barycentrics' own error is left
+  //    out: it moves the point within the triangle's plane, not off it.
+  //  - The rounding of the hardware's test of the next ray against this triangle. PBRT's own
+  //    intersector guards against it from inside, rejecting any hit closer than its error; hardware
+  //    cannot be told to, so the origin moves past it instead. It follows the size of the
+  //    coordinates the test works with: the triangle's extent around the ray origin.
+  // Every term is a length of the scene's own, so the step scales with the scene.
+  {
+    const float3 objectError = roundingGamma(7) * (abs(barycentrics.x * pos0) + abs(barycentrics.y * pos1) + abs(barycentrics.z * pos2));
+    // The world error is |objectToWorld| applied to the object error (and to |position|, 1 for the
+    // translation); along the normal, dot(|n|, |M| e) = dot(|M|^T |n|, e), so the normal goes through
+    // the matrix once instead of each error. Rows 0-2 weigh the object axes, row 3 the translation.
+    const float4 normalWeight = mul(abs(objectToWorld), float4(abs(hit.geonrm), 0.0));
+    const float  pointError   = (1.0F + roundingGamma(3)) * dot(normalWeight.xyz, objectError)
+                             + roundingGamma(3) * (dot(normalWeight.xyz, abs(position)) + normalWeight.w);
+    const float  triangleSize = sqrt(max(dot(worldEdge1, worldEdge1), max(dot(worldEdge2, worldEdge2), dot(worldEdge3, worldEdge3))));
+    hit.offsetDistance = pointError + RAY_TEST_ERROR_ULPS * FLOAT_UNIT_ROUNDOFF * triangleSize;
+  }
 
   // Normal
   float3 nrm0   = geoNormal;
@@ -116,7 +162,7 @@ HitState getHitState(GltfRenderPrimitive renderPrim,  //
     float2  uv0        = texCoords0[triangleIndex.x];
     float2  uv1        = texCoords0[triangleIndex.y];
     float2  uv2        = texCoords0[triangleIndex.z];
-    hit.texelDensity   = computeTexelDensity(pos0, pos1, pos2, uv0, uv1, uv2, objectToWorld);
+    hit.texelDensity   = computeTexelDensity(worldEdge1, worldEdge2, uv0, uv1, uv2);
   }
   else
   {

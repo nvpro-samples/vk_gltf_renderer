@@ -133,6 +133,7 @@ public:
   bool               m_depthCopyable{true};  // The depth format is 32-bit float, so the staged depth can be copied in
   nvvk::RenderTarget m_depthStaging;         // R32_SFLOAT, G-buffer size
   nvvk::Buffer       m_depthCopyBuffer;      // Bridge for the color -> depth copy (no direct image copy between them)
+  nvvk::Buffer       m_cameraMediumBuffer;   // shaderio::CameraMedium: the medium camera paths start in
   bool               m_useSER{true};         // Requested SER state; clamped to m_supportSER each frame.
   bool m_shadowTransmission{true};  // Shadow rays pass through transmissive surfaces (biased; see ePtShadowTransmission).
   bool m_pipelineUseSER{false};     // SER value the currently-live pipelines were built with.
@@ -333,10 +334,15 @@ private:
   void               ensureShadersAndPipelines(Resources& resources);
   void               startAsyncCompile(Resources& resources);
   void               updateStatistics(Resources& resources);
-  void               renderRayQuery(VkCommandBuffer cmd, VkExtent2D renderingSize, Resources& resources);
-  void               renderRayTrace(VkCommandBuffer cmd, VkExtent2D& renderingSize, Resources& resources);
-  void               denoiseDlss(VkCommandBuffer cmd, Resources& resources);
-  void               setupPushConstant(VkCommandBuffer cmd, Resources& resources, VkExtent2D renderingSize);
+  // Bind the technique's pipeline and launch it over `renderingSize`; the caller times it.
+  void renderRayQuery(VkCommandBuffer cmd, VkExtent2D renderingSize, Resources& resources);
+  void renderRayTrace(VkCommandBuffer cmd, VkExtent2D renderingSize, Resources& resources);
+  void traceRays(VkCommandBuffer cmd, VkExtent2D renderingSize, Resources& resources);  // The selected technique
+  // Find the medium the camera is in (ePtProbeCameraMedium), then push `pushConst` back for the frame.
+  void probeCameraMedium(VkCommandBuffer cmd, Resources& resources, const shaderio::PathtracePushConstant& pushConst);
+  void denoiseDlss(VkCommandBuffer cmd, Resources& resources);
+  // Push this frame's constants; returns what was pushed.
+  shaderio::PathtracePushConstant setupPushConstant(VkCommandBuffer cmd, Resources& resources, VkExtent2D renderingSize);
   // Determine if DLSS should actively denoise this frame
   bool getEffectiveDlssEnabled(const Resources& resources) const;
   // A denoiser of the accumulated image (OptiX or OIDN) is on

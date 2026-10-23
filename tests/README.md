@@ -92,6 +92,25 @@ a scene whose graph writes a pointer every tick (e.g. `BowShooting.glb`'s perman
 animation) resets the accumulation counter every single frame, which used to make `ready` hang
 forever.
 
+### Render Tests (`tests/render/`)
+
+The unit tests never render. Shader behavior is checked by Python scripts that write small glTF
+scenes, render them with the built app in headless mode to a linear `.hdr`, and check the pixels.
+They need a GPU, use only the Python standard library, and are not registered with CTest. Each one
+exits non-zero on failure and leaves its scenes and images in the `--out` directory (default: the
+system temp directory). Every check runs with both path-tracing techniques (`--ptTechnique`), since
+each has its own shadow-ray implementation.
+
+```bash
+python tests/render/volume_scatter_punctual.py --exe _bin/Release/vk_gltf_renderer.exe
+```
+
+| Script | Verifies |
+|---|---|
+| `ray_offset.py` | A ray leaving a surface neither hits it again nor starts beyond what lies just above it: a 100 m ground quad keeps the shadow of a plate 0.5 mm over it (a step sized by the triangle once leaked light under it) and shows no self-shadowing, near the origin, 1 km away, tilted, scaled down 1000 times, and with its size in its vertices rather than its node's scale (without the hardware term of `safeOffsetRay`'s step, 45% of such a floor shadowed itself) |
+| `volume_scatter_punctual.py` | Point, spot and directional lights light a `KHR_materials_scatter` medium through next-event estimation at the scatter point (their pdf is `DIRAC`, which a `pdf <= 0` guard used to drop), a spot aimed away leaves it dark, and the light-selection pdf is right (two half-intensity lights give the same image as one) |
+| `volume_transmittance.py` | Light that crosses a `KHR_materials_volume` medium is attenuated by it: an emitter inside an absorbing medium is dimmed by `exp(-sigma_t d)`, seen from outside the medium and from inside it (emission used to be added before the medium in front of it, and a camera path started in clear air wherever the camera was), a surface and its point light inside one by the camera and shadow segments (a shadow ray did not know it started inside, nor attenuate its last segment), a fog lit from just inside its boundary matches one lit from just outside, and an extinction given over a 0.2 mm `attenuationDistance` renders like the same extinction given over 1 m (a 1 mm floor once dropped all absorption of such media), and a lit fog scaled down to a fraction of a millimetre renders like the original (a fixed-length ray offset once skipped medium at every boundary, so small media came out brighter) |
+
 ### UI Scenario Scripts (`tests/ui/`) — currently dormant
 
 Hover/select/UI interaction used to be scriptable end-to-end via a scripted UI-automation
@@ -148,6 +167,7 @@ tests/
 ├── test_extensions_metadata.cpp # Extension metadata
 ├── test_primitives.cpp         # Procedural primitives
 ├── test_interactivity_engine.cpp # KHR_interactivity graph parsing, flow scheduling, node eval
+├── render/                     # GPU render checks driven by Python (see Render Tests)
 └── common/
     ├── test_utils.hpp          # Test utilities header
     └── test_utils.cpp          # Test utilities implementation

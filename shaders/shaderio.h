@@ -280,6 +280,17 @@ enum PathtracerFlags
   ePtFirstFrame         = 1 << 2,
   ePtShadowTransmission = 1 << 3,  // Biased: shadow rays pass straight through transmissive surfaces
   ePtDenoiserGuides     = 1 << 4,  // Accumulate the albedo/normal guides (eDenoiserAlbedo, eDenoiserNormal)
+  ePtProbeCameraMedium  = 1 << 5,  // Trace nothing but the camera's medium, into PathtracePushConstant::cameraMedium
+};
+
+// The participating medium the camera is in, for every camera path to start in. Written once per
+// accumulation by the path tracer's own pipeline (ePtProbeCameraMedium, probeCameraMedium()).
+struct CameraMedium
+{
+  float3 absorption;  // sigma_a, when `inside`
+  int    inside;      // The camera is inside a KHR_materials_volume medium
+  float3 scattering;  // sigma_s
+  float  anisotropy;  // Henyey-Greenstein g
 };
 
 
@@ -303,6 +314,7 @@ struct PathtracePushConstant
   SceneFrameInfo* frameInfo;                    // Camera info (incl. SceneFrameInfo::jitter when DLSS is active)
   GltfScene*      gltfScene;                    // GLTF scene
   float4x4*       prevRenderNodeObjectToWorld;  // #DLSS instance motion: previous-frame objectToWorld per render node
+  CameraMedium*   cameraMedium;                 // The medium camera paths start in; null when the scene has none
 };
 
 // OptiX: copy of the images to the linear buffers it reads (optix_image_to_buffer.slang)

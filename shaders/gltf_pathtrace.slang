@@ -132,15 +132,9 @@ float3 evalPhysicalSkyBackground(float3 worldDir, SceneFrameInfo* frameInfo)
 // and bounce scratch data accordingly. It manages ray-scene intersections, material retrieval, handling
 // of missed rays (e.g., environment hits), and prepares data for direct/indirect lighting and next events.
 //-----------------------------------------------------------------------
-PathStepResult pathTraceOneBounce(IRaytracer raytracer, inout RayDesc ray, inout uint seed, inout PathTracerState pt, out BounceScratch bounce)
+// `bounce` arrives default-initialized (BounceScratch's member defaults) and is filled in here.
+PathStepResult pathTraceOneBounce(IRaytracer raytracer, inout RayDesc ray, inout uint seed, inout PathTracerState pt, inout BounceScratch bounce)
 {
-  // Initialize the bounce scratch data
-  bounce.nextEventValid = false;
-  bounce.contribution   = float3(0);
-  bounce.shadowRayPos   = float3(0);
-  bounce.shadowRayDir   = float3(0);
-  bounce.shadowRayDist  = 0.0f;
-
   {
     //DirectLight directLight;
     SceneFrameInfo* frameInfo = pushConst.frameInfo;
@@ -257,14 +251,24 @@ PathStepResult pathTraceOneBounce(IRaytracer raytracer, inout RayDesc ray, inout
       // Shadow catcher: invisible plane that shows only shadows for compositing
       if(hasFlag(frameInfo->flags, SceneFrameInfoFlags::eSceneInfinitePlaneShadowCatcher))
       {
+        // The medium in front of the plane, as for a mesh (see below): the ray may scatter before
+        // it reaches the catcher, and the catcher's shadow ray starts in that medium.
+        PathStepResult volumeStep = processVolumeSegment(raytracer, payload.hitT, ray, pt, seed);
+        if(volumeStep != PathStepResult.eOutOfVolume)
+          return volumeStep;
+        float3 shadowExtinction = float3(0.0F);
+#if GLTF_USE_VOLUME
+        shadowExtinction = volumeExtinction(pt.volumeMedium);
+#endif
+
         // Propagate cone through plane bounce before potential early continue from shadow-catcher path.
         pt.cone.width = worldFoot;
         // What the catcher shows is the environment behind it, which already carries the whole
         // atmosphere; aerial perspective at the plane would haze it a second time.
         if(firstRay)
           pt.firstHitHazed = false;
-        bool continuePath =
-            handleShadowCatcher(raytracer, hit, pbrMat, ray, pt.radiance, pt.throughput, pt.lastSamplePdf, seed, frameInfo);
+        bool continuePath = handleShadowCatcher(raytracer, hit, pbrMat, ray, pt.radiance, pt.throughput,
+                                                pt.lastSamplePdf, seed, ptIsInside(pt), shadowExtinction, frameInfo);
         if(!continuePath)
           return PathStepResult.eBreak;  // Catch the shadow
         return PathStepResult.eEarlyContinue;  // Continue the path tracing from the infinite plane, missed the shadow catcher path
@@ -394,6 +398,15 @@ PathStepResult pathTraceOneBounce(IRaytracer raytracer, inout RayDesc ray, inout
 #endif
 
     //-----------------------------------------------------------------------
+    // The medium in front of the surface
+    //-----------------------------------------------------------------------
+    // Before anything the surface gives: the ray may scatter on its way and never reach it, and what
+    // does reach it -- its emission included -- comes through the medium's transmittance.
+    PathStepResult volumeStep = processVolumeSegment(raytracer, payload.hitT, ray, pt, seed);
+    if(volumeStep != PathStepResult.eOutOfVolume)
+      return volumeStep;  // Skip the surface bounce if the ray is still in the volume (ray is scattered)
+
+    //-----------------------------------------------------------------------
     // Adding emissive
     //-----------------------------------------------------------------------
     // Emitters that are also sampled as area lights (constant emissive, no emissive texture) get
@@ -421,10 +434,6 @@ PathStepResult pathTraceOneBounce(IRaytracer raytracer, inout RayDesc ray, inout
       return PathStepResult.eBreak;
     }
 #endif
-
-    PathStepResult volumeStep = processVolumeSegment(raytracer, payload.hitT, ray, pt, seed);
-    if(volumeStep != PathStepResult.eOutOfVolume)
-      return volumeStep;  // Skip the surface bounce if the ray is still in the volume (ray is scattered)
 
     // Normal surface bounce: propagate the cone footprint to the next segment. The new ray
     // starts at hit.pos with the slant-corrected worldFoot as its starting width, so the
@@ -468,6 +477,24 @@ PathStepResult pathTraceOneBounce(IRaytracer raytracer, inout RayDesc ray, inout
         bounce.contribution += w * evalData.bsdf_diffuse;
         bounce.contribution += w * evalData.bsdf_glossy;
       }
+      else
+      {
+        // The BSDF cannot scatter toward the light, so the shadow ray could only multiply zero
+        bounce.nextEventValid = false;
+      }
+
+#if GLTF_USE_VOLUME
+      // The medium the shadow ray starts in, read before the BSDF sample below moves the path into
+      // another one: the medium the ray arrived through, unless the light is behind a surface that
+      // bounds a volume (diffuse transmission), which the shadow ray then starts on the far side of.
+      bounce.shadowRayInside     = pt.isInside;
+      bounce.shadowRayExtinction = volumeExtinction(pt.volumeMedium);
+      if(dot(directLight.direction, hit.nrm) <= 0.0F && pbrMat.thickness > 0.0F)
+      {
+        bounce.shadowRayInside     = !pt.isInside;
+        bounce.shadowRayExtinction = volumeExtinction(makeVolumeMedium(pbrMat));
+      }
+#endif
     }
 
     //-----------------------------------------------------------------------
@@ -505,17 +532,19 @@ PathStepResult pathTraceOneBounce(IRaytracer raytracer, inout RayDesc ray, inout
 
         // Compute the offset position for the next bounce
         float3 offsetDir = dot(ray.Direction, hit.geonrm) > 0 ? hit.geonrm : -hit.geonrm;
-        ray.Origin       = safeOffsetRay(hit.pos, offsetDir);
+        ray.Origin       = safeOffsetRay(hit.pos, offsetDir, hit.offsetDistance);
 
         // Toggle 'pt.isInside' to track whether the ray is currently inside or outside geometry.
         // This update is necessary for correctly handling transmission (refraction) through solid (non-thin-walled) materials.
-        // For thin-walled surfaces - like decals or leaves - this state isn't toggled, because there's no real "inside".
+        // For thin-walled surfaces - like decals or leaves - this state isn't toggled, because there's no real "inside":
+        // thickness 0 is the same test the BSDF uses to pass straight through instead of refracting, and the one shadow
+        // rays use to count boundaries.
         //
         // Gated on GLTF_USE_TRANSMISSION: scenes without transmission never produce
         // BSDF_EVENT_TRANSMISSION, so this branch is dead. makeVolumeMedium only when
         // GLTF_USE_VOLUME is on (medium has nowhere to live otherwise).
 #if GLTF_USE_TRANSMISSION
-        if(isTransmission)
+        if(isTransmission && pbrMat.thickness > 0.0F)
         {
           pt.isInside = !pt.isInside;
 #if GLTF_USE_VOLUME
@@ -536,23 +565,26 @@ PathStepResult pathTraceOneBounce(IRaytracer raytracer, inout RayDesc ray, inout
     }
 
     //-----------------------------------------------------------------------
-    // Finding the shadow ray position and direction
+    // Finding the shadow ray position and direction (only for a shadow ray pathTrace() will trace)
     //-----------------------------------------------------------------------
-    bool   shadowSideForward = dot(directLight.direction, hit.nrm) > 0.0F;
-    float3 shadowOffsetDir   = shadowSideForward ? hit.geonrm : -hit.geonrm;
-    float3 shadowOffsetBase  = shadowSideForward ? hit.shadowPos : hit.pos;
-    bounce.shadowRayPos      = safeOffsetRay(shadowOffsetBase, shadowOffsetDir);
-    bounce.shadowRayDir      = directLight.direction;
-    bounce.shadowRayDist     = directLight.distance;
-
-    // The light was sampled from `hit.pos`, stopping just short of the emitter. The terminator
-    // offset moves the origin, so aim at that same end point: keeping direction and distance would
-    // shift it through a grazing emissive triangle, which then shadows itself.
-    if(directLight.distance < INFINITE)
+    if(bounce.nextEventValid)
     {
-      const float3 toTarget = hit.pos + directLight.direction * directLight.distance - bounce.shadowRayPos;
-      bounce.shadowRayDist  = length(toTarget);
-      bounce.shadowRayDir   = toTarget / max(bounce.shadowRayDist, 1e-12F);
+      bool   shadowSideForward = dot(directLight.direction, hit.nrm) > 0.0F;
+      float3 shadowOffsetDir   = shadowSideForward ? hit.geonrm : -hit.geonrm;
+      float3 shadowOffsetBase  = shadowSideForward ? hit.shadowPos : hit.pos;
+      bounce.shadowRayPos      = safeOffsetRay(shadowOffsetBase, shadowOffsetDir, hit.offsetDistance);
+      bounce.shadowRayDir      = directLight.direction;
+      bounce.shadowRayDist     = directLight.distance;
+
+      // The light was sampled from `hit.pos`, stopping just short of the emitter. The terminator
+      // offset moves the origin, so aim at that same end point: keeping direction and distance would
+      // shift it through a grazing emissive triangle, which then shadows itself.
+      if(directLight.distance < INFINITE)
+      {
+        const float3 toTarget = hit.pos + directLight.direction * directLight.distance - bounce.shadowRayPos;
+        bounce.shadowRayDist  = length(toTarget);
+        bounce.shadowRayDir   = toTarget / max(bounce.shadowRayDist, 1e-12F);
+      }
     }
   }
 
@@ -572,6 +604,19 @@ SampleResult pathTrace(IRaytracer raytracer, RayDesc ray, inout uint seed)
 {
   PathTracerState pt = {};
 
+#if GLTF_USE_VOLUME
+  // A camera path starts in the medium the camera is in (probeCameraMedium). No pointer: the scene
+  // has no medium to be in.
+  if(pushConst.cameraMedium != nullptr && pushConst.cameraMedium->inside != 0)
+  {
+    const CameraMedium cameraMedium    = *pushConst.cameraMedium;
+    pt.isInside                        = true;
+    pt.volumeMedium.absorption         = float32_t3(cameraMedium.absorption);
+    pt.volumeMedium.scatterCoefficient = float32_t3(cameraMedium.scattering);
+    pt.volumeMedium.scatterAnisotropy  = float32_t(cameraMedium.anisotropy);
+  }
+#endif
+
   while(pt.surfaceDepth < pushConst.maxDepth)
   {
     ray.Direction = normalize(ray.Direction);
@@ -579,8 +624,8 @@ SampleResult pathTrace(IRaytracer raytracer, RayDesc ray, inout uint seed)
     //-----------------------------------------------------------------------
     // Tracing the ray and finding the radiance, the throughput and the next event valid flag
     //-----------------------------------------------------------------------
-    BounceScratch  bounce;
-    PathStepResult step = pathTraceOneBounce(raytracer, ray, seed, pt, bounce);
+    BounceScratch  bounce = {};
+    PathStepResult step   = pathTraceOneBounce(raytracer, ray, seed, pt, bounce);
     if(step == PathStepResult.eBreak)
       break;
     if(step == PathStepResult.eVolumeContinue || step == PathStepResult.eEarlyContinue)
@@ -596,7 +641,7 @@ SampleResult pathTrace(IRaytracer raytracer, RayDesc ray, inout uint seed)
       shadowRay.Direction = bounce.shadowRayDir;
       shadowRay.TMin      = 0.0;
       shadowRay.TMax      = bounce.shadowRayDist;
-      float3 shadowFactor = raytracer.TraceShadow(shadowRay, seed);
+      float3 shadowFactor = raytracer.TraceShadow(shadowRay, seed, bounce.shadowRayInside, bounce.shadowRayExtinction);
       pt.radiance += bounce.contribution * shadowFactor;
     }
 
@@ -899,6 +944,80 @@ void processPixel(IRaytracer raytracer, float2 samplePos, float2 imageSize)
 }
 
 //-----------------------------------------------------------------------
+// The medium the camera is in
+//
+// A path knows it is inside a volume only by having crossed into one, and a camera ray starts in
+// clear air. From a camera inside a fog, the path would take the fog's far wall for its near one:
+// no fog in front of the camera, and fog behind the wall. So once per accumulation of a scene with a
+// KHR_materials_volume material, the host runs the path tracer's own pipeline with
+// ePtProbeCameraMedium, and one thread follows the center camera ray to the nearest surface that
+// bounds a medium: met from behind, the camera is inside it. Other surfaces are passed through, so
+// an object between the camera and the wall does not hide it. A path is in one medium at a time, so
+// the nearest boundary is the only one that counts. Depth of field moves the origin within the
+// aperture, which is assumed to stay in the same medium.
+//
+// It traces and evaluates surfaces exactly as the paths do. Being compiled into the path-tracing
+// kernel costs it 1-2% of ray-query throughput (Sponza), most of it for the branch alone: a leaner
+// probe (opaque, material factors only) measured the same, so only a pipeline of its own would
+// remove it.
+//-----------------------------------------------------------------------
+static const int CAMERA_MEDIUM_MAX_SURFACES = 32;  // Surfaces passed through before giving up (clear air)
+
+void probeCameraMedium(IRaytracer raytracer)
+{
+  CameraMedium result = {};
+
+#if GLTF_USE_VOLUME
+  GltfShadeMaterial*   materials       = pushConst.gltfScene->materials;
+  GltfTextureInfo*     texInfos        = pushConst.gltfScene->textureInfos;
+  GltfRenderNode*      renderNodes     = pushConst.gltfScene->renderNodes;
+  GltfRenderPrimitive* renderPrimitive = pushConst.gltfScene->renderPrimitives;
+
+  const float2 imageSize      = float2(pushConst.renderSize);
+  const bool   isOrthographic = hasFlag(pushConst.frameInfo->flags, SceneFrameInfoFlags::eSceneIsOrthographic);
+  RayDesc      ray            = getRay(imageSize * 0.5F, float2(0.0F), imageSize, pushConst.frameInfo->projInv,
+                                       pushConst.frameInfo->viewInv, isOrthographic);
+  uint         seed           = xxhash32(uint3(0, 0, uint(pushConst.frameCount)));
+
+  for(int i = 0; i < CAMERA_MEDIUM_MAX_SURFACES; i++)
+  {
+    HitPayload payload;
+    raytracer.Trace(ray, payload, seed);
+    if(payload.hitT == INFINITE)
+      break;
+
+    GltfRenderNode      node  = renderNodes[payload.rnodeID];
+    GltfRenderPrimitive prim  = renderPrimitive[payload.rprimID];
+    float3              barys = float3(1.0 - payload.bary.x - payload.bary.y, payload.bary.x, payload.bary.y);
+    HitState hit = getHitState(prim, barys, node.worldToObject, node.objectToWorld, payload.primitiveID, ray.Direction);
+    MeshState mesh          = MeshState(hit.nrm, hit.tangent, hit.bitangent, hit.geonrm, hit.uv, !hit.frontFace, 0.0F);
+    mesh.baseColorVertexMul = hit.color;
+    PbrMaterial mat = evaluateMaterial(max(0, node.materialID), mesh, allImages, allSamplers, texInfos, materials);
+
+    // A boundary the path would cross into a medium through (see the pt.isInside toggle)
+    if(mat.thickness > 0.0F && (mat.transmission > 0.0F || mat.diffuseTransmissionFactor > 0.0F))
+    {
+      if(!hit.frontFace)
+      {
+        const VolumeMedium medium = makeVolumeMedium(mat);
+        result.inside             = 1;
+        result.absorption         = float3(medium.absorption);
+        result.scattering         = float3(medium.scatterCoefficient);
+        result.anisotropy         = float(medium.scatterAnisotropy);
+      }
+      break;
+    }
+
+    // Past this surface: the same ray, from just beyond the hit. The hardware finds the same distance
+    // to the same triangle again, so the next float excludes it, with no offset to size.
+    ray.TMin = nextFloatUp(payload.hitT);
+  }
+#endif
+
+  *pushConst.cameraMedium = result;
+}
+
+//-----------------------------------------------------------------------
 // RAY-QUERY COMPUTE
 //-----------------------------------------------------------------------
 [shader("compute")]
@@ -908,7 +1027,13 @@ void computeMain(uint3 threadIdx: SV_DispatchThreadID)
   RAYQUERY_USE_OPACITY_MICROMAP(computeMain);
   // The render size, not the output image's: OptiX 2x upscale traces only its top-left quarter.
   RayQueryRaytracer raytracer;
-  float2            samplePos = (float2)threadIdx.xy;
+  if(hasFlag(pushConst.flags, PathtracerFlags::ePtProbeCameraMedium))
+  {
+    if(all(threadIdx.xy == 0))
+      probeCameraMedium(raytracer);
+    return;
+  }
+  float2 samplePos = (float2)threadIdx.xy;
   processPixel(raytracer, samplePos, (float2)pushConst.renderSize);
 }
 
@@ -920,7 +1045,13 @@ void rgenMain()
 {
   RAYQUERY_USE_OPACITY_MICROMAP(rgenMain);  // Ray queries here too (e.g. dlssTraceSkipThinGlass)
   TraditionalRaytracer raytracer;
-  float2               samplePos = (float2)DispatchRaysIndex().xy;
+  if(hasFlag(pushConst.flags, PathtracerFlags::ePtProbeCameraMedium))
+  {
+    if(all(DispatchRaysIndex().xy == 0))
+      probeCameraMedium(raytracer);
+    return;
+  }
+  float2 samplePos = (float2)DispatchRaysIndex().xy;
   processPixel(raytracer, samplePos, (float2)pushConst.renderSize);
 }
 
@@ -1021,19 +1152,20 @@ void rahitShadow(inout ShadowPayload payload, in BuiltInTriangleIntersectionAttr
   float r       = rand(payload.seed);
   if(r < opacity)
   {
-    // Segment length for Beer's law inside getShadowTransmission (only used when isInside == true).
+    // Segment length for Beer's law (only used when isInside == true).
     // abs() guards against any-hit invocations arriving out of spatial order, which Vulkan/DXR
     // do not guarantee. This is an approximation; a fully correct version would chain
     // closest-hit traces along the ray instead of accumulating in any-hit.
     float segmentLength = abs(hitT - payload.prevHitT);
+    payload.prevHitT    = hitT;  // keep the actual previous hit T, not the segment length
 
-    bool   isInside     = payload.isInside;
-    float3 transmission = getShadowTransmission(renderNode, renderPrim, primitiveID, barycentrics, segmentLength,
-                                                worldToObject, worldRayDir, isInside);
-
-    payload.isInside = isInside;
-    payload.prevHitT = hitT;  // keep the actual previous hit T, not the segment length
-    payload.totalTransmission *= transmission;
+    bool   isInside   = payload.isInside;
+    float3 extinction = payload.extinction;
+    payload.totalTransmission *= shadowMediumTransmittance(isInside, extinction, segmentLength);
+    payload.totalTransmission *= getShadowTransmission(renderNode, renderPrim, primitiveID, barycentrics, worldToObject,
+                                                       worldRayDir, isInside, extinction);
+    payload.isInside   = isInside;
+    payload.extinction = extinction;
 
     if(max(max(payload.totalTransmission.r, payload.totalTransmission.g), payload.totalTransmission.b) <= MIN_TRANSMISSION)
     {

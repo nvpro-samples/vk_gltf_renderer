@@ -91,6 +91,11 @@ void PathTracer::onAttach(Resources& resources, nvvk::ProfilerGpuTimer* profiler
   // Create pipeline cache for faster pipeline creation
   m_pipelineCache.init(m_device, nvutils::getExecutablePath().parent_path() / "pipeline_cache.bin");
 
+  // Written by probeCameraMedium() before any path reads it
+  NVVK_CHECK(resources.allocator.createBuffer(m_cameraMediumBuffer, sizeof(shaderio::CameraMedium),
+                                              VK_BUFFER_USAGE_2_STORAGE_BUFFER_BIT | VK_BUFFER_USAGE_2_SHADER_DEVICE_ADDRESS_BIT));
+  NVVK_DBG_NAME(m_cameraMediumBuffer.buffer);
+
   // The path tracer writes depth as a storage image. nvvk::RenderTarget only gives the G-buffer depth
   // STORAGE usage when the format supports it, which D32_SFLOAT does not on every GPU (AMD); there the
   // shader writes an R32_SFLOAT image instead, so the binding stays valid, and a copy brings it into the
@@ -229,6 +234,7 @@ void PathTracer::onDetach(Resources& resources)
 
   resources.allocator.destroyBuffer(m_sbtBuffer);
   resources.allocator.destroyBuffer(m_depthCopyBuffer);
+  resources.allocator.destroyBuffer(m_cameraMediumBuffer);
   m_depthStaging.deinit();
 
 #if defined(USE_DLSS)
@@ -763,7 +769,7 @@ void PathTracer::onRender(VkCommandBuffer cmd, Resources& resources)
 #endif
 
   // Setting up the push constant
-  setupPushConstant(cmd, resources, renderingSize);
+  const shaderio::PathtracePushConstant pushConst = setupPushConstant(cmd, resources, renderingSize);
 
   // Frame 1 after DLSS's frame 0: keep DLSS's image for the hand-off before the path tracer overwrites
   // it. The barrier below orders that write after the copy.
@@ -775,14 +781,16 @@ void PathTracer::onRender(VkCommandBuffer cmd, Resources& resources)
   nvvk::cmdMemoryBarrier(cmd, VK_PIPELINE_STAGE_2_TRANSFER_BIT,
                          VK_PIPELINE_STAGE_2_COMPUTE_SHADER_BIT | VK_PIPELINE_STAGE_2_RAY_TRACING_SHADER_BIT_KHR);
 
+  // Every change to the camera or the scene starts a new accumulation; a scene without a medium
+  // has no camera medium to find (setupPushConstant leaves the pointer null)
+  if(resources.frameCount == 0 && pushConst.cameraMedium != nullptr)
+    probeCameraMedium(cmd, resources, pushConst);
+
   // Tracing the rays: Ray Query or Ray Tracing
-  if(m_renderTechnique == RenderTechnique::RayQuery)
   {
-    renderRayQuery(cmd, renderingSize, resources);
-  }
-  else if(m_renderTechnique == RenderTechnique::RayTracing)
-  {
-    renderRayTrace(cmd, renderingSize, resources);
+    auto timerSection =
+        m_profiler->cmdFrameSection(cmd, m_renderTechnique == RenderTechnique::RayQuery ? "Path Trace (RQ)" : "Path Trace (RTX)");
+    traceRays(cmd, renderingSize, resources);
   }
 
   // Making sure the rendered image is ready to be used by tonemapper (written by ray query compute or the RTX pipeline)
@@ -1860,10 +1868,37 @@ void PathTracer::updateStatistics(Resources& resources)
   resources.accumulatedSamples = m_totalSamplesAccumulated;
 }
 
+void PathTracer::traceRays(VkCommandBuffer cmd, VkExtent2D renderingSize, Resources& resources)
+{
+  if(m_renderTechnique == RenderTechnique::RayQuery)
+    renderRayQuery(cmd, renderingSize, resources);
+  else
+    renderRayTrace(cmd, renderingSize, resources);
+}
+
+//--------------------------------------------------------------------------------------------------
+// The medium the camera is in, for every camera path to start in (probeCameraMedium in
+// gltf_pathtrace.slang): one thread of the path tracer's own pipeline, before the frame's paths.
+void PathTracer::probeCameraMedium(VkCommandBuffer cmd, Resources& resources, const shaderio::PathtracePushConstant& pushConst)
+{
+  auto timerSection = m_profiler->cmdFrameSection(cmd, "Camera medium");
+
+  // The previous frame's paths may still be reading it
+  nvvk::cmdMemoryBarrier(cmd, VK_PIPELINE_STAGE_2_COMPUTE_SHADER_BIT | VK_PIPELINE_STAGE_2_RAY_TRACING_SHADER_BIT_KHR,
+                         VK_PIPELINE_STAGE_2_COMPUTE_SHADER_BIT | VK_PIPELINE_STAGE_2_RAY_TRACING_SHADER_BIT_KHR);
+
+  shaderio::PathtracePushConstant probe = pushConst;
+  probe.flags |= shaderio::ePtProbeCameraMedium;
+  vkCmdPushConstants(cmd, m_pipelineLayout, VK_SHADER_STAGE_ALL, 0, sizeof(probe), &probe);
+  traceRays(cmd, {1, 1}, resources);
+
+  nvvk::cmdMemoryBarrier(cmd, VK_PIPELINE_STAGE_2_COMPUTE_SHADER_BIT | VK_PIPELINE_STAGE_2_RAY_TRACING_SHADER_BIT_KHR,
+                         VK_PIPELINE_STAGE_2_COMPUTE_SHADER_BIT | VK_PIPELINE_STAGE_2_RAY_TRACING_SHADER_BIT_KHR);
+  vkCmdPushConstants(cmd, m_pipelineLayout, VK_SHADER_STAGE_ALL, 0, sizeof(pushConst), &pushConst);
+}
+
 void PathTracer::renderRayQuery(VkCommandBuffer cmd, VkExtent2D renderingSize, Resources& resources)
 {
-  auto timerSection = m_profiler->cmdFrameSection(cmd, "Path Trace (RQ)");
-
   // Create pipeline if it doesn't exist
   if(m_rqPipeline == VK_NULL_HANDLE)
   {
@@ -1893,10 +1928,8 @@ void PathTracer::renderRayQuery(VkCommandBuffer cmd, VkExtent2D renderingSize, R
   vkCmdDispatch(cmd, numGroups.width, numGroups.height, 1);
 }
 
-void PathTracer::renderRayTrace(VkCommandBuffer cmd, VkExtent2D& renderingSize, Resources& resources)
+void PathTracer::renderRayTrace(VkCommandBuffer cmd, VkExtent2D renderingSize, Resources& resources)
 {
-  auto timerSection = m_profiler->cmdFrameSection(cmd, "Path Trace (RTX)");
-
   // Create pipeline if it doesn't exist
   if(m_rtxPipeline == VK_NULL_HANDLE)
   {
@@ -1960,7 +1993,7 @@ void PathTracer::denoiseDlss(VkCommandBuffer cmd, Resources& resources)
 #endif
 }
 
-void PathTracer::setupPushConstant(VkCommandBuffer cmd, Resources& resources, VkExtent2D renderingSize)
+shaderio::PathtracePushConstant PathTracer::setupPushConstant(VkCommandBuffer cmd, Resources& resources, VkExtent2D renderingSize)
 {
   // Current frame count, can be overridden by DLSS
   int frameCount = resources.frameCount;
@@ -2042,6 +2075,10 @@ void PathTracer::setupPushConstant(VkCommandBuffer cmd, Resources& resources, Vk
   m_pushConst.frameInfo    = (shaderio::SceneFrameInfo*)resources.bFrameInfo.address;
   m_pushConst.gltfScene    = (shaderio::GltfScene*)resources.sceneVk.sceneDesc().address;
   m_pushConst.mouseCoord   = nvapp::ElementDbgPrintf::getMouseCoord();  // Use for debugging: printf in shader
+  // Only a scene with a KHR_materials_volume material has a medium the camera can be in
+  m_pushConst.cameraMedium = resources.currentFeatureSet.has(nvvkgltf::SceneFeatureSet::eVolume) ?
+                                 (shaderio::CameraMedium*)m_cameraMediumBuffer.address :
+                                 nullptr;
 
   // #DLSS instance motion vectors: previous-frame render-node transforms (snapshotted at frame start
   // in GltfRenderer::onRender, only on frames where transforms actually changed). Bound only when DLSS
@@ -2065,6 +2102,7 @@ void PathTracer::setupPushConstant(VkCommandBuffer cmd, Resources& resources, Vk
   shaderio::PathtracePushConstant pushConst = m_pushConst;
   pushConst.numSamples                      = m_frameSamples;
   vkCmdPushConstants(cmd, m_pipelineLayout, VK_SHADER_STAGE_ALL, 0, sizeof(shaderio::PathtracePushConstant), &pushConst);
+  return pushConst;
 }
 
 //--------------------------------------------------------------------------------------------------

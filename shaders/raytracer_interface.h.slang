@@ -52,15 +52,18 @@ struct ShadowPayload
   uint seed;
   float prevHitT = 0.0f;  // The previous accepted any-hit's absolute RayT. rahitShadow takes abs(hitT - prevHitT) as the in-volume segment length for Beer's-law attenuation between consecutive transmissive hits. Spatial ordering of any-hit invocations is not guaranteed; abs() is an approximation that works well for thin/convex volumes.
   bool   isInside          = false;         // If true, the shadow ray is considered to start INSIDE a volume
+  float3 extinction        = float3(0.0f);  // sigma_t of the medium the ray is in, while isInside
   float3 totalTransmission = float3(1.0f);  // The total transmission of the shadow ray through the volume
 };
 
 // Raytracer interface definition
 interface IRaytracer
 {
-  void   Trace(RayDesc ray, inout HitPayload payload, inout uint seed);
-  void   TraceLow(RayDesc ray, inout HitPayload payload);
-  float3 TraceShadow(RayDesc ray, inout uint seed, bool initialInside = false);
+  void Trace(RayDesc ray, inout HitPayload payload, inout uint seed);
+  void TraceLow(RayDesc ray, inout HitPayload payload);
+  // A shadow ray that starts inside a medium says so, with that medium's extinction: it attenuates
+  // every segment it travels inside one, up to TMax.
+  float3 TraceShadow(RayDesc ray, inout uint seed, bool initialInside = false, float3 initialExtinction = float3(0.0));
 }
 
 // Implementation using RayQuery
@@ -136,11 +139,12 @@ struct RayQueryRaytracer : IRaytracer
     }
   }
 
-  float3 TraceShadow(RayDesc ray, inout uint seed, bool initialInside = false)
+  float3 TraceShadow(RayDesc ray, inout uint seed, bool initialInside = false, float3 initialExtinction = float3(0.0))
   {
     const float MIN_TRANSMISSION  = 0.01;  // Minimum transmission factor to continue tracing
     float3      totalTransmission = float3(1.0);
     bool        isInside          = initialInside;
+    float3      extinction        = initialExtinction;
     float       prevHitT          = 0;
 
     // Visibility needs any occluder, not the closest one: the first committed (opaque) hit ends the
@@ -166,12 +170,13 @@ struct RayQueryRaytracer : IRaytracer
       float r = rand(seed);
       if(r < opacity)
       {
-        // RayQuery candidate hits arrive in spatial order: |segment| = hitT - prevHitT.
-        float  segmentLength       = max(0.0F, hitT - prevHitT);
-        float3 currentTransmission = getShadowTransmission(renderNode, renderPrim, triangleID, barycentrics,
-                                                           segmentLength, worldToObject, ray.Direction, isInside);
-        prevHitT                   = hitT;
-        totalTransmission *= currentTransmission;
+        // Candidates are not guaranteed to arrive in spatial order: abs() keeps one that comes back
+        // out of order from zeroing the segment, as in rahitShadow (exact for a single convex crossing).
+        float segmentLength = abs(hitT - prevHitT);
+        prevHitT            = hitT;
+        totalTransmission *= shadowMediumTransmittance(isInside, extinction, segmentLength);
+        totalTransmission *= getShadowTransmission(renderNode, renderPrim, triangleID, barycentrics, worldToObject,
+                                                   ray.Direction, isInside, extinction);
 
         if(max(max(totalTransmission.r, totalTransmission.g), totalTransmission.b) <= MIN_TRANSMISSION)
         {
@@ -185,7 +190,7 @@ struct RayQueryRaytracer : IRaytracer
       return float3(0., 0., 0.);
     }
 
-    return totalTransmission;
+    return totalTransmission * shadowTailTransmittance(ray, isInside, extinction, prevHitT);
   }
 }
 
@@ -254,11 +259,12 @@ struct TraditionalRaytracer : IRaytracer
   // Visibility needs any occluder, not the closest one: the first committed hit (opaque, or accepted
   // by rahitShadow once the transmission is spent) ends the traversal; transmissive surfaces are
   // ignored by rahitShadow and never committed.
-  float3 TraceShadow(RayDesc ray, inout uint seed, bool initialInside = false)
+  float3 TraceShadow(RayDesc ray, inout uint seed, bool initialInside = false, float3 initialExtinction = float3(0.0))
   {
     ShadowPayload shadowPayload = {};
     shadowPayload.seed          = seed;
     shadowPayload.isInside      = initialInside;
+    shadowPayload.extinction    = initialExtinction;
 
     if(USE_SER == 1 && AVAILABLE_SER == 1)
     {
@@ -277,6 +283,7 @@ struct TraditionalRaytracer : IRaytracer
     }
     seed = shadowPayload.seed;  // any-hit consumed random numbers; propagate on every path
 
-    return shadowPayload.totalTransmission;
+    return shadowPayload.totalTransmission
+           * shadowTailTransmittance(ray, shadowPayload.isInside, shadowPayload.extinction, shadowPayload.prevHitT);
   }
 }
