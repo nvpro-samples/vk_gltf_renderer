@@ -210,6 +210,11 @@ light owns the direction (then it is an undoable scene edit) or the renderer doe
 reported angles still match, and whether the image needs re-baking. Only the physical sky's bake
 depends on the sun.
 
+The angles are a compass bearing (0° north, 90° east, clockwise) and an elevation, in the
+environment's frame: north is −Z in a Y-up scene and −Y in a Z-up one, turned by the environment's
+rotation. `SkySun::setAngles` / `syncAngles` own that conversion, so the sliders, `--sunAzimuth`
+and Time of Day all read the same compass.
+
 Time of Day is the only one that is not an angle. It takes a place, a date and a local clock
 reading and computes where the sun actually was, by NOAA's algorithm in `src/sun_position.*` —
 pure, self-contained, and tested against astronomy rather than recorded output. The named moments

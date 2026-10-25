@@ -149,9 +149,11 @@ namespace {
 // Render the Animation Strip widget row. Placement-agnostic: the caller (currently
 // renderStripOverlay) opens whatever wrapping container it wants, then calls
 // into this function to fill it with the play/pause/scrubber/speed widgets.
-void renderStripWidgets(nvvkgltf::Scene* scene, AnimationControl& ctrl)
+// Returns true when the Play/Pause button was clicked.
+bool renderStripWidgets(nvvkgltf::Scene* scene, AnimationControl& ctrl)
 {
-  const bool enabled = hasPlayableAnimation(scene);
+  const bool enabled     = hasPlayableAnimation(scene);
+  bool       playToggled = false;
 
   ImGui::PushID("##animation_strip");
   ImGui::BeginDisabled(!enabled);
@@ -169,7 +171,10 @@ void renderStripWidgets(nvvkgltf::Scene* scene, AnimationControl& ctrl)
 
   // Play / pause
   if(ImGui::Button(ctrl.play ? ICON_MS_PAUSE : ICON_MS_PLAY_ARROW))
+  {
     ctrl.togglePlay();
+    playToggled = true;
+  }
   if(enabled)
     nvgui::tooltip("Play/Pause (Space)");
 
@@ -238,11 +243,12 @@ void renderStripWidgets(nvvkgltf::Scene* scene, AnimationControl& ctrl)
 
   ImGui::EndDisabled();
   ImGui::PopID();
+  return playToggled;
 }
 
 }  // namespace
 
-void renderStripOverlay(nvvkgltf::Scene* scene, AnimationControl& ctrl, const ImVec2& topLeft, const ImVec2& size)
+bool renderStripOverlay(nvvkgltf::Scene* scene, AnimationControl& ctrl, const ImVec2& topLeft, const ImVec2& size)
 {
   // Decide target alpha BEFORE opening the child so we can push the style
   // var for both the child background and the widgets inside. The strip is
@@ -265,11 +271,12 @@ void renderStripOverlay(nvvkgltf::Scene* scene, AnimationControl& ctrl, const Im
 
   ImGui::SetCursorScreenPos(topLeft);
   ImGui::BeginChild("##anim_strip", size, ImGuiChildFlags_None, ImGuiWindowFlags_NoScrollbar | ImGuiWindowFlags_NoScrollWithMouse);
-  renderStripWidgets(scene, ctrl);
+  const bool playToggled = renderStripWidgets(scene, ctrl);
   ImGui::EndChild();
 
   ImGui::PopStyleColor();
   ImGui::PopStyleVar(2);
+  return playToggled;
 }
 
 }  // namespace ui::animation

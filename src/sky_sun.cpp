@@ -33,25 +33,39 @@
 #include "undo_redo.hpp"
 
 //--------------------------------------------------------------------------------------------------
-// The sun's direction as a unit vector, and the inverse. Azimuth is measured from +X toward +Z --
-// nvgui::azimuthElevationSliders' own convention -- and elevation up from the horizon.
+// The sun's direction as a unit vector, and the inverse, in the environment's own frame. Azimuth
+// is a compass bearing -- degrees clockwise from north, as sun_position reports it and as anyone
+// reading a sun chart expects -- and elevation is up from the horizon.
+//
+// The compass comes from glTF: a camera looks down -Z, so -Z is the direction a scene faces and the
+// natural place to put north. In a Z-up scene the same reasoning puts north at -Y.
+//
+//     Y-up:  north -Z    east +X    south +Z    west -X
+//     Z-up:  north -Y    east +X    south +Y    west -X
+//
+// That is the compass of the environment's own frame. A model built facing some other way turns
+// the environment (Settings::envRotation), and the compass turns with it -- see setAngles.
 //
 namespace {
 glm::vec3 sunDirectionFromAngles(float azimuthDegrees, float elevationDegrees, bool yIsUp)
 {
-  const float az  = glm::radians(azimuthDegrees);
-  const float el  = glm::radians(elevationDegrees);
-  const float cel = std::cos(el);
-  return yIsUp ? glm::vec3(cel * std::cos(az), std::sin(el), cel * std::sin(az)) :
-                 glm::vec3(cel * std::cos(az), cel * std::sin(az), std::sin(el));
+  const float az    = glm::radians(azimuthDegrees);
+  const float el    = glm::radians(elevationDegrees);
+  const float cel   = std::cos(el);
+  const float east  = cel * std::sin(az);
+  const float north = cel * std::cos(az);
+  return yIsUp ? glm::vec3(east, std::sin(el), -north) : glm::vec3(east, -north, std::sin(el));
 }
 
 void anglesFromSunDirection(const glm::vec3& direction, bool yIsUp, float& azimuthDegrees, float& elevationDegrees)
 {
-  const glm::vec3 d  = glm::normalize(direction);
-  const float     up = yIsUp ? d.y : d.z;
-  elevationDegrees   = glm::degrees(std::asin(std::clamp(up, -1.0F, 1.0F)));
-  azimuthDegrees     = glm::degrees(yIsUp ? std::atan2(d.z, d.x) : std::atan2(d.y, d.x));
+  const glm::vec3 d     = glm::normalize(direction);
+  const float     up    = yIsUp ? d.y : d.z;
+  const float     north = yIsUp ? -d.z : -d.y;
+  elevationDegrees      = glm::degrees(std::asin(std::clamp(up, -1.0F, 1.0F)));
+  azimuthDegrees        = glm::degrees(std::atan2(d.x, north));
+  if(azimuthDegrees < 0.0F)
+    azimuthDegrees += 360.0F;  // a bearing reads 0..360, not -180..180
 }
 }  // namespace
 
@@ -249,30 +263,10 @@ void SkySun::aim(const glm::vec3& toSun)
 }
 
 //--------------------------------------------------------------------------------------------------
-// A compass bearing, in the azimuth the renderer measures.
-//
-// The two disagree by a quarter turn, and the reason is glTF: a camera looks down -Z, so -Z is the
-// direction a scene faces and the natural place to put north. The renderer's own azimuth is measured
-// from +X toward +Z (nvgui::azimuthElevationSliders), which puts +X at east.
-//
-//     north -Z    east +X    south +Z    west -X
-//
-// That is the compass of the environment's own frame. A model built facing some other way turns
-// the environment (Settings::envRotation), and the compass turns with it -- see applyTimeOfDay.
-//
-static float sceneAzimuthFromCompass(float bearingDeg)
-{
-  return bearingDeg - 90.0F;
-}
-
-//--------------------------------------------------------------------------------------------------
 // Put the sun where it actually was, at a place and a moment.
 //
 // The Time of Day settings are a clock reading; sun_position wants UTC, so the offset comes off
-// here. The result is a compass bearing, which sceneAzimuthFromCompass turns into the renderer's own
-// azimuth -- measured from +X toward +Z -- in the environment's frame. The environment's rotation
-// then carries it into the world, so north is wherever the sky has been turned to put it, and the
-// sun and the sky it sits in can never disagree about which way that is.
+// here. The result is a compass bearing and an altitude -- the very angles setAngles takes.
 //
 void SkySun::applyTimeOfDay()
 {
@@ -290,27 +284,32 @@ void SkySun::applyTimeOfDay()
   const sun_position::AzimuthElevation sun =
       sun_position::computeSunPosition({st.todLatitude, st.todLongitude}, {year, month, day, st.todHour - st.todUtcOffset});
 
-  const glm::vec3 inSky = sunDirectionFromAngles(sceneAzimuthFromCompass(sun.azimuthDeg), sun.elevationDeg, m_resources->sunYIsUp);
-  aim(st.envRotationQuat() * inSky);
+  setAngles(sun.azimuthDeg, sun.elevationDeg);
 }
 
 //--------------------------------------------------------------------------------------------------
 // Drive the shared sun from angles. The inverse of syncAngles(), and the single place the
-// conversion happens on the way in -- the settings callback and the Environment panel's reset both
-// land here rather than each calling the free function with their own yIsUp argument. Through
-// aim(), like every other move, so a marked sun light follows instead of being overwritten by
-// syncFromMarkedLight() on the next frame.
+// conversion happens on the way in -- the settings callback, the Environment panel's sliders and
+// reset, and Time of Day all land here rather than each calling the free function with their own
+// yIsUp argument. Through aim(), like every other move, so a marked sun light follows instead of
+// being overwritten by syncFromMarkedLight() on the next frame.
+//
+// The angles are in the environment's frame, and its rotation carries them into the world: north
+// is wherever the sky has been turned to put it, so the sun and the sky it sits in can never
+// disagree about which way that is.
 //
 void SkySun::setAngles(float azimuthDegrees, float elevationDegrees)
 {
-  aim(sunDirectionFromAngles(azimuthDegrees, elevationDegrees, m_resources->sunYIsUp));
+  const glm::vec3 inSky = sunDirectionFromAngles(azimuthDegrees, elevationDegrees, m_resources->sunYIsUp);
+  aim(m_resources->settings.envRotationQuat() * inSky);
 }
 
 //--------------------------------------------------------------------------------------------------
-// Mirror Resources::sunDirection back into the reported azimuth/elevation. Called after the sky UI
-// moves the sun, so reading sunAzimuth/sunElevation tells the truth.
+// Mirror Resources::sunDirection back into the reported azimuth/elevation, in the environment's
+// frame. Called after anything moves the sun or turns the environment, so reading
+// sunAzimuth/sunElevation tells the truth.
 void SkySun::syncAngles()
 {
-  anglesFromSunDirection(m_resources->sunDirection, m_resources->sunYIsUp, m_resources->settings.sunAzimuth,
-                         m_resources->settings.sunElevation);
+  const glm::vec3 inSky = glm::inverse(m_resources->settings.envRotationQuat()) * m_resources->sunDirection;
+  anglesFromSunDirection(inSky, m_resources->sunYIsUp, m_resources->settings.sunAzimuth, m_resources->settings.sunElevation);
 }

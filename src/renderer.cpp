@@ -216,12 +216,19 @@ GltfRenderer::GltfRenderer(nvutils::ParameterRegistry* paramReg, const nvutils::
   // Bounds mirror the "Max Samples" slider in PathTracer::onUIRender.
   m_settings.add({"ptMaxSamples", "Path tracer: stop accumulating at this many samples per pixel"},
                  &m_resources.settings.maxSamples, Persist::eYes, 1, 1000000);
-  // Not persisted: a scripted or headless run must not change what the next interactive session plays.
+  // Persisted: the UI's Play/Pause writes it, so a user who paused keeps new scenes paused across
+  // sessions. Headless, scripted and benchmark runs neither read nor write the ini, so they can't
+  // change what the next interactive session plays.
   m_settings.add(
       {.name = "animPlay",
-       .help = "Play animations [Off:0, On:1]. Default: on, off in headless runs. A scene with a behavior graph never autoplays",
+       .help = "Play animations [Off:0, On:1]. Default: on (last Play/Pause choice is remembered), off in headless runs. "
+               "A scene with a behavior graph never autoplays",
        .callbackSuccess = [this](const nvutils::ParameterBase* const) { m_resources.animationControl.play = m_animPlay; }},
-      &m_animPlay, Persist::eNo);
+      &m_animPlay, Persist::eYes);
+  // The ini restore writes m_animPlay directly, after a start-up scene may already have set
+  // animationControl.play from the default. Only ever turn playback off here: a scene with a
+  // behavior graph has already forced it off and must stay so.
+  m_settings.addPostRestoreHook([this]() { m_resources.animationControl.play &= m_animPlay; });
   // Headless-only output path: consumed at start-up, so remembering it would be misleading.
   m_settings.add({"output", "Output image file path for headless mode"}, &m_resources.headlessOutputPath, Persist::eNo);
   m_settings.add({"outputSamples",
@@ -330,8 +337,10 @@ GltfRenderer::GltfRenderer(nvutils::ParameterRegistry* paramReg, const nvutils::
   const auto applySunAngles = [this](const nvutils::ParameterBase* const) {
     m_skySun.setAngles(m_resources.settings.sunAzimuth, m_resources.settings.sunElevation);
   };
-  m_settings.add({.name = "sunAzimuth", .help = "Sun azimuth (degrees); shared by every sky type", .callbackSuccess = applySunAngles},
-                 &m_resources.settings.sunAzimuth, Persist::eYes, -180.0F, 180.0F);
+  m_settings.add({.name = "sunAzimuth",
+                  .help = "Sun azimuth as a compass bearing (degrees, 0 = north, 90 = east); shared by every sky type",
+                  .callbackSuccess = applySunAngles},
+                 &m_resources.settings.sunAzimuth, Persist::eYes, 0.0F, 360.0F);
   m_settings.add({.name = "sunElevation", .help = "Sun elevation (degrees); shared by every sky type", .callbackSuccess = applySunAngles},
                  &m_resources.settings.sunElevation, Persist::eYes, -90.0F, 90.0F);
   // ImGui.ini restore writes sunAzimuth/Elevation directly and never runs applySunAngles, so
@@ -844,7 +853,6 @@ void GltfRenderer::onAttach(nvapp::Application* app)
       .applyTimeOfDay        = [this] { m_skySun.applyTimeOfDay(); },
       .environmentRotated    = [this] { onEnvironmentRotated(); },
       .setSunAngles          = [this](float az, float el) { m_skySun.setAngles(az, el); },
-      .aimSun                = [this](const glm::vec3& toSun) { m_skySun.aim(toSun); },
       .sunLightNode          = [this] { return m_skySun.lightNode(); },
       .setSkySunNode         = [this](int node) { m_skySun.setSunNode(node); },
       .directionalLightNodes = [this] { return m_skySun.candidateLights(); },
@@ -2593,6 +2601,8 @@ void GltfRenderer::onEnvironmentRotated()
 {
   if(skyHasSun(m_resources.settings.envSystem))
     m_skySun.applyTimeOfDay();
+  else
+    m_skySun.syncAngles();  // the sun stays put, but its bearing is on the turned compass now
   resetFrame();
 }
 

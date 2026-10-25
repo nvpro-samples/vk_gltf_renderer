@@ -91,8 +91,8 @@ option(NVPRO2_ENABLE_MCP_AUTO_PARAMETER_REGISTRY
 # set(Slang_VERSION      "2026.17" CACHE STRING "Slang compiler version to download.")
 
 # DLSS SDK.
-set(DLSS_VERSION       "310.7.0" CACHE STRING "DLSS SDK version to download (ignored when DLSS_ROOT_OVERRIDE is set).")
-set(DLSS_ROOT_OVERRIDE ""        CACHE PATH   "Path to a local DLSS SDK; skips download when non-empty.")
+set(DLSS_VERSION       "310.9.16" CACHE STRING "DLSS SDK version to download (ignored when DLSS_ROOT_OVERRIDE is set).")
+set(DLSS_ROOT_OVERRIDE ""         CACHE PATH   "Path to a local DLSS SDK; skips download when non-empty.")
 # Example local overrides — uncomment and re-configure to pick up a private drop:
 # set(DLSS_VERSION       "310.9.0" CACHE STRING "" FORCE)
 # set(DLSS_ROOT_OVERRIDE "${CMAKE_BINARY_DIR}/_deps/NVIDIA-NGX-DLSS-SDK-INTERNAL-v310.9.0-beta3" CACHE PATH "" FORCE)

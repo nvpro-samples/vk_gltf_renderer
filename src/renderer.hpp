@@ -449,8 +449,8 @@ private:
   std::vector<BenchmarkController::MemorySample> benchmarkMemorySamples() const;
   void                                           saveHeadlessOutputImage();
   void saveViewportImage(const std::filesystem::path& filename);  // .hdr: linear render, else tonemapped
-  std::filesystem::path                          headlessOutputPathOrDefault() const;
-  void                                           logDenoiserTimings() const;  // DENOISER_TIMING lines (headless)
+  std::filesystem::path headlessOutputPathOrDefault() const;
+  void                  logDenoiserTimings() const;  // DENOISER_TIMING lines (headless)
   // --outputSamples: the samples per pixel of the image shown, and which one it is (DisplayBuffer)
   int displayedImageSamples(DisplayBuffer& source) const;
   void refreshSampleTargets();  // Before the frame renders: parses the counts, and hands them to the path tracer as stops
@@ -609,7 +609,9 @@ private:
   // wrongly: see the post-restore hook beside the tod* declarations.
   bool m_todDrivesSun{false};
   // --animPlay: whether animations play. Re-applied to animationControl.play on every scene load,
-  // which resets the animation state. Off by default in headless runs (applyHeadlessDefaults).
+  // which resets the animation state. The UI's Play/Pause writes it, so a pause carries over to
+  // the next scene and, persisted, to the next session. Off by default in headless runs
+  // (applyHeadlessDefaults).
   bool m_animPlay{true};
   // --outputSamples: save the output image when the displayed image reaches these samples per pixel
   std::string m_outputSamples;

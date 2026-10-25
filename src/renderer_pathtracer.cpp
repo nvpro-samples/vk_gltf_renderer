@@ -614,6 +614,12 @@ void PathTracer::ensureShadersAndPipelines(Resources& resources)
   PendingCompileWork work = getPendingCompileWork(resources);
   if(work.recompile)
   {
+    VariantKey compiled;
+    {
+      std::lock_guard<std::mutex> lock(m_compileMutex);
+      compiled = m_compiled;
+    }
+    LOGI("[PathTracer] Shader recompile: %s\n", compiled.shaderDiff(makeVariantKey(resources)).c_str());
     if(m_busyWindow)
       m_busyWindow->setReason("Compiling Slang shaders...");
     compileShader(resources);
@@ -1585,6 +1591,24 @@ PathTracer::VariantKey PathTracer::makeVariantKey(const Resources& resources) co
       0,
 #endif
   };
+}
+
+std::string PathTracer::VariantKey::shaderDiff(const VariantKey& to) const
+{
+  std::string diff;
+  auto        add = [&](const char* name, bool a, bool b) {
+    if(a != b)
+      diff += std::string(diff.empty() ? "" : ", ") + name + (a ? " 1->0" : " 0->1");
+  };
+  add("wireframe", wireframe, to.wireframe);
+  add("visualize", visualize, to.visualize);
+  add("omm", omm, to.omm);
+  add("optimal", optimal, to.optimal);
+  add("dlss", dlss, to.dlss);
+  add("dlssGuide", dlssGuide, to.dlssGuide);
+  if(optimal && to.optimal && features != to.features)
+    diff += std::string(diff.empty() ? "" : ", ") + "features [" + features.toString() + "] -> [" + to.features.toString() + "]";
+  return diff.empty() ? "no shader field changed" : diff;
 }
 
 //--------------------------------------------------------------------------------------------------

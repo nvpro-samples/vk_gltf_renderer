@@ -290,7 +290,8 @@ This tab aims the one sun shared by the **Sky** and **Gradient** types.
 North comes from the environment's **Rotation**. With no rotation, north is −Z and east is +X in a
 Y-up scene; in a Z-up scene north is −Y.
 
-**Advanced** holds **Sun Source**, exact **Azimuth** / **Elevation**, **Gizmo on sun light**
+**Advanced** holds **Sun Source**, exact **Azimuth** / **Elevation** (azimuth is a compass bearing
+on that same compass: 0° north, 90° east), **Gizmo on sun light**
 (selects the sun light and shows the transform gizmo; needs a scene light as the sun), and
 **Location & Date**: **Now** fills today's date, time and UTC offset from this machine, then
 **City**, latitude and longitude, date, and **UTC Offset**. Offsets are standard time, with no
@@ -638,7 +639,8 @@ If the loaded scene contains animations, an animation strip appears along the bo
 
 ![](images/animation_controls.png)
 
-- **Play / Pause** the active animation (`Space`)
+- **Play / Pause** the active animation (`Space`). The choice is remembered: after a pause, scenes
+  you load next (and the next session) open paused until you press Play again
 - **Step** forward one frame at a time
 - **Reset** to the beginning
 - Pick the **animation clip** when the scene has more than one

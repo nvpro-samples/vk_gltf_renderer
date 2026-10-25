@@ -68,13 +68,14 @@ public:
   // Point the sun along `toSun`, through whatever owns it, and report that it moved.
   void aim(const glm::vec3& toSun);
 
-  // Drive the sun from azimuth/elevation in degrees, and the inverse: mirror the direction back
-  // into the reported angles so reading sunAzimuth/sunElevation tells the truth after a UI move.
+  // Drive the sun from a compass bearing (0 = north, 90 = east) and an elevation, in degrees and in
+  // the environment's frame; and the inverse: mirror the direction back into the reported angles so
+  // reading sunAzimuth/sunElevation tells the truth after a UI move.
   void setAngles(float azimuthDegrees, float elevationDegrees);
   void syncAngles();
 
-  // Recompute from the Time of Day settings (place, date, clock, north offset) and aim. No-op if
-  // the configured date does not parse.
+  // Recompute from the Time of Day settings (place, date, clock) on the environment's compass and
+  // aim. No-op if the configured date does not parse.
   void applyTimeOfDay();
 
   // Directional lights the scene offers as candidate suns: node index and display name, in scene

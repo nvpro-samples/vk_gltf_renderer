@@ -77,8 +77,7 @@ struct EnvironmentPanelActions
   std::function<void()> applyTimeOfDay;      // place/date/clock moved: recompute the sun and aim it
   std::function<void()> environmentRotated;  // Settings::envRotation was edited: north moved, re-place the sun
 
-  std::function<void(float azimuthDeg, float elevationDeg)> setSunAngles;
-  std::function<void(const glm::vec3& toSun)>               aimSun;
+  std::function<void(float azimuthDeg, float elevationDeg)> setSunAngles;  // compass bearing + elevation
 
   // Which light is the sun. -1 hands it back to the renderer; the setter is undoable because the
   // marker lives in the scene.

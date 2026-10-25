@@ -41,7 +41,6 @@
 #include <glm/gtx/euler_angles.hpp>
 #include <imgui.h>
 
-#include <nvgui/azimuth_sliders.hpp>
 #include <nvgui/file_dialog.hpp>
 #include <nvgui/fonts.hpp>
 #include <nvgui/property_editor.hpp>
@@ -320,7 +319,7 @@ void UiEnvironment::setActions(EnvironmentPanelActions actions)
 {
   assert(actions.environmentChanged && actions.requestPreview && actions.resetFrame && actions.applyTimeOfDay);
   assert(actions.environmentRotated);
-  assert(actions.setSunAngles && actions.aimSun);
+  assert(actions.setSunAngles);
   assert(actions.sunLightNode && actions.setSkySunNode && actions.directionalLightNodes);
   assert(actions.loadHdrFileDialog && actions.loadSkyPresetDialog && actions.saveSkyPresetDialog);
   m_actions = std::move(actions);
@@ -1001,17 +1000,20 @@ bool UiEnvironment::sunJumpToPresets(const TimeOfDayEvents& events)
 //--------------------------------------------------------------------------------------------------
 // Azimuth and elevation, degrees. Folded under Advanced because Time and Location cover the common
 // case now; angles are the escape hatch for typing an exact number, and they are what the command
-// line carries and what a marked light stores.
+// line carries and what a marked light stores. Azimuth is a compass bearing on the environment's
+// compass, the same one Time of Day uses, so the two widgets always agree on where the sun is.
 //
 bool UiEnvironment::sunAngleSliders()
 {
-  glm::vec3 editedSun = m_resources->sunDirection;
-  if(nvgui::azimuthElevationSliders(editedSun, false, m_resources->sunYIsUp))
-  {
-    m_actions.aimSun(editedSun);
-    return true;
-  }
-  return false;
+  float azimuth   = m_resources->settings.sunAzimuth;
+  float elevation = m_resources->settings.sunElevation;
+  bool  changed   = PE::SliderFloat("Azimuth", &azimuth, 0.0F, 360.0F, "%.1f deg", ImGuiSliderFlags_NoRoundToFormat,
+                                    "Compass bearing: 0 = north, 90 = east, 180 = south, 270 = west");
+  changed |= PE::SliderFloat("Elevation", &elevation, -90.0F, 90.0F, "%.1f deg", ImGuiSliderFlags_NoRoundToFormat,
+                             "Degrees above the horizon");
+  if(changed)
+    m_actions.setSunAngles(azimuth, elevation);
+  return changed;
 }
 
 

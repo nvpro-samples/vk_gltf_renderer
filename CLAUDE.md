@@ -224,7 +224,7 @@ you are expected to keep them that way:
 # Sibling clone recommended: nvpro_core2 next to vk_gltf_renderer
 # (CMake auto-downloads nvpro_core2 into build/_deps if not found locally)
 # Windows
-cmake -B build -S . -G "Visual Studio 17 2022" -A x64
+cmake -B build -S . -A x64
 cmake --build build --config Release
 ./_bin/Release/vk_gltf_renderer.exe
 

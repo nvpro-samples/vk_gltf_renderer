@@ -89,14 +89,15 @@ struct PresetEntry
   const char* label;
 };
 
-// RR preset table (NVSDK_NGX_RayReconstruction_Hint_Render_Preset -> label). Only the presets documented as functional in nvsdk_ngx_defs.h are exposed.
+// RR preset table (NVSDK_NGX_RayReconstruction_Hint_Render_Preset -> label). Only the presets documented as functional in nvsdk_ngx_defs_dlssd.h are exposed.
 inline constexpr PresetEntry kRrPresets[] = {
     {NVSDK_NGX_RayReconstruction_Hint_Render_Preset_Default, "Default"},
     {NVSDK_NGX_RayReconstruction_Hint_Render_Preset_D, "D (transformer)"},
     {NVSDK_NGX_RayReconstruction_Hint_Render_Preset_E, "E (latest transformer)"},
+    {NVSDK_NGX_RayReconstruction_Hint_Render_Preset_F, "F (RR2, default model)"},
 };
 
-// SR preset table (NVSDK_NGX_DLSS_Hint_Render_Preset). Only the presets documented as functional in nvsdk_ngx_defs_dlssd.h are exposed.
+// SR preset table (NVSDK_NGX_DLSS_Hint_Render_Preset). Only the presets documented as functional in nvsdk_ngx_defs.h are exposed.
 inline constexpr PresetEntry kSrPresets[] = {
     {NVSDK_NGX_DLSS_Hint_Render_Preset_Default, "Default"},
     {NVSDK_NGX_DLSS_Hint_Render_Preset_J, "J- Similar to preset K"},

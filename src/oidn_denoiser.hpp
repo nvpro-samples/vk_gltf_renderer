@@ -95,7 +95,7 @@ public:
 
   struct Settings
   {
-    bool enable             = false;
+    bool enable             = true;
     bool autoDenoiseEnabled = true;                         // Automatically denoise every N samples per pixel
     int  autoDenoiseSpp     = 50;                           // Denoise at 50, 100, 150, ... spp
     int  quality            = int(vkoidn::Quality::eHigh);  // vkoidn::Quality: eFast, eBalanced, eHigh

@@ -56,8 +56,8 @@ cd vk_gltf_renderer
 
 ```bash
 # Windows
-cmake -B build -S . -G "Visual Studio 17 2022" -A x64
-cmake --build build --config Release
+cmake -B build -S . -A x64
+cmake --build build --config Release -j 8
 .\_bin\Release\vk_gltf_renderer.exe
 ```
 

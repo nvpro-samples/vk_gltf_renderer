@@ -812,8 +812,9 @@ void GltfRenderer::renderUI()
     {
       const float  h = ImGui::GetFrameHeight();
       const ImVec2 stripTopLeft(imageTopLeft.x, imageTopLeft.y + imageSize.y - h);
-      ui::animation::renderStripOverlay(m_resources.getScene(), m_resources.animationControl, stripTopLeft,
-                                        ImVec2(imageSize.x, h));
+      if(ui::animation::renderStripOverlay(m_resources.getScene(), m_resources.animationControl, stripTopLeft,
+                                           ImVec2(imageSize.x, h)))
+        m_animPlay = m_resources.animationControl.play;
     }
 
     ImGui::End();
@@ -1470,7 +1471,11 @@ void GltfRenderer::registerCommands()
                   .label   = "Play / Pause Animation",
                   .group   = "View",
                   .binding = {ImGuiKey_Space, KeyScope::eViewport},
-                  .run     = [this] { m_resources.animationControl.togglePlay(); },
+                  .run =
+                      [this] {
+                        m_resources.animationControl.togglePlay();
+                        m_animPlay = m_resources.animationControl.play;  // Remembered for the next scene
+                      },
                   .enabled = [this] { return ui::animation::hasPlayableAnimation(m_resources.getScene()); }});
 
   // Windows, in menu and toolbar order. The Agentic window only exists when USE_AGENTIC is built, so

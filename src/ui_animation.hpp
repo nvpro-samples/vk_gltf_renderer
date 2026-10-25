@@ -34,7 +34,9 @@
 // State owner: Resources::animationControl. The renderer's update path
 // (GltfRenderer::updateAnimation) reads the queries (doAnimation, deltaTime,
 // isReset) and calls clearStates() after consuming a one-shot step/reset.
-// GltfRenderer::cleanupScene resets the struct to defaults on scene load.
+// GltfRenderer::cleanupScene resets the struct to defaults on scene load, then
+// sets `play` from GltfRenderer::m_animPlay -- the user's last explicit
+// Play/Pause choice, persisted as --animPlay.
 
 #include <string>
 
@@ -98,6 +100,8 @@ bool hasPlayableAnimation(nvvkgltf::Scene* scene);
 // visible while the mouse is over the strip; eases to a dim idle alpha when
 // the mouse leaves, so it stays out of the way of the 3D content until the
 // user wants it. Owns its own child region, background, and fade state.
-void renderStripOverlay(nvvkgltf::Scene* scene, AnimationControl& ctrl, const ImVec2& topLeft, const ImVec2& size);
+// Returns true when the user clicked Play/Pause this frame, so the caller can
+// remember that choice for the next scene load (scrub and step pauses don't count).
+bool renderStripOverlay(nvvkgltf::Scene* scene, AnimationControl& ctrl, const ImVec2& topLeft, const ImVec2& size);
 
 }  // namespace ui::animation
