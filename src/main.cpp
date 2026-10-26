@@ -545,6 +545,8 @@ auto main(int argc, char** argv) -> int
   // a specific file (loaded below, once every element has registered its settings handler).
   const bool automatedRun = appInfo.headless || sequencerInfo.hasScript() || benchmarkOptions.enabled;
   appInfo.persistSettings = !automatedRun;
+  // An automated run measures or captures what it asked for: never the all-features fallback shader
+  elemGltfRenderer->setBackgroundOptimalShader(!automatedRun);
 
   // Create the application
   nvapp::Application app;

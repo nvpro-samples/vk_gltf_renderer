@@ -209,7 +209,7 @@ GltfRenderer::GltfRenderer(nvutils::ParameterRegistry* paramReg, const nvutils::
   m_settings.add({"dbgWireframe", "Enable wireframe overlay"}, &m_resources.settings.wireframe, Persist::eYes);
   m_settings.add({"ptOptimalShader",
                   "Compile gltf_pathtrace.slang with GLTF_USE_* gates specialized per scene "
-                  "(no runtime MAT_EXT_* changes; triggers shader recompile on scene/material change). Default off."},
+                  "(no runtime MAT_EXT_* changes; rebuilt when the scene's material extensions change). Default on."},
                  &m_resources.settings.optimalShader, Persist::eYes);
   m_settings.add({"useSolidBackground", "Use solid color background"}, &m_resources.settings.useSolidBackground, Persist::eYes, true);
   m_settings.addVector({"solidBackgroundColor", "Solid Background Color"}, &m_resources.settings.solidBackgroundColor, Persist::eYes);
@@ -3194,6 +3194,11 @@ void GltfRenderer::setSerAvailable(bool available)
   m_resources.settings.serHardwareAvailable = available;
 }
 
+void GltfRenderer::setBackgroundOptimalShader(bool enable)
+{
+  m_resources.settings.backgroundOptimalShader = enable;
+}
+
 //--------------------------------------------------------------------------------------------------
 // Names of the extensions enabled on the device. Call before the path tracer is attached: the
 // vk_oidn denoiser picks its optional features (tensor cores, ...) from them.
@@ -4010,6 +4015,7 @@ bool GltfRenderer::compileShaders()
   {
     return m_pathTracer.reloadShader(m_resources);
   }
+  m_pathTracer.finishPrefetch(m_resources);  // its background Slang compile shares the compiler
   return m_rasterizer.compileShader(m_resources, true);
 }
 

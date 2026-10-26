@@ -99,6 +99,8 @@ public:
   bool compileShader(Resources& resources, bool fromFile = true) override;
   // User-initiated hot reload: drop cached variants and recompile from Slang source.
   bool reloadShader(Resources& resources);
+  // Wait for the background shader builds and cache them. Before another Slang compile (the rasterizer's).
+  void finishPrefetch(Resources& resources);
   void setBusyWindow(BusyWindow* busy) { m_busyWindow = busy; }
 
   // Register command line parameters
@@ -188,10 +190,52 @@ public:
   VariantKey makeVariantKey(const Resources& resources) const;  // The variant the current settings ask for.
   // Swaps in the wanted variant if it is cached (cheap; no BusyWindow). Leaves live handles alone on a miss.
   bool tryRestoreCachedVariant(Resources& resources);
+  void destroyCacheEntry(Resources& resources, VariantCacheEntry& entry);
+
+  // Prefetch: variants built on a background thread and added to the cache when done. The driver
+  // compiles a pipeline on a single thread, so building them beside the live one costs little wall time.
+  // - The sibling: the variant the frames after this one switch to with no settings change (see
+  //   siblingVariant()), built while the live one builds.
+  // - The scene-optimized variant (and its sibling), built while the all-features one renders (see
+  //   updateOptimalFallback()).
+  std::optional<VariantKey> siblingVariant(const VariantKey& key) const;
+  void                      prefetchSiblingVariant(Resources& resources);  // On the compile worker.
+  void startPrefetch(Resources& resources, const std::vector<VariantKey>& keys);
+  void runPrefetch(Resources& resources, RenderTechnique technique);  // The prefetch thread.
+  void buildPrefetchPipeline(Resources& resources, RenderTechnique technique, VariantCacheEntry& entry) const;
+  void updateOptimalFallback(Resources& resources);
+  VariantKey wantedVariantKey(const Resources& resources) const;  // makeVariantKey() without the optimal fallback.
+  std::vector<VariantCacheEntry> m_prefetch;  // Owned by m_prefetchThread until finishPrefetch() joins it.
+  std::vector<VariantKey> m_prefetchFailed;   // Prefetched variants whose Slang compile failed. Guarded by m_compileMutex.
+  std::thread             m_prefetchThread;
+  std::atomic<bool>       m_prefetchDone{false};     // m_prefetchThread is done, so joining it does not block.
+  std::mutex              m_prefetchMutex;           // Serializes starting and finishing a prefetch.
+  std::atomic<bool>       m_optimalFallback{false};  // The optimized variant is not built yet: render the all-features one.
+  std::atomic<bool>       m_optimalFailed{false};    // The optimized variant failed to compile (retried on a shader reload).
 
   BusyWindow* m_busyWindow{nullptr};  // Modal shown during async shader/pipeline compile.
   std::mutex  m_compileMutex;         // Guards compile metadata and live pipeline handles.
   std::thread m_compileThread;        // Joined in onDetach().
+
+  // Pipeline builders: they touch no live handle, so the sibling prefetch runs them on its own thread.
+  struct RtxBuild
+  {
+    VkPipeline                  pipeline = VK_NULL_HANDLE;
+    nvvk::Buffer                sbtBuffer{};
+    nvvk::SBTGenerator::Regions sbtRegions{};
+  };
+  struct PipelineBuildInfo
+  {
+    VkShaderModule module           = VK_NULL_HANDLE;
+    bool           useSER           = false;  // USE_SER specialization constant
+    int            dlssTransparency = 0;      // USE_DLSS_TRANSP specialization constant (Dlss::TransparencyMode)
+    const char*    label            = "";     // Log prefix, e.g. "RTX (prefetch)"
+  };
+  VkPipeline buildRqPipeline(const PipelineBuildInfo& info) const;
+  RtxBuild   buildRtxPipeline(Resources& resources, const PipelineBuildInfo& info) const;
+  int  currentDlssTransparency() const;  // The DLSS transparency mode the pipelines are specialized with.
+  bool compileSpirv(Resources& resources, const VariantKey& key);  // gltf_pathtrace.slang for `key`.
+  VkShaderModule createShaderModule(const void* code, size_t codeSize) const;
 
   // The default rendering technique
   RenderTechnique m_renderTechnique{RenderTechnique::RayQuery};

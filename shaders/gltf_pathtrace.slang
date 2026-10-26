@@ -990,15 +990,29 @@ void probeCameraMedium(IRaytracer raytracer)
     GltfRenderPrimitive prim  = renderPrimitive[payload.rprimID];
     float3              barys = float3(1.0 - payload.bary.x - payload.bary.y, payload.bary.x, payload.bary.y);
     HitState hit = getHitState(prim, barys, node.worldToObject, node.objectToWorld, payload.primitiveID, ray.Direction);
-    MeshState mesh          = MeshState(hit.nrm, hit.tangent, hit.bitangent, hit.geonrm, hit.uv, !hit.frontFace, 0.0F);
-    mesh.baseColorVertexMul = hit.color;
-    PbrMaterial mat = evaluateMaterial(max(0, node.materialID), mesh, allImages, allSamplers, texInfos, materials);
 
-    // A boundary the path would cross into a medium through (see the pt.isInside toggle)
-    if(mat.thickness > 0.0F && (mat.transmission > 0.0F || mat.diffuseTransmissionFactor > 0.0F))
+    // A boundary the path would cross into a medium through (see the pt.isInside toggle). The mesh
+    // bounds the medium, so the material's factors decide, not their textured values at the hit: a
+    // texel with no transmission (a logo on glass) is still the medium's wall, and passing it would
+    // take the far wall, met from behind, for the camera being inside.
+    // Only the transmissions this shader evaluates count, as in evaluateMaterial(): a path cannot
+    // cross into a medium through the others.
+    const GltfShadeMaterial factors      = materials[max(0, node.materialID)];
+    bool                    transmissive = false;
+#if GLTF_USE_TRANSMISSION
+    transmissive = transmissive || factors.transmissionFactor > 0.0F;
+#endif
+#if GLTF_USE_DIFFUSE_TRANSMISSION
+    transmissive = transmissive || factors.diffuseTransmissionFactor > 0.0F;
+#endif
+    if(factors.thicknessFactor > 0.0F && transmissive)
     {
       if(!hit.frontFace)
       {
+        MeshState mesh          = MeshState(hit.nrm, hit.tangent, hit.bitangent, hit.geonrm, hit.uv, !hit.frontFace, 0.0F);
+        mesh.baseColorVertexMul = hit.color;
+        PbrMaterial mat = evaluateMaterial(max(0, node.materialID), mesh, allImages, allSamplers, texInfos, materials);
+
         const VolumeMedium medium = makeVolumeMedium(mat);
         result.inside             = 1;
         result.absorption         = float3(medium.absorption);

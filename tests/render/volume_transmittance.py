@@ -11,6 +11,8 @@ Three ways light used to cross a KHR_materials_volume medium for free:
     full strength through any medium.
   - A camera path started in clear air wherever the camera was, so from inside a medium nothing in
     front of the camera was attenuated, and the parity of every boundary it crossed was inverted.
+  - The probe for the camera's medium read the textured transmission, so a camera ray meeting a
+    texel with none passed the near wall and took the far one, met from behind, for being inside.
 
 The script writes small glTF scenes (boxes of medium, no environment), renders each one headless to
 a linear .hdr and checks:
@@ -47,6 +49,7 @@ import math
 import struct
 import sys
 import tempfile
+import zlib
 from pathlib import Path
 
 from volume_scatter_punctual import CAMERA_Z, IMAGE_SIZE, TECHNIQUES, cube_buffer, read_hdr, render
@@ -75,6 +78,23 @@ def medium(sigma_t, scatter=None, distance=1.0):
             "extensions": exts}
 
 
+def masked(material):
+    """The same material with a transmission texture of a single black texel: no transmission
+    anywhere on it, though its factors still give it a medium (the cube has no UVs, so every hit
+    reads that texel)."""
+    masked = json.loads(json.dumps(material))
+    masked["extensions"]["KHR_materials_transmission"]["transmissionTexture"] = {"index": 0}
+    return masked
+
+
+def black_png():
+    """A 1x1 8-bit grayscale PNG of 0."""
+    def chunk(tag, data):
+        return struct.pack(">I", len(data)) + tag + data + struct.pack(">I", zlib.crc32(tag + data))
+    return (b"\x89PNG\r\n\x1a\n" + chunk(b"IHDR", struct.pack(">IIBBBBB", 1, 1, 8, 0, 0, 0, 0))
+            + chunk(b"IDAT", zlib.compress(b"\x00\x00")) + chunk(b"IEND", b""))
+
+
 def diffuse(albedo):
     return {"pbrMetallicRoughness": {"baseColorFactor": [albedo, albedo, albedo, 1.0], "metallicFactor": 0.0,
                                      "roughnessFactor": 1.0}}
@@ -89,11 +109,24 @@ def emitter(strength):
 def make_scene(boxes, lights=(), scale=1.0):
     """glTF with one box per (material, center, half extents), a camera on +Z, and point lights.
 
-    `scale` multiplies every position and size, the camera's included; materials and light
-    intensities are the caller's to match."""
+    A box's material can be a (sides, front) pair: its +Z face, the one facing the camera, then has
+    the front material. `scale` multiplies every position and size, the camera's included; materials
+    and light intensities are the caller's to match."""
     data, vertex_count, index_count = cube_buffer()
     pos_len = vertex_count * 12
-    materials = [material for material, _, _ in boxes]
+    materials, meshes = [], []
+    for material, _, _ in boxes:
+        if isinstance(material, tuple):
+            sides, front = len(materials), len(materials) + 1
+            materials += list(material)
+            # cube_buffer's faces are +X, -X, +Y, -Y, +Z, -Z, six indices each: +Z is indices 24-29
+            meshes.append({"primitives": [{"attributes": {"POSITION": 0, "NORMAL": 1}, "indices": accessor,
+                                           "material": index}
+                                          for accessor, index in ((3, sides), (4, front), (5, sides))]})
+        else:
+            meshes.append({"primitives": [{"attributes": {"POSITION": 0, "NORMAL": 1}, "indices": 2,
+                                           "material": len(materials)}]})
+            materials.append(material)
     gltf = {
         "asset": {"version": "2.0", "generator": "volume_transmittance.py"},
         "extensionsUsed": ["KHR_lights_punctual", "KHR_materials_transmission", "KHR_materials_volume",
@@ -103,9 +136,10 @@ def make_scene(boxes, lights=(), scale=1.0):
         "nodes": [{"name": "Camera", "camera": 0, "translation": [0.0, 0.0, CAMERA_Z * scale]}],
         "cameras": [{"type": "perspective", "perspective": {"yfov": 0.75, "znear": 0.1 * scale,
                                                             "zfar": 100.0 * scale, "aspectRatio": 1.0}}],
-        "meshes": [{"primitives": [{"attributes": {"POSITION": 0, "NORMAL": 1}, "indices": 2, "material": i}]}
-                   for i in range(len(materials))],
+        "meshes": meshes,
         "materials": materials,
+        "images": [{"uri": "data:image/png;base64," + base64.b64encode(black_png()).decode()}],
+        "textures": [{"source": 0}],
         "buffers": [{"byteLength": len(data),
                      "uri": "data:application/octet-stream;base64," + base64.b64encode(data).decode()}],
         "bufferViews": [
@@ -118,6 +152,9 @@ def make_scene(boxes, lights=(), scale=1.0):
              "min": [-1.0, -1.0, -1.0], "max": [1.0, 1.0, 1.0]},
             {"bufferView": 1, "componentType": 5126, "count": vertex_count, "type": "VEC3"},
             {"bufferView": 2, "componentType": 5123, "count": index_count, "type": "SCALAR"},
+            {"bufferView": 2, "componentType": 5123, "count": 24, "type": "SCALAR"},
+            {"bufferView": 2, "byteOffset": 48, "componentType": 5123, "count": 6, "type": "SCALAR"},
+            {"bufferView": 2, "byteOffset": 60, "componentType": 5123, "count": 6, "type": "SCALAR"},
         ],
         "extensions": {"KHR_lights_punctual": {"lights": []}},
     }
@@ -162,10 +199,17 @@ SHORT_DISTANCE   = 0.0002  # attenuationDistance 0.2 mm, the same sigma_t as FOG
 # SMALL_SCALE^2 times weaker, so it gives the fog the same irradiance at the same relative distance.
 SMALL_SCALE      = 0.0002
 
+# A medium box whose front face has no transmission anywhere, lit from in front: the camera ray meets
+# that face first, so the camera is outside, and the box looks the same whatever its medium. Taken for
+# inside, every camera path would cross CAMERA_Z - 1 of medium to the face: exp(-3.5) dimmer.
+MASKED_LIGHT = (2.0, [0.0, 0.5, 2.0])
+
 SCENES = {
     "emitter_alone":     make_scene([EMITTER]),
     "emitter_in_medium": make_scene([(medium(SIGMA_T),) + MEDIUM_BOX, EMITTER]),
     "emitter_camera_in_medium": make_scene([(medium(CAMERA_SIGMA_T),) + CAMERA_BOX, EMITTER]),
+    "masked_clear":      make_scene([((medium(0.0), masked(medium(0.0))),) + MEDIUM_BOX], [MASKED_LIGHT]),
+    "masked_medium":     make_scene([((medium(SIGMA_T), masked(medium(SIGMA_T))),) + MEDIUM_BOX], [MASKED_LIGHT]),
     "panel_clear":       make_scene([(medium(0.0),) + MEDIUM_BOX, PANEL], [PANEL_LIGHT]),
     "panel_in_medium":   make_scene([(medium(SIGMA_T),) + MEDIUM_BOX, PANEL], [PANEL_LIGHT]),
     "fog_light_inside":  make_scene([FOG], [(5.0, [0.0, 1.0 - FOG_LIGHT_OFFSET, 0.0])]),
@@ -195,7 +239,7 @@ def mean_luminance(path, half_size):
 
 # The emitter's and the panel's front faces cover more than these squares, and over them the path
 # lengths differ from the on-axis ones by well under 1%.
-REGION = {"emitter": 8, "panel": 8, "fog": IMAGE_SIZE // 4, "distance": IMAGE_SIZE // 4, "scale": IMAGE_SIZE // 4}
+REGION = {"emitter": 8, "masked": 8, "panel": 8, "fog": IMAGE_SIZE // 4, "distance": IMAGE_SIZE // 4, "scale": IMAGE_SIZE // 4}
 
 
 def main():
@@ -234,6 +278,8 @@ def main():
                     math.exp(-SIGMA_T * EMITTER_D), 0.03)
         check_ratio("emitter seen from a camera inside the medium",
                     lum["emitter_camera_in_medium"] / lum["emitter_alone"], math.exp(-CAMERA_SIGMA_T * CAMERA_D), 0.03)
+        check_ratio("camera outside a medium whose near wall has no transmission",
+                    lum["masked_medium"] / lum["masked_clear"], 1.0, 0.03)
         check_ratio("panel lit and seen through the medium", lum["panel_in_medium"] / lum["panel_clear"],
                     math.exp(-SIGMA_T * PANEL_D), 0.05)
 

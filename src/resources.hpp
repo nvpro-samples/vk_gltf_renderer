@@ -289,8 +289,11 @@ struct Settings
   DisplayBuffer displayBuffer = DisplayBuffer::eRendered;  // Which buffer to display in viewport
 
   // Enable scene-based shader optimization. When true, only features used by the scene are
-  // enabled, reducing shader size and register usage at the cost of a one-time recompile per scene change.
-  bool optimalShader = false;
+  // enabled, reducing shader size and register usage at the cost of a recompile per scene change.
+  bool optimalShader = true;
+  // Build the optimized shader in the background while the all-features one renders (set at startup).
+  // Off for headless, scripted and benchmark runs, so they render and time only the shader they ask for.
+  bool backgroundOptimalShader = true;
 
 #ifndef NDEBUG
   bool showGridStyleWindow  = false;  // Show Grid Style debug window

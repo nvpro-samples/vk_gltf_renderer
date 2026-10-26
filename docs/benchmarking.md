@@ -228,7 +228,7 @@ outdoor terrain (a furnished room with ~100 materials, a forested mountain, Flig
 |---|---|
 | `--ptTechnique` | Ray query (compute) vs the ray tracing pipeline. Scatter: the pipeline was ~2x faster. Surfaces: ray query was 10-30% faster than the pipeline *with* SER, more without |
 | `--ptUseSER` | Shader Execution Reordering, ray tracing pipeline only. Scatter: ~2.3-2.8x. Surfaces: ~20-25%. Silently ignored when the device does not support it |
-| `--ptOptimalShader` | Recompiles with only the scene's feature gates. Scatter: 14-20% with SER on, ~32% with SER off. Surfaces: ~20% on the pipeline, more on ray query, where the compiled-out features mostly free registers |
+| `--ptOptimalShader` | On by default: compiles with only the scene's feature gates (pass `0` to time the all-features shader). Scatter: 14-20% with SER on, ~32% with SER off. Surfaces: ~20% on the pipeline, more on ray query, where the compiled-out features mostly free registers |
 | `--dlssInputSize` | DLSS-RR's input resolution. The default (Optimal) path-traces below native resolution, so a DLSS-on vs DLSS-off comparison at defaults compares different pixel counts: on one scene the path trace was ~2.1x cheaper with DLSS on. Set `--dlssInputSize 2` (Max, native) to compare at equal resolution; see [denoising.md](denoising.md#dlss-rr-input-resolution) |
 
 Three traps worth knowing, each of which produces confident-looking numbers that mean nothing:

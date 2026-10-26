@@ -131,6 +131,7 @@ public:
   void                                        registerRecentFilesHandler();
   void                                        setDlssHardwareAvailability(bool rrAvailable, bool srAvailable);
   void                                        setSerAvailable(bool available);
+  void                                        setBackgroundOptimalShader(bool enable);
   void                                        setDeviceExtensions(std::vector<std::string> extensions);
   void                                        setOpacityMicromapAvailable(bool hardware, bool enabled);
 #ifdef USE_AGENTIC

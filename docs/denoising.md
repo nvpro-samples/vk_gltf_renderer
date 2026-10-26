@@ -133,9 +133,11 @@ blends from one to the other instead of switching:
 - **The frames after it run the regular shader.** DLSS's guide captures (`USE_DLSS_SHADER`) cost
   every sample, so they are compiled in only for the frames DLSS renders
   (`PathTracer::makeVariantKey`). Each camera start and stop swaps the two cached variants in
-  `PathTracer::prepareFrame`: a queue wait, no recompile. A moving camera stays on DLSS's. The first
-  time a combination is used, the missing variant compiles behind the BusyWindow, which restarts the
-  accumulation.
+  `PathTracer::prepareFrame`: a queue wait, no recompile. A moving camera stays on DLSS's. Whenever
+  one of the two is built, the other one's pipeline is built at the same time on a thread of its own
+  (`PathTracer::prefetchSiblingVariant`): the driver compiles a pipeline on a single thread, so the
+  pair costs about one compile. Only the first one waits behind the BusyWindow, which restarts the
+  accumulation. A swap to a sibling still being built waits for it there.
 - **The image shown** is `lerp(dlss, denoised, handoffWeight(spp, end))` (`denoiser_schedule.hpp`),
   computed by `shaders/denoiser_handoff.slang`, with `end` the **DLSS Hand-off** setting
   (`dlssHandoffSpp`), capped at Max Samples so the final image is always the denoised one alone.

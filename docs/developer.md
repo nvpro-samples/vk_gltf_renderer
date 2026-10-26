@@ -283,7 +283,9 @@ are **forked locally** into `shaders/gltf_*.h.slang` rather than using the upstr
    state (`PathTracerState`, volume segment, shadow transmission), and raster extension paths
    without changing buffer layout. Optimal mode passes each gate as `-DGLTF_USE_X=0` or `1`
    from `SceneFeatureSet` (never `-DMAT_EXT_X=0` at runtime). `MAT_EXT_*` remains layout authority
-   on host and device only.
+   on host and device only. Since the gates only drop work, the all-features build renders the
+   same image: interactively, it renders while the optimized one builds in the background
+   (`PathTracer::updateOptimalFallback`), which swaps in once ready.
 
 ### Key design points
 
@@ -396,7 +398,8 @@ Some things about the transport are worth knowing before touching it:
   medium the camera is in: once per accumulation of a scene with a `KHR_materials_volume` material,
   `PathTracer::probeCameraMedium()` runs the path tracer's own pipeline for a single thread
   (`probeCameraMedium()` in [`gltf_pathtrace.slang`](../shaders/gltf_pathtrace.slang)), which
-  follows the center camera ray to the nearest medium boundary and, if it meets it from behind,
+  follows the center camera ray to the nearest medium boundary (a surface whose material factors
+  give it a volume; a texel textured to no transmission is still the wall) and, if it meets it from behind,
   records that medium for `pathTrace()` to start in. Without it, a camera inside a fog sees no fog
   in front of it and fog behind the far wall.
 
