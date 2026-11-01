@@ -54,6 +54,7 @@ struct BenchmarkOptions
   std::filesystem::path screenshotFilename;        // Output path for the next tonemapped-render capture (viewport only)
   std::filesystem::path uiScreenshotFilename;  // Output path for the next full-window capture (UI panels + viewport)
   int                   selectNodeIndex{-1};   // Scene-graph node index to select; < 0 or out-of-range clears selection
+  int                   pickNodeIndex{-1};  // Scene-graph node to pick as a viewport click would; < 0 clears selection
 };
 
 //--------------------------------------------------------------------------------------------------
@@ -77,6 +78,7 @@ public:
     std::function<void(const std::filesystem::path&)> saveScreenshot;    // Save tonemapped render (viewport only)
     std::function<void(const std::filesystem::path&)> saveUiScreenshot;  // Save full composited window (UI + viewport)
     std::function<void(int)> selectSceneNode;  // Select a scene-graph node by index (drives Inspector/Scene Browser)
+    std::function<void(int)> pickSceneNode;    // Pick a scene-graph node's first render node, as a viewport click
   };
 
   // Snapshot of the headless run configuration, passed to every timing call.

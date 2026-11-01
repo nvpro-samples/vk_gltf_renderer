@@ -18,17 +18,19 @@
  */
 
 //
-// Loads glTF image data from various container formats (KTX2, DDS, WebP,
+// Loads glTF image data from various container formats (KTX2, DDS, WebP, OpenEXR,
 // and standard formats via stb_image) into Vulkan-compatible image
 // descriptors. Handles format detection, swizzle mapping, mip chains,
 // and conversion to VkFormat-based ImageData structures.
 //
 
+#include <algorithm>
 #include <cinttypes>
 #include <cstdint>
 #include <cstring>
 #include <limits>
 
+#include <glm/gtc/packing.hpp>
 #include <stb/stb_image.h>
 #include <webp/decode.h>
 #include "nvimageformats/nv_dds.h"
@@ -36,6 +38,12 @@
 #include "nvimageformats/texture_formats.h"
 #include "nvutils/logger.hpp"
 #include "gltf_image_loader.hpp"
+
+#ifdef NVP_SUPPORTS_BASISU
+// Same tinyexr the environment loader uses (see env_image_loader.cpp): basis_universal's vendored
+// copy, not a second one. NVP_SUPPORTS_BASISU arrives transitively from nvimageformats.
+#include <3rdparty/tinyexr.h>
+#endif
 
 namespace nvvkgltf {
 
@@ -200,6 +208,106 @@ bool loadWebp(LoadedImageData& out, const void* data, size_t byteLength, bool sr
   return true;
 }
 
+// PROVISIONAL(OpenEXR textures): not part of glTF 2.0 / 2.1. A glTF image may point at an OpenEXR
+// file (uri ending in .exr, mimeType image/x-exr by convention); the decoder dispatches on the file's
+// magic number, so the suffix and mimeType are not consulted. See docs/gltf_2_1.md.
+//
+// EXR is scene-linear data, so the result is always a float format: the sRGB flag is ignored (an
+// sRGB transfer function applied to linear floats would be wrong) and the values are kept as authored,
+// above 1.0 included. Half is the working precision, as in the file itself: one channel stays a
+// single-channel R16F (sampled as RRR1, like a grayscale 8-bit image), anything else becomes
+// RGBA16F with alpha 1 when the file has none. Mips are generated on the GPU like for any
+// single-level image.
+bool isExr(const void* data, size_t byteLength)
+{
+#ifdef NVP_SUPPORTS_BASISU
+  return IsEXRFromMemory(static_cast<const unsigned char*>(data), byteLength) == TINYEXR_SUCCESS;
+#else
+  const uint8_t magic[4] = {0x76, 0x2f, 0x31, 0x01};
+  return byteLength >= sizeof(magic) && memcmp(data, magic, sizeof(magic)) == 0;
+#endif
+}
+
+#ifdef NVP_SUPPORTS_BASISU
+
+// glm's conversion does not saturate: a float above half range would become infinity, which a filtered
+// sample can turn into NaN. Clamp to the finite range; NaN becomes 0.
+uint16_t floatToHalf(float v)
+{
+  constexpr float kHalfMax = 65504.0F;
+  return glm::packHalf1x16(v != v ? 0.0F : std::clamp(v, -kHalfMax, kHalfMax));
+}
+
+bool loadExr(LoadedImageData& out, const void* data, size_t byteLength, uint64_t imageIDForLog)
+{
+  const unsigned char* bytes = static_cast<const unsigned char*>(data);
+
+  // The channel count decides the Vulkan format; LoadEXRFromMemory below always returns RGBA.
+  int numChannels = 0;
+  {
+    EXRVersion version{};
+    EXRHeader  header{};
+    InitEXRHeader(&header);
+    const char* error = nullptr;
+    if(ParseEXRVersionFromMemory(&version, bytes, byteLength) != TINYEXR_SUCCESS
+       || ParseEXRHeaderFromMemory(&header, &version, bytes, byteLength, &error) != TINYEXR_SUCCESS)
+    {
+      LOGW("Failed to read the EXR header of image %" PRIu64 ": %s\n", imageIDForLog, error ? error : "unknown error");
+      FreeEXRErrorMessage(error);
+      return false;
+    }
+    numChannels = header.num_channels;
+    FreeEXRHeader(&header);
+  }
+
+  float*      rgba   = nullptr;
+  int         width  = 0;
+  int         height = 0;
+  const char* error  = nullptr;
+  if(LoadEXRFromMemory(&rgba, &width, &height, bytes, byteLength, &error) != TINYEXR_SUCCESS)
+  {
+    LOGW("Failed to decode EXR image %" PRIu64 ": %s\n", imageIDForLog, error ? error : "unknown error");
+    FreeEXRErrorMessage(error);
+    return false;
+  }
+
+  const size_t texels   = static_cast<size_t>(width) * static_cast<size_t>(height);
+  const bool   gray     = numChannels == 1;
+  const size_t channels = gray ? 1 : 4;
+
+  std::vector<char> mip(texels * channels * sizeof(uint16_t));
+  uint16_t*         dst = reinterpret_cast<uint16_t*>(mip.data());
+  if(gray)
+  {
+    for(size_t i = 0; i < texels; ++i)
+      dst[i] = floatToHalf(rgba[4 * i]);
+    out.format           = VK_FORMAT_R16_SFLOAT;
+    out.componentMapping = {VK_COMPONENT_SWIZZLE_R, VK_COMPONENT_SWIZZLE_R, VK_COMPONENT_SWIZZLE_R, VK_COMPONENT_SWIZZLE_ONE};
+  }
+  else
+  {
+    for(size_t i = 0; i < texels * 4; ++i)
+      dst[i] = floatToHalf(rgba[i]);
+    out.format = VK_FORMAT_R16G16B16A16_SFLOAT;
+  }
+  free(rgba);  // tinyexr allocates with malloc
+
+  out.size = {static_cast<uint32_t>(width), static_cast<uint32_t>(height)};
+  out.mipData.clear();
+  out.mipData.push_back(std::move(mip));
+  return true;
+}
+
+#else
+
+bool loadExr(LoadedImageData&, const void*, size_t, uint64_t imageIDForLog)
+{
+  LOGW("Image %" PRIu64 " is an OpenEXR file, which this build cannot decode (basis_universal is not available).\n", imageIDForLog);
+  return false;
+}
+
+#endif
+
 bool loadStb(LoadedImageData& out, const void* data, size_t byteLength, bool srgb, uint64_t imageIDForLog)
 {
   if(byteLength > static_cast<size_t>(std::numeric_limits<int>::max()))
@@ -276,6 +384,8 @@ bool loadFromMemory(LoadedImageData& out, const void* data, size_t byteLength, b
     return true;
   if(loadWebp(out, data, byteLength, srgb, imageIDForLog))
     return true;
+  if(isExr(data, byteLength))  // claimed by magic: a corrupt EXR logs its own reason, not stb's
+    return loadExr(out, data, byteLength, imageIDForLog);
   if(loadStb(out, data, byteLength, srgb, imageIDForLog))
     return true;
 

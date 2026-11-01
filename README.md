@@ -147,7 +147,7 @@ For the architecture, bridge directory layout, and request/response protocol beh
 ### Core
 
 - ✅ glTF 2.0 (.gltf/.glb)
-- ✅ Images (HDR, PNG, JPEG, KTX, KTX2, DDS, WebP)
+- ✅ Images (HDR, PNG, JPEG, KTX, KTX2, DDS, WebP, OpenEXR)
 - ✅ Buffers (geometry, animation, skinning)
 - ✅ Textures and samplers
 - ✅ Materials (PBR metallic-roughness and specular-glossiness)
@@ -200,6 +200,7 @@ For the architecture, bridge directory layout, and request/response protocol beh
 - ✅ [MSFT_texture_dds](https://github.com/KhronosGroup/glTF/tree/main/extensions/2.0/Vendor/MSFT_texture_dds)
 - 🧪 [OMI_environment_sky](https://github.com/omigroup/gltf-extensions/tree/main/extensions/2.0/OMI_environment_sky) — `plain`, `gradient` and `physical` are rendered and round-trip on save; `panorama` needs a URI, which the extension does not define, so it is read from the sibling `NV_environment_sky_panorama` below
 - 🧪 `NV_environment_sky_panorama` — vendor sibling carrying the panorama image URI for `OMI_environment_sky`
+- 🧪 `NV_node_shadow_casting` — vendor node extension, `{"castShadows": false}`: the node's mesh is skipped by the path tracer's shadow rays but stays visible to every other ray (USD `primvars:doNotCastShadows`). It applies to the node's own mesh, not its children
 - 🧪 `NV_environment_sky_atmosphere` — vendor sibling carrying the rest of the physical sky's atmosphere (solar spectrum, planet size, scale heights, aerosol albedo, ozone layer), which `OMI_environment_sky` has no fields for
 
 ### glTF 2.1 (Complex Scenes — preview)

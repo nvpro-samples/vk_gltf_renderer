@@ -904,3 +904,59 @@ TEST_F(IndexRemappingTest, MergeRebasesNodeLight)
   EXPECT_EQ(nodeLights(reloaded.getModel()), bothLights);
   EXPECT_EQ(reloaded.getModel().lights.size(), 2u);
 }
+
+// A triangle reading its positions from "model.bin" in `dir`, offset by `x`.
+static fs::path writeTrianglePart(const fs::path& dir, float x)
+{
+  fs::create_directories(dir);
+  const float positions[9] = {x, 0, 0, x + 1, 0, 0, x, 1, 0};
+  {
+    std::ofstream bin(dir / "model.bin", std::ios::binary);
+    bin.write(reinterpret_cast<const char*>(positions), sizeof(positions));
+  }
+  const fs::path file = dir / "part.gltf";
+  std::ofstream  out(file);
+  out << R"({
+    "asset": {"version": "2.0"},
+    "scene": 0, "scenes": [{"nodes": [0]}],
+    "nodes": [{"mesh": 0}],
+    "meshes": [{"primitives": [{"attributes": {"POSITION": 0}}]}],
+    "accessors": [{"bufferView": 0, "componentType": 5126, "count": 3, "type": "VEC3",
+                   "min": [)"
+      << x << R"(, 0, 0], "max": [)" << x + 1 << R"(, 1, 0]}],
+    "bufferViews": [{"buffer": 0, "byteLength": 36}],
+    "buffers": [{"uri": "model.bin", "byteLength": 36}]
+  })";
+  return file;
+}
+
+TEST_F(IndexRemappingTest, MergedBuffersKeepTheirOwnFilesOnSave)
+{
+  // Two files of other folders, each reading its own "model.bin": a saved .gltf must not write both
+  // to one file. A same-named buffer with the same bytes (the first file merged again) shares it.
+  const fs::path first  = writeTrianglePart(tempDir / "a", 0.0f);
+  const fs::path second = writeTrianglePart(tempDir / "b", 5.0f);
+
+  nvvkgltf::Scene scene;
+  ASSERT_TRUE(scene.load(first));
+  ASSERT_GE(scene.mergeScene(second), 0);
+  ASSERT_GE(scene.mergeScene(first), 0);
+  std::vector<std::vector<unsigned char>> bytes;
+  for(const tinygltf::Buffer& buffer : scene.getModel().buffers)
+    bytes.push_back(buffer.data);
+  ASSERT_EQ(bytes.size(), 3u);
+
+  const fs::path saved = tempDir / "out" / "merged.gltf";
+  fs::create_directories(saved.parent_path());
+  ASSERT_TRUE(scene.save(saved));
+
+  nvvkgltf::Scene reloaded;
+  ASSERT_TRUE(reloaded.load(saved));
+  const std::vector<tinygltf::Buffer>& buffers = reloaded.getModel().buffers;
+  ASSERT_EQ(buffers.size(), 3u);
+  EXPECT_EQ(buffers[0].uri, "model.bin");
+  EXPECT_EQ(buffers[1].uri, "model_2.bin");
+  EXPECT_EQ(buffers[2].uri, "model.bin");
+  for(size_t i = 0; i < buffers.size(); i++)
+    EXPECT_EQ(buffers[i].data, bytes[i]) << "buffer " << i;
+}

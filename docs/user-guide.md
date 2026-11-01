@@ -19,7 +19,7 @@
 
 ## Recommended First Run
 
-1. Launch the app and load a `.gltf`/`.glb` scene (`.obj` files are also accepted and converted to glTF on the fly).
+1. Launch the app and load a `.gltf`/`.glb` scene (`.obj` files are also accepted and converted to glTF on the fly; an MTL `Tf` value becomes `KHR_materials_diffuse_transmission`, for thin translucent surfaces such as curtains). USD stages are converted offline with [usd-to-gltf.py](#usd-to-gltfpy). While a scene loads, a dialog lists each stage (reading the glTF, external files, textures, GPU upload and acceleration structures) with its time and item count; the same breakdown is written to the log when the load finishes.
 2. Switch between Rasterizer and Path Tracer in the **Settings** panel.
 3. Load an HDR environment or use Sun and Sky.
 4. Enable a denoiser (DLSS-RR, OptiX or OIDN) in path tracing mode.
@@ -48,6 +48,7 @@ A Monte Carlo path tracer with global illumination, progressive accumulation, an
 | **FireFly Clamp**       | Clamps high-intensity samples to reduce firefly artifacts in early frames.                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                          |
 | **Texture LOD**         | Ray-footprint gradient scale for texture mip selection: 0 always samples mip 0, 1 uses the full physically derived LOD.                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                             |
 | **Shadow Transmission** | Lets shadow rays pass through transmissive surfaces (`KHR_materials_transmission`), tinted by their color and absorption, for brighter glass and colored shadows. A **biased approximation**: refraction is ignored. Off is unbiased, but caustics from small or punctual lights go missing. |
+| **Camera Medium**       | Whether the camera starts inside a `KHR_materials_volume` medium (fog, tinted glass), found from the center camera ray. **Auto** / **On** look for it; **Off** always starts in clear air. Turn it off if the scene renders black when a volume surface, such as a windshield, is at the center of the view: an inward-wound asset makes the camera look like it is inside it. |
 | **Accumulated**         | Progress of the accumulation, in samples per pixel (spp) out of **Max Samples**. The window title shows the same count. Frames carry a varying number of samples (Samples per Frame, Auto SPP), so samples, not frames, measure image quality.                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                      |
 | **Max Samples**         | Samples per pixel at which the renderer stops accumulating (`--ptMaxSamples`). The frame that reaches it traces only the samples still missing, so the image always ends exactly there.                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                             |
 | **Samples per Frame**   | Samples per pixel traced each frame (`--ptSamples`). Higher = fewer frames to reach Max Samples, but slower per frame. A frame ends early to land exactly on Max Samples and on each `--outputSamples` count.                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                       |
@@ -554,7 +555,11 @@ When a KHR light is selected, the Inspector shows:
 
 All light property edits are undoable.
 
-**Deleting lights:** Select the light's node in the hierarchy and delete it (`Del`). Use **Tools > Compact Scene** to remove orphaned light definitions from the file.
+**Deleting lights:** Deleting a light's node (`Del`) removes the light definition with it. A light that is already
+unattached in the scene (for example a sun brought in by a reference file) can be deleted from the
+**Elements > Lights** toolbar (undoable), or removed with **Tools > Compact Scene**. A light is deletable only
+once nothing references it: the toolbar's tooltip says what still does (a node, an animation pointer, or a
+behavior graph, whose pointers can address lights by index).
 
 ### IES Photometric Profiles
 
@@ -590,9 +595,19 @@ To keep external files as **references** (glTF 2.1 external assets) instead of e
 use **File > Reference Scene...** or **Ctrl+Shift + Drag & Drop**. Referenced assets stay
 read-only, repeated references share geometry, and the links are preserved on save. A referenced
 file without animation, skins, lights or cameras is drawn without nodes of its own: the scene
-browser shows only the referencing node, and clicking the asset in the viewport selects it. Use the
-context-menu **Make Editable** to break the lock on a referenced subtree (its content then appears
-as nodes), and
+browser lists its meshes, marked with a lock, under the referencing node, and clicking the asset in
+the viewport selects the primitive you clicked, so the **Inspector** shows its mesh and material
+while the gizmo still moves the whole reference. Clicking content nested deeper (a car placed by a
+placed district) selects the top referencing node, so the gizmo moves the whole district; the
+Inspector's **Clicked part** link then selects the primitive you clicked. A referenced file's
+**material can be edited** directly: the change shows on every placement of that file, but **Save**
+keeps the reference and drops it, while **Save Self-Contained** keeps it. The Elements tab marks
+read-only nodes and meshes with a lock and referenced materials with a link icon. A node that
+references a file shows a small open button in the Scene Graph, and the Inspector an **Open referenced glTF** button; either loads that glTF as the scene. **Copy Path to Reference** (node context menu, or right-click the Inspector button) copies its path, e.g. to open it in a second instance. Use the
+context-menu **Make Editable** (Scene Graph or Elements) to break the lock: it unlocks **every
+placement** of the file referenced by the top referencing node above what you clicked, not only that
+subtree (their content then appears as nodes; this rebuilds the scene, so it is slow on very large
+scenes), and
 **File > Save Self-Contained As...** to bake references inline into a portable file. See
 [External Assets](external_assets.md) for details.
 
@@ -613,6 +628,10 @@ The Inspector's node **Transform** panel exposes two interaction flags, next to 
 - **Hoverable** (`KHR_node_hoverability`) — a companion flag intended for hover interactions (primarily consumed by `KHR_interactivity`). It is parsed, editable, and preserved on save.
 
 Both flags cascade to the whole subtree (a `false` on an ancestor disables its descendants) and default to enabled. Use **Add Selectability** / **Add Hoverability** to attach the extension to a node that does not yet carry it.
+
+### Cast Shadows
+
+**Cast Shadows** (`NV_node_shadow_casting`, a vendor extension) sits in the same panel. When unchecked, the path tracer's shadow rays pass through the node's mesh while every other ray still sees it -- for example a glass slab or a facade pane that should not darken what is behind it. Unlike the flags above it applies to the node's own mesh only, not its children. It is undoable and preserved on save; the rasterizer draws no shadows, so it has no effect there.
 
 ### Interactivity
 
@@ -743,6 +762,13 @@ Press **Ctrl+Shift+R** or use `Tools > Reload Shaders` to hot-reload all Slang s
 
 Both are also available from **File > Save Image** and **File > Save Screen Image**.
 
+### Statistics
+
+Open via **Windows > Statistics**. Shows scene counts (nodes, primitives, materials, triangles, lights,
+textures, images). For a scene that references other glTF files, a **Referenced Files** row gives the
+number of distinct files (a file placed many times counts once). **Copy to Clipboard** includes the same
+counts.
+
 ### Memory Statistics
 
 Open via **Windows > Memory Usage**. Displays GPU memory allocation broken down by category (textures, buffers, acceleration structures, etc.). Useful for tracking memory consumption on large scenes.
@@ -844,6 +870,170 @@ on F7) is covered in [ComfyUI Agentic Setup](comfyui-agentic-setup.md).
 
 ## Utilities
 
+### usd-to-gltf.py
+
+Located in `utils/usd-to-gltf.py` (the converter itself is `utils/usd_gltf/convert.py`). Converts a USD stage (`.usd`, `.usda`, `.usdc`, `.usdz`) to glTF
+offline, so the renderer needs no OpenUSD or MDL dependency. It needs the `usd-core` Python package,
+which publishes wheels for a limited set of Python versions (use the newest one it supports):
+
+```bash
+py -3.13 -m pip install usd-core numpy pillow OpenEXR
+py -3.13 utils/usd-to-gltf.py World.usd out/World.gltf
+```
+
+Composition, instancing and GeomSubsets are resolved, and the stage is converted to Y-up metres.
+Skinned meshes are posed at their skeleton's rest pose and written as static geometry.
+Identical meshes are written once, a PointInstancer becomes `EXT_mesh_gpu_instancing`, UDIM
+textures split meshes per UV tile, and `--variant SET=VALUE` picks variants first (for example
+`--variant material=renderLow` for lighter textures).
+Materials are read from MDL first: OmniPBR (and the Omniverse Base materials that wrap it),
+OmniSurface and the glass shaders keep their original textures. MaterialX comes next: OpenPBR and
+Standard Surface shaders, in the stage or in a `.mtlx` document it references (read directly, since
+`usd-core` has no MaterialX plugin), map to glTF PBR with the material extensions for their medium,
+subsurface, dispersion, anisotropy and thin film (`extra_extensions` in
+[materialx.py](../utils/usd_gltf/materialx.py) owns the mapping); their EXR textures are read with
+`OpenEXR` (ACEScg ones converted to sRGB). Other materials use the UsdPreviewSurface network
+Omniverse bakes next to them (`--materials preview` uses those for every material); an input driven by a shader graph takes the graph's base texture, and identical images
+are written once. A GeomSubset bound to no material keeps its name on a plain material, so data sets
+that only name their materials (such as Caldera) keep those names to edit later. Lights become `KHR_lights_punctual` (color temperature applied) and a dome light an
+`OMI_environment_sky`; an Omniverse `OmniProject_Environment` backdrop becomes a panorama sky
+(`OpenEXR` is optional and only needed for that and for EXR textures), and a stage lit only by its own lights gets a
+black sky. Meshes with `primvars:doNotCastShadows` get `NV_node_shadow_casting`. The cameras'
+exposure (or, without one, Omniverse's photographic f-number/ISO/shutter settings) is baked into
+every light, emissive and the sky: the renderer's auto-exposure works on it as is, and
+`--tmAutoExposure 0 --tmExposure 1` shows it exactly as the stage's camera did (`--keep-exposure`
+keeps physical values instead). The module
+docstring lists the full mapping.
+
+### usd-world.py
+
+Located in `utils/usd-world.py` (code in `utils/usd_gltf/world/`). For stages too large to convert
+into one file, it converts each asset on its own and assembles them with glTF 2.1 external assets,
+with the same conversion as `usd-to-gltf.py`. It knows nothing of any particular scene:
+
+```bash
+py -3.13 utils/usd-world.py ui
+py -3.13 utils/usd-world.py build World.usd --cache D:/world-gltf --root D:/world
+```
+
+`ui` opens a local page. "Open USD stage..." (the system's file dialog) or a recent project starts
+it; a project then goes through four stages, in order, each open once the one before it is done and
+each starting with the recommended options:
+
+1. **Scene**: opening a stage finds its data set (the folder holding the layers it uses), makes a
+   project in the projects folder and scans it: the assets, the level-of-detail switches, the variant
+   sets to choose from.
+2. **Convert**: every asset to its own glTF file. Recommended: convert all images to KTX2, force
+   double-sided (as Omniverse RTX renders USD; off follows each mesh's `doubleSided`), and light
+   values pre-exposed (the cameras' exposure baked in, viewed at exposure 1; off keeps physical
+   values). Variant sets that are not levels of detail (a texture resolution) are chosen here, and
+   the texture size: automatic by default, the largest that fits the GPU budget beside the geometry.
+3. **Assemble**: the scene file. The look starts as recommended (a recipe when most materials are
+   only names). The level of detail stays as authored: the levels from the cameras within 70 % of
+   the GPU's memory are recommended when the scene has switches and cameras, but choosing them
+   scans and converts every level, so it is left to you. "Estimate" shows triangles, geometry and
+   texture memory before writing.
+4. **View**: "Open in vk_gltf_renderer".
+
+Changing an option of a stage reopens it and the ones after it. The scene graph below shows each
+asset, what it places and its switches, and converts any part alone. A variant set whose assets
+each offer their own values (Kitchen_set's `modelingVariant`, the Mini Car Kit's vehicles) is chosen
+for one asset in the Selected asset panel: every placement of that asset uses the variant, and only
+that asset is scanned and converted again (one already converted with that variant is reused). The
+choice wins over a scene-wide selection of the same set. "Stop" ends the running step
+after the work in progress: every asset already converted (and every image already encoded) is
+kept, so running it again continues where it stopped. "Open another stage" (top right) goes back to
+the start page. Recent projects and the projects folder are kept in
+`~/.usd-world.json`.
+
+Everything a project converts goes into its project folder, `<projects folder>/<stage name>-gltf`,
+shown at the top of the project page with the scene file: the scene file (`<stage name>.gltf`)
+places the assets of `units/`, which share the images of `textures/`, so the folder moves as a
+whole. The USD files are only read. The folder is kept between sessions, so opening the stage again
+converts only what changed; deleting it starts over.
+
+From the command line, each step is also a command of its own (`scan`, `convert`, `ktx`, `look`,
+`assemble`), and `--unit` runs it on some units and what they place. The stage and the settings are
+remembered by the project, so later commands need only `--cache`.
+
+- **Scan** reads the asset graph from the composition, without loading the geometry of what is
+  placed. Every reference or payload to another layer places an asset (a *unit*). The asset is
+  shared by every placement that only moves it; one that changes it (material overrides, primvars)
+  places the asset as changed, shared with the placements that change it the same way. A variant
+  set whose every variant places one asset is a *switch*: alternatives such as levels of detail or
+  a model and its proxy. `scan.py` documents the rules. With `--lod authored` (the default) only
+  the option each switch places is followed, so only what the scene shows is scanned and converted
+  (Caldera: 245 assets in seconds, instead of 63,000 for every level of every model); the other
+  policies compare the options, so they scan and convert them all.
+- **Convert** writes what each unit draws itself (its *leaf*) as a glTF 2.0 file, in parallel.
+  Textures go to one folder shared by every leaf, named by content. Cameras and the environment
+  belong to the scene: the assembly at the top places them, and the input stage's camera exposure
+  is baked into every leaf, as `usd-to-gltf.py` does (`--keep-exposure` keeps physical values).
+- **KTX2** (`--ktx`) encodes the leaves' images as GPU-compressed KTX2 with
+  `gltf-ktx2-converter.py`'s defaults: each image once, each leaf rewritten in place, the PNG / JPEG
+  originals deleted. Scenes with thousands of textures (Da Vinci's workshop) need it to fit in GPU
+  memory. `--ktx-max-size <pixels>` halves larger images until they fit (nvtt_export doesn't
+  resize; `0` keeps them as authored); the default, `auto`, picks the largest size whose textures
+  fit what the geometry leaves of the budget (`--lod-budget`, else 70 % of the GPU's memory; half of
+  it with `--lod camera`, whose geometry takes the rest). Since the originals are deleted, changing
+  the size later converts the leaves that have images again.
+- **Look** (`--look <recipe>`) applies a [gltf-look.py](#gltf-lookpy) recipe to each leaf, written
+  next to it (`geo.<recipe>.gltf`, same `.bin`), so look-dev never converts geometry again; the
+  step names the material names no family matched.
+- **Assemble** writes the input as a glTF 2.1 scene placing the leaves, at the cache's root
+  (`<input name>[.<options>].gltf`, or `-o`):
+  a node per placement, a `boundingVolume` on every node. At each switch it places the option
+  `--variant SET=VALUE` names (`SET=VALUE:name,name` for the switches with those prim names), else
+  the one `--lod` picks: by triangle count (`finest`, `coarsest`, `levelN`), the authored selection,
+  or by what cameras see (`camera`). The draft `EXT_external_asset_lod` lists every option, for
+  level-of-detail tools. `--variant` on a set that is not a switch is a selection made while
+  composing, as with `usd-to-gltf.py` (for example `--variant material=renderLow`).
+- **`--lod camera`** chooses per placement, the same way for any scene: an option's projected size
+  from the nearest camera (`--lod-camera`: the scene's cameras, positions, or renderer
+  `--cameraString` values) asks for `--lod-density` triangles per square pixel, and the coarsest
+  option with that many is placed. With `--lod-budget <GB>`, the density is lowered until the
+  geometry and the textures fit (an estimate per triangle placed, `BYTES_PER_TRIANGLE` in `assemble.py`; textures from their
+  files' headers, or as the KTX2 step will encode them). A far
+  district gets its proxy, a near model its finest level.
+
+```bash
+py -3.13 utils/usd-world.py build caldera.usda --variant districtLod=proxy --variant districtLod=full:map_capital --look caldera --cache D:/caldera-gltf --root D:/caldera
+```
+
+Everything is cached (`cache.py` documents the layout and keys): a leaf is converted again only when
+a layer, texture or MDL file it read changed, when the converter version changed, or when `--force <glob>` names it, and
+an assembly is rewritten only when its content changes. Units that place others become group nodes
+(`--nesting inline`, the default), so every placed file is a leaf the renderer draws as an instance
+set. On large scenes (`--hierarchy auto`, the default; `usd` or `compact` to choose) the assemblies
+are written compact: a group with a single child is folded into it, keeping the placing prim's
+name, transforms become translation, rotation and scale, and bounding volumes stay only where a
+level-of-detail tool reads them (switches and the roots). Caldera's assemblies shrink by about half
+(nodes and JSON); a small scene keeps one node per prim. An asset that fails to scan or convert is
+reported and left out; the others go on.
+
+Leaves keep one mesh per USD mesh, as authored. `--leaf-merge material` (Advanced settings: Leaf
+meshes) merges each asset's meshes into one mesh with a primitive per material, the parts' names
+kept in the primitive's extras. On Caldera's airfield it halves the load time and cuts the
+ray-tracing memory by a third; frame time and image are unchanged. A look can also leave
+placements out by prim name (`exclude` in the recipe; Caldera's drops its occluder volumes and an
+editor marker).
+
+### gltf-look.py
+
+Located in `utils/gltf-look.py` (Python 3 only). Gives a glTF file materials made from its material
+names, for scenes that name their materials and define none (Caldera's `plaster_stucco_beige_01`):
+a base family per keyword (wood, metal, plaster, glass...), colour and finish words (`beige`, `dark`,
+`worn`, `polished`), and a small variation per name. Only the materials a converter made up (what
+`usd-to-gltf.py` writes for a surface without a material) change, unless `--everything`.
+
+```bash
+py utils/gltf-look.py scene.gltf --in-place --recipe names --report
+```
+
+Recipes are JSON files in `utils/usd_gltf/looks/` (`names.json`, and `caldera.json`, which extends
+it with what to drop and the ocean) or anywhere else; `utils/usd_gltf/looks/__init__.py` documents
+the format. `--report` lists the families used and the names none matched, to extend a recipe with.
+
 ### gltf-material-modifier.py
 
 Located in `utils/gltf-material-modifier.py`. A Python 3 script to batch-modify materials in a glTF file and optionally reorient the scene from Z-up to Y-up.
@@ -874,6 +1064,7 @@ usage: gltf-material-modifier.py [-h] [--metallic METALLIC] [--roughness ROUGHNE
 **Running on a non-NVIDIA GPU (AMD)**
 - The renderer targets NVIDIA RTX; other ray-tracing GPUs run with reduced features. On AMD, DLSS, OptiX, SER and opacity micromaps are unavailable, and the path tracer always uses the Ray Tracing Pipeline (Ray Query is greyed out).
 - Use the release binaries, or build with `-DSHADER_DEBUG_LEVEL=0` (or `1`): AMD's driver crashes compiling shaders that carry full debug info, which a default local build embeds.
+- A GPU without hardware ray tracing (for example, many integrated GPUs) cannot run the renderer: it logs the missing Vulkan extensions and exits, with a message box on Windows.
 - `--device <index>` selects a GPU on a multi-GPU system.
 
 **DLSS not available**

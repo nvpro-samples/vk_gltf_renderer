@@ -211,6 +211,13 @@ GltfRenderer::GltfRenderer(nvutils::ParameterRegistry* paramReg, const nvutils::
                   "Compile gltf_pathtrace.slang with GLTF_USE_* gates specialized per scene "
                   "(no runtime MAT_EXT_* changes; rebuilt when the scene's material extensions change). Default on."},
                  &m_resources.settings.optimalShader, Persist::eYes);
+  // The probe runs once per accumulation, so a change has to start a new one
+  m_settings.add({.name = "ptCameraMedium",
+                  .help = "PathTracer: Find the volume medium the camera starts in [Auto:0, On:1, Off:2]. Off for assets "
+                          "whose volume surfaces are wound inward (the camera lands inside an opaque medium and the "
+                          "scene renders black)",
+                  .callbackSuccess = [this](const nvutils::ParameterBase* const) { resetFrame(); }},
+                 (int*)&m_resources.settings.cameraMedium, Persist::eYes, 0, 2);
   m_settings.add({"useSolidBackground", "Use solid color background"}, &m_resources.settings.useSolidBackground, Persist::eYes, true);
   m_settings.addVector({"solidBackgroundColor", "Solid Background Color"}, &m_resources.settings.solidBackgroundColor, Persist::eYes);
   // Bounds mirror the "Max Samples" slider in PathTracer::onUIRender.
@@ -618,6 +625,7 @@ GltfRenderer::GltfRenderer(nvutils::ParameterRegistry* paramReg, const nvutils::
                           }
                         },
                     .selectSceneNode = [this](int index) { selectSceneNodeFromScript(index); },
+                    .pickSceneNode   = [this](int index) { pickSceneNodeFromScript(index); },
                 });
 
   // Initialize camera manipulator
@@ -841,6 +849,7 @@ void GltfRenderer::onAttach(nvapp::Application* app)
   // Wire the create-catalog hook up front so the menu-bar "Create" works with nothing loaded:
   // it stands up an empty, UI-wired scene on demand (wireSceneToUi re-sets this same hook later).
   m_sceneBrowser.setBeforeCreateCallback([this] { ensureEmptyScene(); });
+  m_sceneBrowser.setOpenSceneCallback([this](const std::filesystem::path& p) { m_pendingOpenScene = p; });
 
   // The Environment panel. It edits Settings through m_resources directly; everything below is a
   // consequence an edit has for the renderer, which the panel has no business knowing how to do.
@@ -1325,6 +1334,8 @@ void GltfRenderer::onUIRender()
     m_settings.runPostRestoreHooks();
   }
 
+  if(!m_pendingOpenScene.empty())  // frame-top: replacing the scene mid-panel would dangle the scene graph rows
+    replaceSceneAsync(std::exchange(m_pendingOpenScene, {}));
   applyPendingAuthoredSky();         // frame-top: adopt a loaded scene's OMI sky, after the ini restore above
   applyPendingSkyPresets();          // frame-top: start-up presets, after the scene's sky so they win over it
   applyPendingEnvironmentRefresh();  // frame-top: re-bake / rebind the environment after a sky change (see method)
@@ -1395,7 +1406,8 @@ void GltfRenderer::onRender(VkCommandBuffer cmd)
   if(isAutomatedRun())
     m_loadPipeline.drain();
   else if(m_loadPipeline.poll())
-    return;  // Still loading -- give control back to the UI
+    return;                 // Still loading -- give control back to the UI
+  m_busy.progress().end();  // A load reports until its GPU work has run (no-op otherwise)
 
   // Preview re-bake for a control that is being dragged. Unlike the commit path this records into
   // the frame's own command buffer and waits on nothing, so it belongs here rather than in
@@ -1538,6 +1550,10 @@ void GltfRenderer::onRender(VkCommandBuffer cmd)
   {
     resetFrame();
   }
+  // A static scene gets its TLAS once its BLAS are compacted on the load pipeline, so an acceleration
+  // structure rebuild queued this frame (updateSceneChanges_BlasRebuild) leaves nothing to trace yet.
+  if(m_resources.sceneRtx.topLevelAS() == VK_NULL_HANDLE)
+    return;
   refreshSampleTargets();                    // --outputSamples: the stops this frame may end on
   bool frameChanged = updateFrameCounter();  // Check if the frame counter has changed
 
@@ -1727,6 +1743,12 @@ void GltfRenderer::onLastHeadlessFrame()
   m_benchmark.finishHeadlessTiming();
 }
 
+// Load progress: the last stage of a load, from the worker's end until its GPU work has run: the
+// scene upload, then the BLAS passes (each compacted before the next on static scenes) and the TLAS.
+// They run on the load pipeline behind each other with no finer progress to observe, so they are one
+// stage.
+constexpr const char* kGpuLoadStage = "Uploading to the GPU, building acceleration structures";
+
 //--------------------------------------------------------------------------------------------------
 // Add another glTF into the current scene, either embedded (merge) or linked (glTF 2.1 external
 // asset reference). Shared worker for onMergeScene()/onReferenceScene(): the two modes differ only
@@ -1755,6 +1777,8 @@ void GltfRenderer::addSceneFromFile(const std::filesystem::path& filename, bool 
 
   // Set busy BEFORE starting the worker thread to prevent UI access during scene modification
   m_busy.start(asReference ? "Referencing Scene" : "Merging Scene");
+  m_busy.progress().begin(std::string(asReference ? "Referencing " : "Merging ") + nvutils::utf8FromPath(filename.filename()));
+  m_resources.getScene()->setLoadProgress(&m_busy.progress());
 
   std::thread([=, this]() {
     nvvkgltf::Scene* scene = m_resources.getScene();
@@ -1763,6 +1787,8 @@ void GltfRenderer::addSceneFromFile(const std::filesystem::path& filename, bool 
     // (eMergeAppend). An empty / texture-less base carries 1x1 GPU dummy defaults whose sizes don't match
     // the model, so it still needs a full rebuild.
     const bool wasTextured = scene && !scene->getModel().images.empty() && !scene->getModel().textures.empty();
+
+    m_busy.progress().stage("Reading glTF");
 
     const int         nodeIdx = asReference ? scene->referenceScene(filename) :
                                               scene->mergeScene(filename, static_cast<uint32_t>(m_maxTextures));
@@ -1783,6 +1809,7 @@ void GltfRenderer::addSceneFromFile(const std::filesystem::path& filename, bool 
     {
       LOGE("Failed to %s scene: %s\n", asReference ? "reference" : "merge", name.c_str());
     }
+    m_busy.progress().stage(kGpuLoadStage);
     m_busy.stop();
   }).detach();
 }
@@ -1834,10 +1861,12 @@ void GltfRenderer::onFileDrop(const std::filesystem::path& filename)
     cleanupScene();  // also frees rasterizer record cmd + clears sort state via onSceneInvalidated()
 
     m_busy.start("Loading Descriptor");
+    m_busy.progress().begin("Loading " + nvutils::utf8FromPath(filename.filename()));
     m_imageSaveFilename = std::filesystem::path(filename.stem()).replace_extension(".jpg");
     std::thread([=, this]() {
       m_lastSceneDirectory = filename.parent_path();
       createSceneFromDescriptor(filename);
+      m_busy.progress().stage(kGpuLoadStage);
       m_busy.stop();
     }).detach();
   }
@@ -1877,18 +1906,7 @@ void GltfRenderer::onFileDrop(const std::filesystem::path& filename)
     }
     else
     {
-      m_loadPipeline.clear();
-      cleanupScene();  // also frees rasterizer record cmd + clears sort state via onSceneInvalidated()
-
-      // Set busy BEFORE starting the worker thread to prevent re-entrant drops
-      m_busy.start("Loading");
-      m_imageSaveFilename = std::filesystem::path(filename.stem()).replace_extension(".jpg");
-
-      std::thread([=, this]() {
-        m_lastSceneDirectory = filename.parent_path();
-        createScene(filename);
-        m_busy.stop();
-      }).detach();
+      replaceSceneAsync(filename);
     }
   }
   else if(isEnvImageExtension(filename))
@@ -1899,6 +1917,32 @@ void GltfRenderer::onFileDrop(const std::filesystem::path& filename)
     calibrateFireflyClamp();
   }
 
+  resetFrame();
+}
+
+//--------------------------------------------------------------------------------------------------
+// Replace the current scene with a glTF/OBJ file, loading on a worker thread behind the busy indicator.
+// Shared by a plain file drop and the "open referenced glTF" buttons, which must not read drop modifiers.
+void GltfRenderer::replaceSceneAsync(const std::filesystem::path& filename)
+{
+  if(m_busy.isBusy())
+    return;
+
+  vkQueueWaitIdle(m_app->getQueue(0).queue);
+  m_loadPipeline.clear();
+  cleanupScene();  // also frees rasterizer record cmd + clears sort state via onSceneInvalidated()
+
+  // Set busy BEFORE starting the worker thread to prevent re-entrant drops
+  m_busy.start("Loading");
+  m_busy.progress().begin("Loading " + nvutils::utf8FromPath(filename.filename()));
+  m_imageSaveFilename = std::filesystem::path(filename.stem()).replace_extension(".jpg");
+
+  std::thread([=, this]() {
+    m_lastSceneDirectory = filename.parent_path();
+    createScene(filename);
+    m_busy.progress().stage(kGpuLoadStage);
+    m_busy.stop();
+  }).detach();
   resetFrame();
 }
 
@@ -3035,14 +3079,23 @@ void GltfRenderer::silhouette(VkCommandBuffer cmd)
     NVVK_DBG_SCOPE(cmd);  // <-- Helps to debug in NSight
     auto timerSection = m_profilerGpuTimer.cmdFrameSection(cmd, __FUNCTION__);
 
-    // Rebuild selection bitmask and ensure GPU buffer exists and is up to date.
+    // Rebuild the selection bitmask and upload it only when the selection or the render-node count
+    // changed: the GPU buffer keeps it between frames.
     int numRenderNodes = m_resources.getScene() && m_resources.getScene()->valid() ?
                              static_cast<int>(m_resources.getScene()->getRenderNodes().size()) :
                              0;
-    m_resources.updateSelectionBitMask(numRenderNodes);
+
+    const bool upToDate = m_resources.uploadedSelectionRevision == m_resources.selectedRenderNodes.revision()
+                          && m_resources.uploadedSelectionRenderNodes == numRenderNodes
+                          && m_resources.bSelectionBitMask.buffer != VK_NULL_HANDLE;
+    const bool rebuild = !upToDate;
+    if(rebuild)
+      m_resources.updateSelectionBitMask(numRenderNodes);
     const VkDeviceSize bitmaskBytes = m_resources.selectionBitMask.size() * sizeof(uint32_t);
-    if(bitmaskBytes > 0)
+    if(rebuild && bitmaskBytes > 0)
     {
+      m_resources.uploadedSelectionRevision    = m_resources.selectedRenderNodes.revision();
+      m_resources.uploadedSelectionRenderNodes = numRenderNodes;
       // Build or update the selection bitmask buffer
       if(m_resources.bSelectionBitMask.buffer == VK_NULL_HANDLE || m_resources.bSelectionBitMask.bufferSize < bitmaskBytes)
       {
@@ -3199,6 +3252,11 @@ void GltfRenderer::setBackgroundOptimalShader(bool enable)
   m_resources.settings.backgroundOptimalShader = enable;
 }
 
+void GltfRenderer::setCompileInline(bool enable)
+{
+  m_resources.settings.compileInline = enable;
+}
+
 //--------------------------------------------------------------------------------------------------
 // Names of the extensions enabled on the device. Call before the path tracer is attached: the
 // vk_oidn denoiser picks its optional features (tensor cores, ...) from them.
@@ -3245,6 +3303,7 @@ bool GltfRenderer::createScene(const std::filesystem::path& sceneFilename)
     readerConfig.mtl_search_path = std::filesystem::path(filename).parent_path().string();
     tinyobj::ObjReader reader;
 
+    m_busy.progress().stage("Reading OBJ");
     bool        result = reader.ParseFromFile(nvutils::utf8FromPath(filename), readerConfig);
     std::string warn   = reader.Warning();
     std::string error  = reader.Error();
@@ -3255,7 +3314,8 @@ bool GltfRenderer::createScene(const std::filesystem::path& sceneFilename)
       tinygltf::Model model;
       converter.convert(model, reader);
       auto scn = std::make_unique<nvvkgltf::Scene>();
-      scn->takeModel(std::move(model));
+      scn->setLoadProgress(&m_busy.progress());
+      scn->takeModel(std::move(model), filename);
       m_resources.scene = std::move(scn);
     }
     else
@@ -3271,6 +3331,7 @@ bool GltfRenderer::createScene(const std::filesystem::path& sceneFilename)
     LOGI("Loading scene: %s\n", nvutils::utf8FromPath(filename).c_str());
     auto scn = std::make_unique<nvvkgltf::Scene>();
     scn->supportedExtensions().insert(EXT_TEXTURE_WEBP_EXTENSION_NAME);  // Register support for WebP images in glTF (local to this project)
+    scn->setLoadProgress(&m_busy.progress());
     if(!scn->load(filename))
     {
       LOGW("Error loading scene: %s\n", nvutils::utf8FromPath(filename).c_str());
@@ -3381,6 +3442,8 @@ void GltfRenderer::wireSceneToUi()
   m_inspector.setHostServices(host);
   m_inspector.setViewImageCallback([this](int imageIndex) { m_sceneBrowser.openImageViewer(imageIndex); });
   m_inspector.setImageThumbnailCallback([this](int i) { return thumbnailForImage(i); });
+  m_inspector.setFocusSelectionCallback([this] { m_sceneBrowser.focusOnSelection(); });
+  m_inspector.setOpenSceneCallback([this](const std::filesystem::path& p) { m_pendingOpenScene = p; });
 }
 
 // Push a transient notification (isError = red) to the on-screen toast overlay.
@@ -3435,6 +3498,10 @@ void GltfRenderer::createSceneFromDescriptor(const std::filesystem::path& descri
   for(const auto& [modelIdx, instances] : instancesByModel)
   {
     const auto& modelEntry = desc.models[modelIdx];
+    // One stage per model, counted in instances. The scene reports its own stages only from the GPU
+    // build on (setLoadProgress below): each referenceScene() here would otherwise add a row.
+    m_busy.progress().stage("Referencing " + nvutils::utf8FromPath(modelEntry.resolvedPath.filename()),
+                            static_cast<uint32_t>(instances.size()));
     // referenceScene() loads the file on first use and, for repeats of the same model, duplicates the
     // instance so geometry (meshes/BLAS) is shared. Each call returns the editable instance node that
     // carries the externalAsset link; we only set its transform/name.
@@ -3450,6 +3517,7 @@ void GltfRenderer::createSceneFromDescriptor(const std::filesystem::path& descri
       scene->editor().setNodeTRS(instanceNodeIdx, inst.translation, inst.rotation, inst.scale);
       if(!inst.name.empty())
         scene->getModel().nodes[instanceNodeIdx].name = inst.name;
+      m_busy.progress().advance(1, inst.name);
     }
   }
 
@@ -3462,6 +3530,7 @@ void GltfRenderer::createSceneFromDescriptor(const std::filesystem::path& descri
   scene->setCurrentScene(scene->getCurrentScene());  // Final reparse: world matrices + render nodes
 
   // Publish to resources only when fully constructed (UI thread can now see it)
+  scene->setLoadProgress(&m_busy.progress());
   m_resources.scene = std::move(scn);
   createVulkanScene();
   if(ui::animation::hasPlayableAnimation(scene))
@@ -3732,16 +3801,18 @@ void GltfRenderer::createVulkanScene()
 
   buildAccelerationStructures();
 
-  // One line to compare scenes by: ray tracing size, and the GPU memory the scene was given (the BLAS
-  // before compaction, which runs later on non-animated scenes).
+  // One line to compare scenes by: ray tracing size, and the GPU memory the scene was given. The BLAS
+  // are not built yet: this is their size before compaction, and enqueueTopLevelAccelerationStructure()
+  // reports what is left after it.
   const nvvkgltf::Scene& scene = *m_resources.getScene();
   constexpr double       kMB   = 1024.0 * 1024.0;
-  LOGI("Scene: %zu render primitives (BLAS), %zu render nodes (TLAS instances); GPU memory: scene %.1f MB, ray tracing %.1f MB (BLAS %.1f MB)\n",
+  LOGI("Scene: %zu render primitives (BLAS), %zu render nodes (TLAS instances); GPU memory: scene %.1f MB, BLAS %.1f MB\n",
        scene.getRenderPrimitives().size(), scene.getRenderNodes().size(),
-       sumTrackerCurrentBytes(m_resources.sceneVk.getMemoryTracker()) / kMB,
-       sumTrackerCurrentBytes(m_resources.sceneRtx.getMemoryTracker()) / kMB,
-       m_resources.sceneRtx.getMemoryTracker().getStats("BLAS").currentBytes / kMB);
+       sumTrackerCurrentBytes(m_resources.sceneVk.getMemoryTracker()) / kMB, m_resources.sceneRtx.blasBuildBytes() / kMB);
 }
+
+// BLAS are built in passes of about this much acceleration-structure memory each.
+constexpr VkDeviceSize kBlasBuildMemoryBudget = 512ULL * 1024 * 1024;
 
 //--------------------------------------------------------------------------------------------------
 // Build BLAS and TLAS acceleration structures for ray tracing
@@ -3757,57 +3828,12 @@ void GltfRenderer::buildAccelerationStructures()
   // Create the bottom-level acceleration structure descriptors (no building yet)
   m_resources.sceneRtx.createBottomLevelAccelerationStructure(*m_resources.getScene(), m_resources.sceneVk, flags);
 
-  // Build the bottom-level acceleration structure
-  // Memory-conscious approach: build within a fixed memory budget using multiple command buffers if needed
-  // Each build command is queued separately and (for non-animated scenes) followed by compaction to optimize memory usage
-  {
-    bool finished = false;
-
-    // Building BLAS within a memory budget, which could involve multiple calls to cmdBuildBottomLevelAccelerationStructure
-    do
-    {
-      VkCommandBuffer cmd{};
-      nvvk::beginSingleTimeCommands(cmd, m_device, m_transientCmdPool);
-      constexpr VkDeviceSize kBlasBuildMemoryBudget = 512ULL * 1024 * 1024;  // 512 MB per build pass
-      finished = m_resources.sceneRtx.cmdBuildBottomLevelAccelerationStructure(cmd, kBlasBuildMemoryBudget);
-      NVVK_CHECK(vkEndCommandBuffer(cmd));
-      if(isAnimated)
-      {
-        m_loadPipeline.enqueue(cmd);
-      }
-      else
-      {
-        m_loadPipeline.enqueue(cmd, [this] {
-          VkCommandBuffer compactCmd{};
-          nvvk::beginSingleTimeCommands(compactCmd, m_device, m_transientCmdPool);
-          m_resources.sceneRtx.cmdCompactBlas(compactCmd);
-          NVVK_CHECK(vkEndCommandBuffer(compactCmd));
-          m_loadPipeline.enqueue(compactCmd);
-        });
-      }
-
-    } while(!finished);
-
-    // Track all BLAS allocations now that they're all built
-    m_resources.sceneRtx.trackBlasMemory();
-
-    // Queue TLAS building for after all BLAS work completes
-    // TLAS is the top-level structure referencing all bottom-level acceleration structures
-    {
-      VkCommandBuffer cmd{};
-      nvvk::beginSingleTimeCommands(cmd, m_device, m_transientCmdPool);
-      m_resources.sceneRtx.cmdCreateBuildTopLevelAccelerationStructure(cmd, m_resources.staging, *m_resources.getScene());
-      m_resources.staging.cmdUploadAppended(cmd);
-      NVVK_CHECK(vkEndCommandBuffer(cmd));
-      m_loadPipeline.enqueue(cmd, [this] { m_resources.staging.releaseCompletedAllocations(true); });
-    }
-  }
-
   // Avoid double-build: whoever called us (createVulkanScene, rebuildVulkanSceneInternal, or updateSceneChanges) just queued BLAS+TLAS.
   if(m_resources.getScene())
     m_resources.getScene()->getDirtyFlags().primitivesChanged = false;
 
-  // GPU transform SSBOs (hierarchy, matrices, RenderNodeGpuMapping). Queue after TLAS instance buffer exists.
+  // GPU transform SSBOs (hierarchy, matrices, RenderNodeGpuMapping). Queued before the acceleration
+  // structures: the TLAS must be the last load work, since its completion releases all staging.
   if(m_resources.getScene())
   {
     m_resources.transformCompute.createGpuBuffers(m_resources.staging, *m_resources.getScene());
@@ -3817,6 +3843,73 @@ void GltfRenderer::buildAccelerationStructures()
     NVVK_CHECK(vkEndCommandBuffer(upCmd));
     m_loadPipeline.enqueue(upCmd);
   }
+
+  if(isAnimated)
+  {
+    // Building BLAS within a memory budget, which could involve multiple calls to cmdBuildBottomLevelAccelerationStructure
+    bool finished = false;
+    do
+    {
+      VkCommandBuffer cmd{};
+      nvvk::beginSingleTimeCommands(cmd, m_device, m_transientCmdPool);
+      finished = m_resources.sceneRtx.cmdBuildBottomLevelAccelerationStructure(cmd, kBlasBuildMemoryBudget);
+      NVVK_CHECK(vkEndCommandBuffer(cmd));
+      m_loadPipeline.enqueue(cmd);
+    } while(!finished);
+    enqueueTopLevelAccelerationStructure();
+  }
+  else
+  {
+    enqueueCompactedBlasPass();
+  }
+}
+
+//--------------------------------------------------------------------------------------------------
+// Static scenes: build one BLAS pass, compact it once it has run (the compacted sizes are read back),
+// free its originals once the copies have run, and only then record the next pass. BLAS memory peaks
+// at the compacted BLAS so far plus one pass. The TLAS is built after the last pass, so it only ever
+// references compacted BLAS.
+//
+void GltfRenderer::enqueueCompactedBlasPass()
+{
+  VkCommandBuffer cmd{};
+  nvvk::beginSingleTimeCommands(cmd, m_device, m_transientCmdPool);
+  const bool lastPass = m_resources.sceneRtx.cmdBuildBottomLevelAccelerationStructure(cmd, kBlasBuildMemoryBudget);
+  NVVK_CHECK(vkEndCommandBuffer(cmd));
+
+  m_loadPipeline.enqueue(cmd, [this, lastPass] {
+    VkCommandBuffer compactCmd{};
+    nvvk::beginSingleTimeCommands(compactCmd, m_device, m_transientCmdPool);
+    m_resources.sceneRtx.cmdCompactBlas(compactCmd);
+    NVVK_CHECK(vkEndCommandBuffer(compactCmd));
+
+    m_loadPipeline.enqueue(compactCmd, [this, lastPass] {
+      m_resources.sceneRtx.destroyNonCompactedBlas();
+      if(lastPass)
+        enqueueTopLevelAccelerationStructure();
+      else
+        enqueueCompactedBlasPass();
+    });
+  });
+}
+
+//--------------------------------------------------------------------------------------------------
+// Build the TLAS over the current BLAS. This is the last command of a load: once it has run, no
+// queued work still reads staging, so all of it is released.
+//
+void GltfRenderer::enqueueTopLevelAccelerationStructure()
+{
+  VkCommandBuffer cmd{};
+  nvvk::beginSingleTimeCommands(cmd, m_device, m_transientCmdPool);
+  m_resources.sceneRtx.cmdCreateBuildTopLevelAccelerationStructure(cmd, m_resources.staging, *m_resources.getScene());
+  NVVK_CHECK(vkEndCommandBuffer(cmd));
+  m_loadPipeline.enqueue(cmd, [this] {
+    m_resources.staging.releaseCompletedAllocations(true);
+    constexpr double kMB = 1024.0 * 1024.0;
+    LOGI("Acceleration structures: BLAS %.1f MB (peak %.1f MB), ray tracing %.1f MB\n",
+         m_resources.sceneRtx.getMemoryTracker().getStats("BLAS").currentBytes / kMB,
+         m_resources.sceneRtx.blasPeakBytes() / kMB, sumTrackerCurrentBytes(m_resources.sceneRtx.getMemoryTracker()) / kMB);
+  });
 }
 
 //--------------------------------------------------------------------------------------------------
@@ -4118,8 +4211,8 @@ void GltfRenderer::resetFrame()
 // index, exactly as shown in the Scene Browser tree. This routes through the shared SceneSelection so the
 // Scene Browser highlight, the Inspector contents, and the render-node selection set all update precisely
 // as they would from a click in the tree (selectNode emits NodeSelected, which the UI callback turns into
-// the selectedRenderNodes set). A negative or out-of-range index clears the selection. Used by the
-// windowed scripted-run harness so UI/UX changes to the scene list and inspector can be exercised and
+// the selectedRenderNodes set), and the Scene Browser expands and scrolls to the node, as on a pick. A
+// negative or out-of-range index clears the selection. Used by the windowed scripted-run harness so UI/UX changes to the scene list and inspector can be exercised and
 // captured with --uiScreenshot.
 void GltfRenderer::selectSceneNodeFromScript(int nodeIndex)
 {
@@ -4128,6 +4221,7 @@ void GltfRenderer::selectSceneNodeFromScript(int nodeIndex)
   if(nodeIndex >= 0 && nodeIndex < count)
   {
     m_sceneSelection.selectNode(nodeIndex);
+    m_sceneBrowser.focusOnSelection();
   }
   else
   {
@@ -4794,10 +4888,10 @@ bool GltfRenderer::updateSceneChanges(VkCommandBuffer cmd)
   bool renderNodeOrNodeDirty = df.allRenderNodesDirty || !df.renderNodesVk.empty() || scene->dirtyNodesReachGeometry();
 
   // Material edit may have added or removed a KHR_materials_* extension; refresh the
-  // scene feature set so optimal-mode shader rebuild picks it up. Cheap check (walk
-  // a few maps per material); only runs when materials are actually dirty.
+  // scene feature set so optimal-mode shader rebuild picks it up. Only the dirty materials
+  // are re-detected.
   if(!df.materials.empty())
-    m_resources.recomputeSceneFeatures(dlssGuideRequired());
+    m_resources.recomputeSceneFeatures(dlssGuideRequired(), &df.materials);
 
   // A material/light property changed (e.g. a KHR_interactivity pointer/set writing a
   // texture-transform offset, or a live Inspector edit) - this is an appearance discontinuity

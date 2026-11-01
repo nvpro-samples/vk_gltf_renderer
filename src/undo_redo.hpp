@@ -547,6 +547,29 @@ private:
 };
 
 //--------------------------------------------------------------------------------------------------
+// RemoveLightCommand - Undo/redo for removing a light nothing references (SceneEditor::removeLightAt)
+//
+// Typically a light left behind by deleting the nodes of placed glTF 2.1 content. Undo re-inserts the
+// stored copy at its original index; both directions renumber the lights after it.
+//--------------------------------------------------------------------------------------------------
+
+class RemoveLightCommand : public ICommand
+{
+public:
+  RemoveLightCommand(nvvkgltf::Scene& scene, int lightIndex, const tinygltf::Light& removedLight);
+  ~RemoveLightCommand() override;
+
+  void                      execute() override;  // redo: remove again
+  void                      undo() override;     // re-insert the stored light
+  [[nodiscard]] std::string description() const override;
+
+private:
+  nvvkgltf::Scene&                 m_scene;
+  int                              m_lightIndex = -1;
+  std::unique_ptr<tinygltf::Light> m_light;
+};
+
+//--------------------------------------------------------------------------------------------------
 // ImportImageAsTextureCommand - Undo/redo for importing a file as a new image + texture.
 //
 // SceneEditor::importImageAsTexture appends both at the tail of model.images / model.textures. This

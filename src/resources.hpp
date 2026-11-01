@@ -77,6 +77,16 @@ enum class DisplayBuffer
   eAgenticBeautified,  // External image-to-image result from the agentic bridge
 };
 
+// Whether the path tracer looks for a medium the camera starts in (PathTracer::probeCameraMedium).
+// The probe follows the centre camera ray and trusts triangle winding, so an asset whose volume
+// surfaces are wound inward can make it put the camera inside an opaque medium; Off is the way out.
+enum class CameraMediumMode
+{
+  eAuto,  // Probe when the scene has a KHR_materials_volume material (default)
+  eOn,    // Probe whenever the scene has a volume, whatever Auto learns to skip
+  eOff,   // Never probe: every camera path starts in clear air
+};
+
 enum DirtyFlags
 {
   eDirtyTangents,  // When tangents need to be pushed to GPU
@@ -290,10 +300,15 @@ struct Settings
 
   // Enable scene-based shader optimization. When true, only features used by the scene are
   // enabled, reducing shader size and register usage at the cost of a recompile per scene change.
-  bool optimalShader = true;
+  bool             optimalShader = true;
+  CameraMediumMode cameraMedium  = CameraMediumMode::eAuto;  // See CameraMediumMode
   // Build the optimized shader in the background while the all-features one renders (set at startup).
   // Off for headless, scripted and benchmark runs, so they render and time only the shader they ask for.
   bool backgroundOptimalShader = true;
+  // Compile shaders and build pipelines on the frame that needs them instead of on a worker (set at
+  // startup). On for headless, scripted and benchmark runs: frames that wait for a background
+  // compile draw nothing, and a script counting frames would time and capture those empty frames.
+  bool compileInline = false;
 
 #ifndef NDEBUG
   bool showGridStyleWindow  = false;  // Show Grid Style debug window
@@ -419,12 +434,48 @@ struct Resources
   bool dlssInstanceMotionActive{false};
 
   // Selection: set of render node indices (TLAS order). One primitive = set of size 1; node + branch = many.
-  std::unordered_set<int> selectedRenderNodes;
+  // Every change bumps revision(), so the silhouette rebuilds and uploads its bitmask only when the
+  // selection changed: on a city-scale scene the mask is one bit for each of millions of render nodes.
+  class RenderNodeSelection
+  {
+  public:
+    RenderNodeSelection& operator=(std::initializer_list<int> ids)
+    {
+      m_set = ids;
+      ++m_revision;
+      return *this;
+    }
+    void clear()
+    {
+      if(!m_set.empty())
+        ++m_revision;
+      m_set.clear();
+    }
+    void insert(int id)
+    {
+      if(m_set.insert(id).second)
+        ++m_revision;
+    }
+    [[nodiscard]] size_t   size() const { return m_set.size(); }
+    [[nodiscard]] bool     empty() const { return m_set.empty(); }
+    [[nodiscard]] size_t   count(int id) const { return m_set.count(id); }
+    [[nodiscard]] uint64_t revision() const { return m_revision; }
+    [[nodiscard]] auto     begin() const { return m_set.begin(); }
+    [[nodiscard]] auto     end() const { return m_set.end(); }
+    operator const std::unordered_set<int>&() const { return m_set; }
 
-  // Selection bitmask for silhouette: one bit per render node (GPU buffer + CPU mirror)
+  private:
+    std::unordered_set<int> m_set;
+    uint64_t                m_revision = 0;
+  };
+  RenderNodeSelection selectedRenderNodes;
+
+  // Selection bitmask for silhouette: one bit per render node (GPU buffer + CPU mirror), and what the
+  // GPU copy was last built from.
   std::vector<uint32_t> selectionBitMask;
   nvvk::Buffer          bSelectionBitMask;
-  bool                  selectionDirty = true;
+  uint64_t              uploadedSelectionRevision    = ~uint64_t(0);
+  int                   uploadedSelectionRenderNodes = -1;
 
   // Build CPU-side selection bitmask from selectedRenderNodes. Cleared and refilled each call.
   void updateSelectionBitMask(int numRenderNodes)
@@ -451,14 +502,36 @@ struct Resources
 
   // Scene feature set (KHR_materials_* and denoiser guide buffer);
   // updated via recomputeSceneFeatures() on scene/material/denoiser changes.
-  nvvkgltf::SceneFeatureSet currentFeatureSet{};
+  nvvkgltf::SceneFeatureSet              currentFeatureSet{};
+  std::vector<nvvkgltf::SceneFeatureSet> materialFeatures;  // per material, unpromoted (recomputeSceneFeatures)
 
-  // Update currentFeatureSet from the scene. Returns true if changed.
-  bool recomputeSceneFeatures(bool dlssGuideActive)
+  // Update currentFeatureSet from the scene. Returns true if changed. With `dirtyMaterials`, only those
+  // materials are re-detected (a live material edit on a scene of 100k+ materials); the others keep
+  // the features found last time.
+  bool recomputeSceneFeatures(bool dlssGuideActive, const std::unordered_set<int>* dirtyMaterials = nullptr)
   {
     nvvkgltf::SceneFeatureSet newSet{};
     if(scene)
-      newSet = nvvkgltf::detectSceneFeatures(scene->getModel());
+    {
+      const std::vector<tinygltf::Material>& materials = scene->getModel().materials;
+      if(!dirtyMaterials || materialFeatures.size() != materials.size())
+      {
+        materialFeatures.resize(materials.size());
+        for(size_t i = 0; i < materials.size(); ++i)
+          materialFeatures[i] = nvvkgltf::detectMaterialFeatures(materials[i]);
+      }
+      else
+      {
+        for(int i : *dirtyMaterials)
+          if(i >= 0 && i < static_cast<int>(materials.size()))
+            materialFeatures[i] = nvvkgltf::detectMaterialFeatures(materials[i]);
+      }
+      for(size_t i = 0; i < materialFeatures.size(); ++i)
+        newSet.merge(materialFeatures[i]);
+      newSet.promote();
+    }
+    else
+      materialFeatures.clear();
     newSet.set(nvvkgltf::SceneFeatureSet::eDlssGuide, dlssGuideActive);
     const bool changed = (newSet != currentFeatureSet);
     currentFeatureSet  = newSet;

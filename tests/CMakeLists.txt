@@ -72,6 +72,10 @@ set(TEST_SOURCES
     # Phase 5c: .sky.json presets -- round trip, the sun angle OMI has no field for, strangers' keys
     test_sky_preset.cpp
     ${CMAKE_SOURCE_DIR}/src/sky_preset.cpp
+    # The live scene's sky sun: resolved on load, rebuild and SetSkySunCommand, never per frame
+    test_sky_sun_scene.cpp
+    ${CMAKE_SOURCE_DIR}/src/undo_redo.cpp
+    ${CMAKE_SOURCE_DIR}/src/scene_selection.cpp
     # Phase 5a: NOAA sun position, checked against astronomy rather than recorded output
     test_sun_position.cpp
     ${CMAKE_SOURCE_DIR}/src/sun_position.cpp
@@ -79,6 +83,9 @@ set(TEST_SOURCES
     test_denoiser_schedule.cpp
     # Path tracer samples per frame: ending on stops, the Auto SPP controller (header only)
     test_sample_schedule.cpp
+    # Scene feature detection: per-material sets and their promoted union (optimal-shader gates)
+    test_scene_features.cpp
+    ${CMAKE_SOURCE_DIR}/src/scene_feature_detection.cpp
     # Need tinygltf implementation
     ${CMAKE_SOURCE_DIR}/src/tiny_stb_implementation.cpp
     # Optional external generation bridge

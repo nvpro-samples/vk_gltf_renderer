@@ -322,7 +322,8 @@ void GltfRenderer::updateSelectionFromPick(int renderNodeIdx, const glm::vec3& s
   }
 
   // The picked node is read-only (e.g. part of a referenced external asset). Select the first
-  // editable ancestor instead, so the user can still change its transformation.
+  // editable ancestor instead, so the user can still change its transformation. The selection keeps
+  // the render node that was hit, so the Inspector can lead on to the part that was clicked.
   if(scene->isNodeReadOnly(renderNodes[renderNodeIdx].refNodeID))
   {
     int editableNodeID = renderNodes[renderNodeIdx].refNodeID;
@@ -331,7 +332,7 @@ void GltfRenderer::updateSelectionFromPick(int renderNodeIdx, const glm::vec3& s
 
     if(editableNodeID >= 0)
     {
-      m_sceneSelection.selectNode(editableNodeID, selectionPoint, selectionRayOrigin);
+      m_sceneSelection.selectNode(editableNodeID, selectionPoint, selectionRayOrigin, renderNodeIdx);
       m_sceneBrowser.focusOnSelection();
     }
     else
@@ -341,22 +342,12 @@ void GltfRenderer::updateSelectionFromPick(int renderNodeIdx, const glm::vec3& s
     return;
   }
 
-  // An instance of a placed external asset drawn without a node of its own: select its placing node.
-  if(scene->isInstanceSetRenderNode(renderNodeIdx))
-  {
-    m_sceneSelection.selectNode(renderNodes[renderNodeIdx].refNodeID, selectionPoint, selectionRayOrigin);
-    m_sceneBrowser.focusOnSelection();
-    return;
-  }
-
-  // Regular case: select the picked primitive.
-  const auto& renderNode = renderNodes[renderNodeIdx];
-  int         nodeID     = renderNode.refNodeID;
-  int         primIndex  = scene->getPrimitiveIndexForRenderNode(renderNodeIdx);
-  int         meshID     = scene->getModel().nodes[nodeID].mesh;
-
-  m_resources.selectedRenderNodes = {renderNodeIdx};
-  m_sceneSelection.selectPrimitive(renderNodeIdx, nodeID, primIndex, meshID, selectionPoint, selectionRayOrigin);
+  // Select the picked primitive. An instance of a placed external asset drawn without a node of its
+  // own is a primitive of an instance-set entry: its node is the placing node (the one a transform
+  // edit moves) and its mesh the entry's, so the Inspector shows the placed mesh and its material.
+  const nvvkgltf::Scene::RenderNodePart part = scene->getRenderNodePart(renderNodeIdx);
+  m_resources.selectedRenderNodes            = {renderNodeIdx};
+  m_sceneSelection.selectPrimitive(renderNodeIdx, part.node, part.primitive, part.mesh, selectionPoint, selectionRayOrigin);
   m_sceneBrowser.focusOnSelection();
 }
 
@@ -383,21 +374,8 @@ nvutils::Bbox GltfRenderer::getRenderNodeBbox(int renderNodeIndex)
   glm::mat4 nodeWorld = scene->computeNodeWorldMatrix(renderNode.refNodeID);
 
   // Nodes drawn more than once (EXT_mesh_gpu_instancing, instance sets): one local matrix per render node.
-  const auto& gpuInstMap = scene->getRenderNodeLocalMatrices();
-  auto        instIt     = gpuInstMap.find(renderNode.refNodeID);
-  if(instIt != gpuInstMap.end() && !instIt->second.empty())
-  {
-    const auto& rnList = scene->getRenderNodeRegistry().getRenderNodesForNode(renderNode.refNodeID);
-    for(size_t k = 0; k < rnList.size(); ++k)
-    {
-      if(rnList[k] == renderNodeIndex)
-      {
-        if(k < instIt->second.size())
-          nodeWorld = nodeWorld * instIt->second[k];
-        break;
-      }
-    }
-  }
+  if(const glm::mat4* local = scene->getRenderNodeRegistry().getLocalMatrix(renderNodeIndex))
+    nodeWorld = nodeWorld * *local;
   return objBbox.transform(nodeWorld);
 }
 
@@ -824,8 +802,8 @@ void GltfRenderer::renderUI()
 
   ui::help::renderWindows(m_help, *m_cameraManip, m_commands, m_app->getPhysicalDevice());
 
-  // Show the busy window if the busy flag is set
-  if(m_busy.isBusy())
+  // Show the busy window while a worker is busy or a load is still running on the GPU
+  if(m_busy.isVisible())
   {
     m_busy.show();
   }
@@ -894,16 +872,15 @@ void GltfRenderer::renderUI()
 
       // One local matrix per render node, so per primitive for an EXT_mesh_gpu_instancing mesh.
       const tinygltf::Node& pending    = model.nodes[m_pendingDeleteNode];
-      const auto&           gpuInstMap = m_resources.getScene()->getRenderNodeLocalMatrices();
-      auto                  instIt     = gpuInstMap.find(m_pendingDeleteNode);
-      if(instIt != gpuInstMap.end() && !instIt->second.empty() && pending.mesh >= 0)
+      const size_t          locals     = m_resources.getScene()->getRenderNodeLocalMatrices(m_pendingDeleteNode).size();
+      if(locals > 0 && pending.mesh >= 0)
       {
         const size_t primitives = std::max<size_t>(1, model.meshes[pending.mesh].primitives.size());
         ImGui::TextColored(ImVec4(1.f, 0.6f, 0.2f, 1.f),
                            ICON_MS_WARNING
                            " This node uses EXT_mesh_gpu_instancing (%zu instances).\n"
                            "Deleting it will remove ALL instances.",
-                           instIt->second.size() / primitives);
+                           locals / primitives);
       }
 
       ImGui::Text("This will delete the node and all its children.");
@@ -1824,7 +1801,7 @@ void GltfRenderer::applyGltfCamera(int cameraIndex)
     return;
 
   // Get the node that contains this camera to clear its extras
-  int nodeIndex = m_sceneBrowser.getNodeForCamera(cameraIndex);
+  int nodeIndex = m_resources.getScene()->getCameraNode(cameraIndex);
   if(nodeIndex >= 0)
   {
     // Clear the camera extras so that eye/center/up are recalculated from the world matrix
@@ -1882,7 +1859,7 @@ void GltfRenderer::setGltfCameraFromView(int cameraIndex)
   }
 
   // Get the node that contains this camera
-  int nodeIndex = m_sceneBrowser.getNodeForCamera(cameraIndex);
+  int nodeIndex = m_resources.getScene()->getCameraNode(cameraIndex);
   if(nodeIndex < 0)
   {
     return;
@@ -1973,6 +1950,8 @@ void GltfRenderer::renderMemoryStatistics()
   const auto& animationTracker = m_resources.animationVk.getMemoryTracker();
   const auto& appTracker       = m_resources.appMemoryTracker;
 
+  std::string clipboardText;
+
   // Create sortable table with memory statistics
   ImGuiTableFlags tableFlags = ImGuiTableFlags_Borders | ImGuiTableFlags_RowBg | ImGuiTableFlags_SizingFixedFit | ImGuiTableFlags_Sortable;
   if(ImGui::BeginTable("MemoryStatsTable", 3, tableFlags))
@@ -1988,134 +1967,66 @@ void GltfRenderer::renderMemoryStatistics()
     const CategorySortBy             sortBy    = CategorySortBy(spec.ColumnIndex);
     const bool                       ascending = (spec.SortDirection == ImGuiSortDirection_Ascending);
 
-    // --- Scene (SceneVk) Section ---
-    ImGui::TableNextRow();
-    ImGui::TableNextColumn();
-    ImGui::TextColored(ImVec4(0.5f, 0.8f, 1.0f, 1.0f), "SCENE");
-    ImGui::TableNextColumn();
-    ImGui::TableNextColumn();
-
-    // Display SceneVk categories with sorting
-    for(const auto& categoryName : vkTracker.getActiveCategories(sortBy, ascending))
-    {
-      GpuMemoryStats stats = vkTracker.getStats(categoryName);
-
+    // Every row is drawn and appended to `clipboardText` (tab-separated) so the copy matches the table
+    clipboardText = "Category\tCurrent\tCount\n";
+    auto sectionRow = [&](const ImVec4& color, const char* title) {
       ImGui::TableNextRow();
       ImGui::TableNextColumn();
-      ImGui::Text("  %s", categoryName.c_str());
+      ImGui::TextColored(color, "%s", title);
       ImGui::TableNextColumn();
-      ImGui::Text("%s", formatBytes(stats.currentBytes).c_str());
       ImGui::TableNextColumn();
-      ImGui::Text("%u", stats.currentCount);
-    }
+      clipboardText += fmt::format("{}\n", title);
+    };
+    auto valueRow = [&](const ImVec4& color, const std::string& label, uint64_t bytes, uint32_t count) {
+      const auto size = formatBytes(bytes);
+      ImGui::TableNextRow();
+      ImGui::TableNextColumn();
+      ImGui::TextColored(color, "%s", label.c_str());
+      ImGui::TableNextColumn();
+      ImGui::TextColored(color, "%s", size.c_str());
+      ImGui::TableNextColumn();
+      ImGui::TextColored(color, "%u", count);
+      clipboardText += fmt::format("{}\t{}\t{}\n", label, size.c_str(), count);
+    };
+    const ImVec4 textColor = ImGui::GetStyleColorVec4(ImGuiCol_Text);
+    auto categoryRows      = [&](const auto& tracker) {
+      for(const auto& categoryName : tracker.getActiveCategories(sortBy, ascending))
+      {
+        GpuMemoryStats stats = tracker.getStats(categoryName);
+        valueRow(textColor, "  " + categoryName, stats.currentBytes, stats.currentCount);
+      }
+    };
 
-    // Scene subtotal
+    // --- Scene (SceneVk) Section ---
+    sectionRow(ImVec4(0.5f, 0.8f, 1.0f, 1.0f), "SCENE");
+    categoryRows(vkTracker);
     auto totalVk = vkTracker.getTotalStats();
     if(totalVk.currentBytes > 0)
-    {
-      ImGui::TableNextRow();
-      ImGui::TableNextColumn();
-      ImGui::TextColored(ImVec4(0.7f, 0.9f, 1.0f, 1.0f), "  Scene Subtotal");
-      ImGui::TableNextColumn();
-      ImGui::TextColored(ImVec4(0.7f, 0.9f, 1.0f, 1.0f), "%s", formatBytes(totalVk.currentBytes).c_str());
-      ImGui::TableNextColumn();
-      ImGui::TextColored(ImVec4(0.7f, 0.9f, 1.0f, 1.0f), "%u", totalVk.currentCount);
-    }
+      valueRow(ImVec4(0.7f, 0.9f, 1.0f, 1.0f), "  Scene Subtotal", totalVk.currentBytes, totalVk.currentCount);
 
     // --- RTX (SceneRtx) Section ---
-    ImGui::TableNextRow();
-    ImGui::TableNextColumn();
-    ImGui::TextColored(ImVec4(1.0f, 0.5f, 0.5f, 1.0f), "RTX (Acceleration)");
-    ImGui::TableNextColumn();
-    ImGui::TableNextColumn();
-
-    // Display SceneRtx categories with sorting
-    for(const auto& categoryName : rtxTracker.getActiveCategories(sortBy, ascending))
-    {
-      GpuMemoryStats stats = rtxTracker.getStats(categoryName);
-
-      ImGui::TableNextRow();
-      ImGui::TableNextColumn();
-      ImGui::Text("  %s", categoryName.c_str());
-      ImGui::TableNextColumn();
-      ImGui::Text("%s", formatBytes(stats.currentBytes).c_str());
-      ImGui::TableNextColumn();
-      ImGui::Text("%u", stats.currentCount);
-    }
-
-    // RTX subtotal
+    sectionRow(ImVec4(1.0f, 0.5f, 0.5f, 1.0f), "RTX (Acceleration)");
+    categoryRows(rtxTracker);
     auto totalRtx = rtxTracker.getTotalStats();
     if(totalRtx.currentBytes > 0)
-    {
-      ImGui::TableNextRow();
-      ImGui::TableNextColumn();
-      ImGui::TextColored(ImVec4(1.0f, 0.7f, 0.7f, 1.0f), "  RTX Subtotal");
-      ImGui::TableNextColumn();
-      ImGui::TextColored(ImVec4(1.0f, 0.7f, 0.7f, 1.0f), "%s", formatBytes(totalRtx.currentBytes).c_str());
-      ImGui::TableNextColumn();
-      ImGui::TextColored(ImVec4(1.0f, 0.7f, 0.7f, 1.0f), "%u", totalRtx.currentCount);
-    }
+      valueRow(ImVec4(1.0f, 0.7f, 0.7f, 1.0f), "  RTX Subtotal", totalRtx.currentBytes, totalRtx.currentCount);
 
     // --- Transform (GPU compute) Section ---
     auto totalTransform = transformTracker.getTotalStats();
     if(totalTransform.currentBytes > 0)
     {
-      ImGui::TableNextRow();
-      ImGui::TableNextColumn();
-      ImGui::TextColored(ImVec4(0.5f, 1.0f, 0.5f, 1.0f), "TRANSFORM (GPU)");
-      ImGui::TableNextColumn();
-      ImGui::TableNextColumn();
-
-      for(const auto& categoryName : transformTracker.getActiveCategories(sortBy, ascending))
-      {
-        GpuMemoryStats stats = transformTracker.getStats(categoryName);
-        ImGui::TableNextRow();
-        ImGui::TableNextColumn();
-        ImGui::Text("  %s", categoryName.c_str());
-        ImGui::TableNextColumn();
-        ImGui::Text("%s", formatBytes(stats.currentBytes).c_str());
-        ImGui::TableNextColumn();
-        ImGui::Text("%u", stats.currentCount);
-      }
-
-      ImGui::TableNextRow();
-      ImGui::TableNextColumn();
-      ImGui::TextColored(ImVec4(0.7f, 1.0f, 0.7f, 1.0f), "  Transform Subtotal");
-      ImGui::TableNextColumn();
-      ImGui::TextColored(ImVec4(0.7f, 1.0f, 0.7f, 1.0f), "%s", formatBytes(totalTransform.currentBytes).c_str());
-      ImGui::TableNextColumn();
-      ImGui::TextColored(ImVec4(0.7f, 1.0f, 0.7f, 1.0f), "%u", totalTransform.currentCount);
+      sectionRow(ImVec4(0.5f, 1.0f, 0.5f, 1.0f), "TRANSFORM (GPU)");
+      categoryRows(transformTracker);
+      valueRow(ImVec4(0.7f, 1.0f, 0.7f, 1.0f), "  Transform Subtotal", totalTransform.currentBytes, totalTransform.currentCount);
     }
 
     // --- Animation (GPU compute) Section ---
     auto totalAnimation = animationTracker.getTotalStats();
     if(totalAnimation.currentBytes > 0)
     {
-      ImGui::TableNextRow();
-      ImGui::TableNextColumn();
-      ImGui::TextColored(ImVec4(1.0f, 0.8f, 0.4f, 1.0f), "ANIMATION (GPU)");
-      ImGui::TableNextColumn();
-      ImGui::TableNextColumn();
-
-      for(const auto& categoryName : animationTracker.getActiveCategories(sortBy, ascending))
-      {
-        GpuMemoryStats stats = animationTracker.getStats(categoryName);
-        ImGui::TableNextRow();
-        ImGui::TableNextColumn();
-        ImGui::Text("  %s", categoryName.c_str());
-        ImGui::TableNextColumn();
-        ImGui::Text("%s", formatBytes(stats.currentBytes).c_str());
-        ImGui::TableNextColumn();
-        ImGui::Text("%u", stats.currentCount);
-      }
-
-      ImGui::TableNextRow();
-      ImGui::TableNextColumn();
-      ImGui::TextColored(ImVec4(1.0f, 0.9f, 0.6f, 1.0f), "  Animation Subtotal");
-      ImGui::TableNextColumn();
-      ImGui::TextColored(ImVec4(1.0f, 0.9f, 0.6f, 1.0f), "%s", formatBytes(totalAnimation.currentBytes).c_str());
-      ImGui::TableNextColumn();
-      ImGui::TextColored(ImVec4(1.0f, 0.9f, 0.6f, 1.0f), "%u", totalAnimation.currentCount);
+      sectionRow(ImVec4(1.0f, 0.8f, 0.4f, 1.0f), "ANIMATION (GPU)");
+      categoryRows(animationTracker);
+      valueRow(ImVec4(1.0f, 0.9f, 0.6f, 1.0f), "  Animation Subtotal", totalAnimation.currentBytes, totalAnimation.currentCount);
     }
 
     // --- Application (frame targets, denoisers) Section ---
@@ -2131,65 +2042,29 @@ void GltfRenderer::renderMemoryStatistics()
     uint32_t appCombinedCount = totalApp.currentCount + totalOptixExport.currentCount;
     if(appCombinedBytes > 0)
     {
-      ImGui::TableNextRow();
-      ImGui::TableNextColumn();
-      ImGui::TextColored(ImVec4(0.8f, 0.6f, 1.0f, 1.0f), "APPLICATION");
-      ImGui::TableNextColumn();
-      ImGui::TableNextColumn();
-
-      for(const auto& categoryName : appTracker.getActiveCategories(sortBy, ascending))
-      {
-        GpuMemoryStats stats = appTracker.getStats(categoryName);
-        ImGui::TableNextRow();
-        ImGui::TableNextColumn();
-        ImGui::Text("  %s", categoryName.c_str());
-        ImGui::TableNextColumn();
-        ImGui::Text("%s", formatBytes(stats.currentBytes).c_str());
-        ImGui::TableNextColumn();
-        ImGui::Text("%u", stats.currentCount);
-      }
-
+      sectionRow(ImVec4(0.8f, 0.6f, 1.0f, 1.0f), "APPLICATION");
+      categoryRows(appTracker);
 #if defined(USE_OPTIX_DENOISER)
       if(const OptiXDenoiser* optix = m_pathTracer.getOptiXDenoiser())
-      {
-        for(const auto& categoryName : optix->getExportMemoryTracker().getActiveCategories(sortBy, ascending))
-        {
-          GpuMemoryStats stats = optix->getExportMemoryTracker().getStats(categoryName);
-          ImGui::TableNextRow();
-          ImGui::TableNextColumn();
-          ImGui::Text("  %s", categoryName.c_str());
-          ImGui::TableNextColumn();
-          ImGui::Text("%s", formatBytes(stats.currentBytes).c_str());
-          ImGui::TableNextColumn();
-          ImGui::Text("%u", stats.currentCount);
-        }
-      }
+        categoryRows(optix->getExportMemoryTracker());
 #endif
-
-      ImGui::TableNextRow();
-      ImGui::TableNextColumn();
-      ImGui::TextColored(ImVec4(0.9f, 0.8f, 1.0f, 1.0f), "  Application Subtotal");
-      ImGui::TableNextColumn();
-      ImGui::TextColored(ImVec4(0.9f, 0.8f, 1.0f, 1.0f), "%s", formatBytes(appCombinedBytes).c_str());
-      ImGui::TableNextColumn();
-      ImGui::TextColored(ImVec4(0.9f, 0.8f, 1.0f, 1.0f), "%u", appCombinedCount);
+      valueRow(ImVec4(0.9f, 0.8f, 1.0f, 1.0f), "  Application Subtotal", appCombinedBytes, appCombinedCount);
     }
 
     // --- Combined Total ---
-    ImGui::TableNextRow();
-    ImGui::TableNextColumn();
-    ImGui::TextColored(ImVec4(1.0f, 1.0f, 0.0f, 1.0f), "TOTAL");
-    ImGui::TableNextColumn();
     auto combinedBytes = totalVk.currentBytes + totalRtx.currentBytes + totalTransform.currentBytes
                          + totalAnimation.currentBytes + appCombinedBytes;
     auto combinedCount = totalVk.currentCount + totalRtx.currentCount + totalTransform.currentCount
                          + totalAnimation.currentCount + appCombinedCount;
-    ImGui::TextColored(ImVec4(1.0f, 1.0f, 0.0f, 1.0f), "%s", formatBytes(combinedBytes).c_str());
-    ImGui::TableNextColumn();
-    ImGui::TextColored(ImVec4(1.0f, 1.0f, 0.0f, 1.0f), "%u", combinedCount);
+    valueRow(ImVec4(1.0f, 1.0f, 0.0f, 1.0f), "TOTAL", combinedBytes, combinedCount);
 
     ImGui::EndTable();
   }
+
+  ImGui::Spacing();
+  if(ImGui::Button(ICON_MS_CONTENT_COPY " Copy to Clipboard"))
+    ImGui::SetClipboardText(clipboardText.c_str());
+  nvgui::tooltip("Copy memory statistics to clipboard (tab-separated)");
 
   ImGui::End();
 }
@@ -2237,6 +2112,24 @@ void GltfRenderer::renderStatisticsWindow()
 
   const tinygltf::Model& tiny = m_resources.getScene()->getModel();
 
+  // glTF 2.1: distinct files placed by nodes. A file placed many times is loaded once and shared.
+  uint64_t numReferencedFiles = 0;
+  {
+    std::vector<char> used(tiny.files.size(), 0);
+    for(const tinygltf::Node& node : tiny.nodes)
+    {
+      const int ea = node.externalAsset;
+      if(ea < 0 || ea >= static_cast<int>(tiny.externalAssets.size()))
+        continue;
+      const int file = tiny.externalAssets[ea].file;
+      if(file >= 0 && file < static_cast<int>(used.size()) && !used[file])
+      {
+        used[file] = 1;
+        ++numReferencedFiles;
+      }
+    }
+  }
+
   // Create a table for better organization
   if(ImGui::BeginTable("StatisticsTable", 2, ImGuiTableFlags_Borders | ImGuiTableFlags_RowBg))
   {
@@ -2266,6 +2159,8 @@ void GltfRenderer::renderStatisticsWindow()
     addStatRow(ICON_MS_LIGHTBULB, "Lights", tiny.lights.size());
     addStatRow(ICON_MS_IMAGE_INSET, "Textures", tiny.textures.size());
     addStatRow(ICON_MS_IMAGE, "Images", tiny.images.size());
+    if(numReferencedFiles > 0)
+      addStatRow(ICON_MS_LINK, "Referenced Files", numReferencedFiles);
 
     ImGui::EndTable();
   }
@@ -2289,6 +2184,8 @@ void GltfRenderer::renderStatisticsWindow()
     logStat("Lights", tiny.lights.size());
     logStat("Textures", tiny.textures.size());
     logStat("Images", tiny.images.size());
+    if(numReferencedFiles > 0)
+      logStat("Referenced Files", numReferencedFiles);
     ImGui::LogFinish();
   }
   if(ImGui::IsItemHovered())

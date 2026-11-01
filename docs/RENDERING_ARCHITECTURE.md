@@ -48,6 +48,7 @@ There is a **direct correlation between BLAS and primitive index**:
 
 - **BLAS** (Bottom-Level Acceleration Structures) are built from `RenderPrimitive[]` in order: `m_blasAccel[renderPrimID]`.
 - **TLAS** (Top-Level AS) instances reference BLAS via `object.renderPrimID`: `blasAddress = m_blasAccel[object.renderPrimID].address`.
+- **TLAS instance masks** say whether an instance casts shadows (`RenderNode::castShadows`, from `NV_node_shadow_casting`): the path tracer's shadow rays cull with the caster mask only. The masks are defined in `shaders/gltf_scene_io.h.slang`.
 
 **When are BLAS actually built?** Only when the Vulkan scene is (re)created:
 
@@ -152,9 +153,10 @@ handleRenderNode(nodeID, worldMatrix, primMap):
       else:
         register single RenderNode in m_renderNodeRegistry
 
+  A node's render nodes are added together, so they form one contiguous range of render-node IDs.
   A node drawn more than once (instancing, instance set) keeps one local matrix per render node,
-  in registry order, in Scene::getRenderNodeLocalMatrices(): every world-matrix update (CPU serial,
-  CPU parallel, GPU update_render_instances) computes world(node) × local.
+  in that order, in the registry (Scene::getRenderNodeLocalMatrices(nodeID)): every world-matrix
+  update (CPU serial, CPU parallel, GPU update_render_instances) computes world(node) × local.
 ```
 
 ### Example Scene Graph → RenderNodes:
@@ -279,8 +281,10 @@ Device — sample a light at each surface hit (`sampleLights`):
 
 The list is derived data, regenerated wholesale (never patched). It stores references, but each
 emitter's **selection weight is its world-space area × luminance**, so it also depends on the
-emitter's transform. `syncFromScene` rebuilds it when materials, the emitter set, or an emitter's
-transform change; a `DirtyFlags::emissiveDirty` latch is consumed independently of the sync mask so
+emitter's transform. `syncFromScene` rebuilds it when a material's emission, the emitter set, or an emitter's
+transform change. A material edit counts only if it changes the material's constant emitted radiance
+(`SceneVk::materialEmissionChanged`): a base-colour or roughness edit leaves a list of millions of
+emitters alone. A `DirtyFlags::emissiveDirty` latch is consumed independently of the sync mask so
 the GPU-transform path (which syncs only materials + lights) rebuilds it too. The shader samples the
 emitter at its **live** GPU transform, and the pdf cancels the world area (below), so the host table
 and the live geometry must agree on that area — a stale table biases the estimate, it does not merely
@@ -420,13 +424,15 @@ weighted or not: a target without a weight blends with 0 until an animation give
 ### Mapping (CPU) – RenderNodeRegistry
 
 ```cpp
-// RenderNodeRegistry: flat vector + bidirectional maps
+// RenderNodeRegistry: flat arrays only, no per-node containers
 // - getRenderNodes() → vector<RenderNode> (flat array for GPU upload)
-// - getRenderNodesForNode(nodeID) → nodeID → list of RenderNode indices (unordered_map internally)
+// - getRenderNodesForNode(nodeID) → the node's contiguous range of RenderNode indices
+//   (a per-node (first, count), so a lookup is an index and a re-parse allocates nothing)
 // - getNodeAndPrim(renderNodeID) → (nodeID, primIndex)
+// - getLocalMatrices(nodeID) / getLocalMatrix(renderNodeID) → instancing / instance-set locals
 
 // Example:
-// getRenderNodesForNode(3) = {5, 6}  // Node 3 has RenderNodes 5 and 6
+// getRenderNodesForNode(3) = [5, 7)  // Node 3 has RenderNodes 5 and 6
 //   → Node 3 has a mesh with 2 primitives
 //   → RenderNode[5] and RenderNode[6] both have refNodeID = 3
 ```
@@ -452,8 +458,12 @@ weighted or not: a target without a weight blends with 0 until an animation give
 
 3. buildAccelerationStructures()
      → createBottomLevelAccelerationStructure() → prepare BLAS build data
-     → cmdBuildBottomLevelAccelerationStructure() → GPU BLAS build (budgeted)
-     → cmdCreateBuildTopLevelAccelerationStructure() → GPU TLAS build
+     → animated scenes: every cmdBuildBottomLevelAccelerationStructure() pass (budgeted),
+        then cmdCreateBuildTopLevelAccelerationStructure()
+     → static scenes, one pass at a time (enqueueCompactedBlasPass()):
+        cmdBuildBottomLevelAccelerationStructure() → once it has run, cmdCompactBlas()
+        → once the copies have run, destroyNonCompactedBlas() → next pass
+        → after the last pass: cmdCreateBuildTopLevelAccelerationStructure()
 ```
 
 ---
@@ -657,6 +667,16 @@ compact (see `GltfRenderer::buildAccelerationStructures()`). Vulkan permits comp
 updatable BLAS and refitting it afterward, but this app's build+compact+per-frame-update path
 triggers a GPU device-lost, so compaction is skipped for animated scenes as a workaround.
 
+Compaction copies each BLAS into a new, smaller one, so its device address changes. A static
+scene's BLAS are built one budgeted pass at a time: each pass is compacted once it has run, its
+originals are freed once the copies have run, and only then is the next pass recorded. BLAS memory
+therefore peaks at the compacted BLAS so far plus one pass, never at all BLAS twice. The TLAS is
+built once, after the last pass, so it only ever references compacted BLAS; until then
+`SceneRtx::topLevelAS()` is null and nothing is traced.
+
+The TLAS is the last load work on purpose: its completion releases all staging
+(`releaseCompletedAllocations(true)`), which is only safe when no queued command still reads it.
+
 ---
 
 ## When Structures Are Rebuilt
@@ -824,7 +844,8 @@ Model (authoritative) → parseScene() → RenderNodes (derived) → GPU
 **Option 1:** Split `parseScene()` into targeted rebuilds
 - `rebuildPrimitivesAndRenderNodes()` for split/merge mesh
 - `rebuildRenderNodesAndLights()` already exists and is used for adding lights;
-  node delete/duplicate still go through a full `parseScene()`
+  `rebuildRenderNodesKeepingPrimitives()` also keeps the render primitives and is used by Make
+  Editable on static placed content; node delete/duplicate still go through a full `parseScene()`
 - Only rebuild what the operation requires
 - Medium complexity
 

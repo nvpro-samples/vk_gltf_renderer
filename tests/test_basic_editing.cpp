@@ -22,6 +22,7 @@
 #include "gltf_scene_editor.hpp"
 #include "common/test_utils.hpp"
 #include <filesystem>
+#include <fstream>
 
 using namespace gltf_test;
 
@@ -454,4 +455,47 @@ TEST_F(BasicEditingTest, CompactModelReducesBufferData)
     EXPECT_LE(scene.getModel().accessors.size(), preAccessors);
     EXPECT_LE(scene.getModel().bufferViews.size(), preBufferViews);
   }
+}
+
+// A light no node carries (as deleting the nodes of placed glTF 2.1 content leaves behind) can be
+// removed; the lights after it are renumbered in the nodes and the render lights, and undo restores it.
+TEST_F(BasicEditingTest, RemoveUnattachedLight)
+{
+  const std::filesystem::path path = tempDir / "lights.gltf";
+  {
+    std::ofstream out(path);
+    out << R"({"asset":{"version":"2.0"},"scene":0,"scenes":[{"nodes":[0,1]}],
+      "extensionsUsed":["KHR_lights_punctual"],
+      "extensions":{"KHR_lights_punctual":{"lights":[
+        {"name":"A","type":"point"},{"name":"B","type":"directional"},{"name":"C","type":"spot","spot":{}}]}},
+      "nodes":[{"name":"carriesC","extensions":{"KHR_lights_punctual":{"light":2}}},
+               {"name":"carriesA","extensions":{"KHR_lights_punctual":{"light":0}}}]})";
+  }
+  nvvkgltf::Scene scene;
+  ASSERT_TRUE(scene.load(path));
+  nvvkgltf::SceneEditor& editor = scene.editor();
+  const tinygltf::Model& model  = scene.getModel();
+  ASSERT_EQ(model.lights.size(), 3u);
+
+  EXPECT_FALSE(editor.lightRemovalBlocker(0).empty());  // carried by a node
+  EXPECT_TRUE(editor.lightRemovalBlocker(1).empty());   // unattached
+  EXPECT_FALSE(editor.lightRemovalBlocker(2).empty());
+
+  const tinygltf::Light removed = model.lights[1];
+  editor.removeLightAt(1);
+  ASSERT_EQ(model.lights.size(), 2u);
+  EXPECT_EQ(model.lights[0].name, "A");
+  EXPECT_EQ(model.lights[1].name, "C");
+  EXPECT_EQ(model.nodes[0].light, 1);  // C moved down
+  EXPECT_EQ(model.nodes[1].light, 0);
+  for(size_t i = 0; i < scene.getRenderLights().size(); i++)
+    EXPECT_EQ(scene.getRenderLights()[i].light, model.nodes[scene.getRenderLights()[i].nodeID].light);
+
+  editor.insertLightAt(1, removed);
+  ASSERT_EQ(model.lights.size(), 3u);
+  EXPECT_EQ(model.lights[1].name, "B");
+  EXPECT_EQ(model.nodes[0].light, 2);
+  EXPECT_EQ(model.nodes[1].light, 0);
+  for(size_t i = 0; i < scene.getRenderLights().size(); i++)
+    EXPECT_EQ(scene.getRenderLights()[i].light, model.nodes[scene.getRenderLights()[i].nodeID].light);
 }

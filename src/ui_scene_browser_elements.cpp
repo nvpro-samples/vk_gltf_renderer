@@ -177,9 +177,21 @@ void UiSceneBrowser::ensureElementRegistry()
     d.count    = [this] { return int(m_scene->getModel().nodes.size()); };
     d.name     = [this](int i) { return m_scene->getModel().nodes[i].name; };
     d.select   = [this](int i) { m_selection->selectNode(i); };
+    // glTF 2.1: placed (read-only) nodes carry a lock, like their rows in the Scene Graph.
     d.columns.push_back({"Name", 0.0f, false, [this](int i) {
                            const tinygltf::Node& n = m_scene->getModel().nodes[i];
-                           ImGui::Text("%s %s", nodeResourceIcon(n), n.name.c_str());
+                           if(m_scene->isNodeReadOnly(i))
+                           {
+                             ImGui::Text("%s %s %s", nodeResourceIcon(n), ICON_MS_LOCK, n.name.c_str());
+                             ImGui::SetItemTooltip("Read-only: placed from a referenced file (Make Editable unlocks it)");
+                           }
+                           else if(m_scene->isExternalAssetInstance(i))
+                           {
+                             ImGui::Text("%s %s %s", nodeResourceIcon(n), ICON_MS_LINK, n.name.c_str());
+                             ImGui::SetItemTooltip("Places a referenced file (its content is read-only)");
+                           }
+                           else
+                             ImGui::Text("%s %s", nodeResourceIcon(n), n.name.c_str());
                          }});
     d.columns.push_back(
         {"Children", 70.0f, true, [this](int i) { cellRightInt(int(m_scene->getModel().nodes[i].children.size())); }});
@@ -236,6 +248,7 @@ void UiSceneBrowser::ensureElementRegistry()
         return;
       m_undoStack->executeCommand(std::make_unique<RenameNodeCommand>(*m_scene, i, m_scene->getModel().nodes[i].name, n));
     };
+    d.contextMenuExtra = [this](int i) { makeEditableMenuItem(i); };
     m_elementTypes.push_back(std::move(d));
   }
 
@@ -252,7 +265,14 @@ void UiSceneBrowser::ensureElementRegistry()
     d.name     = [this](int i) { return m_scene->getModel().meshes[i].name; };
     d.select   = [this](int i) { m_selection->selectMesh(i); };
     d.columns.push_back({"Name", 0.0f, false, [this](int i) {
-                           ImGui::Text("%s %s", ICON_MS_VIEW_IN_AR, m_scene->getModel().meshes[i].name.c_str());
+                           const std::string& name = m_scene->getModel().meshes[i].name;
+                           if(m_scene->isMeshReadOnly(i))
+                           {
+                             ImGui::Text("%s %s %s", ICON_MS_VIEW_IN_AR, ICON_MS_LOCK, name.c_str());
+                             ImGui::SetItemTooltip("Read-only: from a referenced file");
+                           }
+                           else
+                             ImGui::Text("%s %s", ICON_MS_VIEW_IN_AR, name.c_str());
                          }});
     d.columns.push_back(
         {"Prims", 56.0f, true, [this](int i) { cellRightInt(int(m_scene->getModel().meshes[i].primitives.size())); }});
@@ -303,7 +323,16 @@ void UiSceneBrowser::ensureElementRegistry()
                            const tinygltf::Material& m = m_scene->getModel().materials[i];
                            drawSwatch(baseColorOf(m));
                            ImGui::SameLine();
-                           ImGui::TextUnformatted(m.name.c_str());
+                           // A referenced file's material stays editable, but Save keeps the reference.
+                           if(m_scene->isMaterialReadOnly(i))
+                           {
+                             ImGui::Text("%s %s", ICON_MS_LINK, m.name.c_str());
+                             ImGui::SetItemTooltip(
+                                 "From a referenced file: edits show on every placement, but Save "
+                                 "keeps the reference and drops them (Save Self-Contained keeps them)");
+                           }
+                           else
+                             ImGui::TextUnformatted(m.name.c_str());
                          }});
     d.columns.push_back({"Alpha", 90.0f, false, [this](int i) {
                            const std::string& a = m_scene->getModel().materials[i].alphaMode;
@@ -586,6 +615,22 @@ void UiSceneBrowser::ensureElementRegistry()
       return iesIdx < int(iesNodes.size()) ? model.nodes[iesNodes[iesIdx]].name : std::string{};
     };
 
+    // A KHR light can be deleted once nothing references it, e.g. one left behind by deleting the
+    // nodes of placed glTF 2.1 content. An IES-only entry is its node: deleted from the scene graph.
+    d.canDelete = [this](int i) {
+      return i < int(m_scene->getModel().lights.size()) && m_scene->editor().lightRemovalBlocker(i).empty();
+    };
+    d.deleteDisabledReason = [this](int i) {
+      return i < int(m_scene->getModel().lights.size()) ? m_scene->editor().lightRemovalBlocker(i) :
+                                                           std::string("IES light: delete its node in the Scene Graph");
+    };
+    d.remove = [this](int i) {
+      m_undoStack->executeCommand(std::make_unique<RemoveLightCommand>(*m_scene, i, m_scene->getModel().lights[i]));
+      markCachesDirty();
+      if(m_selection->getSelection().type == SceneSelection::SelectionType::eLight)
+        m_selection->clearSelection();
+    };
+
     d.rename = [this, getIesOnlyNodes](int i, const std::string& n) {
       const tinygltf::Model& model    = m_scene->getModel();
       const int              khrCount = int(model.lights.size());
@@ -827,15 +872,22 @@ void UiSceneBrowser::ensureElementStats()
           int(uigltf::primitiveTriangleCountForMode(mode, rp.indexCount > 0 ? rp.indexCount : rp.vertexCount));
     }
 
-  // Instances + material usage: walk nodes carrying a mesh, count instanced primitive->material usages.
-  for(const tinygltf::Node& node : model.nodes)
-  {
-    if(node.mesh < 0 || node.mesh >= int(model.meshes.size()))
-      continue;
-    m_meshInstances[node.mesh]++;
-    for(const tinygltf::Primitive& prim : model.meshes[node.mesh].primitives)
+  // Instances + material usage: walk nodes carrying a mesh, and the entries of instance sets (glTF 2.1
+  // placed content drawn without nodes), count instanced primitive->material usages.
+  auto countInstance = [&](int mesh) {
+    if(mesh < 0 || mesh >= int(model.meshes.size()))
+      return;
+    m_meshInstances[mesh]++;
+    for(const tinygltf::Primitive& prim : model.meshes[mesh].primitives)
       if(prim.material >= 0 && prim.material < int(m_materialRefs.size()))
         m_materialRefs[prim.material]++;
+  };
+  for(int n = 0; n < int(model.nodes.size()); ++n)
+  {
+    countInstance(model.nodes[n].mesh);
+    if(const nvvkgltf::InstanceSet* set = m_scene->getInstanceSet(n))
+      for(const nvvkgltf::InstanceSet::Entry& entry : set->entries)
+        countInstance(entry.mesh);
   }
 
   // Sampler usage: textures referencing each sampler.

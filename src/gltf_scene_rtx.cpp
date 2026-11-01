@@ -34,6 +34,7 @@
 #include <nvvk/check_error.hpp>
 #include <nvvk/debug_util.hpp>
 
+#include "shaders/gltf_scene_io.h.slang"  // TLAS instance masks, shared with the shaders
 #include "gltf_scene_rtx.hpp"
 #include "gltf_scene_vk.hpp"
 #include "gltf_scene_animation.hpp"
@@ -51,7 +52,7 @@ constexpr std::string_view kMemCategoryInstances = "Instances";
 //--------------------------------------------------------------------------------------------------
 // SceneRtx implementation grouped by work area:
 //   1. Init / Deinit  - allocator setup and teardown
-//   2. Create        - BLAS/TLAS build (create, createBottomLevel, cmdBuild, cmdCreateBuildTLAS, compact, trackBlasMemory, tlas)
+//   2. Create        - BLAS/TLAS build (create, createBottomLevel, cmdBuild, cmdCreateBuildTLAS, compact, tlas)
 //   3. Sync / Update  - TLAS/BLAS updates (syncTopLevelAS, rebuildTopLevelAS, updateBottomLevelAS)
 //   4. Destroy        - release acceleration structures and scratch (destroy, destroyScratchBuffers, destroyTlasResources)
 //--------------------------------------------------------------------------------------------------
@@ -111,9 +112,6 @@ void nvvkgltf::SceneRtx::create(VkCommandBuffer             cmd,
     finished = cmdBuildBottomLevelAccelerationStructure(cmd, 512'000'000);
   } while(!finished);
 
-  // Track all BLAS allocations after they're all built
-  trackBlasMemory();
-
   cmdCreateBuildTopLevelAccelerationStructure(cmd, staging, scn);
 }
 
@@ -125,16 +123,10 @@ VkAccelerationStructureKHR nvvkgltf::SceneRtx::topLevelAS()
 }
 
 //--------------------------------------------------------------------------------------------------
-// Register all BLAS allocations with the memory tracker. Call after all BLAS are built.
-void nvvkgltf::SceneRtx::trackBlasMemory()
+// Raise the BLAS memory high-water mark to the BLAS memory currently tracked.
+void nvvkgltf::SceneRtx::updateBlasPeak()
 {
-  for(const auto& blas : m_blasAccel)
-  {
-    if(blas.accel != VK_NULL_HANDLE && blas.buffer.allocation)
-    {
-      m_memoryTracker.track(kMemCategoryBLAS, blas.buffer.allocation);
-    }
-  }
+  m_blasPeakBytes = std::max(m_blasPeakBytes, VkDeviceSize(m_memoryTracker.getStats(kMemCategoryBLAS).currentBytes));
 }
 
 //--------------------------------------------------------------------------------------------------
@@ -221,6 +213,7 @@ void nvvkgltf::SceneRtx::createBottomLevelAccelerationStructure(const nvvkgltf::
 
     blasData.addGeometry(geo);
     VkAccelerationStructureBuildSizesInfoKHR sizeInfo = blasData.finalizeGeometry(m_device, flags);  // Will query the size of the resulting BLAS
+    m_blasBuildBytes += sizeInfo.accelerationStructureSize;
   }
 
   // Create the bottom-level acceleration structure Builder and query pool for compaction
@@ -274,6 +267,12 @@ bool nvvkgltf::SceneRtx::cmdBuildBottomLevelAccelerationStructure(VkCommandBuffe
     // although above should actually terminate the app
     return true;
   }
+
+  // Track the BLAS this pass created (the builder fills m_blasAccel in order).
+  for(; m_blasTrackedCount < m_blasAccel.size() && m_blasAccel[m_blasTrackedCount].accel != VK_NULL_HANDLE; m_blasTrackedCount++)
+    m_memoryTracker.track(kMemCategoryBLAS, m_blasAccel[m_blasTrackedCount].buffer.allocation);
+  updateBlasPeak();
+
   return result == VK_SUCCESS;
 }
 
@@ -338,7 +337,7 @@ void nvvkgltf::SceneRtx::cmdCreateBuildTopLevelAccelerationStructure(VkCommandBu
     asInstance.instanceCustomIndex                    = object.renderPrimID;
     asInstance.accelerationStructureReference         = blasAddress;
     asInstance.instanceShaderBindingTableRecordOffset = 0;
-    asInstance.mask                                   = 0x01;
+    asInstance.mask                                   = object.castShadows ? TLAS_MASK_SHADOW_CASTER : TLAS_MASK_NO_SHADOW;
     asInstance.flags                                  = m_instanceFlagsCache[object.materialID];
 
     m_tlasInstances.push_back(asInstance);
@@ -481,6 +480,7 @@ void nvvkgltf::SceneRtx::rebuildTopLevelAS(VkCommandBuffer             cmd,
 
     m_tlasInstances[idx].transform                      = nvvk::toTransformMatrixKHR(object.worldMatrix);
     m_tlasInstances[idx].flags                          = m_instanceFlagsCache[object.materialID];
+    m_tlasInstances[idx].mask                           = object.castShadows ? TLAS_MASK_SHADOW_CASTER : TLAS_MASK_NO_SHADOW;
     m_tlasInstances[idx].accelerationStructureReference = isVisible ? blasAddress : 0;
     m_tlasInstances[idx].instanceCustomIndex            = object.renderPrimID;
 
@@ -569,6 +569,11 @@ bool nvvkgltf::SceneRtx::syncTopLevelAS(VkCommandBuffer cmd, nvvk::CmdUploaderIn
   if(!df.allRenderNodesDirty && dirty.empty() && m_tlasInstances.size() == renderNodes.size())
     return false;
 
+  // BLAS built but the TLAS still pending (built after compaction): its build will read the scene as
+  // it is then, and the dirty flags stay set until it exists.
+  if(m_blasBuilder && m_tlasAccel.accel == VK_NULL_HANDLE)
+    return false;
+
   // Check if we need to do a full update (rebuild) or if we can do a surgical update of the existing TLAS.
   // If the ratio of dirty nodes is high, it's more efficient to do a full rebuild.
   const bool useFullUpdate = df.allRenderNodesDirty || renderNodes.empty()
@@ -601,15 +606,35 @@ void nvvkgltf::SceneRtx::updateBottomLevelAS(VkCommandBuffer cmd, const nvvkgltf
 }
 
 //--------------------------------------------------------------------------------------------------
-// Compact BLAS to reduce memory. Call after cmdBuildBottomLevelAccelerationStructure; then destroyNonCompactedBlas().
+// Compact the oldest built batch of BLAS (one per cmdBuildBottomLevelAccelerationStructure pass) into
+// new, smaller BLAS; m_blasAccel then holds the compacted ones. Call once that pass has run, since it
+// reads the compacted sizes back. Returns VK_SUCCESS once the last batch is recorded. Once the copies
+// have run, release the originals with destroyNonCompactedBlas(); build the TLAS only after that, so
+// it never references an original.
 VkResult nvvkgltf::SceneRtx::cmdCompactBlas(VkCommandBuffer cmd)
 {
   nvutils::ScopedTimer st(__FUNCTION__ + std::string("\n"));
+
+  std::vector<VmaAllocation> before(m_blasAccel.size());
+  for(size_t i = 0; i < m_blasAccel.size(); i++)
+    before[i] = m_blasAccel[i].buffer.allocation;
 
   std::span<nvvk::AccelerationStructureBuildData> blasBuildData(m_blasBuildData);
   std::span<nvvk::AccelerationStructure>          blasAccel(m_blasAccel);
 
   VkResult result = m_blasBuilder->cmdCompactBlas(cmd, blasBuildData, blasAccel);
+
+  // Both copies stay resident until destroyNonCompactedBlas(): track the compacted BLAS now, and
+  // untrack the originals when they are destroyed.
+  for(size_t i = 0; i < m_blasAccel.size(); i++)
+  {
+    if(m_blasAccel[i].buffer.allocation != before[i])
+    {
+      m_memoryTracker.track(kMemCategoryBLAS, m_blasAccel[i].buffer.allocation);
+      m_nonCompactedBlasAllocs.push_back(before[i]);
+    }
+  }
+  updateBlasPeak();
 
   auto stats = m_blasBuilder->getStatistics().toString();
   LOGI("%s%s\n", nvutils::ScopedTimer::indent().c_str(), stats.c_str());
@@ -617,10 +642,14 @@ VkResult nvvkgltf::SceneRtx::cmdCompactBlas(VkCommandBuffer cmd)
 }
 
 //--------------------------------------------------------------------------------------------------
-// Release non-compacted BLAS after compaction. Call after cmdCompactBlas().
+// Release the BLAS that compaction replaced. Call once the copies that read them have run.
 void nvvkgltf::SceneRtx::destroyNonCompactedBlas()
 {
-  m_blasBuilder->destroyNonCompactedBlas();
+  for(VmaAllocation allocation : m_nonCompactedBlasAllocs)
+    m_memoryTracker.untrack(kMemCategoryBLAS, allocation);
+  m_nonCompactedBlasAllocs.clear();
+  if(m_blasBuilder)
+    m_blasBuilder->destroyNonCompactedBlas();
 }
 
 //========== Destroy ==========
@@ -637,12 +666,17 @@ void nvvkgltf::SceneRtx::destroy()
       m_alloc->destroyAcceleration(blas);
     }
   }
+  destroyNonCompactedBlas();  // A load cleared before its compaction finished
 
   destroyTlasResources();
   destroyScratchBuffers();
 
   m_blasAccel          = {};
+  m_blasTrackedCount   = 0;
+  m_blasBuildBytes     = 0;
+  m_blasPeakBytes      = 0;
   m_blasBuildData      = {};
+  m_tlasInstances      = {};  // No TLAS until the next build: keeps the GPU transform path off it
   m_ommGeometry        = {};
   m_instanceFlagsCache = {};
   if(m_blasBuilder)

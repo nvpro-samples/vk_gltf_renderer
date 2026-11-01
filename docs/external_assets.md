@@ -121,7 +121,8 @@ flowchart TD
 ```
 
 **Edit** (`SceneEditor` + UI, §5): every mutator checks `isNodeReadOnly()` and refuses to touch
-placed content; picking an instance-set entry selects its placing node.
+placed content. An instance-set entry is reached as a primitive of its placing node: the Scene
+Browser lists the entries under it and picking one selects that primitive (§5).
 
 **Save** (`Scene::save(filename, selfContained)`, §7), always on a copy of the model: the default
 form writes back what was authored, the self-contained form writes the expansion as core glTF.
@@ -156,7 +157,8 @@ throwaway copy.
 `externalAsset` to an `ExternalAssetPlacer`, which:
 
 1. **Resolves** the reference (`externalAssets[i].file` → `files[j].uri`, percent-decoded, relative
-   to the file that names it) and checks the cycle and depth rules (below).
+   to the file that names it, lexically normalized so the `../` of files nested through sibling
+   folders never accumulates past Windows' `MAX_PATH`) and checks the cycle and depth rules (below).
 2. **Acquires** the file: the first time a file is needed it is loaded (with the referencing entry's
    aliases), validated, meshopt-decoded, its image URIs rebased (below), and its resources appended
    to the scene model with `SceneMerger::appendResources` — buffers to meshes, materials, cameras,
@@ -188,6 +190,17 @@ file could not be loaded; otherwise they are cleared (spec: `externalAsset` take
 editor's **Reference Scene** (`referenceScene`) creates such a node and places it the same way. The
 `External assets:` log line counts the files loaded, images and buffers shared, placements, instance
 sets and nodes created.
+
+Reading, parsing and decoding a file need no scene state, so every file a load places is read first,
+on the thread pool, one nesting level at a time (`ExternalAssetPlacer::preload`), with the paths of
+the files it places already resolved. The scene model's resource arrays are then reserved for all of
+them at once, so thousands of appends never regrow them. Validation, appending and placement run on
+the loading thread afterwards, in the same order as a sequential load, so the scene does not depend
+on the thread count.
+
+Appended buffers keep their URIs, even when several name the same file (the `model.bin` of every
+asset folder). Saving a `.gltf` gives each such buffer whose bytes differ a free `_N` name, since
+each buffer is written to its URI (`makeBufferUrisUnique` in `gltf_scene.cpp`).
 
 Before a file's resources are appended, `rebaseImageUris` rewrites its relative image URIs to be
 relative to the folder of the scene. Images are later found through the scene-wide image search
@@ -264,7 +277,10 @@ node renumbering (delete) and copying (duplicate). The mechanism:
   indices).
 - **Query:** `Scene::isNodeReadOnly(nodeIndex)` returns `node.extras.Has(marker)`;
   `Scene::isMeshReadOnly(meshIndex)` returns true if any read-only node or instance set uses that
-  mesh.
+  mesh, and `Scene::isMaterialReadOnly(materialIndex)` if a read-only mesh uses that material (it
+  came from a referenced file). The two read the scene's element-usage index
+  (`Scene::elementUsage`), built in one pass and kept until the scene graph or an element count
+  changes; the same index answers the Inspector's and the Elements list's "used by" questions.
 - The **instance node itself is NOT marked** — it stays editable (you can move/rotate/scale the
   whole reference). Only the placed descendants are marked; an instance set has no nodes to mark.
 
@@ -295,20 +311,43 @@ The marker is enforced so referenced content cannot be edited, while the instanc
   `duplicateMeshForNode`, `split`/`mergePrimitiveMaterial`. `setPrimitiveMaterial` is mesh-keyed so
   it guards via `isMeshReadOnly`. Undo commands and drag-drop route through these methods, so they
   are covered too.
+- **Materials are the exception.** A material of a referenced file is shared by every placement of
+  that file, often across many placing files (a car placed by every district of a city), so no
+  single Make Editable reaches it. It is edited in place instead, for the session: the edit shows
+  on every placement, the default save writes the reference back unchanged (the material is
+  compacted away with the rest of the placed content), and a self-contained save keeps the edit.
+  The UI says so wherever such a material is edited (`isMaterialReadOnly`). Its *assignment* (which
+  material a placed primitive uses) stays locked through `isMeshReadOnly`.
 - **UI**:
   - `ui_inspector.cpp` shows a `ICON_MS_LOCK Referenced asset (read-only)` badge and wraps the transform /
-    light / camera / material controls in `ImGui::BeginDisabled(readOnly)`.
+    light / camera controls of a read-only node in `ImGui::BeginDisabled(readOnly)`; a referenced
+    material is editable, with a note on what a save keeps (`renderReferencedMaterialNote`).
+  - A viewport click on placed nodes selects their first editable ancestor, the top placing node,
+    so the gizmo moves the whole placement (`updateSelectionFromPick` in `ui_renderer.cpp`). The
+    selection keeps the render node that was hit, and the Inspector offers it as **Clicked part**
+    (`renderClickedPart`): one click on it selects that primitive, with its mesh and material.
   - `ui_scene_browser.cpp` skips read-only roots in the **scene-transform** apply loop
     (`applySceneTransform`, which edits nodes directly, bypassing the editor) and disables the node
     context-menu mutations (duplicate/delete/add-child/rename) for read-only nodes. The per-node
     viewport gizmo instead routes through `SceneEditor::setNodeTRS`, which is guarded by
     `blockIfNodeReadOnly`.
-  - Picking a render node of an instance set selects its placing node (`ui_renderer.cpp`).
-- **Make Editable** (node context menu, `SceneEditor::makeExternalAssetEditable`) breaks the lock
-  for every scene node placing the same file: their instance sets become nodes first
+  - An instance-set entry has no node, so it is selected as a primitive whose node is the placing
+    node and whose mesh is the entry's (`updateSelectionFromPick` in `ui_renderer.cpp`): the gizmo
+    moves the placing node, and the Inspector shows the placed mesh with its material, whose
+    assignment is read-only through `isMeshReadOnly`. The Scene Browser lists the entries under the placing node, with a lock
+    icon, named after their node in the placed file (`renderMeshInHierarchy`).
+  - The Elements tab marks read-only nodes and meshes with a lock, placing nodes and referenced
+    materials with a link icon, and offers **Make Editable** in the node row's context menu
+    (`ui_scene_browser_elements.cpp`).
+- **Make Editable** (node context menu in the Scene Graph and the Elements list,
+  `SceneEditor::makeExternalAssetEditable`) breaks the lock for every scene node placing the same
+  file as the top placing node above the clicked one: their instance sets become nodes first
   (`Scene::materializeInstanceSets`, §6), then it clears their `externalAsset` and the marker of
   everything placed under them, so the content is saved inline. The command is not undoable; it
-  clears the undo stack.
+  clears the undo stack. It ends in a rebuild of the render nodes
+  (`Scene::rebuildRenderNodesKeepingPrimitives`), which is most of its cost on a large scene (§9):
+  static content keeps its render primitives, so vertex buffers and BLAS stay as they are. Only when
+  it unlocks a skinned or morphed node or a camera does it run a full `parseScene`.
 
 ---
 
@@ -327,9 +366,10 @@ one pose drawn at each placement is the right picture. **Make Editable** clears 
 which each copy deforms on its own (RENDERING_ARCHITECTURE.md, "Deformed primitives"). A scene
 without external assets keeps the index key. A placing node with an
 instance set (§3) has no mesh of its own: it gets one render node per (entry, primitive), registered
-under the placing node with no primitive index (`Scene::isInstanceSetRenderNode`). Like the render
+under the placing node with no primitive index; the registry keeps which (entry, primitive) each one
+draws, both ways (`Scene::getInstanceSetDraw`, `Scene::getInstanceSetRenderNode`). Like the render
 nodes of an `EXT_mesh_gpu_instancing` node, each keeps a local matrix in
-`Scene::getRenderNodeLocalMatrices()`, so moving the placing node moves every entry on the CPU and
+`Scene::getRenderNodeLocalMatrices`, so moving the placing node moves every entry on the CPU and
 GPU transform paths alike. A save writes the placing node as authored; a flattened save and
 **Make Editable** turn the set into one plain node per entry (`Scene::materializeInstanceSets`),
 with the name, morph weights and extras its node had in the placed file (`InstanceSet::sources`,
@@ -402,10 +442,11 @@ by canonical source path so a file shared by several entries is copied at most o
 | Resolve + place on load | `Scene::resolveExternalAssets`, `ExternalAssetPlacer`, `gltf_scene_external_assets.cpp` |
 | Append resources / remap a copied node | `SceneMerger::appendResources`, `SceneMerger::remapNodeResources`, `gltf_scene_merger.{hpp,cpp}` |
 | Load a file, aliases, image rebase, meshopt | `nvvkgltf::detail`, `gltf_scene_loading.hpp` |
-| Instance sets | `InstanceSet`, `Scene::getInstanceSet`, `Scene::isInstanceSetRenderNode`, `Scene::materializeInstanceSets`, `ExternalAssetPlacer::staticTree` / `addInstanceSet` |
-| Read-only marker + queries | `Scene::kExternalAssetContentKey`, `isNodeReadOnly`, `isMeshReadOnly`, `ReferencedAsset`, `gltf_scene.{hpp,cpp}` |
+| Instance sets | `InstanceSet`, `Scene::getInstanceSet`, `Scene::getInstanceSetDraw` / `getInstanceSetRenderNode`, `Scene::materializeInstanceSets`, `ExternalAssetPlacer::staticTree` / `addInstanceSet` |
+| Read-only marker + queries | `Scene::kExternalAssetContentKey`, `isNodeReadOnly`, `isMeshReadOnly`, `isMaterialReadOnly`, `ReferencedAsset`, `gltf_scene.{hpp,cpp}` |
+| Element usage (who draws a mesh, uses a material, carries a camera or light) | `Scene::elementUsage`, `getMeshNodes`, `getMeshPlacingNodes`, `getMaterialPrimitiveCount`, `getCameraNode`, `getLightNode`, `gltf_scene.cpp` |
 | Editor guards | `SceneEditor::blockIfNodeReadOnly` + guarded mutators, `gltf_scene_editor.cpp` |
-| UI (badge / disabled controls / gizmo skip) | `ui_inspector.cpp`, `ui_scene_browser.cpp` |
+| UI (badge / disabled controls / gizmo skip / clicked part / Elements lock) | `ui_inspector.cpp`, `ui_scene_browser.cpp`, `ui_scene_browser_elements.cpp` |
 | Save (re-externalize / flatten) | `Scene::save`, `removeExternalAssetContent`, `flattenExternalAssets`, `gltf_scene.cpp` + `gltf_compact_scene.cpp` |
 
 ---
@@ -434,6 +475,13 @@ by canonical source path so a file shared by several entries is copied at most o
 - **A placed file's `KHR_materials_variants` are not merged**, and its `KHR_animation_pointer`
   channels are dropped (with a warning). A skin whose joints lie outside the placed tree draws
   unskinned.
+- **Make Editable rebuilds every render node.** Its cost follows the size of the scene, not of what
+  was unlocked: on a city-scale scene (millions of nodes and render nodes) the walk of the scene
+  takes seconds. Rebuilding only the render nodes of the unlocked placements would make it
+  proportional to them.
+- **A material edit of referenced content is not saved in the referencing form** (§5): the default
+  save writes the reference, so the edit lives for the session or in a self-contained save. Writing
+  it back to the referenced file, or storing it as an override in the scene, is not done.
 - **The file cache lives for one load** (or one Reference Scene); referencing a file again later
   appends its resources again.
 - **Cycle detection is path-string based.** The ancestry check (§3) compares canonical paths with a

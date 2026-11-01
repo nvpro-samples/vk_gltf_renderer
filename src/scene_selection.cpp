@@ -32,11 +32,12 @@
 //--------------------------------------------------------------------------------------------------
 // Select a node in the hierarchy
 //
-void SceneSelection::selectNode(int nodeIdx, const glm::vec3& selectionPoint, const glm::vec3& selectionRayOrigin)
+void SceneSelection::selectNode(int nodeIdx, const glm::vec3& selectionPoint, const glm::vec3& selectionRayOrigin, int clickedRenderNodeIdx)
 {
-  m_selection           = {};  // Clear previous selection
-  m_selection.type      = SelectionType::eNode;
-  m_selection.nodeIndex = nodeIdx;
+  m_selection                 = {};  // Clear previous selection
+  m_selection.type            = SelectionType::eNode;
+  m_selection.nodeIndex       = nodeIdx;
+  m_selection.renderNodeIndex = clickedRenderNodeIdx;
 
   emitEvent({EventType::NodeSelected, nodeIdx, -1, selectionPoint, selectionRayOrigin});
 }

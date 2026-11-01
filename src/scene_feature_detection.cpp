@@ -176,11 +176,9 @@ int SceneFeatureSet::unusedExtensionCount() const
 
 //--------------------------------------------------------------------------------------------------
 // Scan materials/model and collect the scene's active feature toggles
-SceneFeatureSet detectSceneFeatures(const std::vector<tinygltf::Material>& materials, const tinygltf::Model* /*model*/)
+SceneFeatureSet detectMaterialFeatures(const tinygltf::Material& m)
 {
   SceneFeatureSet set{};
-
-  for(const auto& m : materials)
   {
     const auto& ext = m.extensions;
     if(hasExt(ext, KHR_MATERIALS_TRANSMISSION_EXTENSION_NAME))
@@ -215,6 +213,20 @@ SceneFeatureSet detectSceneFeatures(const std::vector<tinygltf::Material>& mater
     if(materialHasTextureTransform(m))
       set.enable(SceneFeatureSet::eTextureTransform);
   }
+  return set;
+}
+
+SceneFeatureSet detectSceneFeatures(const std::vector<tinygltf::Material>& materials, const tinygltf::Model* /*model*/)
+{
+  SceneFeatureSet set{};
+  for(const auto& m : materials)
+    set.merge(detectMaterialFeatures(m));
+  set.promote();
+  return set;
+}
+
+void SceneFeatureSet::promote()
+{
 
   // Feature dependency promotion. The path tracer's bounce-loop code paths form a
   // strict containment chain, and consumers of this set should not have to re-derive
@@ -229,12 +241,10 @@ SceneFeatureSet detectSceneFeatures(const std::vector<tinygltf::Material>& mater
   //   volume   =>  transmission   (the bounce loop only enters a volume via the
   //                                transmission isInside toggle; without transmission
   //                                pt.isInside never flips so the volume code is dead)
-  if(set.has(SceneFeatureSet::eScatter))
-    set.enable(SceneFeatureSet::eVolume);
-  if(set.has(SceneFeatureSet::eVolume))
-    set.enable(SceneFeatureSet::eTransmission);
-
-  return set;
+  if(has(eScatter))
+    enable(eVolume);
+  if(has(eVolume))
+    enable(eTransmission);
 }
 
 //--------------------------------------------------------------------------------------------------

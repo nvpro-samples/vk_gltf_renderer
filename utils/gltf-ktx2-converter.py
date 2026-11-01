@@ -336,9 +336,10 @@ _TWO_CHANNEL_FOURCC = frozenset({b"ATI2", b"BC5U", b"BC5S", b"A2XY"})
 def source_is_two_channel(path):
     """True when ``path`` is an image whose pixel format stores exactly two channels.
 
-    Only DDS and KTX2 can be two-channel in practice; PNG and JPEG always decode to grayscale or
-    RGB(A), so they return False and keep the regular --format. Anything unreadable or unrecognized
-    also returns False, which leaves the existing behaviour untouched rather than guessing.
+    DDS and KTX2 store two channels by format. A PNG or JPEG always decodes to grayscale or RGB(A),
+    and counts only when its blue channel cannot be a normal's Z (``blue_is_not_z``). Anything
+    unreadable or unrecognized returns False, which leaves the existing behaviour untouched rather
+    than guessing.
     """
     try:
         with path.open("rb") as stream:
@@ -357,7 +358,27 @@ def source_is_two_channel(path):
     if header.startswith(KTX2_MAGIC) and len(header) >= 16:
         return int.from_bytes(header[12:16], "little") in _TWO_CHANNEL_VK_FORMATS
 
-    return False
+    return blue_is_not_z(path)
+
+
+def blue_is_not_z(path):
+    """True when ``path`` is an RGB(A) normal map whose blue channel cannot be its Z: an RG normal map
+    saved with a leftover blue. A tangent-space normal points out of the surface, so a real Z is never
+    below 128; when most of the image is, the map only makes sense as RG (Da Vinci's workshop ships
+    its paper scroll's normal map as (181, 230, 29)). Needs Pillow; without it, False."""
+    try:
+        from PIL import Image
+    except ImportError:
+        return False
+    try:
+        with Image.open(path) as image:
+            if image.mode not in ("RGB", "RGBA"):
+                return False
+            image.thumbnail((64, 64))  # enough pixels for a median
+            blue = sorted(image.getchannel("B").getdata())
+    except (OSError, ValueError):
+        return False
+    return bool(blue) and blue[len(blue) // 2] < 128
 
 
 def encoder_format(args, input_path, is_normal_map):
@@ -369,7 +390,8 @@ def encoder_format(args, input_path, is_normal_map):
     and renders black. BC5 keeps it two-channel, and the renderer rebuilds Z from X/Y.
 
     Normal maps that already carry a real blue channel (PNG, JPEG, an RGB DDS) are left on --format;
-    BC7 handles them correctly. An explicit --normal-format overrides both cases.
+    BC7 handles them correctly. A PNG or JPEG whose blue is mostly below 128 is an RG map with a
+    leftover blue, and gets bc5 too. An explicit --normal-format overrides all of these.
     """
     if not is_normal_map:
         return args.format

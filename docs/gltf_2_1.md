@@ -27,6 +27,7 @@ to the working group. So parts of our implementation rest on draft text that may
 | Multiple scenes deprecation | [#2591](https://github.com/KhronosGroup/glTF/issues/2591) | Done: multi-scene files load and honor `scene`; saves keep every scene, with a warning when saved as 2.1 | `Scene::save`; test `RoundTripTest.MultipleScenes` |
 | Shapes, bounding volumes | [#2588](https://github.com/KhronosGroup/glTF/issues/2588), [#2587](https://github.com/KhronosGroup/glTF/issues/2587) | Preserved on load/save; not used | — |
 | Thumbnails | [#2593](https://github.com/KhronosGroup/glTF/issues/2593) | Preserved on load/save; not shown | — |
+| OpenEXR image textures (not in 2.0 or 2.1; a loader extension) | — | `PROVISIONAL(OpenEXR textures)`: an `.exr` image loads as a linear half-float material texture; a save keeps its bytes as loaded | `loadExr` in `src/gltf_image_loader.cpp`; [developer.md](developer.md) § OpenEXR material textures |
 
 "Preserved" means the regression tests in `tests/test_gltf_2_1.cpp` check that the property comes
 back unchanged after a save. Detailed task lists live in the project's issue tracker
@@ -130,7 +131,8 @@ keep the fork until v3 is stable enough to port to, or upstream takes the change
 `tests/gltf_2_1/generate_fixtures.py` describes small `.gltf` files, one per feature area, that
 `tests/test_gltf_2_1.cpp` loads and round-trips: `core_properties.gltf` groups the small core
 properties (thumbnail, shapes, bounding volumes, `uid`), and external assets get two folders
-(`external/` for references, files and images; `placement/` for how placed content is drawn). None of the official sample assets use 2.1 yet, so
+(`external/` for references, files and images; `placement/` for how placed content is drawn).
+`exr_textures/` is not 2.1 but follows the same rule: a provisional loader extension gets a fixture. None of the official sample assets use 2.1 yet, so
 these are the only regression coverage.
 
 - **Generated at build time, never committed.** Only the script is in the repository. The test

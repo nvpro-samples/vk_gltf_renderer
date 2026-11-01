@@ -154,6 +154,20 @@ public:
   // ---------- Node lifecycle ----------
   [[nodiscard]] int addNode(const std::string& name = "", int parentIndex = -1);
   [[nodiscard]] int addLightNode(const std::string& lightType, const std::string& name, int parentIndex = -1);
+
+  // ---------- Light ops ----------
+  // Why the light cannot be removed with removeLightAt(), or empty when it can: a node carries it, an
+  // animation pointer addresses it, or a KHR_interactivity graph exists (its pointers can name any
+  // light by index, so they cannot be renumbered). An unattached light is typically left behind by
+  // deleting the nodes of placed glTF 2.1 content, which merged its lights into the scene.
+  [[nodiscard]] std::string lightRemovalBlocker(int lightIndex) const;
+
+  // Remove a light nothing references (asserts lightRemovalBlocker() is empty), shifting higher light
+  // indices down in nodes, animation pointers and the render lights. Pair with insertLightAt() for undo.
+  void removeLightAt(int lightIndex);
+
+  // Inverse of removeLightAt(): shift light indices at/after lightIndex up and insert `light` there.
+  void insertLightAt(int lightIndex, const tinygltf::Light& light);
   [[nodiscard]] int duplicateNode(int originalIndex, bool reparse = true);
   void              deleteNode(int nodeIndex);
 
@@ -253,6 +267,7 @@ public:
 
   // ---------- Visibility ----------
   void updateVisibility(int nodeIndex);
+  void updateShadowCasting(int nodeIndex);  // NV_node_shadow_casting -> RenderNode::castShadows (own mesh only)
 
   // ---------- Snapshot / Restore (for undo of structural operations) ----------
   [[nodiscard]] SceneGraphSnapshot snapshotForDelete() const;

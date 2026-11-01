@@ -182,8 +182,8 @@ void BenchmarkController::registerParameters(nvutils::ParameterRegistry* paramet
 
   parameterRegistry->add({.name = "selectNode",
                           .help = "Select a scene-graph node by index (as listed in the Scene Browser tree), driving "
-                                  "the Inspector contents and the Scene Browser highlight. A negative or out-of-range "
-                                  "index clears the selection.",
+                                  "the Inspector contents and the Scene Browser highlight; the Scene Browser expands and "
+                                  "scrolls to it. A negative or out-of-range index clears the selection.",
                           .callbackSuccess =
                               [this](const nvutils::ParameterBase* const) {
                                 if(m_callbacks.selectSceneNode)
@@ -192,6 +192,20 @@ void BenchmarkController::registerParameters(nvutils::ParameterRegistry* paramet
                                 }
                               }},
                          &m_options.selectNodeIndex);
+
+  parameterRegistry->add({.name = "pickNode",
+                          .help = "Pick a scene-graph node by index the way a viewport click on it would: its first "
+                                  "render node is picked, so the selection, Inspector and Scene Browser (which "
+                                  "expands to it) follow the click rules, e.g. a primitive of placed glTF 2.1 "
+                                  "content. A negative or out-of-range index clears the selection.",
+                          .callbackSuccess =
+                              [this](const nvutils::ParameterBase* const) {
+                                if(m_callbacks.pickSceneNode)
+                                {
+                                  m_callbacks.pickSceneNode(m_options.pickNodeIndex);
+                                }
+                              }},
+                         &m_options.pickNodeIndex);
 }
 
 //--------------------------------------------------------------------------------------------------

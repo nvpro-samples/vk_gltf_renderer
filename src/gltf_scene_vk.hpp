@@ -298,9 +298,22 @@ protected:
   uint32_t     m_numEmissiveTriangles = 0;
   float        m_emissiveTotalWeight  = 0.0f;  // Sum of per-triangle selection weights (area * defensive luminance)
   float        m_emissiveMeanLum      = 0.0f;  // Area-weighted mean emitter luminance (defensive sampling)
-  nvvk::Buffer m_bRenderPrim;
-  nvvk::Buffer m_bRenderNode;
-  nvvk::Buffer m_bSceneDesc;
+  // What the emissive list takes from each material, as of its last build: the constant emitted
+  // radiance and the doubleSided flag. A material edit rebuilds the list (millions of triangles on a
+  // large scene) only when it changes one of these.
+  struct MaterialEmission
+  {
+    glm::vec3 radiance{0.0f};
+    bool      doubleSided                               = false;
+    bool      operator==(const MaterialEmission&) const = default;
+  };
+  std::vector<MaterialEmission> m_materialEmission;
+  static MaterialEmission       materialEmissionOf(const tinygltf::Material& material);
+  [[nodiscard]] bool materialEmissionChanged(const nvvkgltf::Scene& scn, const std::unordered_set<int>& dirtyMaterials);
+
+  nvvk::Buffer               m_bRenderPrim;
+  nvvk::Buffer               m_bRenderNode;
+  nvvk::Buffer               m_bSceneDesc;
   std::vector<nvvk::Buffer>  m_bIndices;
   std::vector<VertexBuffers> m_vertexBuffers;
   std::vector<SceneImage>    m_images;

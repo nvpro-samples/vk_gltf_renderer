@@ -61,25 +61,13 @@ constexpr const char* kMemCategoryMatrices = "Xform/Matrices";
 // Build a per-render-node array of local matrices (identity for nodes drawn once).
 static void fillPerRenderNodeInstanceLocals(const Scene& scn, std::vector<glm::mat4>& out)
 {
-  const auto& rns    = scn.getRenderNodes();
-  const auto& reg    = scn.getRenderNodeRegistry();
-  const auto& gpuMap = scn.getRenderNodeLocalMatrices();
-  out.assign(rns.size(), glm::mat4(1.f));
-
-  // Walk each such node's render-node list once: position k in that list has local matrix k.
-  // Searching the list per render node would be quadratic in the instance count.
-  for(const auto& [nodeID, locals] : gpuMap)
-  {
-    if(locals.empty())
-      continue;
-    const auto& rnList = reg.getRenderNodesForNode(nodeID);
-    for(size_t k = 0; k < rnList.size(); ++k)
-    {
-      const int rnID = rnList[k];
-      if(rnID >= 0 && static_cast<size_t>(rnID) < out.size())
-        out[rnID] = k < locals.size() ? locals[k] : glm::mat4(1.f);
-    }
-  }
+  const auto& reg = scn.getRenderNodeRegistry();
+  out.assign(scn.getRenderNodes().size(), glm::mat4(1.f));
+  if(!reg.hasLocalMatrices())
+    return;
+  for(size_t rnID = 0; rnID < out.size(); ++rnID)
+    if(const glm::mat4* local = reg.getLocalMatrix(static_cast<int>(rnID)))
+      out[rnID] = *local;
 }
 
 //--------------------------------------------------------------------------------------------------

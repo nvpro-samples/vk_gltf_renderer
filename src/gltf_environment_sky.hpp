@@ -21,10 +21,15 @@
 
 #include <optional>
 #include <string>
+#include <vector>
 
 #include <glm/glm.hpp>
 #include <glm/gtc/quaternion.hpp>
 #include <tinygltf/tiny_gltf.h>
+
+namespace nvvkgltf {
+struct RenderLight;
+}
 
 //--------------------------------------------------------------------------------------------------
 // Host model and serializer for the glTF `OMI_environment_sky` extension -- the authored sky of a
@@ -229,9 +234,19 @@ inline void setSkySunMarker(tinygltf::Node& node, const char* owner = kSkySunOwn
   return -1;
 }
 
-// Index of the node carrying the marker, or -1. First match wins: the writer only ever creates
-// one, and a file with several is malformed rather than meaningful.
+// Index of the light-carrying node with the marker, or -1. A marker on a node without a light is
+// stale and ignored. First match wins: the writer only ever creates one, and a file with several
+// is malformed rather than meaningful.
+//
+// Scans every node, so it is for a model being written, which is not the live scene. The live
+// scene resolves its sun with findSkySunRenderLight(), which applies the same rule to the lights.
 [[nodiscard]] int findSkySunNode(const tinygltf::Model& model);
+
+// Index into `renderLights` of the sky's sun, or -1: the marked node with the lowest index among
+// the lights the scene renders. Only a node carrying a light can be the sun, so this searches the
+// lights rather than every node -- a large scene has millions of nodes and a handful of lights.
+// Called by Scene::updateSkySunLight(), when the lights or the marker change; never per frame.
+[[nodiscard]] int findSkySunRenderLight(const tinygltf::Model& model, const std::vector<nvvkgltf::RenderLight>& renderLights);
 
 // The local rotation that gives a node under `parentWorld` the world rotation `worldRotation`, with
 // the parent's rotation taken back out. A sun direction is a world direction, but a node stores a

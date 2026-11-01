@@ -37,6 +37,7 @@
 #include <imgui.h>
 #include <imgui_internal.h>
 #include <nvgui/fonts.hpp>
+#include <nvutils/file_operations.hpp>
 #include <nvutils/logger.hpp>
 #include <glm/gtc/matrix_transform.hpp>
 #include <glm/gtx/matrix_decompose.hpp>
@@ -49,9 +50,9 @@
 // CONSTANTS
 //==================================================================================================
 
-static ImGuiTreeNodeFlags s_treeNodeFlags = ImGuiTreeNodeFlags_SpanAllColumns | ImGuiTreeNodeFlags_SpanFullWidth
-                                            | ImGuiTreeNodeFlags_SpanTextWidth | ImGuiTreeNodeFlags_OpenOnArrow
-                                            | ImGuiTreeNodeFlags_OpenOnDoubleClick;
+static ImGuiTreeNodeFlags s_treeNodeFlags = ImGuiTreeNodeFlags_SpanAllColumns | ImGuiTreeNodeFlags_AllowOverlap
+                                            | ImGuiTreeNodeFlags_SpanFullWidth | ImGuiTreeNodeFlags_SpanTextWidth
+                                            | ImGuiTreeNodeFlags_OpenOnArrow | ImGuiTreeNodeFlags_OpenOnDoubleClick;
 
 //==================================================================================================
 // HELPER FUNCTIONS
@@ -91,16 +92,13 @@ static float sceneGraphRowHeight()
 // an expanded sibling emits several rows and would otherwise trip the clipper's one-row-per-item
 // assert inside a table (ImGuiListClipper_StepInternal, table branch).
 //
-// TODO: known limitation of the uniform-height model. An expanded sibling still renders its whole
-// subtree, but the clipper keeps modelling it as one row, so the scroll extent is short by those
-// extra rows and the rows it positions from that model can shift or overlap near an expanded
-// sibling while scrolling. It is bounded by the height of what is expanded and only shows up past
-// the threshold; fixing it properly means clipping a flattened list of visible rows rather than a
-// sibling list, which is a restructure of the whole hierarchy walk. Do not "fix" it by declining to
-// virtualize a list that contains an open node: focusOnSelection() opens the selected node, so
-// every viewport pick would drop a huge list straight back to the full walk this exists to avoid.
+// The clipper models every row as one row high, which an open sibling is not: it emits its whole
+// subtree. So the rows in `fullRows` (ascending; the open siblings, and on a focus request those on
+// the path to the selection) are built every frame at their natural height, outside the clipper, and
+// only the collapsed runs between them are clipped. The layout then matches what is drawn, a scroll
+// to the selection lands on it, and a huge list stays virtualized while a sibling in it is open.
 template <class RenderRow>
-static void walkSiblingRows(size_t count, bool virtualize, RenderRow&& render)
+static void walkSiblingRows(size_t count, bool virtualize, const std::vector<size_t>& fullRows, RenderRow&& render)
 {
   if(!virtualize)
   {
@@ -109,14 +107,28 @@ static void walkSiblingRows(size_t count, bool virtualize, RenderRow&& render)
     return;
   }
 
-  const float      rowHeight = sceneGraphRowHeight();
-  ImGuiListClipper clipper;
-  clipper.Begin(static_cast<int>(count), rowHeight);
-  while(clipper.Step())
+  const float rowHeight = sceneGraphRowHeight();
+  size_t      begin     = 0;
+  auto        clipRun   = [&begin, rowHeight, &render](size_t end) {
+    if(end <= begin)
+      return;
+    ImGuiListClipper clipper;
+    clipper.Begin(static_cast<int>(end - begin), rowHeight);
+    while(clipper.Step())
+    {
+      for(int i = clipper.DisplayStart; i < clipper.DisplayEnd; ++i)
+        render(begin + static_cast<size_t>(i), rowHeight);
+    }
+  };
+  for(size_t full : fullRows)
   {
-    for(int i = clipper.DisplayStart; i < clipper.DisplayEnd; ++i)
-      render(static_cast<size_t>(i), rowHeight);
+    if(full < begin || full >= count)
+      continue;
+    clipRun(full);
+    render(full, 0.0f);
+    begin = full + 1;
   }
+  clipRun(count);
 }
 
 //==================================================================================================
@@ -125,11 +137,19 @@ static void walkSiblingRows(size_t count, bool virtualize, RenderRow&& render)
 
 void UiSceneBrowser::markCachesDirty()
 {
-  m_meshToNodeMapDirty   = true;
-  m_lightToNodeMapDirty  = true;
-  m_cameraToNodeMapDirty = true;
   ++m_revision;  // invalidate the Elements view + derived-stat tables (see ui_scene_browser_elements.cpp)
   markSceneTransformsDirty();
+}
+
+// ImGui keeps tree open/closed state in per-window storage keyed by row id, so clearing our own
+// caches is not enough: bumping the generation moves every row under a new id, which ImGui has never
+// seen, so it holds no open state for any of them.
+void UiSceneBrowser::collapseTree()
+{
+  ++m_treeStateGeneration;
+  m_expandedNodes.clear();
+  m_openNodes.clear();
+  m_openEntries.clear();
 }
 
 void UiSceneBrowser::setScene(nvvkgltf::Scene* scene)
@@ -142,16 +162,11 @@ void UiSceneBrowser::setScene(nvvkgltf::Scene* scene)
     // through here before the next scene is handed over). Retire the id the tree rows are scoped
     // under, so the incoming scene starts collapsed instead of inheriting this one's expansion.
     // A merge keeps the same Scene and never unloads, so it keeps the tree the user had open.
-    ++m_treeStateGeneration;
-    m_expandedNodes.clear();
+    collapseTree();
     m_doScroll = false;
     return;
   }
 
-  // Mark caches as dirty
-  m_meshToNodeMapDirty   = true;
-  m_lightToNodeMapDirty  = true;
-  m_cameraToNodeMapDirty = true;
   m_elementTypes.clear();  // rebuilt lazily for the new scene by ensureElementRegistry()
   ++m_revision;
 
@@ -449,6 +464,10 @@ void UiSceneBrowser::renderSceneGraphTab()
   static ImGuiTableFlags s_tableFlags =
       ImGuiTableFlags_ScrollY | ImGuiTableFlags_RowBg | ImGuiTableFlags_BordersOuter | ImGuiTableFlags_BordersV;
 
+  if(ImGui::Button(ICON_MS_UNFOLD_LESS " Collapse All"))
+    collapseTree();
+  ImGui::SetItemTooltip("Close every row of the tree");
+
   if(ImGui::BeginTable("SceneGraphTable", 2, s_tableFlags))
   {
     ImGui::TableSetupScrollFreeze(1, 1);
@@ -526,14 +545,12 @@ void UiSceneBrowser::renderSceneGraphTab()
         // apply-after-traversal contract Delete/Rename already use via their "next frame" flags.
         std::vector<int> nodesToRender = scene.nodes;
 
-        // Virtualize only huge root lists. m_doScroll forces a full walk so SetScrollHereY() on the
-        // (possibly clipped-away) selected row can fire; small graphs also render fully so scrolling
-        // and deep expansion stay correct -- the clipper models scroll extent as (root count x row
-        // height) and would collapse the scroll bar for an expanded ordinary scene.
-        const bool virtualizeRoots = !m_doScroll && nodesToRender.size() > kSceneGraphVirtualizeThreshold;
-        walkSiblingRows(nodesToRender.size(), virtualizeRoots, [&](size_t i, float rowHeight) {
-          renderNodeHierarchy(nodesToRender[i], rowHeight, /*canVirtualizeChildren=*/!virtualizeRoots);
-        });
+        // Virtualize only huge root lists; small graphs render fully (see walkSiblingRows).
+        const bool virtualizeRoots = nodesToRender.size() > kSceneGraphVirtualizeThreshold;
+        walkSiblingRows(nodesToRender.size(), virtualizeRoots,
+                        virtualizeRoots ? openSiblingRows(nodesToRender, -1) : std::vector<size_t>{}, [&](size_t i, float rowHeight) {
+                          renderNodeHierarchy(nodesToRender[i], rowHeight, /*canVirtualizeChildren=*/rowHeight == 0.0f);
+                        });
 
         ImGui::TreePop();
       }
@@ -549,7 +566,7 @@ void UiSceneBrowser::renderSceneGraphTab()
   // and the scroll has fired on the selected row. Clearing them here rather than at the row that
   // consumed them is what guarantees they cannot get stuck: a selection that never reaches a row --
   // cleared again before this frame, or pointing at a node the model no longer has -- would
-  // otherwise leave m_doScroll set forever, permanently disabling virtualization. The walk above
+  // otherwise leave m_doScroll set forever, scrolling to whatever gets selected next. The walk above
   // force-opens the scene rows while the request is live, so a collapsed scene cannot be the reason
   // a row goes unvisited.
   m_expandedNodes.clear();
@@ -782,6 +799,10 @@ void UiSceneBrowser::renderNodeHierarchy(int nodeIdx, float rowHeight, bool canV
 
     // Render tree node
     nodeOpen = ImGui::TreeNodeEx((void*)(intptr_t)nodeIdx, flags, "%s [%d] %s", icon, nodeIdx, node.name.c_str());
+    if(nodeOpen)
+      m_openNodes.insert(nodeIdx);
+    else
+      m_openNodes.erase(nodeIdx);
 
     // Handle node selection on click
     if(ImGui::IsItemClicked() && !ImGui::IsItemToggledOpen())
@@ -837,6 +858,21 @@ void UiSceneBrowser::renderNodeHierarchy(int nodeIdx, float rowHeight, bool canV
 
   ImGui::TableNextColumn();
 
+  // glTF 2.1 external asset: a small button opens the referenced glTF as the scene.
+  if(m_onOpenScene && node.externalAsset >= 0)
+  {
+    const std::string referencedFile = m_scene->referencedFilePathOf(nodeIdx);
+    if(!referencedFile.empty())
+    {
+      ImGui::PushID(nodeIdx);
+      if(ImGui::SmallButton(ICON_MS_FILE_OPEN "##openRef"))
+        m_onOpenScene(nvutils::pathFromUtf8(referencedFile));
+      ImGui::PopID();
+      ImGui::SetItemTooltip("Open referenced glTF:\n%s", referencedFile.c_str());
+      ImGui::SameLine();
+    }
+  }
+
   // XMP button
   std::string popupId = "node_xmp_" + std::to_string(nodeIdx);
   ui_xmp::renderInfoButton(&m_scene->getModel(), node.extensions, popupId.c_str());
@@ -861,17 +897,34 @@ void UiSceneBrowser::renderNodeHierarchy(int nodeIdx, float rowHeight, bool canV
       renderCameraInHierarchy(node.camera);
     }
 
+    // Render the placed content of an instance set (glTF 2.1 static external asset): it has no node
+    // of its own, so without these rows its meshes and materials could not be reached from the tree.
+    // A placed kit can hold many pieces, so the entries virtualize like a long child list.
+    if(const nvvkgltf::InstanceSet* set = m_scene->getInstanceSet(nodeIdx))
+    {
+      const size_t entryCount        = set->entries.size();
+      const bool   virtualizeEntries = canVirtualizeChildren && entryCount > kSceneGraphVirtualizeThreshold;
+      walkSiblingRows(entryCount, virtualizeEntries, virtualizeEntries ? openEntryRows(nodeIdx) : std::vector<size_t>{},
+                      [&](size_t e, float entryRowHeight) {
+                        const nvvkgltf::InstanceSet* liveSet = m_scene->getInstanceSet(nodeIdx);
+                        if(liveSet && e < liveSet->entries.size())
+                          renderMeshInHierarchy(liveSet->entries[e].mesh, nodeIdx, static_cast<int>(e), entryRowHeight);
+                      });
+    }
+
     // Render children, virtualizing long sibling lists the same way the root list is (a single
     // node holding a whole city's worth of children is common in exported scenes). The child list
     // is re-read from the model on every row because a row can edit it inline (context-menu
     // Duplicate / Add, drag-drop reparent), which reallocates model.nodes and would dangle a
     // reference taken before the loop.
-    const bool virtualizeChildren = canVirtualizeChildren && !m_doScroll && node.children.size() > kSceneGraphVirtualizeThreshold;
-    walkSiblingRows(node.children.size(), virtualizeChildren, [&](size_t i, float childRowHeight) {
-      const std::vector<int>& children = m_scene->getModel().nodes[nodeIdx].children;
-      if(i < children.size())
-        renderNodeHierarchy(children[i], childRowHeight, canVirtualizeChildren && !virtualizeChildren);
-    });
+    const bool virtualizeChildren = canVirtualizeChildren && node.children.size() > kSceneGraphVirtualizeThreshold;
+    walkSiblingRows(node.children.size(), virtualizeChildren,
+                    virtualizeChildren ? openSiblingRows(node.children, nodeIdx) : std::vector<size_t>{},
+                    [&](size_t i, float childRowHeight) {
+                      const std::vector<int>& children = m_scene->getModel().nodes[nodeIdx].children;
+                      if(i < children.size())
+                        renderNodeHierarchy(children[i], childRowHeight, canVirtualizeChildren && childRowHeight == 0.0f);
+                    });
 
     ImGui::TreePop();
   }
@@ -881,7 +934,7 @@ void UiSceneBrowser::renderNodeHierarchy(int nodeIdx, float rowHeight, bool canV
 // MESH HIERARCHY RENDERING
 //==================================================================================================
 
-void UiSceneBrowser::renderMeshInHierarchy(int meshIdx, int nodeIdx)
+void UiSceneBrowser::renderMeshInHierarchy(int meshIdx, int nodeIdx, int entry, float rowHeight)
 {
   if(!m_scene)
     return;
@@ -892,26 +945,53 @@ void UiSceneBrowser::renderMeshInHierarchy(int meshIdx, int nodeIdx)
 
   const tinygltf::Mesh& mesh = model.meshes[meshIdx];
 
-  ImGui::TableNextRow();
+  ImGui::TableNextRow(ImGuiTableRowFlags_None, rowHeight);
   ImGui::TableNextColumn();
 
   ImGuiTreeNodeFlags flags = s_treeNodeFlags;
 
-  // Force open if a primitive in this mesh is selected
+  // Force open if a primitive in this mesh is selected. Entries of one instance set can share a
+  // mesh, so an entry row opens only for its own render nodes.
   if(m_selection)
   {
     auto sel = m_selection->getSelection();
     if(sel.type == SceneSelection::SelectionType::ePrimitive && sel.nodeIndex == nodeIdx && sel.meshIndex == meshIdx)
     {
-      ImGui::SetNextItemOpen(true);
+      const auto draw = m_scene->getInstanceSetDraw(sel.renderNodeIndex);
+      if(entry < 0 ? !draw : (draw && draw->first == entry))
+        ImGui::SetNextItemOpen(true);
     }
   }
 
-  bool meshOpen = ImGui::TreeNodeEx((void*)(intptr_t)(meshIdx + 1000000), flags, "%s [%d] %s", ICON_MS_VIEW_IN_AR,
-                                    meshIdx, mesh.name.c_str());
-
-  // Context menu (must be right after TreeNodeEx)
-  showMeshContextMenu(meshIdx);
+  bool meshOpen = false;
+  if(entry < 0)
+  {
+    meshOpen = ImGui::TreeNodeEx((void*)(intptr_t)(meshIdx + 1000000), flags, "%s [%d] %s", ICON_MS_VIEW_IN_AR, meshIdx,
+                                 mesh.name.c_str());
+    // Context menu (must be right after TreeNodeEx)
+    showMeshContextMenu(meshIdx);
+  }
+  else
+  {
+    // A placed entry is named after the placed file's node, else its mesh. Read-only: no context menu.
+    const nvvkgltf::InstanceSet* set    = m_scene->getInstanceSet(nodeIdx);
+    const int                    source = set ? set->entries[entry].source : -1;
+    const std::string*           name   = &mesh.name;
+    if(set && set->sources && source >= 0 && source < static_cast<int>(set->sources->size())
+       && !(*set->sources)[source].name.empty())
+      name = &(*set->sources)[source].name;
+    // The scope stays pushed until after the children: an open TreeNodeEx pushes its own ID on top of
+    // it, so popping here would drop the tree's ID instead and leave every entry's primitives
+    // sharing one ID scope (conflicting "Primitive N" IDs).
+    ImGui::PushID("instance_set_entry");
+    meshOpen = ImGui::TreeNodeEx((void*)(intptr_t)entry, flags, "%s [%d] %s", ICON_MS_LOCK, meshIdx, name->c_str());
+    const uint64_t entryKey = (uint64_t(uint32_t(nodeIdx)) << 32) | uint32_t(entry);
+    if(meshOpen)
+      m_openEntries.insert(entryKey);
+    else
+      m_openEntries.erase(entryKey);
+    ImGui::SetItemTooltip("Placed instance of mesh %d (read-only)", meshIdx);
+  }
 
   ImGui::TableNextColumn();
 
@@ -924,18 +1004,21 @@ void UiSceneBrowser::renderMeshInHierarchy(int meshIdx, int nodeIdx)
     // Render primitives
     for(int primIdx = 0; primIdx < static_cast<int>(mesh.primitives.size()); ++primIdx)
     {
-      renderPrimitiveInHierarchy(primIdx, meshIdx, nodeIdx);
+      renderPrimitiveInHierarchy(primIdx, meshIdx, nodeIdx, entry);
     }
 
     ImGui::TreePop();
   }
+
+  if(entry >= 0)
+    ImGui::PopID();  // "instance_set_entry"
 }
 
 //==================================================================================================
 // PRIMITIVE HIERARCHY RENDERING
 //==================================================================================================
 
-void UiSceneBrowser::renderPrimitiveInHierarchy(int primIdx, int meshIdx, int nodeIdx)
+void UiSceneBrowser::renderPrimitiveInHierarchy(int primIdx, int meshIdx, int nodeIdx, int entry)
 {
   if(!m_scene)
     return;
@@ -955,7 +1038,8 @@ void UiSceneBrowser::renderPrimitiveInHierarchy(int primIdx, int meshIdx, int no
   ImGui::TableNextColumn();
 
   // Get render node index for this primitive
-  int renderNodeIdx = m_scene->getRenderNodeForPrimitive(nodeIdx, primIdx);
+  const int renderNodeIdx = entry < 0 ? m_scene->getRenderNodeForPrimitive(nodeIdx, primIdx) :
+                                        m_scene->getInstanceSetRenderNode(nodeIdx, entry, primIdx);
 
   bool isSelected = false;
   if(m_selection)
@@ -988,8 +1072,9 @@ void UiSceneBrowser::renderPrimitiveInHierarchy(int primIdx, int meshIdx, int no
     }
   }
 
-  // Context menu
-  showPrimitiveContextMenu(primIdx, meshIdx, nodeIdx);
+  // Context menu (none on placed content)
+  if(entry < 0)
+    showPrimitiveContextMenu(primIdx, meshIdx, nodeIdx);
 
   ImGui::TableNextColumn();
 
@@ -1169,6 +1254,36 @@ void UiSceneBrowser::renderImageViewer()
 // CONTEXT MENUS
 //==================================================================================================
 
+// glTF 2.1: "break the lock" -- make a referenced external asset editable. Offered on read-only placed
+// nodes and on the placing node itself; it unlocks every placement of the file the top placing node
+// above the node references (SceneEditor::makeExternalAssetEditable).
+void UiSceneBrowser::makeEditableMenuItem(int nodeIdx)
+{
+  if(!m_scene->isNodeReadOnly(nodeIdx) && !m_scene->isExternalAssetInstance(nodeIdx))
+    return;
+  if(ImGui::MenuItem(ICON_MS_LOCK_OPEN " Make Editable"))
+  {
+    if(m_scene->editor().makeExternalAssetEditable(nodeIdx))
+    {
+      m_undoStack->clear();  // model mutated outside the command system
+      markCachesDirty();
+      // Unlocked copies of a skinned or morphed node no longer share one render primitive:
+      // the renderer recreates vertex buffers, BLAS and animation buffers to match.
+      if(m_onGeometryChanged)
+        m_onGeometryChanged();
+    }
+  }
+  ImGui::SetItemTooltip(
+      "Break the external-asset link and unlock every placement of the referenced file for editing (saved inline on "
+      "next save). Rebuilds the scene: slow on very large scenes. To change a referenced material, edit it in the "
+      "Inspector instead.");
+  // Handy for opening the referenced file in a second instance of the app.
+  const std::string referencedFile = m_scene->referencedFilePathOf(nodeIdx);
+  if(!referencedFile.empty() && ImGui::MenuItem(ICON_MS_CONTENT_COPY " Copy Path to Reference"))
+    ImGui::SetClipboardText(referencedFile.c_str());
+  ImGui::Separator();
+}
+
 void UiSceneBrowser::showNodeContextMenu(int nodeIdx)
 {
   if(ImGui::BeginPopupContextItem())
@@ -1177,26 +1292,8 @@ void UiSceneBrowser::showNodeContextMenu(int nodeIdx)
     {
       const bool readOnly = m_scene->isNodeReadOnly(nodeIdx);
 
-      // glTF 2.1: "break the lock" -- make a referenced external asset editable. Offered on read-only
-      // merged nodes and on the instance node itself, and kept enabled while the rest of the menu is
-      // disabled below for read-only nodes.
-      if(readOnly || m_scene->isExternalAssetInstance(nodeIdx))
-      {
-        if(ImGui::MenuItem(ICON_MS_LOCK_OPEN " Make Editable"))
-        {
-          if(m_scene->editor().makeExternalAssetEditable(nodeIdx))
-          {
-            m_undoStack->clear();  // model mutated outside the command system
-            markCachesDirty();
-            // Unlocked copies of a skinned or morphed node no longer share one render primitive:
-            // the renderer recreates vertex buffers, BLAS and animation buffers to match.
-            if(m_onGeometryChanged)
-              m_onGeometryChanged();
-          }
-        }
-        ImGui::SetItemTooltip("Break the external-asset link and unlock all instances of this asset for editing (saved inline on next save)");
-        ImGui::Separator();
-      }
+      // Kept enabled while the rest of the menu is disabled below for read-only nodes.
+      makeEditableMenuItem(nodeIdx);
 
       // glTF 2.1: referenced external-asset subtrees are read-only -- disable structural edits.
       ImGui::BeginDisabled(readOnly);
@@ -1550,59 +1647,57 @@ void UiSceneBrowser::expandParentPath(int targetNodeIdx)
   }
 }
 
-//--------------------------------------------------------------------------------------------------
-// Recursive helper: no longer needed with simple walk-up approach
-//
-bool UiSceneBrowser::markParentNodes(int currentNodeIdx, int targetNodeIdx)
+std::vector<size_t> UiSceneBrowser::openSiblingRows(const std::vector<int>& siblings, int parent) const
 {
-  // Kept for interface compatibility but not used
-  return false;
-}
+  // The open and focus-opened nodes of this level. Usually a handful, so each is found in the list;
+  // when many are open, one pass over the siblings instead keeps a frame linear in the list size.
+  std::unordered_set<int> candidates;
+  for(int nodeIdx : m_openNodes)
+    if(m_scene->editor().getNodeParent(nodeIdx) == parent)
+      candidates.insert(nodeIdx);
+  if(m_doScroll)
+    for(int nodeIdx : m_expandedNodes)
+      if(m_scene->editor().getNodeParent(nodeIdx) == parent)
+        candidates.insert(nodeIdx);
 
-//==================================================================================================
-// CACHE MANAGEMENT
-//==================================================================================================
-
-void UiSceneBrowser::buildCache(std::unordered_map<int, int>& cache, bool& dirtyFlag, int(tinygltf::Node::* member)) const
-{
-  if(!dirtyFlag || !m_scene)
-    return;
-
-  cache.clear();
-  const tinygltf::Model& model = m_scene->getModel();
-
-  for(size_t i = 0; i < model.nodes.size(); ++i)
+  std::vector<size_t> rows;
+  constexpr size_t    kFindLimit = 8;
+  if(candidates.size() <= kFindLimit)
   {
-    const tinygltf::Node& node         = model.nodes[i];
-    int                   elementIndex = node.*member;
-    if(elementIndex >= 0)
+    for(int nodeIdx : candidates)
     {
-      cache[elementIndex] = static_cast<int>(i);  // First node with this element
+      const std::vector<int>::const_iterator it = std::find(siblings.begin(), siblings.end(), nodeIdx);
+      if(it != siblings.end())
+        rows.push_back(static_cast<size_t>(it - siblings.begin()));
     }
+    std::sort(rows.begin(), rows.end());
   }
-
-  dirtyFlag = false;
+  else
+  {
+    for(size_t i = 0; i < siblings.size(); ++i)
+      if(candidates.contains(siblings[i]))
+        rows.push_back(i);
+  }
+  return rows;
 }
 
-int UiSceneBrowser::getNodeForMesh(int meshIdx)
+std::vector<size_t> UiSceneBrowser::openEntryRows(int nodeIdx) const
 {
-  buildCache(m_meshToNodeMap, m_meshToNodeMapDirty, &tinygltf::Node::mesh);
-  auto it = m_meshToNodeMap.find(meshIdx);
-  return (it != m_meshToNodeMap.end()) ? it->second : -1;
-}
-
-int UiSceneBrowser::getNodeForLight(int lightIdx)
-{
-  buildCache(m_lightToNodeMap, m_lightToNodeMapDirty, &tinygltf::Node::light);
-  auto it = m_lightToNodeMap.find(lightIdx);
-  return (it != m_lightToNodeMap.end()) ? it->second : -1;
-}
-
-int UiSceneBrowser::getNodeForCamera(int camIdx)
-{
-  buildCache(m_cameraToNodeMap, m_cameraToNodeMapDirty, &tinygltf::Node::camera);
-  auto it = m_cameraToNodeMap.find(camIdx);
-  return (it != m_cameraToNodeMap.end()) ? it->second : -1;
+  std::vector<size_t> rows;
+  for(uint64_t key : m_openEntries)
+    if(static_cast<int>(key >> 32) == nodeIdx)
+      rows.push_back(static_cast<size_t>(key & 0xffffffffu));
+  // The selected entry's row opens this frame (renderMeshInHierarchy), so it must not be clipped.
+  if(m_selection)
+  {
+    const SceneSelection::SelectionContext& sel = m_selection->getSelection();
+    if(sel.type == SceneSelection::SelectionType::ePrimitive && sel.nodeIndex == nodeIdx)
+      if(const auto draw = m_scene->getInstanceSetDraw(sel.renderNodeIndex))
+        rows.push_back(static_cast<size_t>(draw->first));
+  }
+  std::sort(rows.begin(), rows.end());
+  rows.erase(std::unique(rows.begin(), rows.end()), rows.end());
+  return rows;
 }
 
 //==================================================================================================

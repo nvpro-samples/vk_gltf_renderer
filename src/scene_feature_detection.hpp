@@ -86,6 +86,11 @@ struct SceneFeatureSet
   // True when `this` set already covers every feature `other` needs. Used to skip
   // unnecessary recompiles when a smaller scene is merged into the current one.
   bool isSupersetOf(const SceneFeatureSet& other) const;
+  // Add every feature of `other` (the scene set is the union of its materials' sets).
+  void merge(const SceneFeatureSet& other) { m_bits |= other.m_bits; }
+  // Apply the feature dependency promotions (scatter => volume => transmission); see
+  // detectSceneFeatures(). Call once on a union, not on each material's set.
+  void promote();
 
   bool operator==(const SceneFeatureSet& o) const;
   bool operator!=(const SceneFeatureSet& o) const { return !(*this == o); }
@@ -110,6 +115,10 @@ private:
 //
 // `model` is retained for signature compatibility and may be nullptr.
 SceneFeatureSet detectSceneFeatures(const std::vector<tinygltf::Material>& materials, const tinygltf::Model* model = nullptr);
+
+// The features one material uses, without the promotions. The scene set is the promoted union of
+// these, which lets a caller keep one set per material and re-detect only the materials it changed.
+SceneFeatureSet detectMaterialFeatures(const tinygltf::Material& material);
 
 // Convenience: detect features from a whole model.
 SceneFeatureSet detectSceneFeatures(const tinygltf::Model& model);

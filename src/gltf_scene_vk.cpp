@@ -50,6 +50,7 @@
 #include "nvvk/mipmaps.hpp"
 
 #include "gltf_scene_vk.hpp"
+#include "load_progress.hpp"
 #include "gltf_scene_animation.hpp"
 #include "gltf_image_loader.hpp"
 #include "ies_profile.hpp"
@@ -380,6 +381,8 @@ void nvvkgltf::SceneVk::create(VkCommandBuffer cmd,
   // flags into GltfTextureInfo, and the format flags are only known once the images are decoded.
   createTextureImages(cmd, staging, scn, imageSearchPaths);
 
+  if(LoadProgress* progress = scn.loadProgress())
+    progress->stage("Creating GPU buffers (materials, geometry, lights)");
   uploadMaterials(staging, scn);
   uploadRenderNodes(staging, scn);
   createVertexBuffers(cmd, staging, scn);
@@ -406,6 +409,9 @@ uint32_t nvvkgltf::SceneVk::syncFromScene(nvvk::CmdUploaderInterface& staging, n
   auto&    df     = scn.getDirtyFlags();
 
   constexpr float fullUpdateRatio = nvvkgltf::kFullUpdateRatio;
+
+  // Checked before the upload below consumes df.materials: does an edited material emit differently?
+  const bool emissionChanged = (mask & eSyncMaterials) && materialEmissionChanged(scn, df.materials);
 
   if(mask & eSyncMaterials)
   {
@@ -468,8 +474,10 @@ uint32_t nvvkgltf::SceneVk::syncFromScene(nvvk::CmdUploaderInterface& staging, n
   // (node/primitive references). df.emissiveDirty latches emissive-membership changes and is consumed
   // independently of the sync `mask`, so the GPU-transform path -- which syncs only materials+lights --
   // still rebuilds the list on a render-node reassignment/structural change. (result & eSyncRenderNodes)
-  // additionally catches transform-only edits that shift a triangle's world area in the CPU path.
-  if((result & eSyncMaterials) || (result & eSyncRenderNodes) || df.emissiveDirty)
+  // additionally catches transform-only edits that shift a triangle's world area in the CPU path. A
+  // material edit counts only when it changes what the material emits (emissionChanged): dragging a
+  // base colour must not rebuild a list of millions of emissive triangles every frame.
+  if(emissionChanged || (result & eSyncRenderNodes) || df.emissiveDirty)
   {
     uploadEmissiveTriangles(staging, scn);
     df.emissiveDirty = false;
@@ -812,12 +820,43 @@ void nvvkgltf::SceneVk::uploadLights(nvvk::CmdUploaderInterface& staging, const 
 // emitters (bright/large triangles picked more often); the total is passed via the scene descriptor.
 // World area is computed from the render node's transform, so the list is rebuilt on material or
 // render-node changes (see syncFromScene). A null buffer with count 0 is a valid "no emitters" state.
+// True when a dirty material changed what the emissive list takes from it (constant emitted radiance,
+// doubleSided) since the list was last built, or the material count changed. Records the new state.
+nvvkgltf::SceneVk::MaterialEmission nvvkgltf::SceneVk::materialEmissionOf(const tinygltf::Material& material)
+{
+  return {tinygltf::utils::getConstantEmissiveRadiance(material), material.doubleSided};
+}
+
+bool nvvkgltf::SceneVk::materialEmissionChanged(const nvvkgltf::Scene& scn, const std::unordered_set<int>& dirtyMaterials)
+{
+  const std::vector<tinygltf::Material>& materials = scn.getModel().materials;
+  if(m_materialEmission.size() != materials.size())
+    return true;  // uploadEmissiveTriangles() refills the table
+  bool changed = false;
+  for(int idx : dirtyMaterials)
+  {
+    if(idx < 0 || idx >= static_cast<int>(materials.size()))
+      continue;
+    const MaterialEmission emission = materialEmissionOf(materials[idx]);
+    if(!(emission == m_materialEmission[idx]))
+    {
+      m_materialEmission[idx] = emission;
+      changed                 = true;
+    }
+  }
+  return changed;
+}
+
 void nvvkgltf::SceneVk::uploadEmissiveTriangles(nvvk::CmdUploaderInterface& staging, const nvvkgltf::Scene& scn)
 {
   const tinygltf::Model&                        model       = scn.getModel();
   const std::vector<nvvkgltf::RenderNode>&      renderNodes = scn.getRenderNodes();
   const std::vector<nvvkgltf::RenderPrimitive>& renderPrims = scn.getRenderPrimitives();
   const std::vector<tinygltf::Material>&        materials   = model.materials;
+
+  m_materialEmission.resize(materials.size());
+  for(size_t i = 0; i < materials.size(); ++i)
+    m_materialEmission[i] = materialEmissionOf(materials[i]);
 
   // First pass: gather emissive triangles + per-triangle world area, and accumulate the totals used
   // to derive the area-weighted mean luminance for defensive sampling.
@@ -990,7 +1029,8 @@ void nvvkgltf::SceneVk::uploadEmissiveTriangles(nvvk::CmdUploaderInterface& stag
     m_sceneDescDirty = true;
   }
 
-  staging.appendBuffer(m_bEmissiveTriangles, 0, std::span(tris));
+  // Scales with the scene's emissive triangles: tens of millions of them overflow one staging block.
+  NVVK_CHECK(appendBufferChunked(staging, m_bEmissiveTriangles, 0, std::span<const shaderio::EmissiveTriangle>(tris)));
 }
 
 //--------------------------------------------------------------------------------------------------
@@ -1629,6 +1669,11 @@ void nvvkgltf::SceneVk::createTextureImages(VkCommandBuffer             cmd,
   std::sort(imageLoadItems.begin(), imageLoadItems.end(),
             [](const ImageLoadItem& a, const ImageLoadItem& b) { return a.numBytes > b.numBytes; });
 
+  // A scene without images has no texture stages to report.
+  LoadProgress* progress = imageLoadItems.empty() ? nullptr : scn.loadProgress();
+  if(progress)
+    progress->stage("Decoding textures", static_cast<uint32_t>(imageLoadItems.size()));
+
   std::atomic<uint32_t> failedImageCount{0};
   nvutils::parallel_batches<1>(  // Not batching
       imageLoadItems.size(), [&](uint64_t i) {
@@ -1637,6 +1682,8 @@ void nvvkgltf::SceneVk::createTextureImages(VkCommandBuffer             cmd,
         {
           ++failedImageCount;
         }
+        if(progress)
+          progress->advance(1, m_images[item.imageId].imgName);
       });
   if(failedImageCount > 0)
   {
@@ -1646,8 +1693,14 @@ void nvvkgltf::SceneVk::createTextureImages(VkCommandBuffer             cmd,
   syncTinyGltfImageDimensionsFromLoadedImages(scn.getModel(), m_images);
 
   // Create Vulkan images (magenta default substituted for unused / failed slots)
+  if(progress)
+    progress->stage("Staging textures for the GPU", static_cast<uint32_t>(m_images.size()));
   for(size_t i = 0; i < m_images.size(); i++)
+  {
     materializeImage(cmd, staging, i);
+    if(progress)
+      progress->advance(1, m_images[i].imgName);
+  }
 
   // Add default image if nothing was loaded
   if(model.images.empty())

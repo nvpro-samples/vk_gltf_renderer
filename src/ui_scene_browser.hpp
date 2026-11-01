@@ -86,6 +86,9 @@ public:
   void setHostServices(UiHostServices services) { m_host = std::move(services); }
   // Resolve a glTF image index to a bounded ImGui thumbnail (0 if none) for the Images panel.
   void setImageThumbnailCallback(std::function<ImTextureID(int)> cb) { m_getImageThumbnail = std::move(cb); }
+  // Called when the user asks to open the glTF a node references (glTF 2.1 externalAsset). The
+  // host defers the actual load, since it replaces the scene this panel is iterating.
+  void setOpenSceneCallback(std::function<void(const std::filesystem::path&)> cb) { m_onOpenScene = std::move(cb); }
   void markCachesDirty();
 
   void render(bool* show = nullptr, bool isBusy = false);
@@ -117,17 +120,13 @@ public:
     m_openDeletePopupNextFrame = openPopup;
   }
 
-  // Node lookup helpers (public for camera operations)
-  int getNodeForCamera(int camIdx);
-  int getNodeForMesh(int meshIdx);
-  int getNodeForLight(int lightIdx);
-
 private:
   //==================================================================================================
   // TAB RENDERING
   //==================================================================================================
   void renderAssetInfoTab();
   void renderSceneGraphTab();
+  void collapseTree();  // forget every open row: retire the tree's id scope and the open-row caches
 
   //==================================================================================================
   // ELEMENTS TAB (data-driven, registry-backed) - see ui_scene_browser_elements.cpp
@@ -158,8 +157,15 @@ private:
   // ImGuiListClipper); canVirtualizeChildren = false when this row is itself clipped, so a child
   // list never opens a second clipper nested inside the parent's.
   void renderNodeHierarchy(int nodeIdx, float rowHeight = 0.0f, bool canVirtualizeChildren = true);
-  void renderMeshInHierarchy(int meshIdx, int nodeIdx);
-  void renderPrimitiveInHierarchy(int primIdx, int meshIdx, int nodeIdx);
+  // Positions in `siblings` (the children of `parent`, or the scene roots for -1) of the rows a
+  // virtualized level builds in full: the open ones and those a focus request is opening.
+  std::vector<size_t> openSiblingRows(const std::vector<int>& siblings, int parent) const;
+  // Same for the entries of nodeIdx's instance set: the open ones and the selected one.
+  std::vector<size_t> openEntryRows(int nodeIdx) const;
+  // entry >= 0: the row is entry `entry` of nodeIdx's instance set (glTF 2.1 placed content drawn
+  // without a node of its own), read-only, its primitives selected through their render nodes.
+  void renderMeshInHierarchy(int meshIdx, int nodeIdx, int entry = -1, float rowHeight = 0.0f);
+  void renderPrimitiveInHierarchy(int primIdx, int meshIdx, int nodeIdx, int entry = -1);
   void renderLightInHierarchy(int lightIdx, int nodeIdx);
   void renderCameraInHierarchy(int cameraIdx);
   void renderImageViewer();  // Modal image viewer (large preview + metadata + replace/reload), opened from the Inspector
@@ -168,6 +174,9 @@ private:
   // CONTEXT MENUS (Scene Graph tree)
   //==================================================================================================
   void showNodeContextMenu(int nodeIdx);
+  // glTF 2.1: the "Make Editable" menu item (and its separator) for a read-only or placing node, in
+  // the Scene Graph and Elements context menus. Nothing for any other node.
+  void makeEditableMenuItem(int nodeIdx);
   void showMeshContextMenu(int meshIdx);
   void showPrimitiveContextMenu(int primIdx, int meshIdx, int nodeIdx);
 
@@ -190,15 +199,9 @@ private:
   const char* getMaterialIcon(int matIdx) const;
 
   //==================================================================================================
-  // CACHE MANAGEMENT
-  //==================================================================================================
-  void buildCache(std::unordered_map<int, int>& cache, bool& dirtyFlag, int(tinygltf::Node::* member)) const;
-
-  //==================================================================================================
   // HIERARCHY EXPANSION HELPERS
   //==================================================================================================
   void expandParentPath(int targetNodeIdx);
-  bool markParentNodes(int currentNodeIdx, int targetNodeIdx);
 
   //==================================================================================================
   // MEMBER VARIABLES
@@ -213,6 +216,10 @@ private:
   // UI state
   std::unordered_set<int> m_expandedNodes;     // Only force-open these nodes (from selection)
   bool                    m_doScroll = false;  // Auto-scroll to selection
+  // Rows last seen open, so a virtualized level knows which siblings take more than one row without
+  // asking ImGui about every one: node indices, and instance-set entries as (node << 32 | entry).
+  std::unordered_set<int>      m_openNodes;
+  std::unordered_set<uint64_t> m_openEntries;
   // ImGui id the scene-graph rows are scoped under. Bumped on unload so a new scene cannot inherit
   // the previous one's tree expansion, which is keyed by node index and would otherwise persist.
   int m_treeStateGeneration = 0;
@@ -230,12 +237,6 @@ private:
   std::vector<SceneTransformState> m_sceneTransforms;
 
   // Performance caches: element → first node containing it
-  std::unordered_map<int, int> m_meshToNodeMap;
-  std::unordered_map<int, int> m_lightToNodeMap;
-  std::unordered_map<int, int> m_cameraToNodeMap;
-  bool                         m_meshToNodeMapDirty   = true;
-  bool                         m_lightToNodeMapDirty  = true;
-  bool                         m_cameraToNodeMapDirty = true;
 
   //==================================================================================================
   // ELEMENTS TAB STATE (registry-backed list) - see ui_scene_browser_elements.cpp
@@ -292,10 +293,11 @@ private:
   bool* m_openDeletePopupNextFrame = nullptr;
 
   // Add-primitive popup state (deferred-open pattern like rename/delete)
-  std::function<void()>           m_onGeometryChanged;
-  std::function<void()>           m_onBeforeCreate;     // ensure a scene exists before any create action
-  std::function<ImTextureID(int)> m_getImageThumbnail;  // image index -> ImGui thumbnail
-  UiHostServices                  m_host;               // shared services (file dialog, texture thumbnails, toasts)
+  std::function<void()>                             m_onGeometryChanged;
+  std::function<void()>                             m_onBeforeCreate;  // ensure a scene exists before any create action
+  std::function<void(const std::filesystem::path&)> m_onOpenScene;     // open a node's referenced glTF
+  std::function<ImTextureID(int)>                   m_getImageThumbnail;  // image index -> ImGui thumbnail
+  UiHostServices m_host;  // shared services (file dialog, texture thumbnails, toasts)
 
   // Image viewer modal state.
   int  m_viewerImageIndex = -1;     // image shown in the viewer (-1 = none)

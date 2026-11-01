@@ -1,0 +1,108 @@
+{
+  "description": "Caldera (Call of Duty: Warzone data set): names.json, plus the proxy terrain's debug colours, facade window cards, the backdrop islands as rock and sand, the game-only surfaces and decals to drop (ocean foam and audio volumes included), and the proxy ocean as water.",
+  "extends": "names",
+  "families": [
+    {
+      "name": "proxy_terrain",
+      "match": "^displaycolor$|^lambert1$|^_default",
+      "color": [
+        0.52,
+        0.47,
+        0.38
+      ],
+      "roughness": 0.95,
+      "metallic": 0.0
+    },
+    {
+      "name": "window_card_glass",
+      "match": "window_island_(?!blinds).*emissive",
+      "color": [
+        0.95,
+        0.95,
+        0.95
+      ],
+      "roughness": 0.03,
+      "metallic": 0.0,
+      "extension": "glass"
+    },
+    {
+      "name": "window_card",
+      "match": "window_(island|terminal)|skylight",
+      "color": [
+        0.08,
+        0.09,
+        0.1
+      ],
+      "roughness": 0.1,
+      "metallic": 0.0
+    },
+    {
+      "name": "vista",
+      "match": "(^|_)vista(_|$)",
+      "color": [
+        0.55,
+        0.5,
+        0.4
+      ],
+      "roughness": 0.9,
+      "metallic": 0.0
+    }
+  ],
+  "remove": [
+    "foam",
+    "scuff",
+    "audio",
+    "sky",
+    "sunshadow",
+    "probe",
+    "lightgrid",
+    "volume",
+    "portal",
+    "trigger",
+    "caulk",
+    "shadowcaster",
+    "shadows_no_flag",
+    "clip",
+    "skip",
+    "nodraw",
+    "noncolliding",
+    "coll",
+    "offhand",
+    "viewmodel",
+    "decals?",
+    "dec",
+    "decails",
+    "stain",
+    "puddle",
+    "footprints",
+    "crease",
+    "seam",
+    "wear_bevel",
+    "cracks",
+    "peeling",
+    "dust",
+    "leaking",
+    "drips",
+    "caustic"
+  ],
+  "exclude": [
+    "occlusion",
+    "first_circle_marker"
+  ],
+  "primitive_rules": [
+    {
+      "material": "^displaycolor$",
+      "min_size": [
+        10000,
+        null,
+        10000
+      ],
+      "max_size": [
+        null,
+        100,
+        null
+      ],
+      "family": "water"
+    }
+  ]
+}

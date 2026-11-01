@@ -34,6 +34,7 @@
 
 #include <gtest/gtest.h>
 
+#include "gltf_image_loader.hpp"
 #include "gltf_scene.hpp"
 #include "gltf_scene_animation.hpp"
 #include "gltf_scene_editor.hpp"
@@ -333,14 +334,13 @@ std::vector<std::string> drawn(const nvvkgltf::Scene& scene)
 const std::vector<std::string> kStaticDrawn = {
     "local_material@0.00,3.00,5.00",                                // shelf_0's local child
     "piece_paint@0.00,0.50,0.00",    "piece_paint@2.00,0.50,0.00",  // placement . piece root offset
-    "piece_paint@4.00,0.50,0.00",    "piece_trim@0.00,0.50,0.00",    "piece_trim@2.00,0.50,0.00",
+    "piece_paint@4.00,0.50,0.00",    "piece_trim@0.00,0.50,0.00",     "piece_trim@2.00,0.50,0.00",
     "piece_trim@4.00,0.50,0.00",     "shelf_material@0.00,1.00,5.00", "shelf_material@0.00,2.00,5.00",
     "shelf_material@4.00,2.00,5.00", "shelf_material@4.00,4.00,5.00",  // shelf_1 is scaled by 2
 };
 
 // static.gltf: static placed trees are instance sets, one entry per mesh node of the tree, with no
-// node per placed node. The placing nodes and the local child stay editable; picking an entry
-// selects the placing node.
+// node per placed node. The placing nodes and the local child stay editable.
 TEST_F(Gltf21Test, Placement_StaticTreesAreInstanceSets)
 {
   nvvkgltf::Scene scene;
@@ -363,8 +363,36 @@ TEST_F(Gltf21Test, Placement_StaticTreesAreInstanceSets)
 
   int setRenderNodes = 0;
   for(size_t rn = 0; rn < scene.getRenderNodes().size(); rn++)
-    setRenderNodes += scene.isInstanceSetRenderNode(static_cast<int>(rn)) ? 1 : 0;
+    setRenderNodes += scene.getInstanceSetDraw(static_cast<int>(rn)) ? 1 : 0;
   EXPECT_EQ(setRenderNodes, 10);  // everything but the local child
+}
+
+// Each entry primitive of an instance set has its own render node, found both ways, so the Scene
+// Browser can list placed content under its placing node and a viewport pick can select it.
+TEST_F(Gltf21Test, Placement_InstanceSetDrawsMapToRenderNodes)
+{
+  nvvkgltf::Scene scene;
+  ASSERT_TRUE(scene.load(kFixtures / "placement/static.gltf"));
+  const tinygltf::Model& model = scene.getModel();
+  for(int placing = 0; placing < 5; ++placing)
+  {
+    const nvvkgltf::InstanceSet* set = scene.getInstanceSet(placing);
+    ASSERT_NE(set, nullptr);
+    for(int e = 0; e < static_cast<int>(set->entries.size()); ++e)
+    {
+      const int primitives = static_cast<int>(model.meshes[set->entries[e].mesh].primitives.size());
+      for(int p = 0; p < primitives; ++p)
+      {
+        const int rn = scene.getInstanceSetRenderNode(placing, e, p);
+        ASSERT_GE(rn, 0) << model.nodes[placing].name << " entry " << e << " primitive " << p;
+        EXPECT_EQ(scene.getRenderNodes()[rn].refNodeID, placing);
+        EXPECT_EQ(scene.getInstanceSetDraw(rn), std::make_optional(std::make_pair(e, p)));
+      }
+      EXPECT_EQ(scene.getInstanceSetRenderNode(placing, e, primitives), -1);
+    }
+  }
+  EXPECT_EQ(scene.getInstanceSetRenderNode(5, 0, 0), -1);  // the local child has no instance set
+  EXPECT_FALSE(scene.getInstanceSetDraw(scene.getRenderNodeForPrimitive(5, 0)));
 }
 
 // Make Editable turns every placement of the file into nodes of the scene, drawn as before and no
@@ -387,6 +415,23 @@ TEST_F(Gltf21Test, Placement_MakeEditableMaterializesInstanceSets)
   }
   EXPECT_NE(scene.getInstanceSet(3), nullptr);
   EXPECT_NE(scene.getInstanceSet(4), nullptr);
+
+  // Static content keeps its render primitives, so Make Editable rebuilds only the render nodes:
+  // they must be what a full re-parse makes.
+  const std::vector<nvvkgltf::RenderNode> rebuilt    = scene.getRenderNodes();
+  const size_t                            primitives = scene.getRenderPrimitives().size();
+  scene.setCurrentScene(scene.getCurrentScene());
+  EXPECT_EQ(scene.getRenderPrimitives().size(), primitives);
+  ASSERT_EQ(scene.getRenderNodes().size(), rebuilt.size());
+  for(size_t rn = 0; rn < rebuilt.size(); ++rn)
+  {
+    const nvvkgltf::RenderNode& parsed = scene.getRenderNodes()[rn];
+    EXPECT_EQ(parsed.refNodeID, rebuilt[rn].refNodeID) << rn;
+    EXPECT_EQ(parsed.renderPrimID, rebuilt[rn].renderPrimID) << rn;
+    EXPECT_EQ(parsed.materialID, rebuilt[rn].materialID) << rn;
+    EXPECT_EQ(parsed.worldMatrix, rebuilt[rn].worldMatrix) << rn;
+    EXPECT_EQ(parsed.visible, rebuilt[rn].visible) << rn;
+  }
 }
 
 // Default save writes the placing nodes and only the scene's own mesh; self-contained save writes
@@ -481,6 +526,47 @@ TEST_F(Gltf21Test, Placement_KitSharedAcrossFiles)
   EXPECT_EQ(scene.getRenderNodes().size(), 8u);
   EXPECT_EQ(scene.getRenderPrimitives().size(), 2u);
   EXPECT_EQ(scene.getModel().meshes.size(), 1u);
+}
+
+// The usage index behind the Inspector and the Elements list, on nested placements (a kit placed by
+// two placed districts): who draws the kit's mesh, what is read-only, and what a click hits. Unlocking
+// one district leaves the kit's mesh and materials read-only: the other district still places them.
+TEST_F(Gltf21Test, Placement_ElementUsageOfNestedPlacements)
+{
+  nvvkgltf::Scene scene;
+  ASSERT_TRUE(scene.load(kFixtures / "placement/shared_kit.gltf"));
+  const tinygltf::Model& model = scene.getModel();
+  ASSERT_EQ(model.meshes.size(), 1u);
+  ASSERT_EQ(model.materials.size(), 2u);
+
+  EXPECT_TRUE(scene.getMeshNodes(0).empty());          // drawn by instance sets only
+  EXPECT_EQ(scene.getMeshPlacingNodes(0).size(), 4u);  // two placements in each district
+  for(int placing : scene.getMeshPlacingNodes(0))
+    EXPECT_TRUE(scene.isNodeReadOnly(placing));  // copied with its district
+  EXPECT_TRUE(scene.isMeshReadOnly(0));
+  for(int material = 0; material < 2; ++material)
+  {
+    EXPECT_TRUE(scene.isMaterialReadOnly(material));
+    EXPECT_EQ(scene.getMaterialPrimitiveCount(material), 1);
+  }
+  EXPECT_FALSE(scene.isMeshReadOnly(1));  // out of range
+  EXPECT_EQ(scene.getMaterialPrimitiveCount(-1), 0);
+
+  // A render node of a placement resolves to its placing node and the entry's mesh and primitive.
+  for(int rn = 0; rn < static_cast<int>(scene.getRenderNodes().size()); ++rn)
+  {
+    const nvvkgltf::Scene::RenderNodePart part = scene.getRenderNodePart(rn);
+    EXPECT_EQ(part.node, scene.getRenderNodes()[rn].refNodeID);
+    EXPECT_EQ(part.mesh, 0);
+    EXPECT_EQ(model.meshes[0].primitives[part.primitive].material, scene.getRenderNodes()[rn].materialID);
+  }
+  EXPECT_EQ(scene.getRenderNodePart(-1).node, -1);
+
+  ASSERT_TRUE(scene.editor().makeExternalAssetEditable(0));  // district_a
+  EXPECT_EQ(scene.getMeshNodes(0).size(), 2u);               // district_a's placements are nodes now
+  EXPECT_EQ(scene.getMeshPlacingNodes(0).size(), 2u);        // district_b's are still instance sets
+  EXPECT_TRUE(scene.isMeshReadOnly(0));
+  EXPECT_TRUE(scene.isMaterialReadOnly(0));
 }
 
 // placement/library: files that each declare their own accessors over one parts.bin, the layout of a
@@ -698,6 +784,27 @@ TEST_F(Gltf21Test, Placement_RuntimeRulesSkipAndContinue)
   EXPECT_EQ(scene.getRenderNodes().size(), 1u + 16u + 2u);
 }
 
+// sibling_chain.gltf: 8 files nested through sibling folders, each placing the next with a "../../"
+// URI. The joined paths are normalized, so the chain's `../` never grows past MAX_PATH: all load.
+TEST_F(Gltf21Test, Placement_SiblingChainPathsStayNormalized)
+{
+  nvvkgltf::Scene scene;
+  ASSERT_TRUE(scene.load(kFixtures / "placement/sibling_chain.gltf"));
+  EXPECT_EQ(scene.getRenderNodes().size(), 8u);
+}
+
+// climb/d00/.../d19/assembly.gltf: one level of placement, from a scene stored 20 folders deep,
+// through a URI with 21 "../". Joined unnormalized it passes MAX_PATH; normalized, the leaf loads.
+TEST_F(Gltf21Test, Placement_LongClimbingUriStaysNormalized)
+{
+  std::filesystem::path path = kFixtures / "placement/climb";
+  for(int level = 0; level < 20; level++)
+    path /= fmt::format("d{:02d}", level);
+  nvvkgltf::Scene scene;
+  ASSERT_TRUE(scene.load(path / "assembly.gltf"));
+  EXPECT_EQ(scene.getRenderNodes().size(), 1u);
+}
+
 //--------------------------------------------------------------------------------------------------
 // Versions (#26): what loads, and what a save declares
 //--------------------------------------------------------------------------------------------------
@@ -875,6 +982,36 @@ TEST_F(Gltf21Test, ComponentTypes_TangentsForUnindexedPrimitive)
   ASSERT_EQ(tangents.size(), 6u);
   for(const glm::vec4& t : tangents)
     EXPECT_NEAR(glm::length(glm::vec3(t)), 1.0f, 1e-3f);  // generated, not left at zero
+}
+
+//--------------------------------------------------------------------------------------------------
+// OpenEXR image textures (a loader extension in neither glTF 2.0 nor 2.1): exr_textures/
+//--------------------------------------------------------------------------------------------------
+
+// PROVISIONAL(OpenEXR textures): a scene with .exr images loads (a missing one included: the renderer
+// shows its fallback), and the files decode to the float formats the renderer samples. Scene::load
+// leaves image bytes to SceneVk, so the decode here reads the files the way SceneVk::loadImage does.
+TEST_F(Gltf21Test, ExrTextures_LoadAndDecode)
+{
+  nvvkgltf::Scene scene;
+  ASSERT_TRUE(scene.load(kFixtures / "exr_textures/exr_textures.gltf"));
+  const tinygltf::Model& model = scene.getModel();
+  ASSERT_EQ(model.images.size(), 4u);
+  ASSERT_EQ(model.textures.size(), 4u);
+
+  const VkFormat expected[3] = {VK_FORMAT_R16G16B16A16_SFLOAT, VK_FORMAT_R16G16B16A16_SFLOAT, VK_FORMAT_R16_SFLOAT};
+  for(size_t i = 0; i < 3; ++i)
+  {
+    SCOPED_TRACE(model.images[i].uri);
+    const std::string bytes = nvutils::loadFile(kFixtures / "exr_textures" / model.images[i].uri);
+    ASSERT_FALSE(bytes.empty());
+    nvvkgltf::LoadedImageData decoded;
+    ASSERT_TRUE(nvvkgltf::loadFromMemory(decoded, bytes.data(), bytes.size(), /*srgb*/ i == 0));
+    EXPECT_EQ(decoded.format, expected[i]);
+    EXPECT_EQ(decoded.size.width, 32u);
+    EXPECT_EQ(decoded.size.height, 32u);
+  }
+  EXPECT_FALSE(std::filesystem::exists(kFixtures / "exr_textures" / model.images[3].uri));
 }
 
 }  // namespace

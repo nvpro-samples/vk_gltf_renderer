@@ -51,6 +51,7 @@ with the code, the code wins (fix the doc — see "Keep the docs true").
 |---|---|
 | Supported glTF extensions | `m_supportedExtensions` in `src/gltf_scene.cpp` |
 | glTF versions that load, the version a save writes, what counts as a 2.1 feature | `src/gltf_version.cpp` |
+| Image formats a glTF texture can be (DDS, KTX, WebP, OpenEXR, stb formats) and the Vulkan format each decodes to | `loadFromMemory` in `src/gltf_image_loader.cpp`; the OpenEXR rules are in [docs/developer.md](docs/developer.md) § OpenEXR material textures |
 | Visualization / debug modes | `enum Visualization` in `shaders/shaderio.h` |
 | Environment types | `enum EnvSystem` in `shaders/shaderio.h`, and the picker in `src/ui_renderer.cpp` |
 | Command-line / MCP / persisted settings (names, defaults, whether they persist) | `m_settings.add(...)` in `src/renderer*.cpp`, plus `parameterRegistry.add(...)` in `src/main.cpp` and `src/benchmarking.cpp` |

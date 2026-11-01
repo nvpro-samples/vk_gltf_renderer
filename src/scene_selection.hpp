@@ -52,6 +52,8 @@ public:
   };
 
   // Complete selection context - contains all relevant indices
+  // renderNodeIndex is also set on a node selected by a viewport click on read-only placed content
+  // (redirected to its editable ancestor): the render node the click hit.
   struct SelectionContext
   {
     SelectionType type            = SelectionType::eNone;
@@ -102,8 +104,9 @@ public:
   // KHR_node_selectability's nearest-selectable-ancestor fallback) still passes the original hit's
   // ray data through here, since the pick itself was real even though the selected node moved.
   void selectNode(int              nodeIdx,
-                  const glm::vec3& selectionPoint     = glm::vec3(std::numeric_limits<float>::quiet_NaN()),
-                  const glm::vec3& selectionRayOrigin = glm::vec3(std::numeric_limits<float>::quiet_NaN()));
+                  const glm::vec3& selectionPoint       = glm::vec3(std::numeric_limits<float>::quiet_NaN()),
+                  const glm::vec3& selectionRayOrigin   = glm::vec3(std::numeric_limits<float>::quiet_NaN()),
+                  int              clickedRenderNodeIdx = -1);
   void selectPrimitive(int              renderNodeIdx,
                        int              nodeIdx,
                        int              primIdx,

@@ -79,7 +79,7 @@ TEST_F(DirtyFlagsTest, MarkNodeDirtySetsNodesAndRenderNodes)
   EXPECT_GE(scene.getDirtyFlags().nodes.count(nodeIndex), 1u) << "Node should be in dirty nodes set";
 
   // markNodeDirty also adds corresponding render node indices to renderNodesVk and renderNodesRtx
-  const auto& rnIds = scene.getRenderNodeRegistry().getRenderNodesForNode(nodeIndex);
+  const auto rnIds = scene.getRenderNodeRegistry().getRenderNodesForNode(nodeIndex);
   if(!rnIds.empty())
   {
     EXPECT_FALSE(scene.getDirtyFlags().renderNodesVk.empty()) << "At least one render node should be marked for Vk";
@@ -367,7 +367,7 @@ TEST_F(RenderNodesAndPrimitivesTest, GetRenderNodesForNodeReturnsConsistentIndic
 
   for(int nodeID = 0; nodeID < static_cast<int>(nodes.size()); ++nodeID)
   {
-    const auto& rnIds = reg.getRenderNodesForNode(nodeID);
+    const auto rnIds = reg.getRenderNodesForNode(nodeID);
     for(int rnID : rnIds)
     {
       EXPECT_GE(rnID, 0);
@@ -377,6 +377,65 @@ TEST_F(RenderNodesAndPrimitivesTest, GetRenderNodesForNodeReturnsConsistentIndic
       EXPECT_EQ(nodeAndPrim->first, nodeID) << "RenderNode " << rnID << " should reference node " << nodeID;
     }
   }
+}
+
+// EXT_mesh_gpu_instancing: a node with 2 primitives drawn at 3 instances, next to a plain node. A
+// node's render nodes are one contiguous range, primitive by primitive, each with its instance matrix.
+TEST_F(RenderNodesAndPrimitivesTest, GpuInstancingRangesAndLocalMatrices)
+{
+  const std::filesystem::path file = tempDir / "gpu_instancing.gltf";
+  std::ofstream(file) << R"gltf({"asset":{"version":"2.0"},"extensionsUsed":["EXT_mesh_gpu_instancing"],"buffers":[{"byteLength":192,
+"uri":"data:application/octet-stream;base64,zczMvs3MzL4AAAAAzczMPs3MzL4AAAAAzczMPs3MzD4AAAAAzczMvs3MzD4AAAAAzcxMvs3MTL4AAAA/zcxMPs3MTL4AAAA/zcxMPs3MTD4AAAA/zcxMvs3MTD4AAAA/AAAAAAAAAAAAAIA/AAAAAAAAAAAAAIA/AAAAAAAAAAAAAIA/AAAAAAAAAAAAAIA/AAABAAIAAAACAAMAAADAvwAAAAAAAAAAAAAAAAAAgD8AAAAAAADAPwAAAAAAAAAA"}],
+"bufferViews":[{"buffer":0,"byteOffset":0,"byteLength":48,"target":34962},{"buffer":0,"byteOffset":48,
+"byteLength":48,"target":34962},{"buffer":0,"byteOffset":96,"byteLength":48,"target":34962},{"buffer":0,
+"byteOffset":144,"byteLength":12,"target":34963},{"buffer":0,"byteOffset":156,"byteLength":36}],"accessors":[{"bufferView":0,
+"componentType":5126,"count":4,"type":"VEC3","min":[-0.4,-0.4,0],"max":[0.4,0.4,0]},{"bufferView":1,"componentType":5126,
+"count":4,"type":"VEC3","min":[-0.2,-0.2,0.5],"max":[0.2,0.2,0.5]},{"bufferView":2,"componentType":5126,
+"count":4,"type":"VEC3"},{"bufferView":3,"componentType":5123,"count":6,"type":"SCALAR"},{"bufferView":4,
+"componentType":5126,"count":3,"type":"VEC3"}],"materials":[{"pbrMetallicRoughness":{"baseColorFactor":[0.8,
+0.1,0.1,1],"metallicFactor":0},"doubleSided":true},{"pbrMetallicRoughness":{"baseColorFactor":[0.1,0.8,
+0.1,1],"metallicFactor":0},"doubleSided":true},{"pbrMetallicRoughness":{"baseColorFactor":[0.1,0.1,0.8,
+1],"metallicFactor":0},"doubleSided":true}],"meshes":[{"primitives":[{"attributes":{"POSITION":0,"NORMAL":2},
+"indices":3,"material":0},{"attributes":{"POSITION":1,"NORMAL":2},"indices":3,"material":1}]},{"primitives":[{"attributes":{"POSITION":0,
+"NORMAL":2},"indices":3,"material":2}]}],"nodes":[{"name":"instanced","mesh":0,"translation":[0,-0.3,
+0],"extensions":{"EXT_mesh_gpu_instancing":{"attributes":{"TRANSLATION":4}}}},{"name":"plain","mesh":1,
+"translation":[0,-1.2,0]}],"scenes":[{"nodes":[0,1]}],"scene":0})gltf";
+
+  nvvkgltf::Scene scene;
+  ASSERT_TRUE(scene.load(file));
+  const auto& reg = scene.getRenderNodeRegistry();
+
+  for(int pass = 0; pass < 2; ++pass)  // as loaded, then re-parsed into the cleared registry
+  {
+    const auto instanced = reg.getRenderNodesForNode(0);
+    ASSERT_EQ(instanced.size(), 6u);
+    EXPECT_EQ(reg.getRenderNodeID(0, 0), instanced[0]);
+    EXPECT_EQ(reg.getRenderNodeID(0, 1), instanced[3]);
+    EXPECT_EQ(reg.getRenderNodeID(0, 2), -1);
+
+    const std::span<const glm::mat4> locals = scene.getRenderNodeLocalMatrices(0);
+    ASSERT_EQ(locals.size(), 6u);
+    const float expectedX[] = {-1.5f, 0.0f, 1.5f};
+    for(size_t k = 0; k < instanced.size(); ++k)
+    {
+      EXPECT_FLOAT_EQ(locals[k][3].x, expectedX[k % 3]);
+      EXPECT_EQ(reg.getLocalMatrix(instanced[k]), &locals[k]);
+      const glm::mat4 expected = scene.computeNodeWorldMatrix(0) * locals[k];
+      EXPECT_EQ(scene.getRenderNodes()[instanced[k]].worldMatrix, expected);
+    }
+
+    ASSERT_EQ(reg.getRenderNodesForNode(1).size(), 1u);
+    EXPECT_TRUE(scene.getRenderNodeLocalMatrices(1).empty());
+    EXPECT_EQ(reg.getLocalMatrix(reg.getRenderNodeID(1, 0)), nullptr);
+
+    scene.setCurrentScene(0);
+  }
+
+  // Moving the node moves every instance with it.
+  scene.editor().setNodeTRS(0, glm::vec3(0.f, 5.f, 0.f), {1, 0, 0, 0}, {1, 1, 1});
+  scene.updateNodeWorldMatrices();
+  for(int rnID : reg.getRenderNodesForNode(0))
+    EXPECT_FLOAT_EQ(scene.getRenderNodes()[rnID].worldMatrix[3].y, 5.f + (*reg.getLocalMatrix(rnID))[3].y);
 }
 
 TEST_F(RenderNodesAndPrimitivesTest, GetRenderNodeForPrimitiveAndGetPrimitiveIndexRoundTrip)
@@ -428,7 +487,7 @@ TEST_F(RenderNodesAndPrimitivesTest, DuplicateNodeCreatesNewRenderNodes)
   EXPECT_GE(renderNodeCountAfter, renderNodeCountBefore) << "Duplicate should add render nodes for the duplicated hierarchy";
 
   // New node should have render nodes (if it has mesh or children with meshes)
-  const auto& rnIdsForNew = scene.getRenderNodeRegistry().getRenderNodesForNode(newRoot);
+  const auto rnIdsForNew = scene.getRenderNodeRegistry().getRenderNodesForNode(newRoot);
   // Duplicated root may have same structure as original; total count should have increased
   EXPECT_GT(renderNodeCountAfter, 0u);
 }
@@ -496,7 +555,7 @@ TEST_F(RenderNodesAndPrimitivesTest, UpdateNodeWorldMatricesUpdatesRenderNodeMat
   scene.editor().setNodeTRS(nodeID, glm::vec3(1.f, 2.f, 3.f), {1, 0, 0, 0}, {1, 1, 1});
   scene.updateNodeWorldMatrices();
 
-  const auto& rnIds = scene.getRenderNodeRegistry().getRenderNodesForNode(nodeID);
+  const auto rnIds = scene.getRenderNodeRegistry().getRenderNodesForNode(nodeID);
   ASSERT_FALSE(rnIds.empty()) << "Node " << nodeID << " should have render nodes";
 
   glm::mat4 expectedWorld = scene.editor().getNodeWorldMatrix(nodeID);

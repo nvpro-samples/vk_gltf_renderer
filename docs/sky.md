@@ -161,7 +161,9 @@ sun light is **marked**, with `NV_sky_sun` in the node's `extras`:
   can therefore become the sun — before this existed the only sun that could be marked was one a
   save had invented, so an authored directional light was silently inert.
 - **A marked light** → that light *is* the sun. The panel aims it through the undo stack like any
-  other transform, and the sky follows it wherever it moves.
+  other transform, and the sky follows it wherever it moves. Only a node that carries a light can
+  be the sun: a marker on any other node is ignored. The scene resolves which light that is when
+  its lights are rebuilt or the marker changes (`Scene::updateSkySunLight`), never per frame.
 - **Every other light** → used exactly as authored. A `KHR_lights_punctual` directional light is a
   delta light by specification; nothing about being directional makes one a sun.
 

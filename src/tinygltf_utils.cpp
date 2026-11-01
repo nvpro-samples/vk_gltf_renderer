@@ -477,6 +477,22 @@ void tinygltf::utils::setNodeSelectability(tinygltf::Node& node, const KHR_node_
   tinygltf::utils::setValue(ext, "selectable", selectability.selectable);
 }
 
+NV_node_shadow_casting tinygltf::utils::getNodeShadowCasting(const tinygltf::Node& node)
+{
+  NV_node_shadow_casting gnode;
+  if(const auto* ext = tinygltf::utils::findExtension(node.extensions, NV_NODE_SHADOW_CASTING_EXTENSION_NAME))
+  {
+    tinygltf::utils::getValue(*ext, "castShadows", gnode.castShadows);
+  }
+  return gnode;
+}
+
+void tinygltf::utils::setNodeShadowCasting(tinygltf::Node& node, const NV_node_shadow_casting& shadowCasting)
+{
+  tinygltf::Value& ext = tinygltf::utils::ensureExtension(node.extensions, NV_NODE_SHADOW_CASTING_EXTENSION_NAME);
+  tinygltf::utils::setValue(ext, "castShadows", shadowCasting.castShadows);
+}
+
 std::vector<EXT_lights_ies_profile> tinygltf::utils::getIesProfiles(const tinygltf::Model& model)
 {
   std::vector<EXT_lights_ies_profile> profiles;

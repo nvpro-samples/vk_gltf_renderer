@@ -43,6 +43,7 @@
 #include <imgui_internal.h>
 #include <nvgui/property_editor.hpp>
 #include <nvgui/fonts.hpp>
+#include <nvutils/file_operations.hpp>
 #include <nvutils/logger.hpp>
 #include <glm/glm.hpp>
 #include <glm/gtc/color_space.hpp>
@@ -520,7 +521,8 @@ UiInspector::~UiInspector() = default;
 
 void UiInspector::setScene(nvvkgltf::Scene* scene)
 {
-  m_scene = scene;
+  m_scene         = scene;
+  m_subtreeBounds = {};
 
   if(!scene)
   {
@@ -717,6 +719,31 @@ bool UiInspector::renderIesEditor(int nodeIdx)
 // NODE PROPERTIES
 //==================================================================================================
 
+void UiInspector::renderOpenReferenceButton(int nodeIdx)
+{
+  if(!m_onOpenScene)
+    return;
+  const std::string fileUri = m_scene->referencedFilePathOf(nodeIdx);
+  if(fileUri.empty())
+    return;
+  const std::filesystem::path path = nvutils::pathFromUtf8(fileUri);
+  ImGui::PushStyleColor(ImGuiCol_Button, ImVec4(0.12f, 0.45f, 0.20f, 1.0f));
+  ImGui::PushStyleColor(ImGuiCol_ButtonHovered, ImVec4(0.18f, 0.60f, 0.28f, 1.0f));
+  ImGui::PushStyleColor(ImGuiCol_ButtonActive, ImVec4(0.10f, 0.35f, 0.16f, 1.0f));
+  if(ImGui::Button(ICON_MS_FILE_OPEN " Open referenced glTF##openRef"))
+    m_onOpenScene(path);
+  ImGui::PopStyleColor(3);
+  ImGui::SetItemTooltip("%s", fileUri.c_str());
+  if(ImGui::BeginPopupContextItem("##refCtx"))
+  {
+    if(ImGui::MenuItem(ICON_MS_CONTENT_COPY " Copy Path to Reference"))
+      ImGui::SetClipboardText(nvutils::utf8FromPath(path).c_str());
+    ImGui::EndPopup();
+  }
+  ImGui::SameLine();
+  ImGui::TextDisabled("%s", nvutils::utf8FromPath(path.filename()).c_str());
+}
+
 void UiInspector::renderNodeProperties(int nodeIdx)
 {
   const tinygltf::Model& model = m_scene->getModel();
@@ -726,6 +753,7 @@ void UiInspector::renderNodeProperties(int nodeIdx)
   const tinygltf::Node& node = model.nodes[nodeIdx];
 
   ImGui::Text("%s Node[%d]: %s", ICON_MS_CATEGORY, nodeIdx, node.name.c_str());
+  renderOpenReferenceButton(nodeIdx);
 
   // XMP button
   std::string popupId = "inspector_node_xmp_" + std::to_string(nodeIdx);
@@ -738,6 +766,8 @@ void UiInspector::renderNodeProperties(int nodeIdx)
   const bool readOnly = m_scene->isNodeReadOnly(nodeIdx);
   if(readOnly)
     ImGui::TextColored(ImVec4(1.0f, 0.8f, 0.3f, 1.0f), "%s Referenced asset (read-only)", ICON_MS_LOCK);
+
+  renderClickedPart(nodeIdx);
 
   ImGui::BeginDisabled(readOnly);
   if(ImGui::CollapsingHeader("TRANSFORM", ImGuiTreeNodeFlags_DefaultOpen))
@@ -937,16 +967,59 @@ void UiInspector::renderNodeRelationships(int nodeIdx)
   else
     ImGui::Text("[%d] %s", node.skin, node.skin < int(model.skins.size()) ? model.skins[node.skin].name.c_str() : "");
 
-  // Children (each a jump link)
+  // Children (each a jump link). A node of a placed district can hold thousands, so the list is clipped.
   ImGui::Spacing();
   ImGui::Text("Children (%zu)", node.children.size());
   ImGui::Indent();
   if(node.children.empty())
     ImGui::TextDisabled("none");
-  for(int c : node.children)
-    if(c >= 0 && c < int(model.nodes.size()))
-      elementLink(elementRefLabel(SceneSelection::SelectionType::eNode, c).c_str(), SceneSelection::SelectionType::eNode, c);
+  ImGuiListClipper clipper;
+  clipper.Begin(int(node.children.size()));
+  while(clipper.Step())
+    for(int i = clipper.DisplayStart; i < clipper.DisplayEnd; ++i)
+    {
+      const int c = node.children[i];
+      ImGui::PushID(i);
+      if(c >= 0 && c < int(model.nodes.size()))
+        elementLink(elementRefLabel(SceneSelection::SelectionType::eNode, c).c_str(), SceneSelection::SelectionType::eNode, c);
+      ImGui::PopID();
+    }
   ImGui::Unindent();
+}
+
+// A viewport click on read-only placed content selects its first editable ancestor (so the gizmo
+// moves the whole placement); this row leads on to the primitive the click hit, whose mesh and
+// material the Inspector then shows.
+void UiInspector::renderClickedPart(int nodeIdx)
+{
+  if(!m_selection)
+    return;
+  const SceneSelection::SelectionContext& sel = m_selection->getSelection();
+  if(sel.type != SceneSelection::SelectionType::eNode || sel.nodeIndex != nodeIdx || sel.renderNodeIndex < 0)
+    return;
+  const nvvkgltf::Scene::RenderNodePart part  = m_scene->getRenderNodePart(sel.renderNodeIndex);
+  const tinygltf::Model&                model = m_scene->getModel();
+  if(part.mesh < 0 || part.mesh >= int(model.meshes.size()))
+    return;
+
+  ImGui::AlignTextToFramePadding();
+  ImGui::TextUnformatted("Clicked part");
+  ImGui::SameLine(120.0f);
+  char label[256];
+  std::snprintf(label, sizeof(label), "%s [%d] %s, primitive %d###clicked_part", ICON_MS_SHAPE_LINE, part.mesh,
+                model.meshes[part.mesh].name.c_str(), part.primitive);
+  ImGui::PushStyleColor(ImGuiCol_Text, ImVec4(0.42f, 0.72f, 1.00f, 1.0f));  // link blue, as elementLink
+  const bool clicked = ImGui::Selectable(label, false, ImGuiSelectableFlags_None, ImGui::CalcTextSize(label, nullptr, true));
+  ImGui::PopStyleColor();
+  if(ImGui::IsItemHovered())
+    ImGui::SetMouseCursor(ImGuiMouseCursor_Hand);
+  ImGui::SetItemTooltip("Select the primitive the click hit, to inspect its mesh and edit its material");
+  if(clicked)
+  {
+    m_selection->selectPrimitive(sel.renderNodeIndex, part.node, part.primitive, part.mesh);
+    if(m_onFocusSelection)
+      m_onFocusSelection();
+  }
 }
 
 void UiInspector::renderNodeExtensions(int nodeIdx)
@@ -975,7 +1048,7 @@ void UiInspector::renderNodeExtensions(int nodeIdx)
         std::make_unique<SetNodeExtensionCommand>(*m_scene, nodeIdx, extName, oldValue, tinygltf::Value{}, description));
   };
 
-  // All three KHR_node_* extensions we expose here (visibility, selectability, hoverability) share the
+  // The node extensions we expose here (KHR_node_visibility/selectability/hoverability, NV_node_shadow_casting) share the
   // same shape: a struct with a single bool flag, a get/set utility pair, and identical UI (checkbox +
   // inline Remove when present, Add when absent). This aggregate is the *data* -- one entry per row.
   struct NodeExtRow
@@ -1022,7 +1095,7 @@ void UiInspector::renderNodeExtensions(int nodeIdx)
     }
   };
 
-  ImGui::TextDisabled("glTF KHR_node_* extensions. Toggling adds the extension to the node if absent; use Remove to strip it.");
+  ImGui::TextDisabled("glTF node extensions. Toggling adds the extension to the node if absent; use Remove to strip it.");
   if(PE::begin())
   {
     renderNodeExtRow(
@@ -1067,6 +1140,21 @@ void UiInspector::renderNodeExtensions(int nodeIdx)
         },
         &tinygltf::utils::getNodeHoverability, &tinygltf::utils::setNodeHoverability, &KHR_node_hoverability::hoverable);
 
+    renderNodeExtRow(
+        {
+            .extName    = NV_NODE_SHADOW_CASTING_EXTENSION_NAME,
+            .label      = "Cast Shadows (NV_node_shadow_casting)",
+            .toggleTip  = "When off, the path tracer's shadow rays pass through this node's mesh; it stays visible "
+                          "otherwise. Applies to this node only, not its children.",
+            .addTip     = "Add NV_node_shadow_casting so the node's shadow can be turned off.",
+            .idTag      = "shd",
+            .onDesc     = "Cast shadows",
+            .offDesc    = "Stop casting shadows",
+            .addDesc    = "Add node shadow casting",
+            .removeDesc = "Remove node shadow casting",
+        },
+        &tinygltf::utils::getNodeShadowCasting, &tinygltf::utils::setNodeShadowCasting, &NV_node_shadow_casting::castShadows);
+
     PE::end();
   }
 }
@@ -1089,6 +1177,7 @@ void UiInspector::renderPrimitiveProperties(int nodeIdx, int primIdx, int meshId
     {
       if(readOnly)
         ImGui::TextColored(ImVec4(1.0f, 0.8f, 0.3f, 1.0f), "%s Referenced asset (read-only)", ICON_MS_LOCK);
+      renderOpenReferenceButton(nodeIdx);
 
       ImGui::BeginDisabled(readOnly);
       if(ImGui::TreeNodeEx("Transform##prim_transform", ImGuiTreeNodeFlags_DefaultOpen | ImGuiTreeNodeFlags_SpanAvailWidth))
@@ -1159,13 +1248,18 @@ void UiInspector::renderPrimitiveProperties(int nodeIdx, int primIdx, int meshId
           std::snprintf(matHdr, sizeof(matHdr), "MATERIAL  (none)##material_section");
         if(ImGui::CollapsingHeader(matHdr, ImGuiTreeNodeFlags_DefaultOpen))
         {
-          ImGui::BeginDisabled(readOnly);
+          // Placed content is read-only through its mesh too: an instance-set entry has an editable
+          // placing node but draws a mesh of the referenced file. Its material assignment is locked,
+          // but the material itself can be edited for the session (renderReferencedMaterialNote).
+          const bool meshReadOnly = readOnly || m_scene->isMeshReadOnly(meshIdx);
+          ImGui::BeginDisabled(meshReadOnly);
           renderMaterialAssignmentToolbar(meshIdx, primIdx, nodeIdx, matIdx);
           ImGui::EndDisabled();
           if(matIdx >= 0 && matIdx < int(model.materials.size()))
           {
             ImGui::Separator();
-            renderMaterialSection(matIdx, !readOnly);
+            renderReferencedMaterialNote(matIdx);
+            renderMaterialSection(matIdx);
           }
         }
       }
@@ -1192,21 +1286,30 @@ void UiInspector::renderMaterialProperties(int matIdx)
   ImGui::SameLine();
   ui_xmp::renderInfoButton(&m_scene->getModel(), material.extensions, popupId.c_str());
 
-  // How many primitives reference this material.
-  int usedByPrims = 0;
-  for(const tinygltf::Mesh& mesh : model.meshes)
-    for(const tinygltf::Primitive& prim : mesh.primitives)
-      if(prim.material == matIdx)
-        usedByPrims++;
-  ImGui::TextDisabled("Used by %d primitive(s)", usedByPrims);
+  ImGui::TextDisabled("Used by %d primitive(s)", m_scene->getMaterialPrimitiveCount(matIdx));
+  renderReferencedMaterialNote(matIdx);
 
   ImGui::Separator();
 
-  renderMaterialSection(matIdx, true);
+  renderMaterialSection(matIdx);
 
   ImGui::Separator();
 
   renderMaterialOperations(matIdx, -1);
+}
+
+// glTF 2.1: a material loaded from a referenced file is shared by every placement of that file. It can
+// be edited like any other, but the default save writes the reference, not the edited copy.
+void UiInspector::renderReferencedMaterialNote(int matIdx)
+{
+  if(!m_scene->isMaterialReadOnly(matIdx))
+    return;
+  ImGui::PushStyleColor(ImGuiCol_Text, ImVec4(1.0f, 0.8f, 0.3f, 1.0f));
+  ImGui::TextWrapped(
+      "%s From a referenced file: edits show on every placement of it, but Save keeps the "
+      "reference and drops them. Save Self-Contained keeps them.",
+      ICON_MS_LINK);
+  ImGui::PopStyleColor();
 }
 
 //==================================================================================================
@@ -1356,18 +1459,26 @@ void UiInspector::renderMeshProperties(int meshIdx)
 
   ImGui::Separator();
 
-  // Used by nodes: all instancing nodes as jump links.
-  int instances = 0;
-  for(int n = 0; n < int(model.nodes.size()); ++n)
-    if(model.nodes[n].mesh == meshIdx)
-      instances++;
-  char usedHdr[64];
-  std::snprintf(usedHdr, sizeof(usedHdr), "Used by nodes (%d)##used_by_%d", instances, meshIdx);
+  // Used by nodes: the nodes carrying the mesh, then the placing nodes whose instance set draws it
+  // (glTF 2.1 placed content), as jump links. A placed kit piece can be used by thousands of nodes,
+  // so the list is clipped.
+  const std::span<const int> meshNodes    = m_scene->getMeshNodes(meshIdx);
+  const std::span<const int> placingNodes = m_scene->getMeshPlacingNodes(meshIdx);
+  const int                  users        = int(meshNodes.size() + placingNodes.size());
+  char                       usedHdr[64];
+  std::snprintf(usedHdr, sizeof(usedHdr), "Used by nodes (%d)##used_by_%d", users, meshIdx);
   if(ImGui::CollapsingHeader(usedHdr))
   {
-    for(int n = 0; n < int(model.nodes.size()); ++n)
-      if(model.nodes[n].mesh == meshIdx)
+    ImGuiListClipper clipper;
+    clipper.Begin(users);
+    while(clipper.Step())
+      for(int i = clipper.DisplayStart; i < clipper.DisplayEnd; ++i)
+      {
+        const int n = i < int(meshNodes.size()) ? meshNodes[i] : placingNodes[i - meshNodes.size()];
+        ImGui::PushID(i);
         elementLink(elementRefLabel(SceneSelection::SelectionType::eNode, n).c_str(), SceneSelection::SelectionType::eNode, n);
+        ImGui::PopID();
+      }
   }
 }
 
@@ -1385,14 +1496,7 @@ void UiInspector::renderCameraProperties(int camIdx)
 
   ImGui::Text("%s Camera[%d]: %s", ICON_MS_CAMERA_ALT, camIdx, camera.name.c_str());
   ImGui::TextDisabled("Type: %s", camera.type.empty() ? "perspective" : camera.type.c_str());
-  int camNode = -1;
-  for(int n = 0; n < int(model.nodes.size()); ++n)
-    if(model.nodes[n].camera == camIdx)
-    {
-      camNode = n;
-      break;
-    }
-  elementLinkRow("Attached to", SceneSelection::SelectionType::eNode, camNode, 100.0f, "(unattached)");
+  elementLinkRow("Attached to", SceneSelection::SelectionType::eNode, m_scene->getCameraNode(camIdx), 100.0f, "(unattached)");
   ImGui::Separator();
 
   if(PE::begin())
@@ -1453,14 +1557,7 @@ void UiInspector::renderLightProperties(int lightIdx)
   tinygltf::Light preEditLight = light;
 
   ImGui::Text("%s Light[%d]: %s", ICON_MS_LIGHTBULB, lightIdx, light.name.c_str());
-  int lightNode = -1;
-  for(int n = 0; n < int(model.nodes.size()); ++n)
-    if(model.nodes[n].light == lightIdx)
-    {
-      lightNode = n;
-      break;
-    }
-  elementLinkRow("Attached to", SceneSelection::SelectionType::eNode, lightNode, 100.0f, "(unattached)");
+  elementLinkRow("Attached to", SceneSelection::SelectionType::eNode, m_scene->getLightNode(lightIdx), 100.0f, "(unattached)");
 
   // EXT_lights_ies is standalone per spec: even if the attached node also carries a profile, it
   // does not compose with this KHR light -- see Scene::handleLightTraversal and the Node inspector.
@@ -1523,14 +1620,22 @@ void UiInspector::renderLightProperties(int lightIdx)
       // One light may be instanced by several nodes, and the marker lives on a node. When the
       // marked node is one of this light's, that is the node the checkbox speaks for; otherwise it
       // would mark the first instance.
-      const int sunNode  = gltf_environment_sky::findSkySunNode(model);
-      int       thisNode = -1;
-      if(sunNode >= 0 && gltf_environment_sky::nodeLightIndex(model.nodes[sunNode]) == lightIdx)
+      //
+      // The sun is the scene's resolved answer, and this light's nodes come from the render lights:
+      // this runs each frame the light is shown, so it never walks the node list.
+      const std::vector<nvvkgltf::RenderLight>& rlights  = m_scene->getRenderLights();
+      const int                                 sunLight = m_scene->getSkySunLight();
+      const int                                 sunNode  = sunLight >= 0 ? rlights[sunLight].nodeID : -1;
+      int                                       thisNode = -1;
+      if(sunLight >= 0 && rlights[sunLight].light == lightIdx)
         thisNode = sunNode;
-      for(size_t n = 0; n < model.nodes.size() && thisNode < 0; ++n)
+      else
       {
-        if(gltf_environment_sky::nodeLightIndex(model.nodes[n]) == lightIdx)
-          thisNode = static_cast<int>(n);
+        for(const nvvkgltf::RenderLight& rl : rlights)
+        {
+          if(rl.light == lightIdx && (thisNode < 0 || rl.nodeID < thisNode))
+            thisNode = rl.nodeID;
+        }
       }
       if(thisNode >= 0 && m_undoStack != nullptr)
       {
@@ -1880,7 +1985,13 @@ void UiInspector::renderTransformSection(int nodeIdx)
 
     // Size of the node's geometry subtree along its own axes. Editing a dimension rewrites Scale
     // (all axes under Keep Proportions), so it shares the undo cycle below.
-    nvutils::Bbox localBounds = m_scene->computeNodeSubtreeBounds(nodeIdx);
+    // The subtree can hold a whole placed district, so its bounds are kept until the node, the scene
+    // graph or a node transform changes.
+    if(m_subtreeBounds.node != nodeIdx || m_subtreeBounds.graphRevision != m_scene->getSceneGraphRevision()
+       || m_subtreeBounds.transformRevision != m_scene->getNodeTransformRevision())
+      m_subtreeBounds = {nodeIdx, m_scene->getSceneGraphRevision(), m_scene->getNodeTransformRevision(),
+                         m_scene->computeNodeSubtreeBounds(nodeIdx)};
+    nvutils::Bbox localBounds = m_subtreeBounds.bounds;
     if(!localBounds.isEmpty())
     {
       const glm::vec3 extent      = localBounds.extents();
@@ -1943,17 +2054,11 @@ void UiInspector::renderTransformSection(int nodeIdx)
 // MATERIAL SECTION
 //==================================================================================================
 
-void UiInspector::renderMaterialSection(int matIdx, bool allowEdit)
+void UiInspector::renderMaterialSection(int matIdx)
 {
   tinygltf::Material& material = m_scene->editor().getMaterialForEdit(matIdx);
 
   ImGui::Text("Material[%d]: %s", matIdx, material.name.c_str());
-
-  if(!allowEdit)
-  {
-    ImGui::TextDisabled("(Read-only view)");
-    return;
-  }
 
   // Snapshot before any widget can modify the material (for undo)
   tinygltf::Material preEditMaterial = material;

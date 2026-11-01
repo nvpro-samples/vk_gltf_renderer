@@ -162,7 +162,7 @@ src/
 ├── gltf_compact_*.cpp/hpp      # Orphan resource removal / buffer compaction
 ├── gltf_create_tangent.cpp/hpp # Tangent space generation (UV gradient + MikkTSpace)
 ├── gltf_material_cache.cpp/hpp # CPU-side material cache
-├── gltf_image_loader.cpp/hpp   # Image decoding (DDS, KTX, STB, WebP)
+├── gltf_image_loader.cpp/hpp   # Image decoding (DDS, KTX, STB, WebP, OpenEXR)
 ├── gltf_animation_pointer.*    # KHR_animation_pointer support
 ├── ies_profile.cpp/hpp         # EXT_lights_ies: IESNA LM-63 photometric profile parser
 │
@@ -192,7 +192,10 @@ src/
 ├── ui_xmp.cpp/hpp              # KHR_xmp_json_ld metadata display
 ├── ui_animation.cpp/hpp        # Animation playback state and viewport animation widget
 ├── ui_mouse_state.hpp          # Mouse state tracking for viewport
-├── ui_busy_window.hpp          # Loading/busy indicator overlay
+├── ui_busy_window.hpp          # Loading/busy indicator overlay; during a scene load it lists the
+│                               #   load's stages and stays up until the GPU work has run
+├── load_progress.hpp           # LoadProgress: thread-safe load stages (name, item count, time) that
+│                               #   Scene/SceneVk and the renderer report into; logged when a load ends
 │
 ├── dlss.cpp/hpp                # DLSS adapter (Ray Reconstruction + Super Resolution)
 ├── dlss_wrapper.cpp/hpp        # NGX / DLSS SDK wrapper (project-independent)
@@ -310,6 +313,36 @@ are **forked locally** into `shaders/gltf_*.h.slang` rather than using the upstr
   [`gltf_material_eval.h.slang`](../shaders/gltf_material_eval.h.slang). See the
   [KHR_materials_retroreflection](https://github.com/KhronosGroup/glTF/blob/main/extensions/2.0/Khronos/KHR_materials_retroreflection/README.md) specification.
 
+### OpenEXR material textures
+
+A glTF image whose file is OpenEXR (`uri` ending in `.exr`, `mimeType` `image/x-exr` by convention)
+loads as a material texture. This is a loader extension, in neither glTF 2.0 nor 2.1, and is marked
+`PROVISIONAL(OpenEXR textures)` ([gltf_2_1.md](gltf_2_1.md) §3): resolve it if Khronos ever defines
+an extension for EXR images. Other viewers may not read such a file, which is the trade for the
+extra range; a save keeps the image's bytes as loaded and never converts to or from EXR.
+
+- **Where.** `loadExr()` in [`gltf_image_loader.cpp`](../src/gltf_image_loader.cpp), reached from
+  `nvvkgltf::loadFromMemory`, so images from a file, a `bufferView` or a data URI, and the material
+  inspector's image import, all take it. It uses the same tinyexr (basis_universal's vendored copy)
+  the environment loader uses, and detects EXR by its magic number, not the suffix or `mimeType`.
+- **Format.** Always linear float, never sRGB: EXR is scene-linear data, so the `srgb` flag a
+  base-color slot sets is ignored, and values above 1 are kept. One channel becomes `R16_SFLOAT`
+  (sampled as `RRR1`, like a grayscale 8-bit image); anything else becomes `R16G16B16A16_SFLOAT`,
+  alpha 1 when the file has none. Float32 files are converted to half, so a texture costs 2 bytes
+  per texel for one channel and 8 for RGBA, against 1 and 4 for the 8-bit equivalents (a 4K RGBA
+  texture is 128 MiB, plus a third for the mip chain). Decoding goes through a transient float RGBA
+  buffer, four times the half size.
+- **Mips.** Generated on the GPU by blit like any single-level image (`SceneVk::createImage`).
+- **Data textures.** A normal map, roughness, metallic or occlusion map in EXR is sampled as authored,
+  with the same decode as an 8-bit one (a normal is `2 * value - 1`), so author a normal map in
+  `[0, 1]`. Only layer-less EXR channels `R`, `G`, `B`, `A` (or a single channel of any name) are
+  read; a two-channel or layered file fails to decode.
+- **Failure.** A missing, unreadable or corrupt file logs why (`Failed to decode EXR image N: ...`),
+  and the image keeps the magenta default every failed image gets; the scene still loads.
+- **Fixture.** `exr_textures/` in `tests/gltf_2_1/generate_fixtures.py` (an RGBA base color, an RGB
+  metallic-roughness map, a single-channel occlusion map, and a missing file), with tests in
+  `tests/test_image_loader.cpp` and `Gltf21Test.ExrTextures_LoadAndDecode`.
+
 ### Texture channels: KTX2 swizzle and two-channel sources
 
 Container formats can store fewer channels than the shader expects, in two different ways, and the
@@ -330,6 +363,9 @@ renderer resolves both on the host so the shader stays simple.
   [`gltf_material_eval.h.slang`](../shaders/gltf_material_eval.h.slang) rebuilds Z from the
   unit-length assumption. Three-channel maps keep their authored Z, and single-channel formats are
   excluded — their green is synthetic too, so there is no second axis to reconstruct from.
+  `utils/gltf-ktx2-converter.py` encodes a normal map as BC5 when its source is two-channel, or an
+  RGB image whose blue is mostly below 128 (an RG map saved with a leftover blue, which as Z would
+  point into the surface).
 
 Because the flag depends on the decoded image format, texture creation runs **before**
 `uploadMaterials()` in `SceneVk::create()` and `recreatePreservingTextures()` — the material cache
@@ -401,7 +437,9 @@ Some things about the transport are worth knowing before touching it:
   follows the center camera ray to the nearest medium boundary (a surface whose material factors
   give it a volume; a texel textured to no transmission is still the wall) and, if it meets it from behind,
   records that medium for `pathTrace()` to start in. Without it, a camera inside a fog sees no fog
-  in front of it and fog behind the far wall.
+  in front of it and fog behind the far wall. The probe trusts triangle winding, so an asset whose
+  volume surfaces are wound inward (a windshield at the center of the view, say) makes it put the
+  camera inside that medium; the `ptCameraMedium` setting (Auto / On / Off) switches it off.
 
 The rasterizer cannot trace inside a medium, so `evaluateMaterial()` compiles only the thin-walled
 branch for `RASTER_PIPELINE` — the approximation the scatter spec explicitly permits for renderers

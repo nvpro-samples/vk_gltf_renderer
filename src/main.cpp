@@ -52,7 +52,31 @@
 #include "docs/app_icon_png.h"
 #include "version.hpp"
 
+#if defined(_WIN32)
+#ifndef WIN32_LEAN_AND_MEAN
+#define WIN32_LEAN_AND_MEAN
+#endif
+#include <windows.h>
+#endif
+
 nvutils::ProfilerManager g_profilerManager;  // #PROFILER
+
+//////////////////////////////////////////////////////////////////////////
+// Tell the user why the app is closing when the GPU can't run it. The log already names the
+// missing extensions, but a double-clicked executable has no visible console on Windows.
+static void reportUnsupportedGpu(bool interactive)
+{
+  const char* message =
+      "The selected GPU does not support the Vulkan features this renderer requires (hardware ray tracing).\n\n"
+      "On a system with several GPUs, select another one with --device <index>.";
+  LOGE("%s\n", message);
+#if defined(_WIN32)
+  if(interactive)
+    MessageBoxA(nullptr, message, "vk_gltf_renderer", MB_OK | MB_ICONERROR);
+#else
+  (void)interactive;
+#endif
+}
 
 //////////////////////////////////////////////////////////////////////////
 // Create and set the window icon
@@ -466,7 +490,9 @@ auto main(int argc, char** argv) -> int
   nvvk::Context vkContext;
   if(vkContext.init(vkSetup) != VK_SUCCESS)
   {
-    LOGE("Failed to initialize Vulkan context!");
+    // Usually a GPU without hardware ray tracing: the missing required extensions are logged above.
+    reportUnsupportedGpu(!(appInfo.headless || sequencerInfo.hasScript() || benchmarkOptions.enabled));
+    vkContext.deinit();  // init() may have created the instance before failing
     return -1;
   }
 
@@ -547,6 +573,8 @@ auto main(int argc, char** argv) -> int
   appInfo.persistSettings = !automatedRun;
   // An automated run measures or captures what it asked for: never the all-features fallback shader
   elemGltfRenderer->setBackgroundOptimalShader(!automatedRun);
+  // ...and every frame it counts is rendered: no frames skipped while a shader compiles
+  elemGltfRenderer->setCompileInline(automatedRun);
 
   // Create the application
   nvapp::Application app;
@@ -612,9 +640,21 @@ auto main(int argc, char** argv) -> int
 #endif
 
   // Load a scene if specified, otherwise the application starts empty
+  bool sceneLoaded = false;
   if(!sceneFilename.empty())
   {
-    elemGltfRenderer->createScene(sceneFilename);
+    sceneLoaded = elemGltfRenderer->createScene(sceneFilename);
+  }
+
+  // A headless run without its scene would save a blank image, and with --frames 0 never end: it
+  // waits for --ptMaxSamples, which an empty scene never accumulates. A sequence may load one later.
+  bool headlessFailed = false;
+  if(appInfo.headless && !sceneLoaded && !sequencerInfo.hasScript()
+     && (!sceneFilename.empty() || appInfo.headlessFrameCount == 0))
+  {
+    LOGE(sceneFilename.empty() ? "Headless --frames 0 needs a scene: it runs until --ptMaxSamples\n" :
+                                 "Headless run stopped: the scene did not load\n");
+    headlessFailed = true;
   }
   // Load an HDR if specified
   if(!hdrFilename.empty())
@@ -643,7 +683,10 @@ auto main(int argc, char** argv) -> int
     LOGW("--iniFile is only used by headless, scripted and benchmark runs; ignored.\n");
   }
 
-  app.run();
+  if(!headlessFailed)
+  {
+    app.run();
+  }
 
   // Closing the window while presenting: put the window and panels back first, since deinit() is
   // what persists the window geometry and the ImGui.ini -- otherwise the next launch would open
@@ -674,5 +717,5 @@ auto main(int argc, char** argv) -> int
   // Deinit Vulkan context
   vkContext.deinit();
 
-  return 0;
+  return headlessFailed ? -1 : 0;
 }

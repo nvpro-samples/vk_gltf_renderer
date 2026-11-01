@@ -43,6 +43,9 @@ BENCHMARK_JSON {"schema":1,"type":"headless_summary",...}
   timing runs. An explicit `--ptMaxSamples` is kept and **ends the run**: once the image reaches it
   (and is denoised, see [denoising.md](denoising.md)), the app saves the output and exits, so
   `--frames` is only an upper bound. `--frames 0` renders until the cap.
+- A headless run whose `--scenefile` does not load exits with an error instead of saving a blank
+  image, and so does `--frames 0` with no scene (an empty scene never reaches the cap). A run with a
+  sequence script is exempt: the script may load the scene itself.
 - Animations don't play in headless mode unless `--animPlay 1` is given: an advancing animation resets the path tracer's accumulation every frame, leaving the output at about one sample per pixel. A scene with a `KHR_interactivity` behavior graph never autoplays, whatever `--animPlay` says.
 - **wall_ms** — measured post-warmup render time. The first completed frame is excluded so one-time setup such as shader specialization is not charged to throughput.
 - **total_wall_ms** — full headless render-loop wall time, including warmup and any synchronous setup.
@@ -192,7 +195,7 @@ The script must do two things. It has to pin the work per frame -- `--ptSamples 
 `--ptAdaptiveSampling 0` (adaptive sampling varies the samples per frame, so ms/frame stops being
 comparable), and `--ptMaxSamples` large enough that accumulation never stops mid-sequence (otherwise
 the frame being timed is just the tonemapper). And it has to **open with a throwaway `load`
-sequence**, because scene loading and pipeline creation consume the frames of whichever sequence is
+sequence**, because scene loading consumes the frames of whichever sequence is
 running at the time -- see the note below.
 
 ```text
@@ -233,9 +236,12 @@ outdoor terrain (a furnished room with ~100 materials, a forested mountain, Flig
 
 Three traps worth knowing, each of which produces confident-looking numbers that mean nothing:
 
-- **A starved first sequence.** Scene load and pipeline creation eat the frames of the sequence
+- **A starved first sequence.** Scene load eats the frames of the sequence
   that happens to be running, so a script whose first sequence is `measure` can burn all of them
-  before a single frame is path traced. The symptom is an empty profiler block
+  before a single frame is path traced. Shader compiles and pipeline builds no longer do this:
+  scripted, benchmark and headless runs do them on the frame that needs them
+  (`Settings::compileInline`, `src/resources.hpp`), so a mid-script change such as `--ptOptimalShader` or a
+  visualization mode costs one long frame instead of skipped ones. The symptom is an empty profiler block
   (`ParameterSequence 0 "warmup" = { }`) or a low `samples` count, and a `--screenshot` taken in
   that window is **solid black** because the framebuffer has not accumulated anything yet. Always
   check `samples` in the block you quote: it should be close to the `--sequenceaverages` you asked
@@ -269,10 +275,11 @@ The headless workflow captures the **viewport render only** — it never composi
   --scenefile shader_ball.gltf --hdrfile std_env.hdr --size 1600 900
 ```
 
-Two script parameters support this (registered alongside the other sequencer commands — see `BenchmarkController::registerParameters` in `src/benchmarking.cpp`):
+Three script parameters support this (registered alongside the other sequencer commands — see `BenchmarkController::registerParameters` in `src/benchmarking.cpp`):
 
 - **`--uiScreenshot <file>`** — capture the full composited window (panels + viewport). This reads the swapchain PRESENT image, so it works only in a windowed run; it is ignored in `--headless` mode (no swapchain). Contrast with `--screenshot`, which saves the viewport render (gbuffer) only.
-- **`--selectNode <index>`** — select a scene-graph node by glTF node index (as listed in the Scene Browser tree), driving the Inspector contents and the Scene Browser highlight, exactly as a click would. A negative or out-of-range index clears the selection.
+- **`--selectNode <index>`** — select a scene-graph node by glTF node index (as listed in the Scene Browser tree), driving the Inspector contents and the Scene Browser highlight, exactly as a click in the tree would; the Scene Browser also expands and scrolls to it, as on a pick. A negative or out-of-range index clears the selection.
+- **`--pickNode <index>`** — pick that node's first render node as a viewport click would: the click rules apply (a primitive is selected, a read-only placed node redirects to its editable ancestor, an instance-set entry selects its primitive) and the Scene Browser expands to the selection.
 
 Two ordering rules matter (both illustrated in [`utils/benchmark/ui_inspect.cfg`](../utils/benchmark/ui_inspect.cfg)):
 

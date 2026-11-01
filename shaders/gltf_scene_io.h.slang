@@ -37,6 +37,11 @@ With all flags = 1 (the default) the struct layout is byte-identical to upstream
 
 NAMESPACE_SHADERIO_BEGIN()
 
+// TLAS instance masks. Every instance is one or the other; shadow rays cull with the first only, so
+// an instance that does not cast shadows (NV_node_shadow_casting) stays visible to every other ray.
+#define TLAS_MASK_SHADOW_CASTER 0x01
+#define TLAS_MASK_NO_SHADOW 0x02
+
 // This is the GLTF Node structure, but flattened
 struct GltfRenderNode
 {

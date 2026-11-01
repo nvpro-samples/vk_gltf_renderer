@@ -21,13 +21,17 @@
 #pragma once
 
 #include <algorithm>
+#include <array>
 #include <cassert>
 #include <functional>
 #include <cstdint>
 #include <map>
 #include <memory>
 #include <optional>
+#include <ranges>
+#include <span>
 #include <string>
+#include <thread>
 #include <unordered_map>
 #include <unordered_set>
 #include <vector>
@@ -40,6 +44,8 @@
 #include "gltf_animation_pointer.hpp"
 #include "gltf_interactivity_graph.hpp"
 #include "gltf_interactivity_instance.hpp"
+
+class LoadProgress;
 
 
 namespace nvvkgltf {
@@ -57,6 +63,7 @@ struct RenderNode
   int       refNodeID    = -1;  // Reference to the tinygltf::Node
   int       skinID       = -1;  // Reference to the skin, if the node is skinned, -1 if not skinned
   bool      visible      = true;
+  bool      castShadows  = true;  // NV_node_shadow_casting: false keeps it out of shadow rays (TLAS mask)
 };
 
 // The RenderPrimitive is a unique primitive in the scene
@@ -140,17 +147,35 @@ struct RenderLight
 };
 
 // Centralized registry for renderNode mappings (nodeID/primID <-> renderNodeID).
-// Provides O(1) bidirectional lookups and sparse storage for nodes with meshes.
+// The render nodes of one node are added together, so they are contiguous: each node keeps a range
+// [first, first + count) into the flat arrays, and every lookup is an index, never a hash. Clearing
+// keeps the capacity, so re-parsing a scene of millions of render nodes allocates and frees nothing.
 class RenderNodeRegistry
 {
 public:
-  // Add a render node; returns the new renderNodeID.
-  int addRenderNode(const RenderNode& node, int nodeID, int primIndex);
+  // The render nodes of one node, in the order they were added.
+  using RenderNodeRange = std::ranges::iota_view<int, int>;
+
+  // Add a render node; returns the new renderNodeID. All render nodes of nodeID must be added one
+  // after the other, and either all or none of them with a `local` matrix (see getLocalMatrices()).
+  int addRenderNode(const RenderNode& node, int nodeID, int primIndex, const glm::mat4* local = nullptr);
+  // Add the render node of primitive `primitive` of entry `entry` of nodeID's instance set. Its
+  // primIndex is -1 (it draws no primitive of the node's own mesh); the draw is kept on the side.
+  int addInstanceSetRenderNode(const RenderNode& node, int nodeID, int entry, int primitive, const glm::mat4& local);
 
   // Lookups
-  int getRenderNodeID(int nodeID, int primIndex) const;  // (nodeID, primID) -> RenderNodeID, -1 if not found
-  std::optional<std::pair<int, int>> getNodeAndPrim(int renderNodeID) const;   // RenderNodeID -> (nodeID, primID)
-  const std::vector<int>&            getRenderNodesForNode(int nodeID) const;  // nodeID -> [RenderNodeIDs]
+  int getRenderNodeID(int nodeID, int primIndex) const;  // (nodeID, primID) -> first RenderNodeID, -1 if not found
+  std::optional<std::pair<int, int>> getNodeAndPrim(int renderNodeID) const;      // RenderNodeID -> (nodeID, primID)
+  RenderNodeRange                    getRenderNodesForNode(int nodeID) const;     // nodeID -> [RenderNodeIDs]
+  std::optional<std::pair<int, int>> getInstanceSetDraw(int renderNodeID) const;  // -> (entry, primitive)
+  int getInstanceSetRenderNodeID(int nodeID, int entry, int primitive) const;     // -1 if not drawn
+
+  // Nodes drawn more than once (EXT_mesh_gpu_instancing, an instance set) have one local matrix per
+  // render node, in getRenderNodesForNode() order: the render node's world matrix is the node's world
+  // matrix times it. Empty for a node drawn once.
+  std::span<const glm::mat4> getLocalMatrices(int nodeID) const;
+  const glm::mat4*           getLocalMatrix(int renderNodeID) const;  // nullptr for a node drawn once
+  bool                       hasLocalMatrices() const { return !m_localMatrices.empty(); }
 
   // Batch: collect all renderNodeIDs for node and its descendants. getChildren(nodeID) returns child node indices.
   void getAllRenderNodesForNodeRecursive(int nodeID, std::function<std::vector<int>(int)> getChildren, std::vector<int>& outRenderNodeIDs) const;
@@ -165,21 +190,29 @@ public:
 private:
   std::vector<RenderNode> m_renderNodes;
 
-  // Forward: (nodeID, primIndex) -> renderNodeID
-  std::unordered_map<uint64_t, int> m_nodeAndPrimToRenderNode;
-
   // Reverse: renderNodeID -> (nodeID, primIndex)
   std::vector<std::pair<int, int>> m_renderNodeToNodeAndPrim;
 
-  // Grouped by node: nodeID -> [renderNodeIDs] (sparse, only nodes with meshes)
-  std::unordered_map<int, std::vector<int>> m_nodeToRenderNodes;
-
-  // Empty vector returned when node has no render nodes
-  static const std::vector<int> s_emptyRenderNodes;
-
-  static uint64_t makeKey(int nodeID, int primIndex)
+  // Per node (indexed by nodeID, grown on demand): its render nodes and, when drawn more than once,
+  // where its local matrices start in m_localMatrices.
+  struct NodeRange
   {
-    return (static_cast<uint64_t>(static_cast<uint32_t>(nodeID)) << 32) | static_cast<uint32_t>(primIndex);
+    int first      = 0;
+    int count      = 0;
+    int firstLocal = -1;
+  };
+  std::vector<NodeRange> m_nodeRanges;
+  std::vector<glm::mat4> m_localMatrices;
+
+  // renderNodeID -> (entry, primitive) of an instance-set render node, (-1, -1) for any other. Only
+  // grown when an instance-set render node is added, so a scene without one pays nothing.
+  std::vector<std::pair<int, int>> m_instanceSetDraws;
+
+  const NodeRange* findRange(int nodeID) const
+  {
+    return nodeID >= 0 && static_cast<size_t>(nodeID) < m_nodeRanges.size() && m_nodeRanges[nodeID].count > 0 ?
+               &m_nodeRanges[nodeID] :
+               nullptr;
   }
 };
 
@@ -310,13 +343,18 @@ public:
   // After mergeScene(), returns the animation list index of the first clip from the merged file (for UI default); -1 if none.
   // Consumed once by the renderer so the animation dropdown selects merged motion instead of staying on a base-scene clip.
   [[nodiscard]] int                      takeMergePreferredAnimationIndex();
-  void                                   takeModel(tinygltf::Model&& model);  // Use pre-loaded model
+  // Use a pre-loaded model; sourceFilename (e.g. the converted .obj) anchors its relative image URIs
+  void takeModel(tinygltf::Model&& model, const std::filesystem::path& sourceFilename = {});
   std::unordered_set<std::string>&       supportedExtensions() { return m_supportedExtensions; }
   const std::unordered_set<std::string>& supportedExtensions() const { return m_supportedExtensions; }
   const std::filesystem::path&           getFilename() const { return m_filename; }
   // Order: base scene directory first, then each imported scene's directory in merge order.
   // Used to resolve image URIs via findFile and when saving/copying images.
   const std::vector<std::filesystem::path>& getImageSearchPaths() const { return m_imageSearchPaths; }
+  // Where loading reports its stages (load_progress.hpp); the GPU side (SceneVk) reports there too.
+  // Not owned, may be null; reporting outside an active load is a no-op.
+  void          setLoadProgress(LoadProgress* progress) { m_loadProgress = progress; }
+  LoadProgress* loadProgress() const { return m_loadProgress; }
 
   //--------------------------------------------------------------------------------------------------
   // Model Access
@@ -340,8 +378,17 @@ public:
   [[nodiscard]] static int         getInstanceSetIndex(const tinygltf::Node& node);
   static void                      setInstanceSetMarker(tinygltf::Node& node, int instanceSetIndex);
   static void                      clearInstanceSetMarker(tinygltf::Node& node);
-  // True if the render node draws an instance-set entry rather than a primitive of its node's mesh.
-  [[nodiscard]] bool isInstanceSetRenderNode(int renderNodeIndex) const;
+  // The (entry, primitive) of its node's instance set a render node draws, or nullopt when it draws
+  // a primitive of its node's own mesh. getInstanceSetRenderNode is the reverse (-1 if not drawn).
+  [[nodiscard]] std::optional<std::pair<int, int>> getInstanceSetDraw(int renderNodeIndex) const;
+  [[nodiscard]] int getInstanceSetRenderNode(int nodeIndex, int entry, int primitive) const;
+  // What a render node draws: its node, and the mesh and primitive index -- the node's own mesh, or
+  // the mesh of the instance-set entry it draws. All -1 for an invalid render node.
+  struct RenderNodePart
+  {
+    int node = -1, mesh = -1, primitive = -1;
+  };
+  [[nodiscard]] RenderNodePart getRenderNodePart(int renderNodeIndex) const;
   // Turn the instance sets of `nodes` (every marked node when empty) into real nodes
   // of `model`, one per entry, under the placing node, and drop the markers. For saves that need
   // plain glTF (flatten) and for "Make Editable". `model` is m_model or a copy of it.
@@ -349,6 +396,12 @@ public:
   // True if the scene references at least one external asset (glTF 2.1). When true, save() can
   // write either the referenced (complex) form or a flattened self-contained form.
   [[nodiscard]] bool hasExternalAssets() const { return !m_referencedAssets.empty(); }
+
+  // Full path of the glTF a node comes from: the file an instance node's `externalAsset` points at, or
+  // the source of the referenced asset a merged-in node is marked with. Both are read from the live
+  // node, so the answer survives node deletion renumbering. Empty for ordinary nodes.
+  [[nodiscard]] std::string referencedFilePathOf(int nodeIndex) const;
+
   // Provenance marker stamped into the `extras` of nodes merged in from a referenced external
   // asset. Stored in extras (not a Node struct field) so it travels with the node through
   // duplicate/delete renumbering for free, and is never persisted (re-externalization removes the
@@ -370,7 +423,10 @@ public:
   }
   [[nodiscard]] static bool hasExternalAssetMarker(const tinygltf::Node& node)
   {
-    return node.extras.Has(kExternalAssetContentKey);
+    // Value::Has takes a std::string, and the key is too long for the small-string buffer: a key
+    // made per call is a heap allocation per node, which a pass over millions of nodes notices.
+    static const std::string s_externalAssetKey(kExternalAssetContentKey);
+    return node.extras.Has(s_externalAssetKey);
   }
   static void clearExternalAssetMarker(tinygltf::Node& node)
   {
@@ -389,8 +445,23 @@ public:
     return nodeIndex >= 0 && nodeIndex < static_cast<int>(m_model.nodes.size())
            && hasExternalAssetMarker(m_model.nodes[nodeIndex]);
   }
-  // True if the mesh is used by a referenced (read-only) node. Used to guard mesh-keyed edits.
+  // True if the mesh is used by a referenced (read-only) node or drawn by an instance set. Used to
+  // guard mesh-keyed edits.
   [[nodiscard]] bool isMeshReadOnly(int meshIndex) const;
+  // True if the material is used by a read-only mesh, i.e. it was loaded from a referenced file.
+  [[nodiscard]] bool isMaterialReadOnly(int materialIndex) const;
+
+  // Who uses an element, for the Inspector and the Elements list, which ask every frame. These and
+  // the two read-only queries above read one index (ElementUsage), built in one pass over the nodes
+  // and meshes and kept until the scene graph, a material assignment or an element count changes.
+  [[nodiscard]] std::span<const int> getMeshNodes(int meshIndex) const;         // nodes with node.mesh == meshIndex
+  [[nodiscard]] std::span<const int> getMeshPlacingNodes(int meshIndex) const;  // nodes whose instance set draws it
+  [[nodiscard]] int                  getMaterialPrimitiveCount(int materialIndex) const;  // mesh primitives using it
+  [[nodiscard]] int                  getCameraNode(int cameraIndex) const;  // first node carrying it, or -1
+  [[nodiscard]] int                  getLightNode(int lightIndex) const;    // first node carrying it, or -1
+  // Rebuild the usage index on its next query: for edits that change what it records without a
+  // scene-graph revision bump (camera attachment).
+  void invalidateElementUsage() { m_elementUsage.revision = ~uint64_t(0); }
 
   // KHR_node_selectability: a node is selectable iff neither it nor any ancestor sets
   // `selectable:false` (the flag cascades to the whole subtree). Default is selectable.
@@ -441,10 +512,10 @@ public:
 
   // Nodes drawn more than once: EXT_mesh_gpu_instancing nodes and placing nodes with an instance
   // set. For such a node, one local matrix per render node, in getRenderNodesForNode() order: the
-  // render node's world matrix is the node's world matrix times it. Nodes drawn once are absent.
-  [[nodiscard]] const std::unordered_map<int, std::vector<glm::mat4>>& getRenderNodeLocalMatrices() const
+  // render node's world matrix is the node's world matrix times it. Empty for a node drawn once.
+  [[nodiscard]] std::span<const glm::mat4> getRenderNodeLocalMatrices(int nodeID) const
   {
-    return m_renderNodeLocalMatrices;
+    return m_renderNodeRegistry.getLocalMatrices(nodeID);
   }
 
   //--------------------------------------------------------------------------------------------------
@@ -507,6 +578,12 @@ public:
   //--------------------------------------------------------------------------------------------------
 
   const std::vector<nvvkgltf::RenderLight>& getRenderLights() const { return m_lights; }
+
+  // Index into getRenderLights() of the sky's sun -- the light whose node carries the
+  // OMI_environment_sky sun marker (gltf_environment_sky.hpp) -- or -1. Resolved when the lights
+  // are rebuilt and when the marker is set or cleared, which must call updateSkySunLight().
+  [[nodiscard]] int getSkySunLight() const { return m_skySunLight; }
+  void              updateSkySunLight();
 
   //--------------------------------------------------------------------------------------------------
   // Render Node Management
@@ -613,7 +690,7 @@ public:
     bool                    primitivesChanged   = false;  // BLAS rebuild needed (primitive set changed)
     bool                    texturesChanged = false;  // Full texture rebuild needed (structural image/texture change)
     bool texturesTailChanged = false;  // Only adding or removing from the end of the texture list (SceneVk::syncTextureTail)
-    bool tlasVisibilityNeedsCpuSync = false;  // KHR_node_visibility: SceneEditor::updateVisibility
+    bool tlasVisibilityNeedsCpuSync = false;  // KHR_node_visibility / NV_node_shadow_casting: SceneEditor::updateVisibility / updateShadowCasting
     bool emissiveDirty = false;  // Emissive area-light list must be rebuilt (SceneVk::uploadEmissiveTriangles)
 
     void clear()
@@ -648,6 +725,9 @@ public:
   void markLightDirty(int lightIndex);
   void markRenderNodeDirty(int renderNodeIndex, bool forVk = true, bool forRtx = true);
   void markNodeDirty(int nodeIndex);
+  // Bumped by every markNodeDirty(): a node's TRS (or what hangs off it) may have changed. Lets a
+  // cache of something derived from node transforms, such as computeNodeSubtreeBounds(), be kept.
+  [[nodiscard]] uint64_t getNodeTransformRevision() const { return m_nodeTransformRevision; }
   void markSamplerDirty(int samplerIndex);  // In-place wrap/filter edit; SceneVk updates the VkSampler only
   void markRenderNodeRtxDirtyForMaterials(const std::unordered_set<int>& materialIds);  // For TLAS instance flags
 
@@ -671,6 +751,7 @@ private:
   //--------------------------------------------------------------------------------------------------
 
   void parseScene();
+  void setSourceFilename(const std::filesystem::path& filename);
   void clearParsedData();
   // glTF 2.1: resolve every node.externalAsset by placing the referenced file's content under that
   // node, nested files too, each file loaded once. Tags the
@@ -706,9 +787,24 @@ private:
   bool handleLightTraversal(int nodeID, const glm::mat4& worldMatrix);
   void updateRenderNodesFull();
 
-  // Lightweight rebuild after structural change (e.g. node deletion). Only clears and repopulates
-  // render nodes and lights; does not touch primitives, cameras, animations, variants.
+  // Lightweight rebuild after structural change (e.g. node deletion): rebuilds the render primitives
+  // and repopulates render nodes and lights; does not touch cameras, animations, variants.
   void rebuildRenderNodesAndLights();
+  // Same, keeping the render primitives, and with dirty flags diffed as parseScene() does. Only for
+  // an edit that changes no mesh and no skinned, morphed or camera node (see the definition).
+  void rebuildRenderNodesKeepingPrimitives();
+  void createRenderNodesAndLights(const PrimitiveKeyMap& primMap);  // one walk, both cleared first
+
+  // A render node's state before a rebuild, to set precise dirty flags after it.
+  struct RenderNodeState
+  {
+    glm::mat4 worldMatrix;
+    int       materialID;
+    int       renderPrimID;
+    bool      visible;
+  };
+  std::vector<RenderNodeState> snapshotRenderNodes() const;
+  void markRebuiltRenderNodesDirty(const std::vector<RenderNodeState>& previous, size_t previousLightCount);
 
   // Traverse scene roots computing local/world matrices, visibility, and parent links.
   void traverseSceneWithVisibility(const std::function<void(int nodeID, const glm::mat4& worldMatrix, bool visible)>& callback);
@@ -760,11 +856,15 @@ private:
   std::vector<std::filesystem::path> m_imageSearchPaths;  // Base dirs for image resolution (base first, then imports)
   std::unordered_set<std::string>    m_supportedExtensions;  // Extensions to load
   bool                               m_validSceneParsed = false;
+  LoadProgress*                      m_loadProgress     = nullptr;  // see setLoadProgress()
 
   // glTF 2.1 external assets resolved into m_model (provenance). Read-only membership is derived
   // from the per-node extras marker (kExternalAssetContentKey), not tracked by index here.
   std::vector<nvvkgltf::ReferencedAsset> m_referencedAssets;
   std::vector<InstanceSet>               m_instanceSets;  // see getInstanceSet(); kept across parseScene()
+  // Frees the JSON of the files placed by the last load: as long as placing them on large scenes, so
+  // done off the load path. It owns what it frees; joined before the next load and on destruction.
+  std::thread m_externalAssetRelease;
 
   //--------------------------------------------------------------------------------------------------
   // Data Members: Render Data (Built from Model)
@@ -775,6 +875,7 @@ private:
   std::vector<glm::vec3>                 m_renderPrimCenterObj;  // Object-space AABB centroid per render primitive
   std::vector<nvvkgltf::RenderCamera>    m_cameras;              // Cameras
   std::vector<nvvkgltf::RenderLight>     m_lights;               // Lights
+  int                                    m_skySunLight = -1;     // Index into m_lights of the sky's sun, or -1
 
   //--------------------------------------------------------------------------------------------------
   // Data Members: Shaded-Nodes Cache
@@ -794,6 +895,25 @@ private:
   // -- those do not bump m_sceneGraphRevision.
   mutable uint64_t m_shadedCacheSceneGraphRevision = 0;
 
+  // The index behind isMeshReadOnly(), getMeshNodes() and the other usage queries, rebuilt by
+  // elementUsage() when m_sceneGraphRevision or an element count changes: parseScene, reparenting
+  // and material assignment bump the revision; adding or removing an element changes a count. An
+  // edit that changes only an attachment the index records (a camera) calls invalidateElementUsage()
+  // instead of bumping the revision, which would also refresh the GPU transform buffers.
+  struct ElementUsage
+  {
+    uint64_t              revision = ~uint64_t(0);
+    std::array<size_t, 5> counts{};  // nodes, meshes, materials, cameras, lights it was built for
+    std::vector<uint8_t>  readOnlyMeshes;
+    std::vector<uint8_t>  readOnlyMaterials;
+    std::vector<int>      meshNodesOffset, meshNodes;      // mesh m: meshNodes[offset[m], offset[m + 1])
+    std::vector<int>      meshPlacingOffset, meshPlacing;  // same layout, placing nodes of instance sets
+    std::vector<int>      materialPrimitives;
+    std::vector<int>      cameraNode, lightNode;
+  };
+  const ElementUsage&  elementUsage() const;
+  mutable ElementUsage m_elementUsage;
+
 
   //--------------------------------------------------------------------------------------------------
   // Data Members: Node Transforms (Cached)
@@ -811,12 +931,12 @@ private:
     std::vector<std::pair<int, int>> levels;     // Per-level (offset, count) into nodeOrder
   };
   TopoLevels m_topoLevels;
-  uint64_t   m_sceneGraphRevision = 0;
+  uint64_t   m_sceneGraphRevision    = 0;
+  uint64_t   m_nodeTransformRevision = 0;  // see getNodeTransformRevision()
   void       buildTopologicalLevels();
   void       updateWorldMatricesSerial();    // Filtered-root recursive walk (small dirty sets)
   void       updateWorldMatricesParallel();  // Level-by-level parallel (large dirty sets)
 
-  std::unordered_map<int, std::vector<glm::mat4>> m_renderNodeLocalMatrices;  // see getRenderNodeLocalMatrices()
   std::vector<std::vector<int>> m_meshRenderPrimitives;  // per mesh primitive, its render primitive or -1 (buildPrimitiveKeyMap)
   // Per node that skins or morphs a mesh other nodes draw too: its own render primitive per mesh
   // primitive, used in place of m_meshRenderPrimitives (assignDeformedRenderPrimitives).

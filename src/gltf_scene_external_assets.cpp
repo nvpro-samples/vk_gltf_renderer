@@ -27,6 +27,10 @@
 // content is static is drawn through an instance set on the placing node, without copying its
 // nodes; other content is copied as read-only nodes pointing at the shared resources.
 //
+// Reading, parsing and decoding a file touch no scene state: every file a load places is read on
+// the thread pool first (ExternalAssetPlacer::preload). Appending and placing then run on the
+// loading thread, in order, so the result does not depend on the thread count.
+//
 
 #include <algorithm>
 #include <functional>
@@ -40,12 +44,14 @@
 
 #include <nvutils/file_operations.hpp>
 #include <nvutils/logger.hpp>
+#include <nvutils/parallel_work.hpp>
 #include <nvutils/timers.hpp>
 
 #include "gltf_scene.hpp"
 #include "gltf_scene_loading.hpp"
 #include "gltf_scene_merger.hpp"
 #include "gltf_scene_validator.hpp"
+#include "load_progress.hpp"
 #include "tinygltf_utils.hpp"
 
 namespace nvvkgltf {
@@ -60,7 +66,127 @@ constexpr size_t kMaxPlacedNodes = size_t(1) << 24;
 std::string canonicalKey(const std::filesystem::path& path)
 {
   std::error_code ec;
-  return nvutils::utf8FromPath(std::filesystem::weakly_canonical(std::filesystem::absolute(path, ec), ec));
+  // Normalized first: a long unnormalized `../` chain can exceed MAX_PATH on Windows.
+  return nvutils::utf8FromPath(std::filesystem::weakly_canonical(std::filesystem::absolute(path, ec).lexically_normal(), ec));
+}
+
+// The file a buffer of a file in `dir` reads; empty for GLB and data: buffers, which belong to their file.
+std::string bufferFileKey(const tinygltf::Buffer& buffer, const std::filesystem::path& dir)
+{
+  if(buffer.uri.empty() || buffer.uri.rfind("data:", 0) == 0)
+    return {};
+  return canonicalKey(dir / nvutils::pathFromUtf8(tinygltf::utils::decodePathFromUri(buffer.uri)));
+}
+
+bool isPlaceable(const tinygltf::File& file)
+{
+  return (file.mimeType == "model/gltf-binary" || file.mimeType == "model/gltf+json") && !file.uri.empty();
+}
+
+// What a `files` entry points at.
+struct FileRef
+{
+  std::filesystem::path path;       // normalized, so nested `../` never accumulates (past MAX_PATH on Windows)
+  std::string           canonical;  // file identity, for the cycle check
+  std::string           key;        // canonical + alias context: what a file is loaded once per
+};
+
+// Resolve `file`, an entry of `ownerJson`, a file in `ownerDir`. Touches the file system.
+FileRef resolveFile(const tinygltf::Model& ownerJson, const std::filesystem::path& ownerDir, const tinygltf::File& file)
+{
+  FileRef ref;
+  ref.path      = (ownerDir / nvutils::pathFromUtf8(tinygltf::utils::decodePathFromUri(file.uri))).lexically_normal();
+  ref.canonical = canonicalKey(ref.path);
+  // glTF 2.1 aliases belong to the referencing file: the same file reached with other aliases may
+  // load other inner files, so it is another entry.
+  ref.key = ref.canonical;
+  for(const tinygltf::FileAlias& alias : file.aliases)
+  {
+    const bool valid = alias.file >= 0 && alias.file < static_cast<int>(ownerJson.files.size());
+    ref.key +=
+        "|" + alias.alias + "="
+        + (valid ? canonicalKey(ownerDir
+                                / nvutils::pathFromUtf8(tinygltf::utils::decodePathFromUri(ownerJson.files[alias.file].uri))) :
+                   std::string("?"));
+  }
+  return ref;
+}
+
+// A referenced file to load, with what its aliases need from the referencing file.
+struct LoadRequest
+{
+  std::string                      key;
+  std::filesystem::path            path;
+  std::vector<tinygltf::FileAlias> aliases;
+  std::vector<tinygltf::File>      ownerFiles;  // the referencing file's files[], when there are aliases
+  std::filesystem::path            ownerDir;
+};
+
+// A referenced file, read and decoded: all of its loading that needs no scene state.
+struct LoadedFile
+{
+  bool                                 loaded = false;  // false: `error` says why
+  std::string                          error;
+  bool                                 decoded = false;  // meshopt decompression succeeded
+  tinygltf::Model                      model;
+  std::vector<std::string>             bufferKeys;  // bufferFileKey() of each buffer
+  std::vector<int>                     roots;       // default-scene roots: what is placed
+  std::vector<std::pair<int, FileRef>> placed;      // files it places (files index), in placement order
+};
+
+// Read, parse and decode a referenced file, and resolve the files it places. Thread-safe.
+LoadedFile loadFile(const LoadRequest& request)
+{
+  LoadedFile                  out;
+  const std::filesystem::path dir = request.path.parent_path();
+  detail::AliasContext        aliasContext;
+  aliasContext.aliases      = &request.aliases;
+  aliasContext.ownerFiles   = &request.ownerFiles;
+  aliasContext.ownerBaseDir = request.ownerDir;
+  aliasContext.childBaseDir = dir;
+  std::string warn;
+  out.loaded = detail::loadGltfFile(request.path, out.model, &out.error, &warn, request.aliases.empty() ? nullptr : &aliasContext);
+  if(!out.loaded)
+    return out;
+  out.decoded = detail::decompressMeshopt(out.model);
+
+  const tinygltf::Model& model = out.model;
+  for(const tinygltf::Buffer& buffer : model.buffers)
+    out.bufferKeys.push_back(bufferFileKey(buffer, dir));
+
+  const int nodeCount = static_cast<int>(model.nodes.size());
+  if(!model.scenes.empty())
+  {
+    int scene = model.defaultScene >= 0 ? model.defaultScene : 0;
+    if(scene >= static_cast<int>(model.scenes.size()))
+      scene = 0;
+    for(int root : model.scenes[scene].nodes)
+      if(root >= 0 && root < nodeCount)
+        out.roots.push_back(root);
+  }
+
+  // In the order ExternalAssetPlacer::copyTree asks for them: a node's children, then its own file.
+  std::vector<char>        visited(nodeCount, 0);
+  std::vector<char>        listed(model.files.size(), 0);
+  std::function<void(int)> visit = [&](int n) {
+    if(visited[n])
+      return;
+    visited[n] = 1;
+    for(int child : model.nodes[n].children)
+      if(child >= 0 && child < nodeCount)
+        visit(child);
+    const int externalAsset = model.nodes[n].externalAsset;
+    if(externalAsset < 0 || externalAsset >= static_cast<int>(model.externalAssets.size()))
+      return;
+    const int fileIndex = model.externalAssets[externalAsset].file;
+    if(fileIndex < 0 || fileIndex >= static_cast<int>(model.files.size()) || listed[fileIndex] || !isPlaceable(model.files[fileIndex]))
+      return;
+    listed[fileIndex] = 1;
+    out.placed.emplace_back(fileIndex, resolveFile(model, dir, model.files[fileIndex]));
+  };
+  for(int root : out.roots)
+    visit(root);
+  return out;
 }
 
 }  // namespace
@@ -102,6 +228,104 @@ public:
     m_scene.recordReferencedAsset(static_cast<int>(firstNode), static_cast<int>(m_model.nodes.size()), nodeIndex,
                                   externalAsset, fileIndex, nvutils::utf8FromPath(placed->path));
     return true;
+  }
+
+  //------------------------------------------------------------------------------------------------
+  // Load every file that the scene's own nodes `nodes` place, directly or nested, before placing
+  // any: level by level on the thread pool, since a file's references are known once it is read.
+  // Then make room in the scene model for all of their resources at once. Appending thousands of
+  // files one after the other otherwise keeps growing the arrays, and every growth moves the
+  // earlier elements again (each holding std::maps, which MSVC allocates for even when moving).
+  //------------------------------------------------------------------------------------------------
+  void preload(const std::vector<int>& nodes)
+  {
+    const nvutils::PerformanceTimer timer;
+    std::unordered_set<std::string> requested;
+    std::vector<LoadRequest>        level;
+    for(int node : nodes)
+    {
+      const int externalAsset = m_model.nodes[node].externalAsset;
+      if(externalAsset < 0 || externalAsset >= static_cast<int>(m_model.externalAssets.size()))
+        continue;
+      const int fileIndex = m_model.externalAssets[externalAsset].file;
+      if(fileIndex < 0 || fileIndex >= static_cast<int>(m_model.files.size()) || !isPlaceable(m_model.files[fileIndex]))
+        continue;
+      const FileRef& ref = fileRef(m_sceneFile, fileIndex);
+      if(ref.canonical != m_sceneFile.canonical && requested.insert(ref.key).second)
+        level.push_back(loadRequest(m_model, m_sceneFile.dir, m_model.files[fileIndex], ref));
+    }
+
+    // Files nested deeper than placement goes are not loaded (cycles stop at `requested`).
+    LoadProgress* progress = m_scene.loadProgress();
+    for(int depth = 1; depth <= kMaxPlacementDepth && !level.empty(); depth++)
+    {
+      if(progress)
+        progress->stage(depth == 1 ? "Loading external files" : "Loading nested external files",
+                        static_cast<uint32_t>(level.size()));
+      std::vector<LoadedFile> loaded(level.size());
+      nvutils::parallel_batches<1>(level.size(), [&](uint64_t i) {
+        loaded[i] = loadFile(level[i]);
+        if(progress)
+          progress->advance(1, nvutils::utf8FromPath(level[i].path.filename()));
+      });
+      std::vector<LoadRequest> next;
+      for(size_t i = 0; i < level.size(); i++)
+      {
+        const std::filesystem::path dir = level[i].path.parent_path();
+        for(const auto& [fileIndex, ref] : loaded[i].placed)
+          if(requested.insert(ref.key).second)
+            next.push_back(loadRequest(loaded[i].model, dir, loaded[i].model.files[fileIndex], ref));
+        m_preloaded.emplace(std::move(level[i].key), std::move(loaded[i]));
+      }
+      level = std::move(next);
+    }
+
+    // At most what the files hold: shared images and buffers are not appended. Nodes are copied
+    // only from files that place others (static content is drawn through instance sets), and a
+    // node array growing one copy at a time moves millions of nodes, each holding std::maps.
+    IndexRemapping total;
+    size_t         copiedNodes = 0;
+    for(const auto& [key, file] : m_preloaded)
+    {
+      const tinygltf::Model& model = file.model;
+      if(!model.externalAssets.empty())
+        copiedNodes += model.nodes.size();
+      total.buffers += static_cast<int>(model.buffers.size());
+      total.bufferViews += static_cast<int>(model.bufferViews.size());
+      total.accessors += static_cast<int>(model.accessors.size());
+      total.images += static_cast<int>(model.images.size());
+      total.samplers += static_cast<int>(model.samplers.size());
+      total.textures += static_cast<int>(model.textures.size());
+      total.materials += static_cast<int>(model.materials.size());
+      total.meshes += static_cast<int>(model.meshes.size());
+      total.cameras += static_cast<int>(model.cameras.size());
+      total.animations += static_cast<int>(model.animations.size());
+    }
+    m_model.buffers.reserve(m_model.buffers.size() + total.buffers);
+    m_model.bufferViews.reserve(m_model.bufferViews.size() + total.bufferViews);
+    m_model.accessors.reserve(m_model.accessors.size() + total.accessors);
+    m_model.images.reserve(m_model.images.size() + total.images);
+    m_model.samplers.reserve(m_model.samplers.size() + total.samplers);
+    m_model.textures.reserve(m_model.textures.size() + total.textures);
+    m_model.materials.reserve(m_model.materials.size() + total.materials);
+    m_model.meshes.reserve(m_model.meshes.size() + total.meshes);
+    m_model.cameras.reserve(m_model.cameras.size() + total.cameras);
+    m_model.animations.reserve(m_model.animations.size() + total.animations);
+    m_model.nodes.reserve(m_model.nodes.size() + copiedNodes);
+    m_loadSeconds += timer.getSeconds();
+  }
+
+  // The placed files' JSON, only needed while placing; handed over to be freed elsewhere.
+  auto takeFiles()
+  {
+    m_staticTrees.clear();  // keyed by the files
+    m_resolvedPaths.clear();
+    std::vector<std::unique_ptr<PlacedFile>> files;
+    files.reserve(m_files.size());
+    for(auto& [key, file] : m_files)
+      files.push_back(std::move(file));
+    m_files.clear();
+    return files;
   }
 
   void logSummary() const
@@ -176,38 +400,25 @@ private:
       return nullptr;
     }
 
-    // Canonicalizing touches the file system: once per path, not once per placement or per files
-    // entry (every district of a city names the same kit pieces from the same folder).
-    const std::pair<ResolvedPaths::iterator, bool> resolved = m_resolvedPaths.try_emplace({&owner, fileIndex});
-    ResolvedPath&                                  entry    = resolved.first->second;
-    if(resolved.second)
-    {
-      entry.path = owner.dir / nvutils::pathFromUtf8(tinygltf::utils::decodePathFromUri(file.uri));
-      const std::pair<CanonicalPaths::iterator, bool> known = m_canonicalPaths.try_emplace(entry.path.native());
-      if(known.second)
-        known.first->second = canonicalKey(entry.path);
-      entry.canonical = known.first->second;
-    }
-    const std::filesystem::path& path      = entry.path;
-    const std::string&           canonical = entry.canonical;
+    const FileRef& ref = fileRef(owner, fileIndex);
     // A file already on its own placement path is a cycle. The same file in two branches is not.
-    if(std::find(m_ancestry.begin(), m_ancestry.end(), canonical) != m_ancestry.end())
+    if(onPlacementPath(ref.canonical))
     {
-      warnOnce("cycle:" + fileKey, fmt::format("reference cycle detected at '{}'; skipping", nvutils::utf8FromPath(path)));
+      warnOnce("cycle:" + fileKey, fmt::format("reference cycle detected at '{}'; skipping", nvutils::utf8FromPath(ref.path)));
       return nullptr;
     }
     if(depth > kMaxPlacementDepth)
     {
       warnOnce("depth:" + fileKey, fmt::format("nesting deeper than {} levels at '{}'; not placed", kMaxPlacementDepth,
-                                               nvutils::utf8FromPath(path)));
+                                               nvutils::utf8FromPath(ref.path)));
       return nullptr;
     }
 
-    const PlacedFile* placed = acquire(owner, file, path, canonical);
+    const PlacedFile* placed = acquire(owner, file, ref);
     if(placed == nullptr)
       return nullptr;
     const PlacedFile& x = *placed;
-    m_ancestry.push_back(canonical);
+    m_ancestry.push_back(ref.canonical);
 
     // Static content (nothing skinned, animated, lit, with a camera, placing a file or carrying a
     // node extension) is drawn through an instance set: one entry per mesh node, no node copied.
@@ -231,25 +442,12 @@ private:
   }
 
   //------------------------------------------------------------------------------------------------
-  // The file `file` of `owner`, at `path`: loaded, validated and its resources appended on first use.
+  // The file `file` of `owner`, resolved to `ref`: loaded (preloaded, normally), validated and its
+  // resources appended on first use.
   //------------------------------------------------------------------------------------------------
-  const PlacedFile* acquire(const PlacedFile& owner, const tinygltf::File& file, const std::filesystem::path& path, const std::string& canonical)
+  const PlacedFile* acquire(const PlacedFile& owner, const tinygltf::File& file, const FileRef& ref)
   {
-    // glTF 2.1 aliases belong to the referencing file: the same file reached with other aliases may
-    // load other inner files, so it is another entry.
-    std::string key = canonical;
-    for(const tinygltf::FileAlias& alias : file.aliases)
-    {
-      const tinygltf::Model& ownerJson = json(owner);
-      const bool             valid     = alias.file >= 0 && alias.file < static_cast<int>(ownerJson.files.size());
-      key +=
-          "|" + alias.alias + "="
-          + (valid ? canonicalKey(owner.dir
-                                  / nvutils::pathFromUtf8(tinygltf::utils::decodePathFromUri(ownerJson.files[alias.file].uri))) :
-                     std::string("?"));
-    }
-
-    const std::pair<PlacedFiles::iterator, bool> found = m_files.try_emplace(key);
+    const std::pair<PlacedFiles::iterator, bool> found = m_files.try_emplace(ref.key);
     const PlacedFiles::iterator                  it    = found.first;
     if(!found.second)
       return it->second->loaded ? it->second.get() : nullptr;  // warned on first use
@@ -262,28 +460,32 @@ private:
     } addTime{timer, m_loadSeconds};
     it->second    = std::make_unique<PlacedFile>();
     PlacedFile& x = *it->second;
-    x.path        = path;
-    x.dir         = path.parent_path();
-    x.canonical   = canonical;
+    x.path        = ref.path;
+    x.dir         = ref.path.parent_path();
+    x.canonical   = ref.canonical;
 
-    const std::string    pathUtf8 = nvutils::utf8FromPath(path);
-    detail::AliasContext aliasContext;
-    aliasContext.aliases      = &file.aliases;
-    aliasContext.ownerFiles   = &json(owner).files;
-    aliasContext.ownerBaseDir = owner.dir;
-    aliasContext.childBaseDir = x.dir;
-    std::string error, warn;
-    if(!detail::loadGltfFile(path, x.model, &error, &warn, file.aliases.empty() ? nullptr : &aliasContext))
+    const std::string pathUtf8 = nvutils::utf8FromPath(x.path);
+    LoadedFile        loaded;
+    if(const auto preloaded = m_preloaded.find(ref.key); preloaded != m_preloaded.end())
     {
-      LOGW("External asset: failed to load '%s' (%s)\n", pathUtf8.c_str(), error.empty() ? "unknown error" : error.c_str());
+      loaded = std::move(preloaded->second);
+      m_preloaded.erase(preloaded);
+    }
+    else  // not preloaded
+      loaded = loadFile(loadRequest(json(owner), owner.dir, file, ref));
+    if(!loaded.loaded)
+    {
+      LOGW("External asset: failed to load '%s' (%s)\n", pathUtf8.c_str(),
+           loaded.error.empty() ? "unknown error" : loaded.error.c_str());
       return nullptr;
     }
+    x.model = std::move(loaded.model);
     if(!m_scene.validator().validateModelExtensions(x.model, "external asset"))
     {
       LOGW("External asset '%s' uses unsupported extensions; skipping\n", pathUtf8.c_str());
       return nullptr;
     }
-    if(!detail::decompressMeshopt(x.model))
+    if(!loaded.decoded)
     {
       LOGW("External asset '%s': meshopt decompression failed; skipping\n", pathUtf8.c_str());
       return nullptr;
@@ -300,22 +502,14 @@ private:
 
     detail::rebaseImageUris(x.model, x.dir, m_sceneFile.dir);
     const std::vector<int> sharedImages  = shareImages(x.model);
-    const std::vector<int> sharedBuffers = shareBuffers(x);
+    const std::vector<int> sharedBuffers = shareBuffers(x, loaded.bufferKeys);
     const size_t           firstBuffer   = m_model.buffers.size();
     x.offsets                            = SceneMerger::appendResources(m_model, x.model, sharedImages, sharedBuffers);
     indexImages();  // the ones just appended
-    indexBuffers(x, sharedBuffers, firstBuffer);
+    indexBuffers(loaded.bufferKeys, sharedBuffers, firstBuffer);
 
     const int nodeCount = static_cast<int>(x.model.nodes.size());
-    if(!x.model.scenes.empty())
-    {
-      int scene = x.model.defaultScene >= 0 ? x.model.defaultScene : 0;
-      if(scene >= static_cast<int>(x.model.scenes.size()))
-        scene = 0;
-      for(int root : x.model.scenes[scene].nodes)
-        if(root >= 0 && root < nodeCount)
-          x.roots.push_back(root);
-    }
+    x.roots             = std::move(loaded.roots);
     x.animatedNode.assign(nodeCount, 0);
     bool pointerChannels = false;
     for(const tinygltf::Animation& animation : x.model.animations)
@@ -338,7 +532,43 @@ private:
 
     x.loaded = true;
     m_loadedFiles++;
+
+    // The files it places, resolved while loading it.
+    for(auto& [fileIndex, childRef] : loaded.placed)
+      m_resolvedPaths.try_emplace({&x, fileIndex}, std::move(childRef));
     return &x;
+  }
+
+  bool onPlacementPath(const std::string& canonical) const
+  {
+    return std::find(m_ancestry.begin(), m_ancestry.end(), canonical) != m_ancestry.end();
+  }
+
+  // files[fileIndex] of `owner`, resolved once (a referenced file's while loading it).
+  const FileRef& fileRef(const PlacedFile& owner, int fileIndex)
+  {
+    const std::pair<ResolvedPaths::iterator, bool> resolved = m_resolvedPaths.try_emplace({&owner, fileIndex});
+    if(resolved.second)
+      resolved.first->second = resolveFile(json(owner), owner.dir, json(owner).files[fileIndex]);
+    return resolved.first->second;
+  }
+
+  // Loading `file`, an entry of `ownerJson`, a file in `ownerDir`, resolved to `ref`.
+  static LoadRequest loadRequest(const tinygltf::Model&       ownerJson,
+                                 const std::filesystem::path& ownerDir,
+                                 const tinygltf::File&        file,
+                                 const FileRef&               ref)
+  {
+    LoadRequest request;
+    request.key  = ref.key;
+    request.path = ref.path;
+    if(!file.aliases.empty())
+    {
+      request.aliases    = file.aliases;
+      request.ownerFiles = ownerJson.files;
+      request.ownerDir   = ownerDir;
+    }
+    return request;
   }
 
   // The file an image entry of the scene model reads, as the GPU upload will find it through the
@@ -383,20 +613,13 @@ private:
     return shared;
   }
 
-  // The file a buffer of a file in `dir` reads; empty for GLB and data: buffers, which belong to their file.
-  static std::string bufferFileKey(const tinygltf::Buffer& buffer, const std::filesystem::path& dir)
-  {
-    if(buffer.uri.empty() || buffer.uri.rfind("data:", 0) == 0)
-      return {};
-    return canonicalKey(dir / nvutils::pathFromUtf8(tinygltf::utils::decodePathFromUri(buffer.uri)));
-  }
-
-  // For each buffer of `x`: the scene buffer loaded from the same file with the same bytes, or -1.
+  // For each buffer of `x` (`keys`: their bufferFileKey()): the scene buffer loaded from the same
+  // file with the same bytes, or -1.
   // Files that read one .bin (a library of parts, each file declaring its own accessors into it) then
   // hold it once, and their accessors over the same bytes resolve to the same buffer range, which is
   // what lets Scene::primitiveKey see that they are the same geometry. The bytes are compared, not
   // assumed: decoding (meshopt, Draco) may have rewritten a file's copy.
-  std::vector<int> shareBuffers(const PlacedFile& x)
+  std::vector<int> shareBuffers(const PlacedFile& x, const std::vector<std::string>& keys)
   {
     if(!m_indexedSceneBuffers)
     {
@@ -409,7 +632,7 @@ private:
     for(size_t i = 0; i < x.model.buffers.size(); i++)
     {
       const tinygltf::Buffer& buffer = x.model.buffers[i];
-      const auto              it     = m_bufferByFile.find(bufferFileKey(buffer, x.dir));
+      const auto              it     = m_bufferByFile.find(keys[i]);
       if(it != m_bufferByFile.end() && !buffer.data.empty() && m_model.buffers[it->second].data == buffer.data)
       {
         shared[i] = it->second;
@@ -419,16 +642,16 @@ private:
     return shared;
   }
 
-  // Record the files of the buffers of `x` just appended, from scene buffer `firstBuffer` on.
-  void indexBuffers(const PlacedFile& x, const std::vector<int>& sharedBuffers, size_t firstBuffer)
+  // Record the files (`keys`) of the buffers of a file just appended, from scene buffer `firstBuffer` on.
+  void indexBuffers(const std::vector<std::string>& keys, const std::vector<int>& sharedBuffers, size_t firstBuffer)
   {
     int next = static_cast<int>(firstBuffer);
-    for(size_t i = 0; i < x.model.buffers.size(); i++)
+    for(size_t i = 0; i < keys.size(); i++)
     {
       if(sharedBuffers[i] >= 0)
         continue;
-      if(std::string key = bufferFileKey(x.model.buffers[i], x.dir); !key.empty())
-        m_bufferByFile.try_emplace(std::move(key), next);
+      if(!keys[i].empty())
+        m_bufferByFile.try_emplace(keys[i], next);
       next++;
     }
   }
@@ -632,13 +855,7 @@ private:
     return index;
   }
 
-  struct ResolvedPath
-  {
-    std::filesystem::path path;
-    std::string           canonical;
-  };
-  using ResolvedPaths  = std::map<std::pair<const PlacedFile*, int>, ResolvedPath>;
-  using CanonicalPaths = std::unordered_map<std::filesystem::path::string_type, std::string>;
+  using ResolvedPaths  = std::map<std::pair<const PlacedFile*, int>, FileRef>;
   using PlacedFiles    = std::unordered_map<std::string, std::unique_ptr<PlacedFile>>;
   using StaticTrees    = std::unordered_map<const PlacedFile*, std::optional<StaticTree>>;
 
@@ -649,9 +866,8 @@ private:
   PlacedFiles                                                  m_files;     // (canonical path, alias context)
   std::vector<std::string>                                     m_ancestry;  // files on the current placement path
   std::unordered_set<std::string>                              m_warned;
-  ResolvedPaths  m_resolvedPaths;   // (file, files index) -> path, canonical
-  CanonicalPaths m_canonicalPaths;  // path -> canonicalKey(path)
-  StaticTrees                                                  m_staticTrees;  // empty optional: not static
+  ResolvedPaths m_resolvedPaths;  // (file, files index) -> what it points at
+  StaticTrees   m_staticTrees;    // empty optional: not static
 
   nvutils::PerformanceTimer m_timer;              // since construction
   double                    m_loadSeconds = 0.0;  // of which loading and appending files
@@ -661,6 +877,8 @@ private:
 
   std::unordered_map<std::string, int> m_bufferByFile;                 // canonical buffer file -> scene buffer
   bool                                 m_indexedSceneBuffers = false;  // the scene's own buffers recorded
+
+  std::unordered_map<std::string, LoadedFile> m_preloaded;  // by FileRef::key, until acquired
 
   size_t m_loadedFiles           = 0;
   size_t m_sharedImages          = 0;
@@ -693,10 +911,22 @@ bool Scene::resolveExternalAssets()
     return false;
 
   ExternalAssetPlacer placer(*this);
-  bool                placedAny = false;
+  placer.preload(placingNodes);
+  if(m_loadProgress)
+    m_loadProgress->stage("Placing external assets", static_cast<uint32_t>(placingNodes.size()));
+  bool placedAny = false;
   for(int node : placingNodes)
+  {
     placedAny = placer.placeSceneNode(node) || placedAny;
+    if(m_loadProgress)
+      m_loadProgress->advance(1, m_model.nodes[node].name);
+  }
   placer.logSummary();
+  // Freeing thousands of parsed files takes as long as placing them (the heap serializes the frees,
+  // so threads don't help): it happens on a thread of its own while the scene goes on to the GPU.
+  if(m_externalAssetRelease.joinable())
+    m_externalAssetRelease.join();
+  m_externalAssetRelease = std::thread([files = placer.takeFiles()]() mutable { files.clear(); });
   return placedAny;
 }
 
@@ -706,6 +936,7 @@ bool Scene::resolveExternalAssets()
 bool Scene::placeExternalAsset(int nodeIndex)
 {
   ExternalAssetPlacer placer(*this);
+  placer.preload({nodeIndex});
   return placer.placeSceneNode(nodeIndex);
 }
 

@@ -363,10 +363,12 @@ void SetNodeExtensionCommand::apply(const tinygltf::Value& value)
   else
     node.extensions[m_extensionName] = value;
 
-  // Visibility feeds render-node visibility (subtree propagation); selectability/hoverability are pure
-  // node flags with no derived render state to refresh.
+  // Visibility feeds render-node visibility (subtree propagation) and shadow casting the TLAS mask;
+  // selectability/hoverability are pure node flags with no derived render state to refresh.
   if(m_extensionName == KHR_NODE_VISIBILITY_EXTENSION_NAME)
     m_scene.editor().updateVisibility(m_nodeIndex);
+  else if(m_extensionName == NV_NODE_SHADOW_CASTING_EXTENSION_NAME)
+    m_scene.editor().updateShadowCasting(m_nodeIndex);
   m_scene.markNodeDirty(m_nodeIndex);
 }
 
@@ -437,12 +439,14 @@ void SetSkySunCommand::execute()
   // A light the user picked is the scene's, never this renderer's -- only the save path creates
   // one it owns.
   attach(m_newNodeIndex, gltf_environment_sky::kSkySunOwnerScene, -1);
+  m_scene.updateSkySunLight();
 }
 
 void SetSkySunCommand::undo()
 {
   detach(m_newNodeIndex);
   attach(m_oldNodeIndex, m_oldOwner, m_oldLightIndex);
+  m_scene.updateSkySunLight();
 }
 
 //--------------------------------------------------------------------------------------------------
@@ -571,6 +575,34 @@ void RemoveImageCommand::undo()
 std::string RemoveImageCommand::description() const
 {
   return fmt::format("Remove Image {}", m_imageIndex);
+}
+
+//--------------------------------------------------------------------------------------------------
+// RemoveLightCommand
+//--------------------------------------------------------------------------------------------------
+
+RemoveLightCommand::RemoveLightCommand(nvvkgltf::Scene& scene, int lightIndex, const tinygltf::Light& removedLight)
+    : m_scene(scene)
+    , m_lightIndex(lightIndex)
+    , m_light(std::make_unique<tinygltf::Light>(removedLight))
+{
+}
+
+RemoveLightCommand::~RemoveLightCommand() = default;
+
+void RemoveLightCommand::execute()
+{
+  m_scene.editor().removeLightAt(m_lightIndex);
+}
+
+void RemoveLightCommand::undo()
+{
+  m_scene.editor().insertLightAt(m_lightIndex, *m_light);
+}
+
+std::string RemoveLightCommand::description() const
+{
+  return fmt::format("Remove Light {}", m_lightIndex);
 }
 
 

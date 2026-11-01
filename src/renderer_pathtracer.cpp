@@ -411,6 +411,18 @@ bool PathTracer::onUIRender(Resources& resources)
                             "so caustics are not focused. When disabled, transmissive surfaces block shadow rays\n"
                             "and light through them comes only from BSDF sampling: no approximation, but caustics\n"
                             "from small or punctual lights (sun, point, spot, directional) are missing.");
+    const char* cameraMediumModes[] = {"Auto", "On", "Off"};
+    int         cameraMediumMode    = static_cast<int>(resources.settings.cameraMedium);
+    if(PE::Combo("Camera Medium", &cameraMediumMode, cameraMediumModes, IM_ARRAYSIZE(cameraMediumModes), -1,
+                 "Whether the camera starts inside a KHR_materials_volume medium (fog, tinted glass), found by following\n"
+                 "the centre camera ray to the nearest volume surface hit from behind.\n"
+                 "Auto / On: look for it. Off: the camera always starts in clear air.\n"
+                 "Turn it off if the scene renders black when a volume surface (e.g. a windshield) is at the\n"
+                 "centre of the view: the asset's winding makes it look like the camera is inside it."))
+    {
+      resources.settings.cameraMedium = static_cast<CameraMediumMode>(cameraMediumMode);
+      changed                         = true;
+    }
     PE::end();
   }
 
@@ -731,12 +743,12 @@ bool PathTracer::prepareFrame(Resources& resources)
 
   if(work.any())
   {
-    if(!resources.app->isHeadless())
+    if(!resources.settings.compileInline)
     {
       startAsyncCompile(resources);
       return false;
     }
-    // In headless mode we must compile/build synchronously so frames are actually rendered before the application frame loop exits.
+    // Automated runs compile/build synchronously so every frame they count is actually rendered.
     ensureShadersAndPipelines(resources);
   }
 
@@ -1110,7 +1122,8 @@ void PathTracer::createPipeline(Resources& resources)
 void PathTracer::createRqPipeline(Resources& /*resources*/)
 {
   SCOPED_TIMER(__FUNCTION__);
-  VkPipeline rqPipeline = buildRqPipeline({.module = m_shaderModule, .useSER = m_useSER, .dlssTransparency = currentDlssTransparency(), .label = "RQ"});
+  VkPipeline rqPipeline = buildRqPipeline(
+      {.module = m_shaderModule, .useSER = m_useSER, .dlssTransparency = currentDlssTransparency(), .label = "RQ"});
   {
     std::lock_guard<std::mutex> lock(m_compileMutex);
     m_rqPipeline = rqPipeline;
@@ -1169,8 +1182,8 @@ VkPipeline PathTracer::buildRqPipeline(const PipelineBuildInfo& info) const
 
   const bool valid = (feedback.flags & VK_PIPELINE_CREATION_FEEDBACK_VALID_BIT) != 0;
   const bool hit   = (feedback.flags & VK_PIPELINE_CREATION_FEEDBACK_APPLICATION_PIPELINE_CACHE_HIT_BIT) != 0;
-  LOGI("%s pipeline creation: %s, %s (%.2f ms)\n", info.label, valid ? "valid" : "invalid", hit ? "CACHE HIT" : "cache miss",
-       feedback.duration / 1e6);
+  LOGI("%s pipeline creation: %s, %s (%.2f ms)\n", info.label, valid ? "valid" : "invalid",
+       hit ? "CACHE HIT" : "cache miss", feedback.duration / 1e6);
   logPipelineStatistics(rqPipeline, info.label);
   return rqPipeline;
 }
@@ -1235,7 +1248,8 @@ void PathTracer::createRtxPipeline(Resources& resources)
     m_rtxPipeline = VK_NULL_HANDLE;
   }
 
-  const RtxBuild build = buildRtxPipeline(resources, {.module = m_shaderModule, .useSER = m_useSER, .dlssTransparency = currentDlssTransparency(), .label = "RTX"});
+  const RtxBuild build = buildRtxPipeline(
+      resources, {.module = m_shaderModule, .useSER = m_useSER, .dlssTransparency = currentDlssTransparency(), .label = "RTX"});
 
   std::lock_guard<std::mutex> lock(m_compileMutex);
   resources.allocator.destroyBuffer(m_sbtBuffer);
@@ -1898,8 +1912,8 @@ void PathTracer::startPrefetch(Resources& resources, const std::vector<VariantKe
   std::lock_guard<std::mutex> prefetchLock(m_prefetchMutex);
   assert(!m_prefetchThread.joinable());
 
-  const RenderTechnique technique = m_renderTechnique;
-  const bool            useSER    = m_useSER;
+  const RenderTechnique          technique = m_renderTechnique;
+  const bool                     useSER    = m_useSER;
   std::vector<VariantCacheEntry> entries;
   {
     std::lock_guard<std::mutex> lock(m_compileMutex);
@@ -1936,8 +1950,8 @@ void PathTracer::startPrefetch(Resources& resources, const std::vector<VariantKe
   if(entries.empty())
     return;
 
-  m_prefetch     = std::move(entries);
-  m_prefetchDone = false;
+  m_prefetch       = std::move(entries);
+  m_prefetchDone   = false;
   m_prefetchThread = std::thread(&PathTracer::runPrefetch, this, std::ref(resources), technique);
 }
 
@@ -1955,7 +1969,8 @@ void PathTracer::runPrefetch(Resources& resources, RenderTechnique technique)
       SCOPED_TIMER("Slang compile (prefetch)");
       if(!compileSpirv(resources, entry.key))
       {
-        LOGW("PathTracer::runPrefetch(): error compiling gltf_pathtrace.slang (%s)\n", VariantKey{}.shaderDiff(entry.key).c_str());
+        LOGW("PathTracer::runPrefetch(): error compiling gltf_pathtrace.slang (%s)\n",
+             VariantKey{}.shaderDiff(entry.key).c_str());
         {
           std::lock_guard<std::mutex> lock(m_compileMutex);
           m_prefetchFailed.push_back(entry.key);
@@ -1970,7 +1985,8 @@ void PathTracer::runPrefetch(Resources& resources, RenderTechnique technique)
 
   std::vector<std::thread> builders;
   for(size_t i = 1; i < m_prefetch.size(); ++i)
-    builders.push_back(std::thread(&PathTracer::buildPrefetchPipeline, this, std::ref(resources), technique, std::ref(m_prefetch[i])));
+    builders.push_back(
+        std::thread(&PathTracer::buildPrefetchPipeline, this, std::ref(resources), technique, std::ref(m_prefetch[i])));
   if(!m_prefetch.empty())
     buildPrefetchPipeline(resources, technique, m_prefetch[0]);
   for(std::thread& t : builders)
@@ -2043,8 +2059,8 @@ void PathTracer::updateOptimalFallback(Resources& resources)
   bool failed = false;
   {
     std::lock_guard<std::mutex> lock(m_compileMutex);
-    const bool rq = m_renderTechnique == RenderTechnique::RayQuery;
-    ready         = m_compiled == wanted;
+    const bool                  rq = m_renderTechnique == RenderTechnique::RayQuery;
+    ready                          = m_compiled == wanted;
     for(const VariantCacheEntry& cached : m_variantCache)
       ready |= cached.key == wanted && cached.useSER == m_useSER && (rq ? cached.rqPipeline : cached.rtxPipeline) != VK_NULL_HANDLE;
     for(const VariantKey& key : m_prefetchFailed)
@@ -2387,8 +2403,10 @@ shaderio::PathtracePushConstant PathTracer::setupPushConstant(VkCommandBuffer cm
   m_pushConst.frameInfo    = (shaderio::SceneFrameInfo*)resources.bFrameInfo.address;
   m_pushConst.gltfScene    = (shaderio::GltfScene*)resources.sceneVk.sceneDesc().address;
   m_pushConst.mouseCoord   = nvapp::ElementDbgPrintf::getMouseCoord();  // Use for debugging: printf in shader
-  // Only a scene with a KHR_materials_volume material has a medium the camera can be in
-  m_pushConst.cameraMedium = resources.currentFeatureSet.has(nvvkgltf::SceneFeatureSet::eVolume) ?
+  // Only a scene with a KHR_materials_volume material has a medium the camera can be in, and the
+  // user may rule the probe out (see CameraMediumMode)
+  m_pushConst.cameraMedium = (resources.settings.cameraMedium != CameraMediumMode::eOff
+                              && resources.currentFeatureSet.has(nvvkgltf::SceneFeatureSet::eVolume)) ?
                                  (shaderio::CameraMedium*)m_cameraMediumBuffer.address :
                                  nullptr;
 

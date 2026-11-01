@@ -149,8 +149,9 @@ struct RayQueryRaytracer : IRaytracer
 
     // Visibility needs any occluder, not the closest one: the first committed (opaque) hit ends the
     // traversal. Transmissive surfaces are never committed -- they only scale the transmission below.
+    // The cull mask skips instances that do not cast shadows (NV_node_shadow_casting).
     RayQuery rayQuery;
-    rayQuery.TraceRayInline(topLevelAS, RAY_FLAG_ACCEPT_FIRST_HIT_AND_END_SEARCH, 0xFF, ray);
+    rayQuery.TraceRayInline(topLevelAS, RAY_FLAG_ACCEPT_FIRST_HIT_AND_END_SEARCH, TLAS_MASK_SHADOW_CASTER, ray);
 
     while(rayQuery.Proceed())
     {
@@ -271,7 +272,7 @@ struct TraditionalRaytracer : IRaytracer
       // Any-hit (rahitShadow) still runs during HitObject traversal and accumulates transmission;
       // only closest-hit/miss are deferred, so a committed hit means the ray was blocked.
       HitObject hitObj =
-          HitObject::TraceRay(topLevelAS, RAY_FLAG_ACCEPT_FIRST_HIT_AND_END_SEARCH, 0xFF, 1, 0, 1, ray, shadowPayload);
+          HitObject::TraceRay(topLevelAS, RAY_FLAG_ACCEPT_FIRST_HIT_AND_END_SEARCH, TLAS_MASK_SHADOW_CASTER, 1, 0, 1, ray, shadowPayload);
       if(hitObj.IsHit())
       {
         shadowPayload.totalTransmission = float3(0.0);
@@ -279,7 +280,7 @@ struct TraditionalRaytracer : IRaytracer
     }
     else
     {
-      TraceRay(topLevelAS, RAY_FLAG_ACCEPT_FIRST_HIT_AND_END_SEARCH, 0xFF, 1, 0, 1, ray, shadowPayload);
+      TraceRay(topLevelAS, RAY_FLAG_ACCEPT_FIRST_HIT_AND_END_SEARCH, TLAS_MASK_SHADOW_CASTER, 1, 0, 1, ray, shadowPayload);
     }
     seed = shadowPayload.seed;  // any-hit consumed random numbers; propagate on every path
 

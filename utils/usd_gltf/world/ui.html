@@ -1,0 +1,674 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>usd-world</title>
+<style>
+:root {
+  --bg: #f6f7f9; --panel: #ffffff; --line: #dfe3e8; --text: #1d2329; --muted: #66707a;
+  --accent: #2f7d32; --accent-text: #ffffff; --warn: #b26a00; --bad: #b3261e; --good: #2f7d32; --soft: #eef1f4;
+  --mono: ui-monospace, "Cascadia Mono", Consolas, monospace;
+}
+@media (prefers-color-scheme: dark) {
+  :root {
+    --bg: #15181b; --panel: #1d2125; --line: #2f353b; --text: #e3e6e9; --muted: #98a2ac;
+    --accent: #76b947; --accent-text: #10140e; --warn: #e0a040; --bad: #f2867c; --good: #8fce6a; --soft: #262b30;
+  }
+}
+* { box-sizing: border-box; }
+body { margin: 0; background: var(--bg); color: var(--text); font: 14px/1.45 system-ui, "Segoe UI", sans-serif; }
+header { display: flex; flex-wrap: wrap; gap: 8px 14px; align-items: center; padding: 10px 16px; background: var(--panel); border-bottom: 1px solid var(--line); }
+header h1 { margin: 0; font-size: 16px; }
+.path { font-family: var(--mono); font-size: 12px; color: var(--muted); overflow-wrap: anywhere; }
+.grow { flex: 1; min-width: 0; }
+button, select, input, textarea { font: inherit; color: inherit; }
+button { padding: 6px 14px; border: 1px solid var(--line); border-radius: 6px; background: var(--soft); cursor: pointer; }
+button:hover:not(:disabled) { border-color: var(--muted); }
+button.primary { background: var(--accent); color: var(--accent-text); border-color: var(--accent); font-weight: 600; }
+button.big { padding: 10px 22px; font-size: 15px; }
+button:disabled { opacity: .45; cursor: default; }
+button.link { background: none; border: none; padding: 0; color: var(--accent); text-decoration: underline; }
+select, input[type=text], input[type=number], textarea { padding: 5px 7px; border: 1px solid var(--line); border-radius: 6px; background: var(--panel); }
+input[type=text] { width: 100%; }
+.page { max-width: 1280px; margin: 0 auto; padding: 14px 16px 40px; display: grid; gap: 12px; }
+.cols { display: grid; grid-template-columns: minmax(320px, 1fr) minmax(320px, 1fr); gap: 12px; }
+@media (max-width: 860px) { .cols { grid-template-columns: 1fr; } }
+section { background: var(--panel); border: 1px solid var(--line); border-radius: 8px; padding: 12px 14px; min-width: 0; }
+section h2 { margin: 0 0 10px; font-size: 13px; text-transform: uppercase; letter-spacing: .04em; color: var(--muted); }
+details > summary { cursor: pointer; font-size: 13px; text-transform: uppercase; letter-spacing: .04em; color: var(--muted); }
+.row { display: flex; gap: 8px; align-items: center; flex-wrap: wrap; }
+.hint { color: var(--muted); font-size: 12.5px; }
+.err { color: var(--bad); }
+.stats { display: grid; grid-template-columns: repeat(auto-fill, minmax(150px, 1fr)); gap: 8px; margin-bottom: 10px; }
+.stat { background: var(--soft); border-radius: 6px; padding: 8px 10px; }
+.stat b { display: block; font-size: 20px; font-weight: 600; }
+.stat span { color: var(--muted); font-size: 12px; }
+.choices { display: grid; grid-template-columns: max-content 1fr; gap: 6px 12px; align-items: center; margin: 6px 0 12px; }
+.choices label { color: var(--muted); }
+.form { display: grid; grid-template-columns: repeat(auto-fill, minmax(230px, 1fr)); gap: 8px 16px; margin-top: 10px; }
+.form label { display: flex; flex-direction: column; gap: 2px; font-size: 12px; color: var(--muted); }
+.form label.check { flex-direction: row; align-items: center; gap: 6px; color: var(--text); font-size: 14px; }
+.form .full { grid-column: 1 / -1; }
+.bar { height: 8px; background: var(--soft); border-radius: 4px; overflow: hidden; margin: 8px 0; }
+.bar > div { height: 100%; background: var(--accent); width: 0; transition: width .3s; }
+.bar.busy > div { width: 30% !important; animation: slide 1.2s infinite ease-in-out; }
+@keyframes slide { from { margin-left: -30%; } to { margin-left: 100%; } }
+pre.log { margin: 6px 0 0; max-height: 220px; overflow: auto; font: 12px var(--mono); background: var(--soft); padding: 6px 8px; border-radius: 6px; white-space: pre-wrap; }
+.recent { display: grid; gap: 6px; }
+.recent button { text-align: left; display: grid; grid-template-columns: 1fr auto; gap: 2px 12px; padding: 8px 12px; background: var(--panel); }
+.recent button:hover { background: var(--soft); }
+.recent .when { color: var(--muted); font-size: 12px; }
+.tree { font-size: 13px; max-height: 60vh; overflow: auto; }
+.node { display: flex; align-items: center; gap: 6px; padding: 2px 4px; border-radius: 4px; cursor: pointer; white-space: nowrap; }
+.node:hover { background: var(--soft); }
+.node.sel { background: var(--soft); outline: 1px solid var(--accent); }
+.twist { width: 14px; text-align: center; color: var(--muted); flex: none; }
+.name { overflow: hidden; text-overflow: ellipsis; }
+.meta { color: var(--muted); font-size: 12px; margin-left: auto; padding-left: 8px; }
+.kids { margin-left: 16px; border-left: 1px dotted var(--line); padding-left: 4px; }
+.pill { font-size: 11px; padding: 0 6px; border-radius: 8px; border: 1px solid currentColor; flex: none; }
+.s-converted { color: var(--good); } .s-failed { color: var(--bad); } .s-to-convert { color: var(--warn); }
+.s-empty, .s-places-only, .s-not-scanned { color: var(--muted); }
+.switch { color: var(--warn); }
+dl { display: grid; grid-template-columns: max-content 1fr; gap: 2px 12px; margin: 0 0 10px; }
+dt { color: var(--muted); } dd { margin: 0; overflow-wrap: anywhere; }
+.hidden { display: none !important; }
+.stage-head { display: flex; align-items: center; gap: 10px; margin-bottom: 6px; }
+.stage-head h2 { margin: 0; }
+.num { width: 24px; height: 24px; border-radius: 12px; display: inline-grid; place-items: center; font-weight: 600;
+  background: var(--soft); border: 1px solid var(--line); flex: none; }
+.stage.done .num { background: var(--accent); color: var(--accent-text); border-color: var(--accent); }
+/* A stage not ready yet can't run, but its options stay open: the level of detail decides what the
+   conversion before it converts. */
+.stage.locked button { opacity: .45; pointer-events: none; }
+.stage.locked .stage-head, .stage.locked > .row { opacity: .6; }
+.chip { font-size: 12px; padding: 1px 8px; border-radius: 10px; background: var(--soft); color: var(--muted); }
+.chip.todo { color: var(--warn); } .chip.ok { color: var(--good); } .chip.bad { color: var(--bad); }
+.rec { color: var(--good); font-size: 12px; }
+button.stop { border-color: var(--bad); color: var(--bad); }
+.assetlist { display: grid; gap: 4px; }
+.assetlist .assetname { min-width: 14em; font-family: var(--mono); font-size: 12px; }
+.where { display: grid; gap: 6px; }
+.where .out { display: grid; grid-template-columns: auto 1fr auto; gap: 6px 12px; align-items: center; }
+.where .out > span:nth-child(3n+1) { color: var(--muted); }
+.where .out .btns { display: flex; gap: 6px; justify-content: flex-end; }
+.where .path { color: var(--text); }
+</style>
+</head>
+<body>
+<header>
+  <h1>usd-world</h1>
+  <div class="grow">
+    <div id="title" class="hint">USD to glTF, one asset at a time</div>
+    <div class="path" id="subtitle"></div>
+  </div>
+  <button id="projects" class="hidden" title="Back to the start page: open another USD stage, or a project converted before">&larr; Open another stage</button>
+</header>
+
+<!-- start: open a stage, or a recent project -->
+<div class="page" id="home">
+  <section>
+    <h2>Open a USD stage</h2>
+    <div class="row" style="margin-bottom:8px">
+      <button class="primary big" id="pickStage">Open USD stage...</button>
+      <span class="hint">or paste its path:</span>
+    </div>
+    <div class="row">
+      <input type="text" id="stagePath" placeholder="D:\data\World.usd" class="grow">
+      <button id="openPath">Open</button>
+    </div>
+    <p class="hint">Opening a stage scans it: you see its assets, levels of detail and variant choices before converting
+      anything. The USD files are only read, never changed.</p>
+    <div class="where">
+      <div><b>Converted data goes to</b> <span class="path" id="cachesExample"></span></div>
+      <div class="hint">One project folder per stage, inside <span class="path" id="caches"></span>
+        <button class="link" id="pickCaches">Change...</button> <button class="link" id="showCaches">Show</button></div>
+      <div class="hint">It keeps every converted asset, so opening the stage again later converts only what changed.</div>
+    </div>
+  </section>
+  <section>
+    <h2>Recent projects</h2>
+    <div class="recent" id="recent"><span class="hint">None yet.</span></div>
+  </section>
+</div>
+
+<!-- a project -->
+<div class="page hidden" id="proj">
+  <section id="jobBox">
+    <div class="row">
+      <b id="jobTitle">Idle</b><span id="jobStep" class="hint"></span>
+      <span class="grow"></span><span id="jobTime" class="hint"></span>
+      <button class="stop hidden" id="stop" title="Stop after the work in progress: what is finished is kept, and running again continues from there">Stop</button>
+      <button class="link" id="toggleLog">Show log</button>
+    </div>
+    <div class="bar" id="jobBarBox"><div id="jobBar"></div></div>
+    <pre class="log hidden" id="log"></pre>
+  </section>
+
+  <section class="where">
+    <h2>Where the converted data goes</h2>
+    <div class="out">
+      <span>Scene file</span><span class="path" id="outScene"></span><button id="showScene">Show in folder</button>
+      <span>Project folder</span><span class="path" id="outProject"></span><span class="btns"><button id="changeProject" title="Move the project folder, and the scene file in it, somewhere else">Change folder</button><button id="showProject">Show in folder</button></span>
+      <span>Source stage</span><span class="path" id="outStage"></span><span></span>
+    </div>
+    <p class="hint">The scene file is what you open in a viewer; it places the assets converted into the project
+      folder (<span class="path">units</span>, and <span class="path">textures</span> shared between them), so keep them
+      together. The project folder is kept between sessions: delete it to start over.</p>
+  </section>
+
+  <section class="stage" id="st-scan">
+    <div class="stage-head"><span class="num">1</span><h2>Scene</h2><span class="chip" id="chip-scan"></span>
+      <span class="grow"></span><button id="rescan">Scan again</button></div>
+    <div id="summary"><span class="hint">Scanning: the assets show here when it is done.</span></div>
+  </section>
+
+  <section class="stage" id="st-convert">
+    <div class="stage-head"><span class="num">2</span><h2>Convert</h2><span class="chip" id="chip-convert"></span></div>
+    <p class="hint">Each asset becomes a glTF file of its own. These options change the converted files: changing one
+      converts again what it affects.</p>
+    <div class="choices" id="convertChoices"></div>
+    <div class="row"><button class="primary big" id="convert">Convert</button><span class="hint" id="convertNote"></span></div>
+    <div class="row hint"><button id="convertAll">Convert everything again</button>
+      <span>after updating usd-world: "Convert" redoes only what the stage or an option changed, not what a newer
+        converter would do differently. This takes as long as the first conversion.</span></div>
+  </section>
+
+  <section class="stage" id="st-assemble">
+    <div class="stage-head"><span class="num">3</span><h2>Assemble</h2><span class="chip" id="chip-assemble"></span></div>
+    <p class="hint">The scene file places the converted assets. These options don't convert anything: try them, estimate,
+      assemble again.</p>
+    <div class="choices" id="assembleChoices"></div>
+    <div class="row"><button class="primary big" id="assemble">Assemble the scene</button>
+      <button id="estimate">Estimate</button><span class="hint" id="estimateNote"></span></div>
+  </section>
+
+  <section class="stage" id="st-view">
+    <div class="stage-head"><span class="num">4</span><h2>View</h2><span class="chip" id="chip-view"></span></div>
+    <div class="row"><button class="primary big" id="open">Open in vk_gltf_renderer</button>
+      <span class="path" id="sceneFile"></span></div>
+  </section>
+
+  <div class="cols">
+    <section>
+      <h2>Scene graph</h2>
+      <div class="tree" id="tree"><span class="hint">Scan the stage to see its assets.</span></div>
+    </section>
+    <section>
+      <h2>Selected asset</h2>
+      <div id="details"><span class="hint">Select an asset in the scene graph: what it draws, what it places, and
+        buttons to convert just that part.</span></div>
+    </section>
+  </div>
+
+  <section>
+    <details id="advanced">
+      <summary>Advanced settings</summary>
+      <form class="form" id="settings">
+        <label class="full">Stage<input type="text" name="input"></label>
+        <label>Prim (empty: the stage's default prim, or its only root prim, else the whole stage)<input type="text" name="prim"></label>
+        <label>Worker processes<input type="number" name="jobs" min="1"></label>
+        <label>Materials<select name="materials"><option>auto</option><option>preview</option></select></label>
+        <label>Nesting<select name="nesting"><option>inline</option><option>files</option></select></label>
+        <label>Hierarchy<select name="hierarchy"><option>auto</option><option>usd</option><option>compact</option></select></label>
+        <label>Leaf meshes (material: merged per asset, faster to load)<select name="leaf_merge"><option>none</option><option>material</option></select></label>
+        <label class="full">Variants, one per line: SET=VALUE, or SET=VALUE:name,name for those switches only
+          <textarea name="variants" rows="3"></textarea></label>
+        <label class="full">LOD cameras (policy "camera"): scene (its cameras), x,y,z positions, or renderer camera strings, separated by ;
+          <input type="text" name="lod_camera"></label>
+        <label>LOD density (triangles per square pixel)<input type="number" name="lod_density" step="any" min="0"></label>
+        <label>LOD field of view (degrees)<input type="number" name="lod_fov" step="any" min="1"></label>
+        <label>LOD image height (pixels)<input type="number" name="lod_pixels" min="1"></label>
+        <label class="full">Scene file (empty: in the project folder, named after the stage)<input type="text" name="output"></label>
+        <div class="full row"><button type="submit">Save settings</button><span id="settingsMsg" class="hint"></span></div>
+      </form>
+      <p class="hint" id="dataRoot"></p>
+    </details>
+  </section>
+</div>
+
+<script>
+const $ = (id) => document.getElementById(id);
+const fmt = (n) => (n == null ? "" : Number(n).toLocaleString());
+let state = null, selected = null, logCount = 0, polling = false;
+
+async function api(path, body) {
+  const r = await fetch(path, body === undefined ? {} :
+    { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify(body) });
+  return r.json();
+}
+function el(tag, attrs = {}, ...kids) {
+  const e = document.createElement(tag);
+  for (const [k, v] of Object.entries(attrs)) {
+    if (k === "class") e.className = v; else if (k.startsWith("on")) e[k] = v; else e.setAttribute(k, v);
+  }
+  for (const k of kids) if (k != null && k !== false) e.append(k);
+  return e;
+}
+const pill = (status) => el("span", { class: "pill s-" + status.replace(/ /g, "-") }, status);
+const show = (id, on) => $(id).classList.toggle("hidden", !on);
+
+// ---- start page ----
+async function loadHome() {
+  const h = await api("/api/home");
+  $("caches").textContent = h.caches;
+  $("cachesExample").textContent = h.caches + h.sep + "<stage name>-gltf";
+  const list = $("recent");
+  list.replaceChildren();
+  for (const p of h.recent)
+    list.append(el("button", { onclick: () => openProject(p.cache) },
+      el("b", {}, p.name), el("span", { class: "when" }, p.modified),
+      el("span", { class: "path" }, p.input || p.cache), el("span", { class: "when" }, fmt(p.leaves) + " leaves"),
+      el("span", { class: "path" }, "converted into " + p.cache)));
+  if (!h.recent.length) list.append(el("span", { class: "hint" }, "None yet."));
+}
+async function openStage(path) {
+  if (!path) return;
+  const r = await api("/api/new", { stage: path });
+  if (r.error) { alert(r.error); return; }
+  // The project is being prepared (its data set found, then scanned): follow the job meanwhile.
+  show("home", false); show("proj", true); show("projects", true);
+  $("title").textContent = path.split(/[\\/]/).pop(); $("subtitle").textContent = path;
+  $("outStage").textContent = path; $("outScene").textContent = "(written when you assemble)"; $("outProject").textContent = "";
+  $("summary").replaceChildren(el("span", { class: "hint" }, "Scanning: the assets show here when it is done."));
+  poll();
+}
+$("pickStage").onclick = async () => {
+  $("pickStage").disabled = true;
+  const r = await api("/api/pick", { kind: "file", title: "Open a USD stage", start: $("stagePath").value || null });
+  $("pickStage").disabled = false;
+  if (r.path) { $("stagePath").value = r.path; openStage(r.path); }
+};
+$("openPath").onclick = () => openStage($("stagePath").value.trim().replace(/^"|"$/g, ""));
+$("stagePath").onkeydown = (e) => { if (e.key === "Enter") $("openPath").onclick(); };
+$("pickCaches").onclick = async () => {
+  const r = await api("/api/pick", { kind: "folder", title: "Folder for usd-world projects", start: $("caches").textContent });
+  if (r.path) { await api("/api/caches", { path: r.path }); loadHome(); }
+};
+async function reveal(what) { const r = await api("/api/reveal", { what }); if (r.error) alert(r.error); }
+$("showCaches").onclick = () => reveal("caches");
+$("showScene").onclick = () => reveal("scene");
+$("showProject").onclick = () => reveal("project");
+$("changeProject").onclick = async () => {
+  const r = await api("/api/pick", { kind: "folder", title: "New project folder (new or empty)", start: state.cache });
+  if (!r.path) return;
+  const m = await api("/api/move_project", { path: r.path });
+  if (m.error) alert(m.error); else await showProject();
+};
+async function openProject(cache) {
+  const r = await api("/api/open_project", { cache });
+  if (r.error) { alert(r.error); return; }
+  await showProject();
+}
+$("projects").onclick = async () => { const r = await api("/api/close", {}); if (r.error) { alert(r.error); return; } showHome(); };
+
+function showHome() {
+  show("home", true); show("proj", false); show("projects", false);
+  $("title").textContent = "USD to glTF, one asset at a time"; $("subtitle").textContent = "";
+  loadHome();
+}
+
+// ---- a project: four stages, in order ----
+async function showProject() {
+  state = await api("/api/state");
+  if (!state.project) { showHome(); return; }
+  show("home", false); show("proj", true); show("projects", true);
+  const s = state.settings;
+  $("title").textContent = s.input ? s.input.split(/[\\/]/).pop() : "project";
+  $("subtitle").textContent = s.input || "";
+  $("outStage").textContent = s.input || "";
+  $("outProject").textContent = state.cache;
+  $("dataRoot").textContent = "Data set root (the folder holding the layers the stage uses): " + state.root + ".";
+  renderStages(); fillSettings();
+  await loadTree();
+}
+
+function stageState(id, done, ready, chip, cls) {
+  $("st-" + id).classList.toggle("done", done);
+  $("st-" + id).classList.toggle("locked", !ready);
+  const c = $("chip-" + id);
+  c.textContent = chip; c.className = "chip " + (cls || "");
+}
+
+function renderStages() {
+  const m = state.summary, s = state.settings, r = state.recommended || {};
+  const st = (m && m.stage) || { scan: false, convert: false, assemble: false };
+  // 1 Scene
+  stageState("scan", st.scan, true, st.scan ? "scanned" + (m && m.scan_failed ? ", " + m.scan_failed + " failed (see the log)" : "") : m && m.to_scan ? "more to scan: a choice places assets not scanned yet" : "not scanned yet",
+    st.scan ? "ok" : "todo");
+  renderSummary();
+  // 2 Convert
+  stageState("convert", st.convert, st.scan,
+    !st.scan ? "after the scan" : st.convert ? "all " + fmt(m.converted) + " assets converted" :
+    m.levels_unknown ? "levels chosen when converting (from the cameras and the budget)" :
+    fmt(m.to_convert) + " to convert" + (m.failed ? ", " + m.failed + " failed" : ""), st.convert ? "ok" : st.scan ? "todo" : "");
+  renderConvertChoices();
+  const todo = m ? m.to_convert + m.failed : 0;
+  $("convert").textContent = !m ? "Convert" : todo ? "Convert " + fmt(todo) + " asset" + (todo > 1 ? "s" : "") :
+    s.ktx && !st.convert ? "Encode the KTX2 textures" : "Convert again what changed";
+  $("convertNote").textContent = st.convert ? "Up to date: nothing to do unless an option or the stage changes." :
+    m && m.out_of_date ? fmt(m.out_of_date) + " were converted with other options or older sources." : "";
+  // 3 Assemble
+  stageState("assemble", st.assemble, st.convert,
+    !st.convert ? "after the conversion" : st.assemble ? "assembled" : "to assemble", st.assemble ? "ok" : st.convert ? "todo" : "");
+  renderAssembleChoices();
+  const a = m && m.assembled;
+  $("estimateNote").textContent = a && st.assemble ? "Assembled: " + fmt(a.drawn) + " triangles drawn, about " + a.gb.toFixed(2) + " GB of geometry" +
+    (a.textures_gb != null ? " and " + a.textures_gb.toFixed(2) + " GB of textures." : ".") : "";
+  // 4 View
+  const viewable = state.scene_exists && st.assemble;
+  stageState("view", false, viewable, viewable ? "ready" : "after assembling", viewable ? "ok" : "");
+  $("open").disabled = !viewable || !state.renderer_found;
+  $("open").title = !state.renderer_found ? "vk_gltf_renderer not found: start the UI with --renderer" : "";
+  $("sceneFile").textContent = state.scene_exists ? state.scene : "";
+  $("outScene").textContent = state.scene ? state.scene + (state.scene_exists ? "" : "  (written when you assemble)") : "";
+  $("showScene").disabled = !state.scene_exists;
+}
+
+function renderSummary() {
+  const m = state.summary, box = $("summary");
+  if (!m || !m.units) { box.replaceChildren(el("span", { class: "hint" }, "Scanning: the assets show here when it is done.")); return; }
+  const stat = (n, label) => el("div", { class: "stat" }, el("b", {}, n), el("span", {}, label));
+  const sw = Object.entries(m.switches);
+  box.replaceChildren(
+    el("div", { class: "stats" },
+      stat(fmt(m.units), "assets found"),
+      stat(fmt(m.leaves), "of them draw geometry, lights or cameras"),
+      stat(fmt(sw.reduce((n, [, v]) => n + v, 0)), "level-of-detail switches"),
+      stat(fmt(Object.entries(m.variant_sets).filter(([k, v]) => !m.switches[k] && v.common.length > 1).length), "scene-wide variant sets")),
+    el("p", { class: "hint" }, sw.length ? "Levels of detail: " + sw.map(([k, v]) => k + " (" + fmt(v) + ")").join(", ") +
+      ". They are chosen when assembling." : "No levels of detail in this stage."));
+}
+
+const rec = (on) => (on ? el("span", { class: "rec" }, "recommended") : null);
+function choiceRow(box, label, input, hint, recommended) {
+  box.append(el("label", {}, label), el("div", { class: "row" }, input, rec(recommended), hint ? el("span", { class: "hint" }, hint) : null));
+}
+function checkbox(checked, onchange) { const c = el("input", { type: "checkbox" }); c.checked = checked; c.onchange = () => onchange(c.checked); return c; }
+
+function renderConvertChoices() {
+  const s = state.settings, m = state.summary || { variant_sets: {}, switches: {} }, box = $("convertChoices");
+  box.replaceChildren();
+  choiceRow(box, "Convert all images to KTX2", checkbox(!!s.ktx, (v) => save({ ktx: v })),
+    "GPU-compressed (BC7, mipmaps): large scenes need it to fit in GPU memory. The original images are not kept.", s.ktx);
+  if (s.ktx) {
+    const sizes = el("select", {}, el("option", { value: "auto" }, "automatic: the largest that fits the GPU budget"),
+      el("option", { value: "0" }, "as authored"), ...[8192, 4096, 2048, 1024, 512].map((n) => el("option", { value: String(n) }, "at most " + n + " pixels")));
+    sizes.value = String(s.ktx_max_size);
+    sizes.onchange = () => save({ ktx_max_size: sizes.value === "auto" ? "auto" : Number(sizes.value) });
+    choiceRow(box, "Texture size", sizes, "larger images are halved until they fit. Changing it later converts the textured assets " +
+      "again, since the originals are gone.", s.ktx_max_size === "auto");
+  }
+  choiceRow(box, "Force double-sided", checkbox(!s.single_sided, (v) => save({ single_sided: !v })),
+    "every surface seen from both sides, as Omniverse RTX renders USD. Off: each mesh's doubleSided, as the USD describes it.", !s.single_sided);
+  choiceRow(box, "Convert light values to pre-exposed", checkbox(!s.keep_exposure, (v) => save({ keep_exposure: !v })),
+    "the cameras' exposure is baked into lights, emission and sky, so the scene reads right at exposure 1. Off: physical values.", !s.keep_exposure);
+  const mat = el("select", {}, el("option", { value: "auto" }, "MDL first, then UsdPreviewSurface"), el("option", { value: "preview" }, "UsdPreviewSurface only"));
+  mat.value = s.materials; mat.onchange = () => save({ materials: mat.value });
+  choiceRow(box, "Materials", mat, "", s.materials === "auto");
+  const perAsset = [];
+  for (const [name, set] of Object.entries(m.variant_sets)) {
+    if (m.switches[name]) continue;
+    const current = (s.variants.find((v) => v.startsWith(name + "=") && !v.includes(":")) || "").split("=")[1] || "";
+    // Only the values every asset with the set offers make a scene-wide choice (a texture resolution).
+    if (set.common.length < 2) { perAsset.push([name, set, current]); continue; }
+    const pick = el("select", {}, el("option", { value: "" }, "as authored"), ...set.common.map((v) => el("option", {}, v)));
+    pick.value = current;
+    pick.onchange = async () => { const r = await api("/api/choose", { set: name, value: pick.value || null }); if (r.error) alert(r.error); else { state = r; renderStages(); } };
+    const where = set.assets > 1 ? " (" + fmt(set.assets) + " assets have this set: all of them)" : "";
+    choiceRow(box, "Variant set " + name, pick, (current ? "converted with " + current + " instead of the stage's choice"
+      : "optional: as authored converts what the stage selects") + where, !current);
+  }
+  // A set whose assets each offer their own values is chosen asset by asset: the list opens here.
+  for (const [name, set, current] of perAsset) {
+    const list = el("div", { class: "assetlist" });
+    const open = el("button", { onclick: () => toggleAssets(name, list, open) }, "Choose per asset...");
+    choiceRow(box, "Variant set " + name, open, fmt(set.assets) + " assets each offer their own values (" + set.examples.slice(0, 2).join("; ") +
+      "); as placed unless chosen here" + (current ? ". " + name + "=" + current + " is also set scene-wide in the advanced settings" : ""), true);
+    box.append(el("span"), list);
+    if (openSets.has(name)) toggleAssets(name, list, open, true);
+  }
+}
+
+const openSets = new Set();  // per-asset lists left open across refreshes
+async function toggleAssets(name, list, button, keep = false) {
+  if (!keep && openSets.has(name)) { openSets.delete(name); list.replaceChildren(); button.textContent = "Choose per asset..."; return; }
+  openSets.add(name); button.textContent = "Hide the list";
+  list.replaceChildren(el("span", { class: "hint" }, "Reading the assets..."));
+  const r = await api("/api/assets_with?set=" + encodeURIComponent(name));
+  if (r.error) { list.replaceChildren(el("span", { class: "err" }, r.error)); return; }
+  list.replaceChildren(...r.assets.map((a) => {
+    const pick = el("select", {}, el("option", { value: "" }, "as placed" + (a.chosen ? "" : ": " + (a.selected || "none"))),
+      ...a.values.map((v) => el("option", {}, v)));
+    pick.value = a.chosen || "";
+    pick.onchange = async () => {
+      const c = await api("/api/choose_asset", { unit: a.id, set: name, value: pick.value || null });
+      if (c.error) { alert(c.error); return; }
+      state = c;
+      run(["scan"]);  // finds the asset with its new variant; Convert then shows what to convert
+    };
+    return el("div", { class: "row" }, el("span", { class: "assetname", title: a.id }, a.name), pick,
+      a.chosen ? el("span", { class: "rec" }, "chosen here") : null);
+  }), r.assets.length ? el("span", { class: "hint" }, "Each choice applies to every placement of that asset; only that asset is scanned and converted again.")
+    : el("span", { class: "hint" }, "No asset has this set on its own prim: it belongs to parts inside them."));
+}
+
+function renderAssembleChoices() {
+  const s = state.settings, r = state.recommended || {}, m = state.summary || { switches: {} }, box = $("assembleChoices");
+  box.replaceChildren();
+  const look = el("select", {}, el("option", { value: "" }, "none: the materials as converted"), ...state.looks.map((l) => el("option", {}, l)));
+  look.value = s.look || "";
+  look.onchange = () => save({ look: look.value || "" });
+  choiceRow(box, "Look", look, r.made_up_share != null ? Math.round(100 * r.made_up_share) + "% of the materials have a name and nothing else" : "",
+    (s.look || null) === (r.look || null));
+  const lod = el("select", {},
+    el("option", { value: "camera" }, "from the cameras, within the GPU budget"), el("option", { value: "authored" }, "as authored"),
+    el("option", { value: "finest" }, "finest everywhere"), el("option", { value: "coarsest" }, "coarsest everywhere"));
+  lod.value = ["authored", "finest", "coarsest", "camera"].includes(s.lod) ? s.lod : "authored";
+  lod.onchange = () => save({ lod: lod.value, ...(lod.value === "camera" && !s.lod_budget_gb ? { lod_budget_gb: r.budget_gb } : {}) });
+  const nSwitch = Object.values(m.switches).reduce((n, v) => n + v, 0);
+  choiceRow(box, "Level of detail", lod, nSwitch ? fmt(nSwitch) + " switches; cameras in the scene: " + fmt(r.cameras || 0) +
+    ". As authored scans and converts only the levels placed; the other policies compare them all, so every level is scanned and converted (Convert again)."
+    : "nothing to choose: no switches", s.lod === r.lod);
+  if (s.lod === "camera") {
+    const budget = el("input", { type: "number", step: "any", min: "0", style: "width:7em" });
+    budget.value = s.lod_budget_gb || "";
+    budget.onchange = () => save({ lod_budget_gb: budget.value === "" ? 0 : Number(budget.value) });
+    choiceRow(box, "GPU budget (GB)", budget, "for geometry and textures" + (r.gpu_gb ? "; this GPU has " + r.gpu_gb.toFixed(1) + " GB" : "") +
+      (r.cameras ? "" : ". No camera in the scene: give positions in the advanced settings"), s.lod_budget_gb === r.budget_gb);
+  }
+}
+
+async function save(changes) {
+  const r = await api("/api/settings", changes);
+  if (r.error) { alert(r.error); return; }
+  state = r; renderStages(); fillSettings();
+}
+
+$("convert").onclick = () => run(["scan", "convert", ...(state.settings.ktx ? ["ktx"] : [])], [], false);
+$("convertAll").onclick = () => {
+  if (confirm("Convert every asset of this project again?")) run(["scan", "convert", ...(state.settings.ktx ? ["ktx"] : [])], [], true);
+};
+$("assemble").onclick = () => run([...(state.settings.look ? ["look"] : []), "assemble"], [], false);
+$("estimate").onclick = () => run(["estimate"], [], false);
+$("rescan").onclick = () => run(["scan"], [], true);  // forced: reads every unit again (keys unchanged)
+$("stop").onclick = async () => { $("stop").disabled = true; const r = await api("/api/stop", {}); if (r.error) alert(r.error); };
+$("open").onclick = async () => { const r = await api("/api/open", {}); if (r.error) alert(r.error); };
+
+// ---- advanced settings ----
+function fillSettings() {
+  const f = $("settings"), s = state.settings;
+  for (const e of f.elements) {
+    if (!e.name) continue;
+    const v = s[e.name];
+    if (e.type === "checkbox") e.checked = !!v;
+    else if (e.name === "variants") e.value = (v || []).join("\n");
+    else e.value = v == null ? "" : v;
+  }
+}
+$("settings").onsubmit = async (ev) => {
+  ev.preventDefault();
+  const changes = {};
+  for (const e of $("settings").elements) {
+    if (!e.name) continue;
+    if (e.type === "checkbox") changes[e.name] = e.checked;
+    else if (e.name === "variants") changes[e.name] = e.value.split("\n").map((x) => x.trim()).filter(Boolean);
+    else if (e.type === "number") changes[e.name] = e.value === "" ? state.defaults[e.name] : Number(e.value);
+    else changes[e.name] = e.value.trim();
+  }
+  const r = await api("/api/settings", changes);
+  $("settingsMsg").textContent = r.error ? r.error : "Saved.";
+  $("settingsMsg").className = r.error ? "err" : "hint";
+  if (!r.error) { state = r; renderStages(); }
+};
+
+// ---- scene graph ----
+async function loadTree() {
+  const tree = $("tree");
+  if (!state.top || !state.summary || !state.summary.units) { tree.replaceChildren(el("span", { class: "hint" }, "Scan the stage to see its assets.")); return; }
+  tree.replaceChildren(await unitNode({ id: state.top, name: $("title").textContent }, true));
+}
+async function unitNode(child, open = false) {
+  const row = el("div", { class: "node" }), kids = el("div", { class: "kids" });
+  const twist = el("span", { class: "twist" }, child.places === 0 ? "·" : "▸");
+  row.append(...[twist, el("span", { class: "name", title: child.id }, child.name),
+    child.count > 1 ? el("span", { class: "hint" }, "×" + fmt(child.count)) : null,
+    child.status ? pill(child.status) : null,
+    el("span", { class: "meta" }, child.drawn ? fmt(child.drawn) + " tris" : "")].filter(Boolean));  // DOM append writes null
+  let loaded = false;
+  const expand = async () => {
+    if (!loaded) {
+      const u = await api("/api/unit?id=" + encodeURIComponent(child.id));
+      for (const sw of u.switches || []) kids.append(switchNode(sw));
+      for (const c of u.placed || []) kids.append(await unitNode(c));
+      loaded = true;
+    }
+    const open = kids.style.display === "none";
+    kids.style.display = open ? "" : "none";
+    twist.textContent = open ? "▾" : "▸";
+  };
+  kids.style.display = "none";
+  twist.onclick = (ev) => { ev.stopPropagation(); if (child.places !== 0) expand(); };
+  row.onclick = () => select(child.id, row);
+  if (open) await expand();
+  return el("div", {}, row, kids);
+}
+function switchNode(sw) {
+  const kids = el("div", { class: "kids" });
+  for (const o of sw.options)
+    unitNode({ ...o, name: o.variant + " · " + o.name + (o.variant === sw.choice ? "  (placed)" : "") }).then((n) => kids.append(n));
+  const pick = el("select", { onclick: (ev) => ev.stopPropagation() },
+    el("option", { value: "" }, "level-of-detail setting"), ...sw.options.map((o) => el("option", { value: o.variant }, o.variant)));
+  const named = state.settings.variants.find((v) => v.startsWith(sw.set + "=") && v.split(":")[1] && v.split(":")[1].split(",").includes(sw.name));
+  pick.value = named ? named.split("=")[1].split(":")[0] : "";
+  pick.onchange = async () => {
+    const r = await api("/api/choose", { set: sw.set, name: sw.name, value: pick.value || null });
+    if (r.error) alert(r.error); else { state = r; run(["assemble"], []); }
+  };
+  const row = el("div", { class: "node" }, el("span", { class: "twist" }, "⇄"),
+    el("span", { class: "name switch", title: "variant set " + sw.set }, sw.name + " · " + sw.set), pick);
+  return el("div", {}, row, kids);
+}
+
+// ---- selected asset ----
+async function select(id, row) {
+  document.querySelectorAll(".node.sel").forEach((n) => n.classList.remove("sel"));
+  if (row) row.classList.add("sel");
+  selected = id;
+  const u = await api("/api/unit?id=" + encodeURIComponent(id));
+  const d = $("details");
+  if (u.missing) { d.replaceChildren(el("p", { class: "err" }, "Not in the last scan: " + id)); return; }
+  const l = u.leaf, dl = el("dl");
+  const add = (k, v) => { if (v !== undefined && v !== null && v !== "") dl.append(el("dt", {}, k), el("dd", {}, String(v))); };
+  add("layer", u.layer); add("prim", u.prim);
+  if (Object.keys(u.selections).length) add("variants", JSON.stringify(u.selections));
+  add("draws itself", Object.entries(u.draws).map(([k, v]) => k + " " + fmt(v)).join(", ") || "nothing");
+  add("its leaf", l.status);
+  if (l.error) add("error", l.error);
+  if (l.triangles != null) {
+    add("triangles", fmt(l.triangles)); add("meshes", fmt(l.meshes)); add("materials", fmt(l.materials));
+    add("images", fmt(l.images) + (l.ktx ? " (KTX2)" : "")); if (l.looks.length) add("looks", l.looks.join(", "));
+    if (l.point_instances) add("point instances", fmt(l.point_instances));
+    add("file", l.file);
+  }
+  add("drawn with what it places", u.drawn ? fmt(u.drawn) + " triangles" : "");
+  add("places", u.placed.length + " assets" + (u.switches.length ? ", " + u.switches.length + " switches" : ""));
+  add("id", u.id);
+  const units = [u.id], s = state.settings;
+  // This asset's own variant sets: a choice converts it (every placement of it) with that variant.
+  const sets = Object.entries(u.variant_sets || {});
+  const variants = sets.length ? el("div", { class: "choices" }, ...sets.flatMap(([name, vs]) => {
+    const chosen = u.chosen[name];
+    const pick = el("select", {}, el("option", { value: "" }, "as placed" + (chosen ? "" : ": " + (vs.selected || "none"))),
+      ...vs.values.map((v) => el("option", {}, v)));
+    pick.value = chosen || "";
+    pick.onchange = async () => {
+      const r = await api("/api/choose_asset", { unit: u.id, set: name, value: pick.value || null });
+      if (r.error) { alert(r.error); return; }
+      state = r; selected = r.unit;
+      run(["scan"]);  // finds the asset with its new variant; Convert then shows what to convert
+    };
+    return [el("label", {}, name), el("div", { class: "row" }, pick, chosen ? el("span", { class: "rec" }, "chosen here") : null)];
+  })) : null;
+  d.replaceChildren(el("h3", { style: "margin:0 0 6px" }, u.name), dl,
+    ...(variants ? [el("h3", { style: "margin:10px 0 6px" }, "Variants of this asset"), variants,
+      el("p", { class: "hint" }, "Every placement of this asset is converted with the variants chosen here; the scan and the conversion then redo only this asset.")] : []),
+    el("div", { class: "row" },
+      el("button", { onclick: () => run(["convert", ...(s.ktx ? ["ktx"] : []), ...(s.look ? ["look"] : []), "assemble"], units) }, "Convert this part"),
+      el("button", { onclick: () => run(["convert", ...(s.ktx ? ["ktx"] : []), ...(s.look ? ["look"] : []), "assemble"], units, true) }, "Convert again (force)")),
+    el("p", { class: "hint" }, "Acts on this asset and everything it places, then assembles the scene."));
+}
+
+// ---- jobs ----
+async function run(steps, units, force = false) {
+  const r = await api("/api/run", { steps, units, force });
+  if (r.error) { alert(r.error); return; }
+  logCount = 0; $("log").textContent = "";
+  poll();
+}
+$("toggleLog").onclick = () => { const hidden = $("log").classList.toggle("hidden"); $("toggleLog").textContent = hidden ? "Show log" : "Hide log"; };
+
+const STEP_NAMES = { scan: "scanning: assets", convert: "converting: leaves", ktx: "encoding KTX2: images",
+  "ktx-size": "KTX2: reading the images' sizes, leaves", levels: "choosing the levels from the cameras and the budget: pass", "ktx-read": "KTX2: finding the images to encode, leaves",
+  look: "applying the look: leaves" };
+async function poll() {
+  if (polling) return;
+  polling = true;
+  try {
+    for (;;) {
+      const j = await api("/api/job?since=" + logCount);
+      logCount = j.count;
+      if (j.lines.length) { const log = $("log"); log.textContent += j.lines.join("\n") + "\n"; log.scrollTop = log.scrollHeight; }
+      $("jobTitle").textContent = j.title || "Idle";
+      const label = STEP_NAMES[j.step] || j.step;
+      $("jobStep").textContent = j.running ? (label + (j.total ? " " + fmt(j.done) + " / " + fmt(j.total) : "")) :
+        j.error ? "failed: " + j.error : j.title ? "done" : "";
+      $("jobStep").className = j.error ? "err" : "hint";
+      $("jobBarBox").classList.toggle("busy", j.running && !j.total);
+      $("jobBar").style.width = !j.running ? (j.title && !j.error ? "100%" : "0") : j.total ? (100 * j.done / j.total) + "%" : "";
+      $("jobTime").textContent = j.seconds ? j.seconds + " s" : "";
+      document.querySelectorAll("#proj button, #home button").forEach((b) => { if (!b.classList.contains("link") && b.id !== "stop") b.disabled = j.running; });
+      show("stop", j.running); $("stop").disabled = j.stopping; $("stop").textContent = j.stopping ? "Stopping..." : "Stop";
+      if (j.running && state && state.project) {  // a scan's results show up while it runs
+        if (j.step === "convert" && !$("summary").dataset.live) { $("summary").dataset.live = 1; state = await api("/api/state"); renderSummary(); }
+      }
+      if (!j.running) break;
+      await new Promise((r) => setTimeout(r, 800));
+    }
+  } finally { polling = false; delete $("summary").dataset.live; }
+  if (!$("proj").classList.contains("hidden")) await showProject();  // also a project the job just opened
+  const last = await api("/api/job?since=1000000");
+  if (last.result && last.title === "estimate") $("estimateNote").textContent = "Estimate: " + fmt(last.result.drawn) +
+    " triangles drawn, about " + last.result.gb.toFixed(2) + " GB of geometry and " + last.result.textures_gb.toFixed(2) + " GB of textures" + (last.result.density ? " (density " + last.result.density.toPrecision(3) + ")" : "") + ".";
+  if (selected) select(selected);
+}
+
+(async () => {
+  const s = await api("/api/state");
+  if (s.project) await showProject(); else showHome();
+  poll();
+})();
+</script>
+</body>
+</html>

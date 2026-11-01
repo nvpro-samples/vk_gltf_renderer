@@ -27,6 +27,8 @@
 #include <algorithm>
 #include <functional>
 #include <limits>
+#include <map>
+#include <string_view>
 
 #include <fmt/format.h>
 
@@ -232,6 +234,19 @@ void SceneEditor::updateVisibility(int nodeIndex)
   // Root dirty is enough: updateNodeWorldMatrices() propagates through descendants.
   m_scene.markNodeDirty(nodeIndex);
 
+  m_scene.m_dirtyFlags.tlasVisibilityNeedsCpuSync = true;
+}
+
+// Shadow casting lives in the TLAS instance mask, which only the CPU instance refresh writes (the GPU
+// transform path rewrites matrices alone), so it takes the same sync as a visibility toggle.
+void SceneEditor::updateShadowCasting(int nodeIndex)
+{
+  const bool castShadows = tinygltf::utils::getNodeShadowCasting(m_scene.m_model.nodes[nodeIndex]).castShadows;
+  for(int renderNodeID : m_scene.m_renderNodeRegistry.getRenderNodesForNode(nodeIndex))
+  {
+    m_scene.m_renderNodeRegistry.getRenderNodes()[renderNodeID].castShadows = castShadows;
+    m_scene.markRenderNodeDirty(renderNodeID);
+  }
   m_scene.m_dirtyFlags.tlasVisibilityNeedsCpuSync = true;
 }
 
@@ -517,6 +532,101 @@ int SceneEditor::addLightNode(const std::string& lightType, const std::string& n
   m_scene.rebuildRenderNodesAndLights();
 
   return nodeIndex;
+}
+
+//--------------------------------------------------------------------------------------------------
+// Light ops
+//--------------------------------------------------------------------------------------------------
+
+namespace {
+constexpr std::string_view kLightPointerPrefix = "/extensions/KHR_lights_punctual/lights/";
+
+// The light a KHR_animation_pointer channel addresses, with the rest of its pointer, or {-1, {}}.
+std::pair<int, std::string> pointerLight(const tinygltf::AnimationChannel& channel)
+{
+  const std::map<std::string, tinygltf::Value>::const_iterator ext = channel.target_extensions.find("KHR_animation_pointer");
+  if(ext == channel.target_extensions.end() || !ext->second.Has("pointer") || !ext->second.Get("pointer").IsString())
+    return {-1, {}};
+  const std::string& pointer = ext->second.Get("pointer").Get<std::string>();
+  if(!pointer.starts_with(kLightPointerPrefix))
+    return {-1, {}};
+  return tinygltf::utils::parsePointerIndexAndRest(pointer, kLightPointerPrefix.size());
+}
+
+// Renumber every reference to a KHR_lights_punctual light through `remap` (old index -> new): node.light,
+// its extension form, animation pointers and the render lights. (tinygltf writes the model-level
+// KHR_lights_punctual array from model.lights alone.) The caller re-parses the animations, which cache
+// their own copy of the pointer paths.
+void remapLightReferences(tinygltf::Model& model, std::vector<RenderLight>& renderLights, const std::function<int(int)>& remap)
+{
+  for(size_t n = 0; n < model.nodes.size(); n++)
+  {
+    tinygltf::Node& node = model.nodes[n];
+    if(node.light >= 0)
+      node.light = remap(node.light);
+    const std::map<std::string, tinygltf::Value>::iterator ext = node.extensions.find("KHR_lights_punctual");
+    if(ext != node.extensions.end() && ext->second.Has("light") && ext->second.Get("light").IsInt())
+      ext->second.Get<tinygltf::Value::Object>()["light"] = tinygltf::Value(remap(ext->second.Get("light").GetNumberAsInt()));
+  }
+  for(size_t a = 0; a < model.animations.size(); a++)
+  {
+    std::vector<tinygltf::AnimationChannel>& channels = model.animations[a].channels;
+    for(size_t c = 0; c < channels.size(); c++)
+    {
+      const std::pair<int, std::string> lightAndRest = pointerLight(channels[c]);
+      const int                         light        = lightAndRest.first;
+      if(light >= 0 && remap(light) != light)
+        channels[c].target_extensions.at("KHR_animation_pointer").Get<tinygltf::Value::Object>()["pointer"] =
+            tinygltf::Value(std::string(kLightPointerPrefix) + std::to_string(remap(light)) + lightAndRest.second);
+    }
+  }
+  for(size_t i = 0; i < renderLights.size(); i++)
+    renderLights[i].light = remap(renderLights[i].light);
+}
+
+}  // namespace
+
+std::string SceneEditor::lightRemovalBlocker(int lightIndex) const
+{
+  const tinygltf::Model& model = m_scene.m_model;
+  if(lightIndex < 0 || lightIndex >= static_cast<int>(model.lights.size()))
+    return "No such light";
+  // node.light is canonical (tinygltf mirrors the extension form into it on load); the usage index
+  // answers without a walk of the nodes, since the Elements list asks every frame.
+  if(m_scene.getLightNode(lightIndex) >= 0)
+    return "Attached to a node: delete the node instead";
+  for(size_t a = 0; a < model.animations.size(); a++)
+    for(size_t c = 0; c < model.animations[a].channels.size(); c++)
+      if(pointerLight(model.animations[a].channels[c]).first == lightIndex)
+        return "Animated: an animation pointer addresses it";
+  if(model.extensions.count("KHR_interactivity"))
+    return "The scene has a behavior graph, whose pointers can address lights by index";
+  return {};
+}
+
+void SceneEditor::removeLightAt(int lightIndex)
+{
+  tinygltf::Model& model = m_scene.m_model;
+  if(lightIndex < 0 || lightIndex >= static_cast<int>(model.lights.size()))
+    return;
+  assert(lightRemovalBlocker(lightIndex).empty() && "removeLightAt requires a light nothing references");
+
+  model.lights.erase(model.lights.begin() + lightIndex);
+  remapLightReferences(model, m_scene.m_lights, [lightIndex](int i) { return i > lightIndex ? i - 1 : i; });
+  m_scene.animation().parseAnimations();   // refresh the cached pointer paths
+  m_scene.m_dirtyFlags.lights.insert(-1);  // every light after it moved down: upload them all
+}
+
+void SceneEditor::insertLightAt(int lightIndex, const tinygltf::Light& light)
+{
+  tinygltf::Model& model = m_scene.m_model;
+  lightIndex             = std::clamp(lightIndex, 0, static_cast<int>(model.lights.size()));
+
+  // Inverse of removeLightAt: everything at >= lightIndex shifts up by one before the insert.
+  remapLightReferences(model, m_scene.m_lights, [lightIndex](int i) { return i >= lightIndex ? i + 1 : i; });
+  model.lights.insert(model.lights.begin() + lightIndex, light);
+  m_scene.animation().parseAnimations();  // refresh the cached pointer paths
+  m_scene.m_dirtyFlags.lights.insert(-1);
 }
 
 //--------------------------------------------------------------------------------------------------
@@ -818,6 +928,32 @@ bool SceneEditor::makeExternalAssetEditable(int nodeIndex)
     collectDescendantIndices(n, subtree);
     placedNodes.insert(subtree.begin(), subtree.end());
   }
+
+  // Unlocking changes which render primitives exist only for a skinned or morphed node (its placed
+  // copies stop sharing one pose, Scene::kPlacedSourceKey), and which cameras the scene owns only for
+  // a camera node. Without either, the render primitives and cameras stay: rebuilding the render
+  // nodes is enough, a fraction of a full parseScene() on a city-scale scene.
+  const tinygltf::Model& model     = m_scene.m_model;
+  const auto             hasMorphs = [&model](int mesh) {
+    if(mesh < 0 || mesh >= static_cast<int>(model.meshes.size()))
+      return false;
+    for(const tinygltf::Primitive& primitive : model.meshes[mesh].primitives)
+      if(!primitive.targets.empty())
+        return true;
+    return false;
+  };
+  bool keepsPrimitives = true;
+  for(int n : placedNodes)
+  {
+    const tinygltf::Node& node = model.nodes[n];
+    keepsPrimitives            = keepsPrimitives && node.skin < 0 && node.camera < 0 && !hasMorphs(node.mesh);
+    if(const InstanceSet* set = m_scene.getInstanceSet(n))
+      for(const InstanceSet::Entry& entry : set->entries)
+        keepsPrimitives = keepsPrimitives && !hasMorphs(entry.mesh);
+    if(!keepsPrimitives)
+      break;
+  }
+
   if(!placedNodes.empty())
     m_scene.materializeInstanceSets(m_scene.m_model, placedNodes);
 
@@ -851,10 +987,15 @@ bool SceneEditor::makeExternalAssetEditable(int nodeIndex)
     m_scene.m_referencedAssets.clear();
 
   LOGI("Made external asset editable (file %d): unlocked %d instance(s)\n", fileIndex, unlockedInstances);
-  // Rebuild the render primitives and nodes: placements drawn without nodes are nodes now, and
-  // unlocked copies of a skinned or morphed node no longer share one pose (Scene::kPlacedSourceKey).
+  // Rebuild the render nodes: placements drawn without nodes are nodes now. With a skinned or
+  // morphed node or a camera unlocked, rebuild the render primitives and cameras too.
   if(unlockedInstances > 0)
-    m_scene.parseScene();
+  {
+    if(keepsPrimitives)
+      m_scene.rebuildRenderNodesKeepingPrimitives();
+    else
+      m_scene.parseScene();
+  }
   return unlockedInstances > 0;
 }
 
@@ -981,6 +1122,7 @@ void SceneEditor::setNodeCamera(int nodeIndex, int cameraIndex)
 
   tinygltf::Node& node = getNodeForEdit(nodeIndex);
   node.camera          = cameraIndex;
+  m_scene.invalidateElementUsage();  // Scene::getCameraNode() reads the attachment
 }
 
 void SceneEditor::clearNodeCamera(int nodeIndex)
@@ -994,6 +1136,7 @@ void SceneEditor::clearNodeCamera(int nodeIndex)
 
   tinygltf::Node& node = getNodeForEdit(nodeIndex);
   node.camera          = -1;
+  m_scene.invalidateElementUsage();  // Scene::getCameraNode() reads the attachment
 }
 
 void SceneEditor::setNodeSkin(int nodeIndex, int skinIndex)
@@ -1799,8 +1942,7 @@ int SceneEditor::mergePrimitiveMaterial(int nodeIndex)
 
   m_scene.parseScene();
 
-  const std::vector<int>& rnIds = m_scene.m_renderNodeRegistry.getRenderNodesForNode(nodeIndex);
-  for(int rn : rnIds)
+  for(int rn : m_scene.m_renderNodeRegistry.getRenderNodesForNode(nodeIndex))
     m_scene.markRenderNodeDirty(rn, true, false);
 
   const int finalMeshIdx = m_scene.m_model.nodes[nodeIndex].mesh;

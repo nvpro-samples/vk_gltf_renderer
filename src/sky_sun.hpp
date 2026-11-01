@@ -60,9 +60,9 @@ public:
 
   void init(Resources* resources, UndoStack* undoStack, Actions actions);
 
-  // Re-read the scene's marker and adopt whatever light it names, or fall back to the renderer's
-  // own sun. Runs at the frame top, so moving that light -- gizmo, inspector, animation -- carries
-  // the sky with it.
+  // Adopt the scene's marked sun light (Scene::getSkySunLight), or fall back to the renderer's own
+  // sun. Runs at the frame top and only reads that light's world matrix, so moving the light --
+  // gizmo, inspector, animation -- carries the sky with it.
   void syncFromMarkedLight();
 
   // Point the sun along `toSun`, through whatever owns it, and report that it moved.

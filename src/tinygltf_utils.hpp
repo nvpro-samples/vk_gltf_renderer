@@ -241,6 +241,14 @@ struct KHR_node_selectability
   bool selectable = true;
 };
 
+// Vendor: a node whose mesh does not cast shadows (USD `primvars:doNotCastShadows`). It is still
+// seen by camera, reflection and refraction rays; only shadow rays pass through it.
+#define NV_NODE_SHADOW_CASTING_EXTENSION_NAME "NV_node_shadow_casting"
+struct NV_node_shadow_casting
+{
+  bool castShadows = true;
+};
+
 // https://github.com/KhronosGroup/glTF/tree/main/extensions/2.0/Khronos/KHR_interactivity
 #define KHR_INTERACTIVITY_EXTENSION_NAME "KHR_interactivity"
 
@@ -1471,6 +1479,14 @@ not walk the hierarchy; the spec's cascade rule (an ancestor with
 -------------------------------------------------------------------------------------------------*/
 KHR_node_selectability getNodeSelectability(const tinygltf::Node& node);
 void                   setNodeSelectability(tinygltf::Node& node, const KHR_node_selectability& selectability);
+
+/*-------------------------------------------------------------------------------------------------
+## Function `getNodeShadowCasting` / `setNodeShadowCasting`
+> Reads / writes `NV_node_shadow_casting` on one node. It applies to that node's own mesh only;
+there is no cascade to children.
+-------------------------------------------------------------------------------------------------*/
+NV_node_shadow_casting getNodeShadowCasting(const tinygltf::Node& node);
+void                   setNodeShadowCasting(tinygltf::Node& node, const NV_node_shadow_casting& shadowCasting);
 
 /*-------------------------------------------------------------------------------------------------
 ## Function `getIesProfiles` / `getNodeIesLight` / `setNodeIesLight`

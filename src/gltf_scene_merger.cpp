@@ -28,10 +28,8 @@
 #include "tinygltf_utils.hpp"
 #include <nvutils/logger.hpp>
 #include <algorithm>
-#include <filesystem>
 #include <span>
 #include <unordered_map>
-#include <unordered_set>
 
 namespace {
 
@@ -130,17 +128,9 @@ static void remapTextureIndicesInValue(tinygltf::Value& val, int textureOffset)
 // Append the imported buffers and return where each one now is in base. sharedBuffers[i] >= 0 means
 // imported buffer i is already base buffer sharedBuffers[i] (the same file, the same bytes): it is not
 // appended, and the buffers after it close up the gap. An empty `sharedBuffers` appends them all at
-// offsets.buffers.
+// offsets.buffers. URIs are kept as they are, even when they clash: Scene::save makes them unique.
 static std::vector<int> remapAndAppendBuffers(tinygltf::Model& base, const tinygltf::Model& imported, std::span<const int> sharedBuffers)
 {
-  // Collect existing buffer URIs to detect clashes
-  std::unordered_set<std::string> existingUris;
-  for(const auto& buf : base.buffers)
-  {
-    if(!buf.uri.empty())
-      existingUris.insert(buf.uri);
-  }
-
   std::vector<int> bufferRemap(imported.buffers.size());
   for(size_t i = 0; i < imported.buffers.size(); i++)
   {
@@ -149,25 +139,8 @@ static std::vector<int> remapAndAppendBuffers(tinygltf::Model& base, const tinyg
       bufferRemap[i] = sharedBuffers[i];
       continue;
     }
-    tinygltf::Buffer buf = imported.buffers[i];
-
-    // If the buffer URI already exists, make it unique by adding a suffix
-    if(!buf.uri.empty() && existingUris.count(buf.uri))
-    {
-      // Make unique: insert "_N" before the extension (e.g. scene.bin → scene_2.bin)
-      std::filesystem::path p(buf.uri);
-      std::string           stem = p.stem().string();
-      std::string           ext  = p.extension().string();
-      int                   n    = 2;
-      do
-      {
-        buf.uri = stem + "_" + std::to_string(n++) + ext;
-      } while(existingUris.count(buf.uri));
-    }
-    if(!buf.uri.empty())
-      existingUris.insert(buf.uri);
     bufferRemap[i] = static_cast<int>(base.buffers.size());
-    base.buffers.push_back(std::move(buf));
+    base.buffers.push_back(imported.buffers[i]);
   }
   return bufferRemap;
 }

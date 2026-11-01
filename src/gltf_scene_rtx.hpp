@@ -61,7 +61,8 @@ public:
   void cmdCreateBuildTopLevelAccelerationStructure(VkCommandBuffer cmd, nvvk::CmdUploaderInterface& staging, const nvvkgltf::Scene& scene);
   VkResult                                 cmdCompactBlas(VkCommandBuffer cmd);
   void                                     destroyNonCompactedBlas();
-  void                                     trackBlasMemory();
+  [[nodiscard]] VkDeviceSize               blasBuildBytes() const { return m_blasBuildBytes; }  // All BLAS before compaction
+  [[nodiscard]] VkDeviceSize               blasPeakBytes() const { return m_blasPeakBytes; }  // BLAS memory high-water mark
   [[nodiscard]] VkAccelerationStructureKHR topLevelAS();
 
   // ---------- Sync / Update ----------
@@ -105,6 +106,7 @@ protected:
 
   void destroyTlasResources();
   void destroyTlasResourcesDeferred();
+  void updateBlasPeak();
 
   VkDevice         m_device         = VK_NULL_HANDLE;
   VkPhysicalDevice m_physicalDevice = VK_NULL_HANDLE;
@@ -115,6 +117,10 @@ protected:
   std::unique_ptr<nvvk::AccelerationStructureBuilder> m_blasBuilder;
   std::vector<nvvk::AccelerationStructureBuildData>   m_blasBuildData;
   std::vector<nvvk::AccelerationStructure>            m_blasAccel;
+  std::vector<VmaAllocation>                          m_nonCompactedBlasAllocs;  // Replaced by cmdCompactBlas(), not yet destroyed
+  size_t                                              m_blasTrackedCount = 0;  // m_blasAccel[0..n) built and tracked
+  VkDeviceSize                                        m_blasBuildBytes   = 0;
+  VkDeviceSize                                        m_blasPeakBytes    = 0;
 
   // Per-renderPrimID opacity micromap linkage attached to the BLAS geometry (triangles.pNext).
   // Must stay alive from the BLAS size query through the GPU build, so it lives here.

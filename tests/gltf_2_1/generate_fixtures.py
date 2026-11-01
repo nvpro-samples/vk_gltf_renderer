@@ -39,19 +39,21 @@ def data_uri(mime: str, payload: bytes) -> str:
     return f"data:{mime};base64,{base64.b64encode(payload).decode('ascii')}"
 
 
-def quad_geometry(model: dict, size: float = 1.0) -> dict:
-    """Append a quad (POSITION, NORMAL, indices) in one data: URI buffer. Returns the primitive
-    (attributes + indices), without a material."""
+def quad_geometry(model: dict, size: float = 1.0, texcoords: bool = False) -> dict:
+    """Append a quad (POSITION, NORMAL, indices, and TEXCOORD_0 when asked) in one data: URI buffer.
+    Returns the primitive (attributes + indices), without a material."""
     h = size * 0.5
     positions = [(-h, -h, 0.0), (h, -h, 0.0), (h, h, 0.0), (-h, h, 0.0)]
     normals = [(0.0, 0.0, 1.0)] * 4
+    uvs = [(0.0, 1.0), (1.0, 1.0), (1.0, 0.0), (0.0, 0.0)]  # glTF's v runs down the image
     indices = [0, 1, 2, 0, 2, 3]
 
     pos_bytes = b"".join(struct.pack("<3f", *p) for p in positions)
     nrm_bytes = b"".join(struct.pack("<3f", *n) for n in normals)
     idx_bytes = b"".join(struct.pack("<H", i) for i in indices)
     idx_bytes += b"\0" * (-len(idx_bytes) % 4)
-    blob = pos_bytes + nrm_bytes + idx_bytes
+    uv_bytes = b"".join(struct.pack("<2f", *uv) for uv in uvs) if texcoords else b""
+    blob = pos_bytes + nrm_bytes + idx_bytes + uv_bytes
 
     buffer = len(model.setdefault("buffers", []))
     model["buffers"].append({"byteLength": len(blob), "uri": data_uri("application/octet-stream", blob)})
@@ -71,8 +73,14 @@ def quad_geometry(model: dict, size: float = 1.0) -> dict:
         {"bufferView": first_view + 1, "componentType": 5126, "count": 4, "type": "VEC3"},
         {"bufferView": first_view + 2, "componentType": 5123, "count": 6, "type": "SCALAR"},
     ]
-    return {"attributes": {"POSITION": first_accessor, "NORMAL": first_accessor + 1},
-            "indices": first_accessor + 2}
+    primitive = {"attributes": {"POSITION": first_accessor, "NORMAL": first_accessor + 1},
+                 "indices": first_accessor + 2}
+    if texcoords:
+        views.append({"buffer": buffer, "byteOffset": len(pos_bytes) + len(nrm_bytes) + len(idx_bytes),
+                      "byteLength": len(uv_bytes), "target": 34962})
+        accessors.append({"bufferView": len(views) - 1, "componentType": 5126, "count": 4, "type": "VEC2"})
+        primitive["attributes"]["TEXCOORD_0"] = len(accessors) - 1
+    return primitive
 
 
 def quad_mesh(model: dict, name: str, color, uid: str | None = None) -> int:
@@ -399,8 +407,45 @@ def placement(out_dir: Path) -> None:
         single_scene(d, range(len(d["nodes"])))
         write(out_dir, f"placement/deep/deep_{level}.gltf", d)
 
+    # sibling_chain.gltf: files nested through sibling folders, as a per-asset converter writes them
+    # (asset_N/world/assembly.gltf places "../../asset_N+1/world/assembly.gltf"). Joined unnormalized,
+    # the `../` chain grows past Windows' MAX_PATH; the normalized paths stay short.
+    m = new_model()
+    m["nodes"] = [{"name": "chain", "externalAsset": external_reference(m, f"siblings/{SIBLING_DIR}_0/world/assembly.gltf")}]
+    single_scene(m, [0])
+    write(out_dir, "placement/sibling_chain.gltf", m)
+
+    for level in range(SIBLING_CHAIN):
+        d = new_model()
+        quad_mesh(d, f"sibling_{level}", (0.5, 0.5, 0.5, 1.0))
+        d["nodes"] = [{"name": f"sibling_{level}", "mesh": 0}]
+        if level + 1 < SIBLING_CHAIN:
+            uri = f"../../{SIBLING_DIR}_{level + 1}/world/assembly.gltf"
+            d["nodes"].append({"name": "next", "externalAsset": external_reference(d, uri), "translation": [1.0, 0.0, 0.0]})
+        single_scene(d, range(len(d["nodes"])))
+        write(out_dir, f"placement/siblings/{SIBLING_DIR}_{level}/world/assembly.gltf", d)
+
+    # climb/d00/.../d19/assembly.gltf: one level of placement, from a file stored deep in folders,
+    # through a URI that climbs all of them to a shared model folder. Joined unnormalized onto the
+    # file's folder, the path passes MAX_PATH; normalized, it is short.
+    leaf = new_model()
+    quad_mesh(leaf, "climbed_leaf", (0.5, 0.5, 0.5, 1.0))
+    leaf["nodes"] = [{"name": "climbed_leaf", "mesh": 0}]
+    single_scene(leaf, [0])
+    write(out_dir, f"placement/{SIBLING_DIR}_models/xmodel/leaf.gltf", leaf)
+
+    folders = [f"d{level:02d}" for level in range(CLIMB_DEPTH)]
+    m = new_model()
+    uri = "../" * (CLIMB_DEPTH + 1) + f"{SIBLING_DIR}_models/xmodel/leaf.gltf"
+    m["nodes"] = [{"name": "leaf", "externalAsset": external_reference(m, uri)}]
+    single_scene(m, [0])
+    write(out_dir, "placement/climb/" + "/".join(folders) + "/assembly.gltf", m)
+
 
 DEEP_CHAIN = 20  # files in placement/deep; more than the renderer's nesting limit
+SIBLING_CHAIN = 8  # files in placement/siblings; within the nesting limit, past MAX_PATH unnormalized
+SIBLING_DIR = "an_asset_folder_with_a_name_as_long_as_converted_usd_paths"
+CLIMB_DEPTH = 20  # folders under placement/climb holding the file whose URI climbs out of them all
 
 
 def library(out_dir: Path) -> None:
@@ -759,6 +804,77 @@ def component_types(out_dir: Path) -> None:
         write(out_dir, f"component_types/{name}.gltf", typed_quad(**kwargs))
 
 
+def exr_half(width: int, height: int, channels: dict) -> bytes:
+    """A minimal OpenEXR: uncompressed scanlines, HALF channels. `channels` maps a channel name to a
+    function (x, y) -> value; EXR stores channels alphabetically, which is how they are written.
+    Hand-built so the fixture does not depend on the decoder under test."""
+    names = sorted(channels)
+    chlist = b"".join(n.encode() + b"\0" + struct.pack("<iB3xii", 1, 0, 1, 1) for n in names) + b"\0"
+
+    def attr(name: str, typ: str, payload: bytes) -> bytes:
+        return name.encode() + b"\0" + typ.encode() + b"\0" + struct.pack("<i", len(payload)) + payload
+
+    header = (struct.pack("<II", 0x01312F76, 2)
+              + attr("channels", "chlist", chlist)
+              + attr("compression", "compression", b"\0")  # NO_COMPRESSION
+              + attr("dataWindow", "box2i", struct.pack("<iiii", 0, 0, width - 1, height - 1))
+              + attr("displayWindow", "box2i", struct.pack("<iiii", 0, 0, width - 1, height - 1))
+              + attr("lineOrder", "lineOrder", b"\0")
+              + attr("pixelAspectRatio", "float", struct.pack("<f", 1.0))
+              + attr("screenWindowCenter", "v2f", struct.pack("<ff", 0.0, 0.0))
+              + attr("screenWindowWidth", "float", struct.pack("<f", 1.0))
+              + b"\0")
+    row_bytes = width * 2 * len(names)
+    first_block = len(header) + 8 * height
+    table = b"".join(struct.pack("<Q", first_block + y * (8 + row_bytes)) for y in range(height))
+    blocks = b"".join(
+        struct.pack("<ii", y, row_bytes)
+        + b"".join(struct.pack(f"<{width}e", *(channels[n](x, y) for x in range(width))) for n in names)
+        for y in range(height))
+    return header + table + blocks
+
+
+def exr_textures(out_dir: Path) -> None:
+    """PROVISIONAL(OpenEXR textures): glTF images that are .exr files, a loader extension that is in
+    neither glTF 2.0 nor 2.1 (docs/gltf_2_1.md). Four quads, left to right:
+
+      base_color   RGBA half, red rises with u, green with v, blue 0.25, alpha 1; as baseColorTexture.
+                   Linear data, so it must not be sampled as sRGB: the colors are exactly these.
+      metal_rough  RGB half, G (roughness) rises 0.05 -> 1 with u, B (metallic) 1; as
+                   metallicRoughnessTexture.
+      occlusion    one channel (Y), a coarse checker of 0 and 1; as occlusionTexture. Loads as R16F.
+      missing      references a file that does not exist: a log line and the magenta fallback.
+
+    Expected in the scene: 4 images, 4 textures; `missing` must not fail the load."""
+    size = 32
+    exr_dir = out_dir / "exr_textures"
+    exr_dir.mkdir(parents=True, exist_ok=True)
+    (exr_dir / "base_color.exr").write_bytes(exr_half(size, size, {
+        "R": lambda x, y: x / (size - 1), "G": lambda x, y: y / (size - 1),
+        "B": lambda x, y: 0.25, "A": lambda x, y: 1.0}))
+    (exr_dir / "metal_rough.exr").write_bytes(exr_half(size, size, {
+        "R": lambda x, y: 0.0, "G": lambda x, y: 0.05 + 0.95 * x / (size - 1), "B": lambda x, y: 1.0}))
+    (exr_dir / "occlusion.exr").write_bytes(exr_half(size, size, {
+        "Y": lambda x, y: float((x // 8 + y // 8) % 2)}))
+
+    m = new_model()
+    uris = ["base_color.exr", "metal_rough.exr", "occlusion.exr", "missing.exr"]
+    m["images"] = [{"name": Path(uri).stem, "mimeType": "image/x-exr", "uri": uri} for uri in uris]
+    m["textures"] = [{"source": i} for i in range(len(uris))]
+    m["materials"] = [
+        {"name": "base_color", "pbrMetallicRoughness": {"baseColorTexture": {"index": 0}, "metallicFactor": 0.0}},
+        {"name": "metal_rough", "pbrMetallicRoughness": {"metallicRoughnessTexture": {"index": 1}}},
+        {"name": "occlusion", "occlusionTexture": {"index": 2}, "pbrMetallicRoughness": {"metallicFactor": 0.0}},
+        {"name": "missing", "pbrMetallicRoughness": {"baseColorTexture": {"index": 3}, "metallicFactor": 0.0}},
+    ]
+    m["meshes"] = [{"name": mat["name"], "primitives": [dict(quad_geometry(m, texcoords=True), material=i)]}
+                   for i, mat in enumerate(m["materials"])]
+    m["nodes"] = [{"name": mat["name"], "mesh": i, "translation": [1.2 * (i - 1.5), 0.0, 0.0]}
+                  for i, mat in enumerate(m["materials"])]
+    single_scene(m, range(len(m["nodes"])))
+    write(out_dir, "exr_textures/exr_textures.gltf", m)
+
+
 def main() -> int:
     if len(sys.argv) != 2:
         print(__doc__.strip().splitlines()[-1], file=sys.stderr)
@@ -769,6 +885,7 @@ def main() -> int:
     external_assets(out_dir)
     versions(out_dir)
     component_types(out_dir)
+    exr_textures(out_dir)
     (out_dir / STAMP).write_text("", encoding="utf-8")
     return 0
 

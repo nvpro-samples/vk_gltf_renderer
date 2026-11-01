@@ -34,6 +34,7 @@
 #include <nvutils/logger.hpp>
 
 #include "gltf_environment_sky.hpp"
+#include "gltf_scene.hpp"
 #include "tinygltf_utils.hpp"
 
 namespace gltf_environment_sky {
@@ -287,10 +288,26 @@ int findSkySunNode(const tinygltf::Model& model)
 {
   for(size_t i = 0; i < model.nodes.size(); ++i)
   {
-    if(hasSkySunMarker(model.nodes[i]))
+    if(hasSkySunMarker(model.nodes[i]) && nodeLightIndex(model.nodes[i]) >= 0)
       return static_cast<int>(i);
   }
   return -1;
+}
+
+//--------------------------------------------------------------------------------------------------
+//
+int findSkySunRenderLight(const tinygltf::Model& model, const std::vector<nvvkgltf::RenderLight>& renderLights)
+{
+  int best = -1;
+  for(size_t i = 0; i < renderLights.size(); ++i)
+  {
+    const int node = renderLights[i].nodeID;
+    if(node < 0 || node >= static_cast<int>(model.nodes.size()) || !hasSkySunMarker(model.nodes[node]))
+      continue;
+    if(best < 0 || node < renderLights[best].nodeID)
+      best = static_cast<int>(i);
+  }
+  return best;
 }
 
 //--------------------------------------------------------------------------------------------------

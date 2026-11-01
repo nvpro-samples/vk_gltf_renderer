@@ -75,6 +75,11 @@ public:
   void setViewImageCallback(std::function<void(int)> cb) { m_onViewImage = std::move(cb); }
   // Resolve a glTF image index to a bounded ImGui thumbnail (0 if none) for the Image inspector.
   void setImageThumbnailCallback(std::function<ImTextureID(int)> cb) { m_getImageThumbnail = std::move(cb); }
+  // Reveal the current selection in the Scene Browser, for the Inspector links that change it the
+  // way a viewport click would (the clicked part of placed content). No-op when unset.
+  void setFocusSelectionCallback(std::function<void()> cb) { m_onFocusSelection = std::move(cb); }
+  // Open the glTF a referenced-asset node points at (the host defers the load).
+  void setOpenSceneCallback(std::function<void(const std::filesystem::path&)> cb) { m_onOpenScene = std::move(cb); }
 
   // Rebuild the cached texture-name list from the current model. Call after the texture set changes
   // outside the inspector (e.g. undo/redo of an import).
@@ -110,8 +115,9 @@ private:
   // "<header>" + the textures satisfying `match`, each a jump link (or "(none)"). Shared by the Image and
   // Sampler inspectors' reverse "used by textures" lists.
   void renderTexturesUsing(const char* header, const std::function<bool(const tinygltf::Texture&)>& match);
-  void renderNodeRelationships(int nodeIdx);  // parent / mesh / camera / light / skin / children as jump links
-  void renderNodeExtensions(int nodeIdx);     // KHR_node_visibility / selectability / hoverability (+ other exts)
+  void renderOpenReferenceButton(int nodeIdx);  // small button opening the glTF this node (or its owner) references
+  void renderNodeRelationships(int nodeIdx);    // parent / mesh / camera / light / skin / children as jump links
+  void renderNodeExtensions(int nodeIdx);       // KHR_node_visibility / selectability / hoverability (+ other exts)
   // One primitive's detail (mode, vertex/triangle counts, attribute->accessor list). Shared by the Mesh
   // inspector (per primitive) and the composite primitive/pick inspector. The material link is not part of
   // this block: callers that want it append their own row (the pick inspector has a full MATERIAL section).
@@ -121,7 +127,9 @@ private:
   // PROPERTY SECTIONS (reusable)
   //==================================================================================================
   void renderTransformSection(int nodeIdx);
-  void renderMaterialSection(int matIdx, bool allowEdit = true);
+  void renderMaterialSection(int matIdx);
+  void renderReferencedMaterialNote(int matIdx);  // glTF 2.1: a material of a referenced file
+  void renderClickedPart(int nodeIdx);            // the placed part a viewport click on this node hit
   void renderMaterialAssignmentToolbar(int meshIdx, int primIdx, int nodeIdx, int matIdx);
 
   // One editable texture slot: name + actions (assign existing / load from file / clear). Returns true
@@ -195,6 +203,18 @@ private:
   UiHostServices                  m_host;
   std::function<void(int)>        m_onViewImage;        // open the large image viewer for an image index
   std::function<ImTextureID(int)> m_getImageThumbnail;  // image index -> ImGui thumbnail (Image inspector)
+  std::function<void()>           m_onFocusSelection;   // reveal the selection in the Scene Browser
+  std::function<void(const std::filesystem::path&)> m_onOpenScene;
+
+  // Transform section: the selected node's subtree bounds (Dimensions), and what they were computed for.
+  struct SubtreeBounds
+  {
+    int           node              = -1;
+    uint64_t      graphRevision     = 0;
+    uint64_t      transformRevision = 0;
+    nvutils::Bbox bounds;
+  };
+  SubtreeBounds m_subtreeBounds;
 
   // Cached texture names (for material dropdowns)
   std::vector<std::string> m_textureNames;

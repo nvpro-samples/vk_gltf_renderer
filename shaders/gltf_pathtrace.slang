@@ -741,7 +741,7 @@ SampleResult samplePixel(IRaytracer raytracer,
   float lum = dot(sampleResult.radiance.xyz, float3(1.0F / 3.0F));
   if(pushConst.fireflyClampThreshold > 0.0F && lum > pushConst.fireflyClampThreshold)
   {
-    sampleResult.radiance *= pushConst.fireflyClampThreshold / lum;
+    sampleResult.radiance.xyz *= pushConst.fireflyClampThreshold / lum;
   }
 
   return sampleResult;

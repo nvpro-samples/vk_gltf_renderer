@@ -26,6 +26,8 @@
 
 #include "tinygltf_converter.hpp"
 
+#include <algorithm>
+
 #include "tinygltf_utils.hpp"
 
 
@@ -186,27 +188,43 @@ void TinyConverter::convert(tinygltf::Model& gltf, const tinyobj::ObjReader& rea
       texBufferView           = (int)gltf.accessors.size() - 1;
     }
 
-    // Create one node/mesh/primitive per shape
+    // One node/mesh per shape, and one primitive per material its faces use (in first-use order):
+    // an OBJ switches material with `usemtl` within a shape.
     for(const auto& shape : reader.GetShapes())
     {
-      uint32_t idxBufferView{0};
-      // Finding the unique vertex index for the shape
-      std::vector<uint32_t> indices;
-      indices.reserve(shape.mesh.indices.size());
-      for(const auto& index : shape.mesh.indices)
+      // Faces are triangles (ObjReaderConfig::triangulate), each with its own material id
+      std::vector<int>                   materialOrder;
+      std::vector<std::vector<uint32_t>> indicesPerMaterial;  // parallel to materialOrder
+      const size_t                       faceCount = shape.mesh.indices.size() / 3;
+      for(size_t f = 0; f < faceCount; f++)
       {
-        const auto v   = getVertex(attrib, index);
-        size_t     idx = vertexToIdx[v];
-        indices.push_back((uint32_t)idx);
+        const int material = f < shape.mesh.material_ids.size() ? std::max(0, shape.mesh.material_ids[f]) : 0;
+        auto      it       = std::find(materialOrder.begin(), materialOrder.end(), material);
+        if(it == materialOrder.end())
+        {
+          materialOrder.push_back(material);
+          indicesPerMaterial.emplace_back();
+          it = materialOrder.end() - 1;
+        }
+        auto& indices = indicesPerMaterial[it - materialOrder.begin()];
+        for(size_t c = 0; c < 3; c++)
+          indices.push_back(static_cast<uint32_t>(vertexToIdx[getVertex(attrib, shape.mesh.indices[3 * f + c])]));
       }
 
-      // Appending the index data to the glTF buffer
-      auto& tBuffer = gltf.buffers.back();
-      olIdx.offset  = static_cast<uint32_t>(tBuffer.data.size());
-      olIdx.len     = appendData(tBuffer, indices);
+      // Adding a glTF mesh
+      tinygltf::Mesh mesh;
+      mesh.name = shape.name;
 
-      // Adding a Buffer View (INDICES)
+      for(size_t m = 0; m < materialOrder.size(); m++)
       {
+        const std::vector<uint32_t>& indices = indicesPerMaterial[m];
+
+        // Appending the index data to the glTF buffer
+        auto& tBuffer = gltf.buffers.back();
+        olIdx.offset  = static_cast<uint32_t>(tBuffer.data.size());
+        olIdx.len     = appendData(tBuffer, indices);
+
+        // Adding a Buffer View (INDICES)
         gltf.bufferViews.emplace_back();
         auto& tBufferView      = gltf.bufferViews.back();
         tBufferView.buffer     = 0;
@@ -222,31 +240,21 @@ void TinyConverter::convert(tinygltf::Model& gltf, const tinyobj::ObjReader& rea
         tAccessor.componentType = TINYGLTF_COMPONENT_TYPE_UNSIGNED_INT;
         tAccessor.count         = indices.size();
         tAccessor.type          = TINYGLTF_TYPE_SCALAR;
-        idxBufferView           = static_cast<int>(gltf.accessors.size() - 1);
+
+        auto& tPrim    = mesh.primitives.emplace_back();
+        tPrim.mode     = TINYGLTF_MODE_TRIANGLES;
+        tPrim.material = materialOrder[m];
+
+        // Setting all buffer views
+        tPrim.indices                = static_cast<int>(gltf.accessors.size() - 1);
+        tPrim.attributes["POSITION"] = posBufferView;
+        if(nrmBufferView >= 0)
+          tPrim.attributes["NORMAL"] = nrmBufferView;
+        if(texBufferView >= 0)
+          tPrim.attributes["TEXCOORD_0"] = texBufferView;
       }
-
-
-      // Adding a glTF mesh
-      tinygltf::Mesh mesh;
-      mesh.name = shape.name;
-
-      // One primitive under the mesh
-      mesh.primitives.emplace_back();
-      auto& tPrim = mesh.primitives.back();
-      tPrim.mode  = TINYGLTF_MODE_TRIANGLES;
-
-      // Material reference
-      // #TODO - We assume all primitives have the same material
-      tPrim.material = shape.mesh.material_ids.empty() ? 0 : shape.mesh.material_ids[0];
-      tPrim.material = std::max(0, tPrim.material);
-
-      // Setting all buffer views
-      tPrim.indices                = idxBufferView;
-      tPrim.attributes["POSITION"] = posBufferView;
-      if(nrmBufferView >= 0)
-        tPrim.attributes["NORMAL"] = nrmBufferView;
-      if(texBufferView >= 0)
-        tPrim.attributes["TEXCOORD_0"] = texBufferView;
+      if(mesh.primitives.empty())
+        continue;
 
       // Adding the mesh
       gltf.meshes.emplace_back(mesh);
@@ -303,20 +311,46 @@ void TinyConverter::convertMaterial(tinygltf::Model& gltf, const tinyobj::materi
   occlusionTexture.index = convertTexture(gltf, mat.ambient_texname);
 
 
+  // Roughness: the PBR extension's Pr when present, otherwise derived from the Phong exponent Ns.
+  // Blinn-Phong exponent n matches a microfacet alpha of sqrt(2 / (n + 2)), and glTF roughness is sqrt(alpha).
+  // tinyobjloader does not record whether Pr was written (it defaults to 0), so an explicit `Pr 0` reads
+  // as absent and falls back to Ns. map_Pr alone does not count: that texture is not converted yet.
+  // Ks is a Phong specular color, not metalness: metallic stays at the PBR extension's Pm (0 by default).
+  const bool  hasPbrRoughness = mat.roughness > 0.0f;
+  const float phongRoughness  = std::sqrt(std::sqrt(2.0f / (std::max(mat.shininess, 0.0f) + 2.0f)));
+
   tinygltf::Material gMat;
   gMat.name                                 = mat.name;
   gMat.emissiveFactor                       = {mat.emission[0], mat.emission[1], mat.emission[2]};
-  gMat.pbrMetallicRoughness.baseColorFactor = {mat.diffuse[0], mat.diffuse[1], mat.diffuse[2], 1};
-  gMat.pbrMetallicRoughness.metallicFactor  = (mat.specular[0] + mat.specular[1] + mat.specular[2]) / 3.0f;
-  gMat.pbrMetallicRoughness.roughnessFactor = mat.shininess;
+  gMat.pbrMetallicRoughness.baseColorFactor = {mat.diffuse[0], mat.diffuse[1], mat.diffuse[2], mat.dissolve};
+  gMat.pbrMetallicRoughness.metallicFactor  = mat.metallic;
+  gMat.pbrMetallicRoughness.roughnessFactor = hasPbrRoughness ? mat.roughness : phongRoughness;
+  if(mat.dissolve < 1.0f)
+    gMat.alphaMode = "BLEND";
 
-  gMat.doubleSided                                   = false;
+  // OBJ has no notion of facing: thin sheets (curtains, planes) are meant to be seen from both sides
+  gMat.doubleSided                                   = true;
   gMat.normalTexture                                 = std::move(normalTexture);
   gMat.occlusionTexture                              = std::move(occlusionTexture);
   gMat.emissiveTexture                               = std::move(emissiveTexture);
   gMat.pbrMetallicRoughness.baseColorTexture         = std::move(baseColorTexture);
   gMat.pbrMetallicRoughness.metallicRoughnessTexture = std::move(metallicRoughnessTexture);
 
+  // Tf (transmission filter): light passing through a thin surface such as a curtain or a lampshade.
+  // Its strength becomes the diffuse transmission factor and its hue the color. Exporters (3ds Max
+  // among them) write a white Tf on every material: an untinted filter, not a translucent surface,
+  // so white counts only on the transparent illumination models (4, 6, 7, 9).
+  const glm::vec3 transmittance    = {mat.transmittance[0], mat.transmittance[1], mat.transmittance[2]};
+  const float     maxTransmit      = std::max({transmittance.x, transmittance.y, transmittance.z});
+  const bool      transparentIllum = mat.illum == 4 || mat.illum == 6 || mat.illum == 7 || mat.illum == 9;
+  const bool      whiteFilter      = transmittance == glm::vec3(1.0f);
+  if(maxTransmit > 0.0f && (transparentIllum || !whiteFilter))
+  {
+    KHR_materials_diffuse_transmission diffuseTransmission;
+    diffuseTransmission.diffuseTransmissionFactor      = std::min(maxTransmit, 1.0f);
+    diffuseTransmission.diffuseTransmissionColorFactor = transmittance / maxTransmit;
+    tinygltf::utils::setDiffuseTransmission(gMat, diffuseTransmission);
+  }
 
   gltf.materials.emplace_back(gMat);
 }

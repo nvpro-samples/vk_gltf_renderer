@@ -37,8 +37,9 @@ struct LoadedImageData
 };
 
 // Decodes raw image bytes into LoadedImageData. Dispatches by magic bytes:
-// DDS, KTX (1/2), WebP, or falls back to stb_image (PNG, JPEG, etc.).
-// srgb: when true, format may be forced to an sRGB variant where applicable.
+// DDS, KTX (1/2), WebP, OpenEXR, or falls back to stb_image (PNG, JPEG, etc.).
+// srgb: when true, format may be forced to an sRGB variant where applicable. OpenEXR is always
+// linear float (R16F or RGBA16F), so it ignores the flag.
 // imageIDForLog: used only for log messages (e.g. "image 3").
 // Returns true if decoding succeeded and out is filled; false on failure or unsupported format.
 [[nodiscard]] bool loadFromMemory(LoadedImageData& out, const void* data, size_t byteLength, bool srgb, uint64_t imageIDForLog = 0);

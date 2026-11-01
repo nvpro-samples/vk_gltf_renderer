@@ -121,6 +121,7 @@ public:
   void createSceneFromDescriptor(const std::filesystem::path& descriptorPath);
   void createHDR(const std::filesystem::path& hdrFilename);
   void onMergeScene(const std::filesystem::path& filename);
+  void replaceSceneAsync(const std::filesystem::path& filename);
   void onReferenceScene(const std::filesystem::path& filename);
   // Shared worker for merge (embed) and reference (glTF 2.1 external asset) imports.
   void addSceneFromFile(const std::filesystem::path& filename, bool asReference);
@@ -132,6 +133,7 @@ public:
   void                                        setDlssHardwareAvailability(bool rrAvailable, bool srAvailable);
   void                                        setSerAvailable(bool available);
   void                                        setBackgroundOptimalShader(bool enable);
+  void                                        setCompileInline(bool enable);
   void                                        setDeviceExtensions(std::vector<std::string> extensions);
   void                                        setOpacityMicromapAvailable(bool hardware, bool enabled);
 #ifdef USE_AGENTIC
@@ -381,10 +383,12 @@ private:
   void finalizeSceneSetup(const std::filesystem::path& filename);  // Shared GPU build + UI wiring after a load
   void wireSceneToUi();                                            // Wire current scene into browser/inspector panels
   void buildAccelerationStructures();                              // Helper for BLAS/TLAS building
+  void enqueueCompactedBlasPass();                                 // Static scenes: one BLAS pass, compacted, then the next
+  void enqueueTopLevelAccelerationStructure();                     // Last load work: the TLAS, then staging release
   void destroyResources();
   void resetFrame();
   void selectSceneNodeFromScript(int nodeIndex);  // Script-driven selection (Inspector/Scene Browser)
-  // Script-driven *ray-pick* selection (`pickrendernode`): selects the given glTF node's
+  // Script-driven *ray-pick* selection (--pickNode, `pickrendernode`): selects the given glTF node's
   // first render primitive the same way a real 3D-viewport click would - unlike
   // selectSceneNodeFromScript() above, this supplies finite (camera-eye/node-position) selectionPoint/
   // selectionRayOrigin values, so KHR_interactivity event/onSelect's ray-info output sockets can be
@@ -632,6 +636,7 @@ private:
   EnvironmentState      m_environmentSky;            // Sky the loaded scene authors, preserved verbatim for save
   bool                  m_environmentSkyPending{false};  // Authored sky parsed but not yet pushed to settings
   std::filesystem::path m_pendingLoadSkyPreset;          // Start-up --loadSkyPreset, applied at the frame top
+  std::filesystem::path m_pendingOpenScene;              // Scene-graph "open referenced glTF", loaded at the frame top
   std::filesystem::path m_pendingSaveSkyPreset;          // Start-up --saveSkyPreset, written after the load
 
   // Undo/Redo
