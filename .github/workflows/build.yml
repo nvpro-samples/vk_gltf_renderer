@@ -180,9 +180,17 @@ jobs:
           -DSHADER_DEBUG_LEVEL=0
           -DRELEASE_VERSION="${{ steps.version.outputs.release_version }}"
 
-      - name: Build
+      - name: Build (Windows)
+        if: runner.os == 'Windows'
         working-directory: vk_gltf_renderer
         run: cmake --build build --config Release --parallel
+
+      # Unlimited --parallel runs 4 jobs on the 4-vCPU runner, and the last, largest translation units
+      # got the build killed (SIGTERM, exit 143, no compile error) on v2026.11.1: capped at 2.
+      - name: Build (Linux)
+        if: runner.os == 'Linux'
+        working-directory: vk_gltf_renderer
+        run: cmake --build build --config Release --parallel 2
 
       # CMake's install(TARGETS ... RUNTIME_DEPENDENCIES) resolves every shared
       # library the binary links against. libcuda.so.1 and libnvidia-ml.so.1
