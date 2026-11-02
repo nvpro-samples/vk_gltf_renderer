@@ -950,7 +950,7 @@ void processPixel(IRaytracer raytracer, float2 samplePos, float2 imageSize)
 // clear air. From a camera inside a fog, the path would take the fog's far wall for its near one:
 // no fog in front of the camera, and fog behind the wall. So once per accumulation of a scene with a
 // KHR_materials_volume material, the host runs the path tracer's own pipeline with
-// ePtProbeCameraMedium, and one thread follows the center camera ray to the nearest surface that
+// ePtProbeCameraMedium (a picked material, CameraMediumMode::eOn, skips the ray: see below), and one thread follows the center camera ray to the nearest surface that
 // bounds a medium: met from behind, the camera is inside it. Other surfaces are passed through, so
 // an object between the camera and the wall does not hide it. A path is in one medium at a time, so
 // the nearest boundary is the only one that counts. Depth of field moves the origin within the
@@ -968,8 +968,25 @@ void probeCameraMedium(IRaytracer raytracer)
   CameraMedium result = {};
 
 #if GLTF_USE_VOLUME
-  GltfShadeMaterial*   materials       = pushConst.gltfScene->materials;
-  GltfTextureInfo*     texInfos        = pushConst.gltfScene->textureInfos;
+  GltfShadeMaterial* materials = pushConst.gltfScene->materials;
+  GltfTextureInfo*   texInfos  = pushConst.gltfScene->textureInfos;
+
+  // The user says which medium the camera is in (CameraMediumMode::eOn): no ray to follow, the
+  // medium is the picked material's, as makeVolumeMedium reads it at the texture origin.
+  if(pushConst.cameraMediumMaterial >= 0)
+  {
+    const float2 uv[2] = { float2(0), float2(0) };
+    MeshState    mesh  = MeshState(float3(0, 0, 1), float3(1, 0, 0), float3(0, 1, 0), float3(0, 0, 1), uv, true, 0.0F);
+    PbrMaterial mat = evaluateMaterial(pushConst.cameraMediumMaterial, mesh, allImages, allSamplers, texInfos, materials);
+    const VolumeMedium medium = makeVolumeMedium(mat);
+    result.inside             = 1;
+    result.absorption         = float3(medium.absorption);
+    result.scattering         = float3(medium.scatterCoefficient);
+    result.anisotropy         = float(medium.scatterAnisotropy);
+    *pushConst.cameraMedium   = result;
+    return;
+  }
+
   GltfRenderNode*      renderNodes     = pushConst.gltfScene->renderNodes;
   GltfRenderPrimitive* renderPrimitive = pushConst.gltfScene->renderPrimitives;
 
@@ -1009,7 +1026,7 @@ void probeCameraMedium(IRaytracer raytracer)
     {
       if(!hit.frontFace)
       {
-        MeshState mesh          = MeshState(hit.nrm, hit.tangent, hit.bitangent, hit.geonrm, hit.uv, !hit.frontFace, 0.0F);
+        MeshState mesh = MeshState(hit.nrm, hit.tangent, hit.bitangent, hit.geonrm, hit.uv, !hit.frontFace, 0.0F);
         mesh.baseColorVertexMul = hit.color;
         PbrMaterial mat = evaluateMaterial(max(0, node.materialID), mesh, allImages, allSamplers, texInfos, materials);
 

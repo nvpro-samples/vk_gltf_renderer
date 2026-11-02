@@ -77,14 +77,15 @@ enum class DisplayBuffer
   eAgenticBeautified,  // External image-to-image result from the agentic bridge
 };
 
-// Whether the path tracer looks for a medium the camera starts in (PathTracer::probeCameraMedium).
+// Which medium the camera starts in (PathTracer::probeCameraMedium).
 // The probe follows the centre camera ray and trusts triangle winding, so an asset whose volume
-// surfaces are wound inward can make it put the camera inside an opaque medium; Off is the way out.
+// surfaces are wound inward can make it put the camera inside an opaque medium, and a ray that
+// meets no volume wall (looking up from under water) finds none. On and Off take the guess away.
 enum class CameraMediumMode
 {
   eAuto,  // Probe when the scene has a KHR_materials_volume material (default)
-  eOn,    // Probe whenever the scene has a volume, whatever Auto learns to skip
-  eOff,   // Never probe: every camera path starts in clear air
+  eOn,    // The camera is in the volume material the user picked (cameraMediumMaterial); no probe
+  eOff,   // The camera is in no medium: every camera path starts in clear air
 };
 
 enum DirtyFlags
@@ -302,6 +303,7 @@ struct Settings
   // enabled, reducing shader size and register usage at the cost of a recompile per scene change.
   bool             optimalShader = true;
   CameraMediumMode cameraMedium  = CameraMediumMode::eAuto;  // See CameraMediumMode
+  int cameraMediumMaterial = -1;  // CameraMediumMode::eOn: material index of the medium; -1 or not a volume: the first one
   // Build the optimized shader in the background while the all-features one renders (set at startup).
   // Off for headless, scripted and benchmark runs, so they render and time only the shader they ask for.
   bool backgroundOptimalShader = true;
@@ -504,6 +506,27 @@ struct Resources
   // updated via recomputeSceneFeatures() on scene/material/denoiser changes.
   nvvkgltf::SceneFeatureSet              currentFeatureSet{};
   std::vector<nvvkgltf::SceneFeatureSet> materialFeatures;  // per material, unpromoted (recomputeSceneFeatures)
+  int firstVolumeMaterial = -1;  // First KHR_materials_volume material, -1 if none (recomputeSceneFeatures)
+
+  // The material CameraMediumMode::eOn puts the camera in: the pick if it is a volume material, else the
+  // first one; -1 when the scene has none. Constant time, it runs every frame.
+  int cameraMediumMaterial(int picked) const
+  {
+    const bool pickedIsVolume = picked >= 0 && picked < static_cast<int>(materialFeatures.size())
+                                && materialFeatures[picked].has(nvvkgltf::SceneFeatureSet::eVolume);
+    return pickedIsVolume ? picked : firstVolumeMaterial;
+  }
+
+  // Every volume material, for the picker. A pass over all materials: call it when the picker opens,
+  // not per frame.
+  std::vector<int> volumeMaterials() const
+  {
+    std::vector<int> indices;
+    for(size_t i = 0; i < materialFeatures.size(); ++i)
+      if(materialFeatures[i].has(nvvkgltf::SceneFeatureSet::eVolume))
+        indices.push_back(static_cast<int>(i));
+    return indices;
+  }
 
   // Update currentFeatureSet from the scene. Returns true if changed. With `dirtyMaterials`, only those
   // materials are re-detected (a live material edit on a scene of 100k+ materials); the others keep
@@ -526,12 +549,21 @@ struct Resources
           if(i >= 0 && i < static_cast<int>(materials.size()))
             materialFeatures[i] = nvvkgltf::detectMaterialFeatures(materials[i]);
       }
+      // The pass over every material is already here; the first volume one costs nothing more
+      firstVolumeMaterial = -1;
       for(size_t i = 0; i < materialFeatures.size(); ++i)
+      {
         newSet.merge(materialFeatures[i]);
+        if(firstVolumeMaterial < 0 && materialFeatures[i].has(nvvkgltf::SceneFeatureSet::eVolume))
+          firstVolumeMaterial = static_cast<int>(i);
+      }
       newSet.promote();
     }
     else
+    {
       materialFeatures.clear();
+      firstVolumeMaterial = -1;
+    }
     newSet.set(nvvkgltf::SceneFeatureSet::eDlssGuide, dlssGuideActive);
     const bool changed = (newSet != currentFeatureSet);
     currentFeatureSet  = newSet;

@@ -414,14 +414,67 @@ bool PathTracer::onUIRender(Resources& resources)
     const char* cameraMediumModes[] = {"Auto", "On", "Off"};
     int         cameraMediumMode    = static_cast<int>(resources.settings.cameraMedium);
     if(PE::Combo("Camera Medium", &cameraMediumMode, cameraMediumModes, IM_ARRAYSIZE(cameraMediumModes), -1,
-                 "Whether the camera starts inside a KHR_materials_volume medium (fog, tinted glass), found by following\n"
-                 "the centre camera ray to the nearest volume surface hit from behind.\n"
-                 "Auto / On: look for it. Off: the camera always starts in clear air.\n"
+                 "The KHR_materials_volume medium (fog, water, tinted glass) the camera starts in.\n"
+                 "Auto: found by following the centre camera ray to the nearest volume surface hit from behind.\n"
+                 "On: the camera is in the volume material picked below, whatever the ray meets.\n"
+                 "Off: the camera is in clear air.\n"
                  "Turn it off if the scene renders black when a volume surface (e.g. a windshield) is at the\n"
-                 "centre of the view: the asset's winding makes it look like the camera is inside it."))
+                 "centre of the view: the asset's winding makes it look like the camera is inside it.\n"
+                 "Turn it on when Auto cannot tell, e.g. under water looking up at the sky."))
     {
       resources.settings.cameraMedium = static_cast<CameraMediumMode>(cameraMediumMode);
       changed                         = true;
+    }
+    if(resources.settings.cameraMedium == CameraMediumMode::eOn)
+    {
+      // The picked material, or the first volume one: constant time, this runs every frame
+      const int picked = resources.cameraMediumMaterial(resources.settings.cameraMediumMaterial);
+      if(picked < 0)
+      {
+        PE::entry("Medium", [] {
+          ImGui::TextDisabled("No KHR_materials_volume material in the scene");
+          return false;
+        });
+      }
+      else
+      {
+        const auto label = [&](int index) {
+          const std::string& name = resources.getScene()->getModel().materials[index].name;
+          return fmt::format("{}: {}", index, name.empty() ? "(unnamed)" : name);
+        };
+        changed |= PE::entry(
+            "Medium",
+            [&] {
+              bool changedPick = false;
+              ImGui::SetNextItemWidth(-FLT_MIN);
+              if(ImGui::BeginCombo("##CameraMedium", label(picked).c_str()))
+              {
+                // A scene can have 500k materials: list the volume ones once per opening, and name only
+                // the rows in view
+                if(ImGui::IsWindowAppearing() || m_volumeMaterialList.empty())
+                  m_volumeMaterialList = resources.volumeMaterials();
+                ImGuiListClipper clipper;
+                clipper.Begin(static_cast<int>(m_volumeMaterialList.size()));
+                while(clipper.Step())
+                {
+                  for(int row = clipper.DisplayStart; row < clipper.DisplayEnd; row++)
+                  {
+                    const int index = m_volumeMaterialList[row];
+                    if(ImGui::Selectable(label(index).c_str(), index == picked))
+                    {
+                      resources.settings.cameraMediumMaterial = index;
+                      changedPick                             = true;
+                    }
+                  }
+                }
+                ImGui::EndCombo();
+              }
+              else
+                m_volumeMaterialList.clear();
+              return changedPick;
+            },
+            "The volume material the camera is in (the absorption and scattering of that material).");
+      }
     }
     PE::end();
   }
@@ -2405,10 +2458,20 @@ shaderio::PathtracePushConstant PathTracer::setupPushConstant(VkCommandBuffer cm
   m_pushConst.mouseCoord   = nvapp::ElementDbgPrintf::getMouseCoord();  // Use for debugging: printf in shader
   // Only a scene with a KHR_materials_volume material has a medium the camera can be in, and the
   // user may rule the probe out (see CameraMediumMode)
-  m_pushConst.cameraMedium = (resources.settings.cameraMedium != CameraMediumMode::eOff
-                              && resources.currentFeatureSet.has(nvvkgltf::SceneFeatureSet::eVolume)) ?
-                                 (shaderio::CameraMedium*)m_cameraMediumBuffer.address :
-                                 nullptr;
+  // On names the medium, so it needs a volume material to name
+  m_pushConst.cameraMedium         = nullptr;
+  m_pushConst.cameraMediumMaterial = -1;
+  if(resources.settings.cameraMedium != CameraMediumMode::eOff && resources.currentFeatureSet.has(nvvkgltf::SceneFeatureSet::eVolume))
+  {
+    bool findMedium = true;
+    if(resources.settings.cameraMedium == CameraMediumMode::eOn)
+    {
+      m_pushConst.cameraMediumMaterial = resources.cameraMediumMaterial(resources.settings.cameraMediumMaterial);
+      findMedium                       = m_pushConst.cameraMediumMaterial >= 0;
+    }
+    if(findMedium)
+      m_pushConst.cameraMedium = (shaderio::CameraMedium*)m_cameraMediumBuffer.address;
+  }
 
   // #DLSS instance motion vectors: previous-frame render-node transforms (snapshotted at frame start
   // in GltfRenderer::onRender, only on frames where transforms actually changed). Bound only when DLSS

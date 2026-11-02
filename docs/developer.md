@@ -439,7 +439,10 @@ Some things about the transport are worth knowing before touching it:
   records that medium for `pathTrace()` to start in. Without it, a camera inside a fog sees no fog
   in front of it and fog behind the far wall. The probe trusts triangle winding, so an asset whose
   volume surfaces are wound inward (a windshield at the center of the view, say) makes it put the
-  camera inside that medium; the `ptCameraMedium` setting (Auto / On / Off) switches it off.
+  camera inside that medium. The `ptCameraMedium` setting overrides the guess: Off starts every camera path
+  in clear air; On skips the ray and starts them in the volume material the user picked
+  (`ptCameraMediumMaterial`), which is what a camera under water needs when the center ray meets no
+  volume wall (looking up at the sky) or meets another volume's front face first.
 
 The rasterizer cannot trace inside a medium, so `evaluateMaterial()` compiles only the thin-walled
 branch for `RASTER_PIPELINE` — the approximation the scatter spec explicitly permits for renderers

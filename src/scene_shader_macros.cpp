@@ -82,7 +82,7 @@ void appendPathTracerDlssShaderMacro(std::vector<std::pair<std::string, std::str
   //                      with OptiX or OIDN also on, frame 0 only). Its guide writes still follow the
   //                      per-frame ePtUseDlss flag, off while DLSS is loading.
 #if defined(USE_DLSS) || defined(USE_OPTIX_DENOISER) || defined(USE_OIDN_DENOISER)
-  const bool useGuideShader = guideActive;
+  const bool useGuideShader = guideActive || dlssActive;  // DLSS's captures live inside the guide structs
 #else
   const bool useGuideShader = false;
 #endif

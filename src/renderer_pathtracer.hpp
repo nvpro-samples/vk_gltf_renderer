@@ -135,6 +135,7 @@ public:
   bool               m_depthCopyable{true};  // The depth format is 32-bit float, so the staged depth can be copied in
   nvvk::RenderTarget m_depthStaging;         // R32_SFLOAT, G-buffer size
   nvvk::Buffer       m_depthCopyBuffer;      // Bridge for the color -> depth copy (no direct image copy between them)
+  std::vector<int>   m_volumeMaterialList;   // Camera Medium picker: the volume materials, listed while it is open
   nvvk::Buffer       m_cameraMediumBuffer;   // shaderio::CameraMedium: the medium camera paths start in
   bool               m_useSER{true};         // Requested SER state; clamped to m_supportSER each frame.
   bool m_shadowTransmission{true};  // Shadow rays pass through transmissive surfaces (biased; see ePtShadowTransmission).
@@ -200,18 +201,18 @@ public:
   //   updateOptimalFallback()).
   std::optional<VariantKey> siblingVariant(const VariantKey& key) const;
   void                      prefetchSiblingVariant(Resources& resources);  // On the compile worker.
-  void startPrefetch(Resources& resources, const std::vector<VariantKey>& keys);
-  void runPrefetch(Resources& resources, RenderTechnique technique);  // The prefetch thread.
-  void buildPrefetchPipeline(Resources& resources, RenderTechnique technique, VariantCacheEntry& entry) const;
-  void updateOptimalFallback(Resources& resources);
+  void                      startPrefetch(Resources& resources, const std::vector<VariantKey>& keys);
+  void                      runPrefetch(Resources& resources, RenderTechnique technique);  // The prefetch thread.
+  void       buildPrefetchPipeline(Resources& resources, RenderTechnique technique, VariantCacheEntry& entry) const;
+  void       updateOptimalFallback(Resources& resources);
   VariantKey wantedVariantKey(const Resources& resources) const;  // makeVariantKey() without the optimal fallback.
   std::vector<VariantCacheEntry> m_prefetch;  // Owned by m_prefetchThread until finishPrefetch() joins it.
-  std::vector<VariantKey> m_prefetchFailed;   // Prefetched variants whose Slang compile failed. Guarded by m_compileMutex.
-  std::thread             m_prefetchThread;
-  std::atomic<bool>       m_prefetchDone{false};     // m_prefetchThread is done, so joining it does not block.
-  std::mutex              m_prefetchMutex;           // Serializes starting and finishing a prefetch.
-  std::atomic<bool>       m_optimalFallback{false};  // The optimized variant is not built yet: render the all-features one.
-  std::atomic<bool>       m_optimalFailed{false};    // The optimized variant failed to compile (retried on a shader reload).
+  std::vector<VariantKey> m_prefetchFailed;  // Prefetched variants whose Slang compile failed. Guarded by m_compileMutex.
+  std::thread       m_prefetchThread;
+  std::atomic<bool> m_prefetchDone{false};     // m_prefetchThread is done, so joining it does not block.
+  std::mutex        m_prefetchMutex;           // Serializes starting and finishing a prefetch.
+  std::atomic<bool> m_optimalFallback{false};  // The optimized variant is not built yet: render the all-features one.
+  std::atomic<bool> m_optimalFailed{false};    // The optimized variant failed to compile (retried on a shader reload).
 
   BusyWindow* m_busyWindow{nullptr};  // Modal shown during async shader/pipeline compile.
   std::mutex  m_compileMutex;         // Guards compile metadata and live pipeline handles.
@@ -231,10 +232,10 @@ public:
     int            dlssTransparency = 0;      // USE_DLSS_TRANSP specialization constant (Dlss::TransparencyMode)
     const char*    label            = "";     // Log prefix, e.g. "RTX (prefetch)"
   };
-  VkPipeline buildRqPipeline(const PipelineBuildInfo& info) const;
-  RtxBuild   buildRtxPipeline(Resources& resources, const PipelineBuildInfo& info) const;
-  int  currentDlssTransparency() const;  // The DLSS transparency mode the pipelines are specialized with.
-  bool compileSpirv(Resources& resources, const VariantKey& key);  // gltf_pathtrace.slang for `key`.
+  VkPipeline     buildRqPipeline(const PipelineBuildInfo& info) const;
+  RtxBuild       buildRtxPipeline(Resources& resources, const PipelineBuildInfo& info) const;
+  int            currentDlssTransparency() const;  // The DLSS transparency mode the pipelines are specialized with.
+  bool           compileSpirv(Resources& resources, const VariantKey& key);  // gltf_pathtrace.slang for `key`.
   VkShaderModule createShaderModule(const void* code, size_t codeSize) const;
 
   // The default rendering technique

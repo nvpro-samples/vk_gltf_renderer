@@ -297,18 +297,20 @@ struct CameraMedium
 // Push constant
 struct PathtracePushConstant
 {
-  int             maxDepth              = 5;       // Maximum depth of the ray
-  int             frameCount            = 0;       // Frame number
-  float           fireflyClampThreshold = 10.f;    // Firefly clamp threshold
-  float           texGradScale          = 0.f;     // Ray-footprint gradient scale
-  int             numSamples            = 1;       // Number of samples per pixel per frame
-  int             totalSamples          = 0;       // Total samples accumulated so far
-  float           focalDistance         = 0.0f;    // Focal distance for depth of field
-  float           aperture              = 0.0f;    // Aperture for depth of field
-  int             flags                 = 0;       // Bit flags: see PathtracerFlags
-  float           pixelAngle            = 0.0f;    // Angular size of one pixel (radians) for ray-cone footprint LOD
-  int             seed                  = 0;       // Random sequence: another value gives independent noise
-  int             guideSamples          = 0;       // Samples in the denoiser guides (0: replace them)
+  int             maxDepth              = 5;     // Maximum depth of the ray
+  int             frameCount            = 0;     // Frame number
+  float           fireflyClampThreshold = 10.f;  // Firefly clamp threshold
+  float           texGradScale          = 0.f;   // Ray-footprint gradient scale
+  int             numSamples            = 1;     // Number of samples per pixel per frame
+  int             totalSamples          = 0;     // Total samples accumulated so far
+  float           focalDistance         = 0.0f;  // Focal distance for depth of field
+  float           aperture              = 0.0f;  // Aperture for depth of field
+  int             flags                 = 0;     // Bit flags: see PathtracerFlags
+  float           pixelAngle            = 0.0f;  // Angular size of one pixel (radians) for ray-cone footprint LOD
+  int             seed                  = 0;     // Random sequence: another value gives independent noise
+  int             guideSamples          = 0;     // Samples in the denoiser guides (0: replace them)
+  int             cameraMediumMaterial  = -1;  // Camera medium probe: the volume material the user picked, -1 to probe
+  int             pad0                  = 0;   // Keeps the float2 below 8-byte aligned
   float2          mouseCoord            = {0, 0};  // Mouse coordinates (use for debug)
   uint2           renderSize = {0, 0};          // Traced region: smaller than the output images under OptiX 2x upscale
   SceneFrameInfo* frameInfo;                    // Camera info (incl. SceneFrameInfo::jitter when DLSS is active)

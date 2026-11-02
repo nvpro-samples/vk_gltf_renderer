@@ -213,11 +213,18 @@ GltfRenderer::GltfRenderer(nvutils::ParameterRegistry* paramReg, const nvutils::
                  &m_resources.settings.optimalShader, Persist::eYes);
   // The probe runs once per accumulation, so a change has to start a new one
   m_settings.add({.name = "ptCameraMedium",
-                  .help = "PathTracer: Find the volume medium the camera starts in [Auto:0, On:1, Off:2]. Off for assets "
-                          "whose volume surfaces are wound inward (the camera lands inside an opaque medium and the "
-                          "scene renders black)",
+                  .help = "PathTracer: The medium the camera starts in [Auto:0, On:1, Off:2]. Auto finds it with a "
+                          "probe ray; On puts the camera in the volume material of ptCameraMediumMaterial; Off in clear "
+                          "air (for assets whose volume surfaces are wound inward, which land the camera inside an "
+                          "opaque medium and render the scene black)",
                   .callbackSuccess = [this](const nvutils::ParameterBase* const) { resetFrame(); }},
                  (int*)&m_resources.settings.cameraMedium, Persist::eYes, 0, 2);
+  m_settings.add({.name = "ptCameraMediumMaterial",
+                  .help = "PathTracer: With ptCameraMedium On, the material index of the volume the camera is in "
+                          "(-1: the scene's first volume material). A material index belongs to one scene, so it is "
+                          "not persisted",
+                  .callbackSuccess = [this](const nvutils::ParameterBase* const) { resetFrame(); }},
+                 &m_resources.settings.cameraMediumMaterial, Persist::eNo, -1, INT_MAX);
   m_settings.add({"useSolidBackground", "Use solid color background"}, &m_resources.settings.useSolidBackground, Persist::eYes, true);
   m_settings.addVector({"solidBackgroundColor", "Solid Background Color"}, &m_resources.settings.solidBackgroundColor, Persist::eYes);
   // Bounds mirror the "Max Samples" slider in PathTracer::onUIRender.
