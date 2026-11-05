@@ -1,0 +1,35 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 960 610" font-family="Segoe UI, Arial, sans-serif" font-size="14">
+  <defs>
+    <marker id="o" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse"><path d="M0 0 L10 5 L0 10 z" fill="#d9822b"/></marker>
+    <marker id="b" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse"><path d="M0 0 L10 5 L0 10 z" fill="#2b6fd9"/></marker>
+    <marker id="g" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse"><path d="M0 0 L10 5 L0 10 z" fill="#555"/></marker>
+  </defs>
+  <rect width="960" height="610" fill="#ffffff"/>
+  <text x="20" y="28" font-size="18" font-weight="bold" fill="#222">What a photon is: from the emitter to the receiver</text>
+  <circle cx="110" cy="110" r="12" fill="#ffd54a" stroke="#c9a200"/>
+  <text x="110" y="92" fill="#222" font-size="13" text-anchor="middle">emitter</text>
+  <circle cx="430" cy="250" r="50" fill="#cfe8ff" fill-opacity="0.7" stroke="#4a90c8" stroke-width="2"/>
+  <text x="430" y="255" fill="#235" font-size="13" text-anchor="middle">caster</text>
+  <rect x="20" y="400" width="920" height="10" fill="#bbb"/>
+  <text x="26" y="428" fill="#555" font-size="13" text-anchor="start">receiver</text>
+  <rect x="820" y="120" width="70" height="30" rx="6" fill="#e8e8e8" stroke="#666"/>
+  <text x="855.0" y="140.0" fill="#222" font-size="13" text-anchor="middle">camera</text>
+  <path d="M122 118 L395 222" stroke="#d9822b" stroke-width="2" fill="none" marker-end="url(#o)"/>
+  <path d="M395 222 L470 288 L585 398" stroke="#d9822b" stroke-width="2" fill="none" marker-end="url(#o)"/>
+  <circle cx="585" cy="400" r="6" fill="#d9822b"/>
+  <circle cx="150" cy="128" r="11" fill="#d9822b"/>
+  <text x="150" y="133" fill="#fff" font-size="13" font-weight="bold" text-anchor="middle">1</text>
+  <circle cx="280" cy="190" r="11" fill="#d9822b"/>
+  <text x="280" y="195" fill="#fff" font-size="13" font-weight="bold" text-anchor="middle">2</text>
+  <circle cx="500" cy="235" r="11" fill="#d9822b"/>
+  <text x="500" y="240" fill="#fff" font-size="13" font-weight="bold" text-anchor="middle">3</text>
+  <circle cx="640" cy="372" r="11" fill="#d9822b"/>
+  <text x="640" y="377" fill="#fff" font-size="13" font-weight="bold" text-anchor="middle">4</text>
+  <text x="20" y="450" fill="#222" font-size="15" font-weight="bold" text-anchor="start">What one photon goes through</text>
+  <text x="20" y="476" fill="#333" font-size="12" text-anchor="start">1  Pick an emitter (an emissive triangle, a punctual light, the sun or the sky) and a point on it.</text>
+  <text x="20" y="496" fill="#333" font-size="12" text-anchor="start">2  Aim at a sphere around a cluster of casters. flux = power / (chance of the emitter x density of the aim x photons).</text>
+  <text x="20" y="516" fill="#333" font-size="12" text-anchor="start">3  At each caster, sample a refraction or a reflection and multiply the flux by the BSDF (and the medium's absorption).</text>
+  <text x="20" y="536" fill="#333" font-size="12" text-anchor="start">4  At the first surface that is not a caster: splat to the camera, and store the photon in the map.</text>
+  <text x="20" y="566" fill="#555" font-size="12" text-anchor="start">Dividing by the probabilities keeps the estimate unbiased: a light picked rarely carries more flux per photon.</text>
+  <text x="20" y="584" fill="#555" font-size="12" text-anchor="start">Photons that carry very different fluxes make noise: a few bright ones, many dim ones (see "Ideas").</text>
+</svg>

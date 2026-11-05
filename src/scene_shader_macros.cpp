@@ -72,7 +72,8 @@ void appendPathTracerOptimalMacros(std::vector<std::pair<std::string, std::strin
   }
 }
 
-void appendPathTracerDlssShaderMacro(std::vector<std::pair<std::string, std::string>>& macros, bool guideActive, bool dlssActive)
+// See scene_shader_macros.hpp.
+void appendPathTracerDlssShaderMacro(std::vector<std::pair<std::string, std::string>>& macros, bool guideActive, bool dlssActive, bool universal)
 {
   // Two independent compile gates, both taken from the variant key being built (never from live
   // state: a background build runs while frames keep changing it), independent of optimal mode:
@@ -81,16 +82,19 @@ void appendPathTracerDlssShaderMacro(std::vector<std::pair<std::string, std::str
   //   USE_DLSS_SHADER  : DLSS's guide captures, on the frames DLSS renders (PathTracer::makeVariantKey;
   //                      with OptiX or OIDN also on, frame 0 only). Its guide writes still follow the
   //                      per-frame ePtUseDlss flag, off while DLSS is loading.
+  // The universal build has every gate the build supports compiled in; the push-constant flags choose
+  // per dispatch (ptGuideActive() / ptDlssActive()), so it serves any denoiser state with one shader.
 #if defined(USE_DLSS) || defined(USE_OPTIX_DENOISER) || defined(USE_OIDN_DENOISER)
-  const bool useGuideShader = guideActive || dlssActive;  // DLSS's captures live inside the guide structs
+  const bool useGuideShader = universal || guideActive || dlssActive;  // DLSS's captures live inside the guide structs
 #else
   const bool useGuideShader = false;
 #endif
 #if defined(USE_DLSS)
-  const bool useDlssShader = dlssActive;
+  const bool useDlssShader = universal || dlssActive;
 #else
   const bool useDlssShader = false;
 #endif
+  pushExplicit(macros, "USE_UNIVERSAL", universal);
   pushExplicit(macros, "USE_GUIDE_SHADER", useGuideShader);
   pushExplicit(macros, "USE_DLSS_SHADER", useDlssShader);
 }

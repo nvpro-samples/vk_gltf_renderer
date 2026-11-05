@@ -85,6 +85,12 @@ vk_gltf_reload_shaders {}                                     // -> compile time
 vk_gltf_measure {"timer": "Path Trace (RTX)", "frames": 100, "warmup": 30}
 ```
 
+**Turn vsync off first** (View > V-Sync, or the `vsync` parameter registered in `src/main.cpp`). At a vsync-capped frame rate the GPU idles
+between frames and its clocks drop, and the less busy the frame, the slower the same shader runs. A
+frame that adds GPU work then makes its other passes faster: with vsync on, the path trace measured
+about 5.4 ms with DLSS off and 4.9 ms with DLSS on at the same resolution; with vsync off, 4.2 ms and
+5.3 ms. The same trap hides in any before/after comparison where the two sides differ in total GPU time.
+
 **Compare the `median`.** It reproduces to roughly 1% here. The `mean` and `standardDeviation` are
 inflated by occasional scheduling outliers and will hide a real change.
 

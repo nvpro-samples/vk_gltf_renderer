@@ -28,6 +28,7 @@ C++20. Host and device share structs via `shaders/shaderio.h`.
 | glTF 2.1 multi-file scenes, read-only flagging, re-externalize on save | [docs/external_assets.md](docs/external_assets.md) |
 | Any other glTF 2.1 work: status, `PROVISIONAL` markers for draft-spec choices, the tinygltf fork, test fixtures | [docs/gltf_2_1.md](docs/gltf_2_1.md) |
 | KHR_interactivity behavior graphs: node execution, event wiring, coverage status | [docs/interactivity.md](docs/interactivity.md) |
+| Beta caustics, a guide for newcomers: why, how it works step by step (photons, splats, the photon map, the partition, the aim, the grid, the gather), settings, what was measured, ideas to improve it | [docs/caustics.md](docs/caustics.md) |
 | Sky models: physical atmosphere, gradient, units and calibration, the sun, glTF mapping | [docs/sky.md](docs/sky.md) |
 | Environment *pipeline*: the analytic bake, lighting vs background fields, preview/commit | [docs/developer.md](docs/developer.md) (§ Environment Lighting) |
 | MCP shader timing: enabling `--mcp`, the tool surface, measuring a change | [docs/mcp.md](docs/mcp.md) |

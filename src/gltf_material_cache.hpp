@@ -23,11 +23,41 @@
 #include <limits>
 #include <vector>
 
+#include <glm/glm.hpp>
 #include <tinygltf/tiny_gltf.h>
 
 #include "shaders/gltf_scene_io.h.slang"
+#include "tinygltf_utils.hpp"
 
 namespace nvvkgltf {
+
+// How a material uses a texture: the texture, the UV set and the UV transform. Rows of one material that
+// agree on all three show the same image, so the texture isolate view treats them as one binding; rows
+// that differ in the UV set or transform are different bindings of the same texture.
+struct TextureBinding
+{
+  int       texture  = -1;
+  int       texCoord = -1;  // -1: any UV set, i.e. the first binding of `texture` (when only the texture is known)
+  glm::mat3 uvTransform{1.0F};
+
+  // True when `candidate` (a slot of the material) is what this binding names
+  bool matches(const TextureBinding& candidate) const
+  {
+    return texture == candidate.texture
+           && (texCoord < 0 || (texCoord == candidate.texCoord && uvTransform == candidate.uvTransform));
+  }
+  bool operator==(const TextureBinding& other) const
+  {
+    return texture == other.texture && texCoord == other.texCoord && uvTransform == other.uvTransform;
+  }
+};
+
+// The binding a glTF texture reference (any TextureInfo-like type) stands for
+template <typename T>
+TextureBinding makeTextureBinding(const T& tinfo)
+{
+  return {tinfo.index, tinfo.texCoord, tinygltf::utils::getTextureTransform(tinfo).uvTransform};
+}
 
 // Contiguous span of texture infos used by a material (for surgical upload)
 struct TextureInfoSpan
@@ -105,11 +135,20 @@ public:
 
   void clear();
 
+  // The texture-info slot (an index into getTextureInfos(); 0 = none) through which cached material
+  // `materialIndex` uses `binding`. `srcMat` is that material's current glTF definition. Slots that
+  // match equally are the same image, so the first in slot order is returned. Used by the Inspector's
+  // texture isolate view.
+  uint16_t findTextureSlot(int materialIndex, const tinygltf::Material& srcMat, const TextureBinding& binding) const;
+
   const std::vector<shaderio::GltfShadeMaterial>& getShadeMaterials() const { return m_shadeMaterials; }
+  // Bumped by every build, update and clear, for what is derived from the materials (caustics' caster bounds)
+  uint64_t                                        getRevision() const { return m_revision; }
   const std::vector<shaderio::GltfTextureInfo>&   getTextureInfos() const { return m_textureInfos; }
 
 private:
   std::vector<shaderio::GltfShadeMaterial> m_shadeMaterials;
+  uint64_t                                 m_revision = 0;
   std::vector<shaderio::GltfTextureInfo>   m_textureInfos;
 };
 

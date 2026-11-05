@@ -95,6 +95,10 @@ public:
 
   [[nodiscard]] int                       getNumAnimations() const { return static_cast<int>(m_animations.size()); }
   [[nodiscard]] bool                      hasAnimation() const { return !m_animations.empty(); }
+  // True when an animation channel moves `nodeIndex` or one of its ancestors: a translation /
+  // rotation / scale target, or a KHR_animation_pointer to a node's TRS. Ignores KHR_interactivity,
+  // whose graphs can move any node at runtime.
+  [[nodiscard]] bool isNodeAnimated(int nodeIndex) const;
   nvvkgltf::AnimationInfo&                getAnimationInfo(int index) { return m_animations[index].info; }
   const nvvkgltf::AnimationInfo&          getAnimationInfo(int index) const { return m_animations[index].info; }
   nvvkgltf::AnimationPointerSystem&       getAnimationPointer() { return m_animationPointer; }

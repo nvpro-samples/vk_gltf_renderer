@@ -19,7 +19,7 @@
 
 ## Recommended First Run
 
-1. Launch the app and load a `.gltf`/`.glb` scene (`.obj` files are also accepted and converted to glTF on the fly; an MTL `Tf` value becomes `KHR_materials_diffuse_transmission`, for thin translucent surfaces such as curtains). USD stages are converted offline with [usd-to-gltf.py](#usd-to-gltfpy). While a scene loads, a dialog lists each stage (reading the glTF, external files, textures, GPU upload and acceleration structures) with its time and item count; the same breakdown is written to the log when the load finishes.
+1. Launch the app and load a `.gltf`/`.glb` scene (`.obj` files are also accepted and converted to glTF on the fly; an MTL `Tf` value becomes `KHR_materials_diffuse_transmission`, for thin translucent surfaces such as curtains). USD stages are converted offline (see [USD conversion](#usd-conversion)). While a scene loads, a dialog lists each stage (reading the glTF, external files, textures, GPU upload and acceleration structures) with its time and item count; the same breakdown is written to the log when the load finishes.
 2. Switch between Rasterizer and Path Tracer in the **Settings** panel.
 3. Load an HDR environment or use Sun and Sky.
 4. Enable a denoiser (DLSS-RR, OptiX or OIDN) in path tracing mode.
@@ -37,25 +37,34 @@ The application provides two Vulkan renderer modes that share GPU resources (geo
 
 A Monte Carlo path tracer with global illumination, progressive accumulation, and physically based light transport. This is the primary ray tracing mode and the reference implementation for glTF PBR material accuracy.
 
+<!-- DRIFT? images/pathtracer_settings.jpg shows the old flat Settings panel; recapture it with the tabs -->
 ![](images/pathtracer_settings.jpg)
+
+The panel is one tab per concern (the progress and speed are in the status bar): **Sampling**, **Transport**, **Caustics** (beta), **Lens**, and the gear tab for what rarely changes
+(Rendering Pipeline, Use SER, Optimize Shader, Texture LOD). A dot on a tab means a value in it differs
+from its default; right-click the tab to reset it, or use **Reset all** under the tabs. A control that
+does not apply is not shown: Performance Target appears with Auto SPP and Samples per Frame without it,
+Focal Distance only with Auto Focus off. FireFly Clamp is not marked: it is calibrated for each environment.
 
 | Setting                 | Description                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                         |
 | ----------------------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
 | **Rendering Pipeline**  | Choice between **Compute / Ray Query** (compute shader) and **Ray Tracing Pipeline** (hardware RT pipeline with SBT). Both produce identical results; Ray Query avoids pipeline overhead on some workloads.                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                         |
 | **Use SER**             | Enable [Shader Execution Reorder](https://developer.nvidia.com/blog/improving-ray-tracing-performance-with-shader-execution-reorder/) for the Ray Tracing pipeline. Can improve coherence on RTX 40-series GPUs.                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                    |
-| **Optimize Shader**     | On by default. Compiles the path tracer with only the glTF features the scene uses (`--ptOptimalShader`): smaller shader, fewer registers, faster rendering, the same image. It builds in the background while the all-features shader renders; the status next to the checkbox says when it is active, and it swaps in without restarting the accumulation. Headless, scripted and benchmark runs build it before the first frame instead. |
+| **Optimize Shader**     | On by default. Compiles the path tracer with only the glTF features the scene uses (`--ptOptimalShader`): smaller shader, fewer registers, faster rendering, the same image. It builds in the background while the universal shader renders (the same shader for DLSS, OptiX, OIDN or none, so turning those on or off never waits either); the status next to the checkbox says when it is active, and it swaps in without restarting the accumulation. The status bar along the bottom of the window shows the same state with a dot (green: optimized; pulsing amber: the universal shader renders while the optimized one builds; grey: Optimize Shader is off; red: the optimized build failed); hover it for an explanation. Hide the bar with **View > Status Bar**. Headless, scripted and benchmark runs build it before the first frame instead. |
 | **Max Depth**           | Maximum number of bounces per path.                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                 |
 | **FireFly Clamp**       | Clamps high-intensity samples to reduce firefly artifacts in early frames.                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                          |
 | **Texture LOD**         | Ray-footprint gradient scale for texture mip selection: 0 always samples mip 0, 1 uses the full physically derived LOD.                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                             |
 | **Shadow Transmission** | Lets shadow rays pass through transmissive surfaces (`KHR_materials_transmission`), tinted by their color and absorption, for brighter glass and colored shadows. A **biased approximation**: refraction is ignored. Off is unbiased, but caustics from small or punctual lights go missing. |
+| **Caustics (beta)** | Off by default. Light tracing and a photon map for the caustics of smooth glass and polished metal, on what the camera sees directly or through glass, such as the floor of a pool (the settings are declared in `src/caustics.cpp`). See [caustics.md](caustics.md) for what it covers. |
 | **Camera Medium**       | The `KHR_materials_volume` medium (fog, water, tinted glass) the camera starts in. **Auto** finds it with a probe ray from the center of the view. **On** says the camera is in a volume: a **Medium** combo lists the scene's volume materials and you pick one, whatever the ray would meet (under water, looking up at the sky). **Off** says it is in clear air; use it if the scene renders black when a volume surface, such as a windshield, is at the center of the view: an inward-wound asset makes Auto think the camera is inside it. |
-| **Accumulated**         | Progress of the accumulation, in samples per pixel (spp) out of **Max Samples**. The window title shows the same count. Frames carry a varying number of samples (Samples per Frame, Auto SPP), so samples, not frames, measure image quality.                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                      |
 | **Max Samples**         | Samples per pixel at which the renderer stops accumulating (`--ptMaxSamples`). The frame that reaches it traces only the samples still missing, so the image always ends exactly there.                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                             |
 | **Samples per Frame**   | Samples per pixel traced each frame (`--ptSamples`). Higher = fewer frames to reach Max Samples, but slower per frame. A frame ends early to land exactly on Max Samples and on each `--outputSamples` count.                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                       |
 | **Auto SPP**            | Adaptive sampling: sets the samples per frame for a target (Performance Target). Interactive, Balanced, Quality and Max Quality aim at a frame rate: after each camera move the count climbs by one per frame until the path-trace GPU time reaches the target, then holds while the view is still (it steps down if frames run over). Changing the Rendering Pipeline, Use SER or Optimize Shader (or reloading the shaders) starts the climb again, so the change in throughput shows. The status next to the checkbox says whether it is climbing or held; the Samples per Frame slider shows the count traced. Max Throughput (the headless default) searches the samples per frame that render fastest, for offline renders. See [Benchmarking](benchmarking.md).                                                                                                                                                                                                                                                                                                                                   |
 | **Aperture**            | Depth-of-field lens aperture. Set to 0 for a pinhole camera (everything in focus).                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                  |
 | **Auto Focus**          | Automatically sets the focal distance to the camera's interest point (double-click an object to set).                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                               |
 | **Infinite Plane**      | Adds an infinite ground plane with optional **Shadow Catcher** mode. When enabled, the plane subtracts light from the environment and adds only shadows and reflections — ideal for product shots. Surface properties (color, roughness, metallic) are adjustable.                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                  |
+
+The **status bar** along the bottom of the window (View > Status Bar) reports the path trace. On the left, the accumulation as a bar with its samples per pixel (spp) out of **Max Samples** (the window title shows the same count; frames carry a varying number of samples, so samples, not frames, measure image quality), then the path-trace GPU time, the samples per frame and the throughput in MSPP/s. On the right, the denoisers that are on (the one whose image is showing in the normal text color, the others dimmed; with DLSS-RR and OptiX or OIDN together, DLSS-RR shows while the view changes), the resolution (the path tracer's, then the output's while DLSS upscales between them), and which shader renders. Hover a figure for what it measures.
 
 ### AI-Accelerated Denoisers
 
@@ -141,8 +150,8 @@ local structure on a background prop while keeping it on a foreground character.
 
 #### Combining DLSS-RR with OptiX or OIDN
 
-With DLSS-RR and OptiX or OIDN both on, DLSS denoises while the camera moves, and OptiX or OIDN takes
-over once it stops, from the accumulated samples. Their first images come from few samples and look
+With DLSS-RR and OptiX or OIDN both on, DLSS denoises while the camera moves (and for a moment after it stops), and OptiX or OIDN takes
+over from the accumulated samples. Their first images come from few samples and look
 worse than DLSS's, so the image does not switch at once: it blends from DLSS's image to the denoised
 one, which is shown alone from **DLSS Hand-off** samples per pixel on (`--dlssHandoffSpp`, 64 by
 default; 0 switches at the first denoise). During the blend, **Auto** denoises each time the samples
@@ -693,6 +702,16 @@ Inspect individual material channels to diagnose shading issues:
 
 Select the visualization mode from the **Visualization** combo in the **Settings** panel. The full set of modes is defined by `shaderio::Visualization` in `shaders/shaderio.h`. See also the [Opacity Micromap](#opacity-micromap-ext_mesh_opacity_micromap) section for the OMM coverage debug view.
 
+### Isolating a texture
+
+The modes above show the *evaluated* material (factors, vertex color and normal maps included). To check a texture on its own, click the eye button on its row in the material **Inspector**. The model then shows that texture's raw value, unlit, with its UV set and `KHR_texture_transform` applied; surfaces of other materials turn grey. Click the eye again to go back to the rendered view.
+
+A bar over the top-left of the viewport names the isolated texture and offers **RGB or one channel at a time**. The single channels separate the data in packed textures (occlusion, roughness and metallic share one). Its close button, like the eye, returns to the rendered view. Color textures are shown as authored; data textures are shown as stored.
+
+Isolating a texture is not one of the **Visualization** choices, since it needs a texture to show: the chosen Visualization is drawn again once the isolate is closed. Loading another scene closes it, and so does removing the isolated texture from its material.
+
+Two rows of one material that use the same texture with a different UV set or `KHR_texture_transform` are separate views, each shown the way that row maps it. Alpha does not cut holes in the isolated surface, except where a baked [opacity micromap](#opacity-micromap-ext_mesh_opacity_micromap) already does in hardware.
+
 ---
 
 ## Material Feature Showcase
@@ -870,169 +889,13 @@ on F7) is covered in [ComfyUI Agentic Setup](comfyui-agentic-setup.md).
 
 ## Utilities
 
-### usd-to-gltf.py
+### USD conversion
 
-Located in `utils/usd-to-gltf.py` (the converter itself is `utils/usd_gltf/convert.py`). Converts a USD stage (`.usd`, `.usda`, `.usdc`, `.usdz`) to glTF
-offline, so the renderer needs no OpenUSD or MDL dependency. It needs the `usd-core` Python package,
-which publishes wheels for a limited set of Python versions (use the newest one it supports):
-
-```bash
-py -3.13 -m pip install usd-core numpy pillow OpenEXR
-py -3.13 utils/usd-to-gltf.py World.usd out/World.gltf
-```
-
-Composition, instancing and GeomSubsets are resolved, and the stage is converted to Y-up metres.
-Skinned meshes are posed at their skeleton's rest pose and written as static geometry.
-Identical meshes are written once, a PointInstancer becomes `EXT_mesh_gpu_instancing`, UDIM
-textures split meshes per UV tile, and `--variant SET=VALUE` picks variants first (for example
-`--variant material=renderLow` for lighter textures).
-Materials are read from MDL first: OmniPBR (and the Omniverse Base materials that wrap it),
-OmniSurface and the glass shaders keep their original textures. MaterialX comes next: OpenPBR and
-Standard Surface shaders, in the stage or in a `.mtlx` document it references (read directly, since
-`usd-core` has no MaterialX plugin), map to glTF PBR with the material extensions for their medium,
-subsurface, dispersion, anisotropy and thin film (`extra_extensions` in
-[materialx.py](../utils/usd_gltf/materialx.py) owns the mapping); their EXR textures are read with
-`OpenEXR` (ACEScg ones converted to sRGB). Other materials use the UsdPreviewSurface network
-Omniverse bakes next to them (`--materials preview` uses those for every material); an input driven by a shader graph takes the graph's base texture, and identical images
-are written once. A GeomSubset bound to no material keeps its name on a plain material, so data sets
-that only name their materials (such as Caldera) keep those names to edit later. Lights become `KHR_lights_punctual` (color temperature applied) and a dome light an
-`OMI_environment_sky`; an Omniverse `OmniProject_Environment` backdrop becomes a panorama sky
-(`OpenEXR` is optional and only needed for that and for EXR textures), and a stage lit only by its own lights gets a
-black sky. Meshes with `primvars:doNotCastShadows` get `NV_node_shadow_casting`. The cameras'
-exposure (or, without one, Omniverse's photographic f-number/ISO/shutter settings) is baked into
-every light, emissive and the sky: the renderer's auto-exposure works on it as is, and
-`--tmAutoExposure 0 --tmExposure 1` shows it exactly as the stage's camera did (`--keep-exposure`
-keeps physical values instead). The module
-docstring lists the full mapping.
-
-### usd-world.py
-
-Located in `utils/usd-world.py` (code in `utils/usd_gltf/world/`). For stages too large to convert
-into one file, it converts each asset on its own and assembles them with glTF 2.1 external assets,
-with the same conversion as `usd-to-gltf.py`. It knows nothing of any particular scene:
-
-```bash
-py -3.13 utils/usd-world.py ui
-py -3.13 utils/usd-world.py build World.usd --cache D:/world-gltf --root D:/world
-```
-
-`ui` opens a local page. "Open USD stage..." (the system's file dialog) or a recent project starts
-it; a project then goes through four stages, in order, each open once the one before it is done and
-each starting with the recommended options:
-
-1. **Scene**: opening a stage finds its data set (the folder holding the layers it uses), makes a
-   project in the projects folder and scans it: the assets, the level-of-detail switches, the variant
-   sets to choose from.
-2. **Convert**: every asset to its own glTF file. Recommended: convert all images to KTX2, force
-   double-sided (as Omniverse RTX renders USD; off follows each mesh's `doubleSided`), and light
-   values pre-exposed (the cameras' exposure baked in, viewed at exposure 1; off keeps physical
-   values). Variant sets that are not levels of detail (a texture resolution) are chosen here, and
-   the texture size: automatic by default, the largest that fits the GPU budget beside the geometry.
-3. **Assemble**: the scene file. The look starts as recommended (a recipe when most materials are
-   only names). The level of detail stays as authored: the levels from the cameras within 70 % of
-   the GPU's memory are recommended when the scene has switches and cameras, but choosing them
-   scans and converts every level, so it is left to you. "Estimate" shows triangles, geometry and
-   texture memory before writing.
-4. **View**: "Open in vk_gltf_renderer".
-
-Changing an option of a stage reopens it and the ones after it. The scene graph below shows each
-asset, what it places and its switches, and converts any part alone. A variant set whose assets
-each offer their own values (Kitchen_set's `modelingVariant`, the Mini Car Kit's vehicles) is chosen
-for one asset in the Selected asset panel: every placement of that asset uses the variant, and only
-that asset is scanned and converted again (one already converted with that variant is reused). The
-choice wins over a scene-wide selection of the same set. "Stop" ends the running step
-after the work in progress: every asset already converted (and every image already encoded) is
-kept, so running it again continues where it stopped. "Open another stage" (top right) goes back to
-the start page. Recent projects and the projects folder are kept in
-`~/.usd-world.json`.
-
-Everything a project converts goes into its project folder, `<projects folder>/<stage name>-gltf`,
-shown at the top of the project page with the scene file: the scene file (`<stage name>.gltf`)
-places the assets of `units/`, which share the images of `textures/`, so the folder moves as a
-whole. The USD files are only read. The folder is kept between sessions, so opening the stage again
-converts only what changed; deleting it starts over.
-
-From the command line, each step is also a command of its own (`scan`, `convert`, `ktx`, `look`,
-`assemble`), and `--unit` runs it on some units and what they place. The stage and the settings are
-remembered by the project, so later commands need only `--cache`.
-
-- **Scan** reads the asset graph from the composition, without loading the geometry of what is
-  placed. Every reference or payload to another layer places an asset (a *unit*). The asset is
-  shared by every placement that only moves it; one that changes it (material overrides, primvars)
-  places the asset as changed, shared with the placements that change it the same way. A variant
-  set whose every variant places one asset is a *switch*: alternatives such as levels of detail or
-  a model and its proxy. `scan.py` documents the rules. With `--lod authored` (the default) only
-  the option each switch places is followed, so only what the scene shows is scanned and converted
-  (Caldera: 245 assets in seconds, instead of 63,000 for every level of every model); the other
-  policies compare the options, so they scan and convert them all.
-- **Convert** writes what each unit draws itself (its *leaf*) as a glTF 2.0 file, in parallel.
-  Textures go to one folder shared by every leaf, named by content. Cameras and the environment
-  belong to the scene: the assembly at the top places them, and the input stage's camera exposure
-  is baked into every leaf, as `usd-to-gltf.py` does (`--keep-exposure` keeps physical values).
-- **KTX2** (`--ktx`) encodes the leaves' images as GPU-compressed KTX2 with
-  `gltf-ktx2-converter.py`'s defaults: each image once, each leaf rewritten in place, the PNG / JPEG
-  originals deleted. Scenes with thousands of textures (Da Vinci's workshop) need it to fit in GPU
-  memory. `--ktx-max-size <pixels>` halves larger images until they fit (nvtt_export doesn't
-  resize; `0` keeps them as authored); the default, `auto`, picks the largest size whose textures
-  fit what the geometry leaves of the budget (`--lod-budget`, else 70 % of the GPU's memory; half of
-  it with `--lod camera`, whose geometry takes the rest). Since the originals are deleted, changing
-  the size later converts the leaves that have images again.
-- **Look** (`--look <recipe>`) applies a [gltf-look.py](#gltf-lookpy) recipe to each leaf, written
-  next to it (`geo.<recipe>.gltf`, same `.bin`), so look-dev never converts geometry again; the
-  step names the material names no family matched.
-- **Assemble** writes the input as a glTF 2.1 scene placing the leaves, at the cache's root
-  (`<input name>[.<options>].gltf`, or `-o`):
-  a node per placement, a `boundingVolume` on every node. At each switch it places the option
-  `--variant SET=VALUE` names (`SET=VALUE:name,name` for the switches with those prim names), else
-  the one `--lod` picks: by triangle count (`finest`, `coarsest`, `levelN`), the authored selection,
-  or by what cameras see (`camera`). The draft `EXT_external_asset_lod` lists every option, for
-  level-of-detail tools. `--variant` on a set that is not a switch is a selection made while
-  composing, as with `usd-to-gltf.py` (for example `--variant material=renderLow`).
-- **`--lod camera`** chooses per placement, the same way for any scene: an option's projected size
-  from the nearest camera (`--lod-camera`: the scene's cameras, positions, or renderer
-  `--cameraString` values) asks for `--lod-density` triangles per square pixel, and the coarsest
-  option with that many is placed. With `--lod-budget <GB>`, the density is lowered until the
-  geometry and the textures fit (an estimate per triangle placed, `BYTES_PER_TRIANGLE` in `assemble.py`; textures from their
-  files' headers, or as the KTX2 step will encode them). A far
-  district gets its proxy, a near model its finest level.
-
-```bash
-py -3.13 utils/usd-world.py build caldera.usda --variant districtLod=proxy --variant districtLod=full:map_capital --look caldera --cache D:/caldera-gltf --root D:/caldera
-```
-
-Everything is cached (`cache.py` documents the layout and keys): a leaf is converted again only when
-a layer, texture or MDL file it read changed, when the converter version changed, or when `--force <glob>` names it, and
-an assembly is rewritten only when its content changes. Units that place others become group nodes
-(`--nesting inline`, the default), so every placed file is a leaf the renderer draws as an instance
-set. On large scenes (`--hierarchy auto`, the default; `usd` or `compact` to choose) the assemblies
-are written compact: a group with a single child is folded into it, keeping the placing prim's
-name, transforms become translation, rotation and scale, and bounding volumes stay only where a
-level-of-detail tool reads them (switches and the roots). Caldera's assemblies shrink by about half
-(nodes and JSON); a small scene keeps one node per prim. An asset that fails to scan or convert is
-reported and left out; the others go on.
-
-Leaves keep one mesh per USD mesh, as authored. `--leaf-merge material` (Advanced settings: Leaf
-meshes) merges each asset's meshes into one mesh with a primitive per material, the parts' names
-kept in the primitive's extras. On Caldera's airfield it halves the load time and cuts the
-ray-tracing memory by a third; frame time and image are unchanged. A look can also leave
-placements out by prim name (`exclude` in the recipe; Caldera's drops its occluder volumes and an
-editor marker).
-
-### gltf-look.py
-
-Located in `utils/gltf-look.py` (Python 3 only). Gives a glTF file materials made from its material
-names, for scenes that name their materials and define none (Caldera's `plaster_stucco_beige_01`):
-a base family per keyword (wood, metal, plaster, glass...), colour and finish words (`beige`, `dark`,
-`worn`, `polished`), and a small variation per name. Only the materials a converter made up (what
-`usd-to-gltf.py` writes for a surface without a material) change, unless `--everything`.
-
-```bash
-py utils/gltf-look.py scene.gltf --in-place --recipe names --report
-```
-
-Recipes are JSON files in `utils/usd_gltf/looks/` (`names.json`, and `caldera.json`, which extends
-it with what to drop and the ocean) or anywhere else; `utils/usd_gltf/looks/__init__.py` documents
-the format. `--report` lists the families used and the names none matched, to extend a recipe with.
+The renderer loads no USD itself. USD stages (`.usd`, `.usda`, `.usdc`, `.usdz`) are converted to glTF
+offline by the separate `usd_to_gltf` repository: one stage to one file, or per asset and assembled
+with glTF 2.1 external assets for very large stages, plus name-based material recipes. Its
+"Open in renderer" starts this repository's Release build when `usd_to_gltf` is checked out next to it.
+<!-- TODO: link usd_to_gltf once it has a public URL -->
 
 ### gltf-material-modifier.py
 

@@ -27,6 +27,7 @@
 #include "gltf_material_cache.hpp"
 
 #include <cstddef>
+#include <cstring>
 
 #include <glm/glm.hpp>
 #include <glm/gtc/type_ptr.hpp>
@@ -260,6 +261,7 @@ void populateShaderMaterial(shaderio::GltfShadeMaterial& dstMat, const tinygltf:
 
 void MaterialCache::buildFromMaterials(const std::vector<tinygltf::Material>& materials, const TextureSlotTable& textureSlots)
 {
+  m_revision++;
   m_textureInfos.clear();
   m_textureInfos.push_back({});
   m_shadeMaterials.clear();
@@ -279,6 +281,7 @@ MaterialUpdateResult MaterialCache::updateMaterial(int index, const tinygltf::Ma
   MaterialUpdateResult result{};
   if(index < 0 || index >= static_cast<int>(m_shadeMaterials.size()))
     return result;
+  m_revision++;
 
   shaderio::GltfShadeMaterial& dstMat = m_shadeMaterials[index];
   shaderio::GltfTextureInfo*   infos  = m_textureInfos.data();
@@ -306,8 +309,30 @@ MaterialUpdateResult MaterialCache::updateMaterial(int index, const tinygltf::Ma
   return result;
 }
 
+uint16_t MaterialCache::findTextureSlot(int materialIndex, const tinygltf::Material& srcMat, const TextureBinding& binding) const
+{
+  if(materialIndex < 0 || materialIndex >= static_cast<int>(m_shadeMaterials.size()) || binding.texture < 0)
+    return 0;
+
+  // Walk the slots in the order the cache was built, on a scratch material, and read the same member
+  // from the cached one: a slot's position inside the struct names it, so this list of slots is not
+  // repeated here.
+  const shaderio::GltfShadeMaterial& cached = m_shadeMaterials[materialIndex];
+  shaderio::GltfShadeMaterial        scratch{};
+  const auto*                        scratchBytes = reinterpret_cast<const std::byte*>(&scratch);
+  const auto*                        cachedBytes  = reinterpret_cast<const std::byte*>(&cached);
+
+  uint16_t found = 0;
+  populateShaderMaterial(scratch, srcMat, [&found, &binding, cachedBytes, scratchBytes](uint16_t& slot, const auto& srcTexInfo) {
+    if(found == 0 && binding.matches(makeTextureBinding(srcTexInfo)))
+      std::memcpy(&found, cachedBytes + (reinterpret_cast<const std::byte*>(&slot) - scratchBytes), sizeof(found));
+  });
+  return found;
+}
+
 void MaterialCache::clear()
 {
+  m_revision++;
   m_shadeMaterials.clear();
   m_textureInfos.clear();
 }

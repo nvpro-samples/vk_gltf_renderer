@@ -62,7 +62,9 @@ void appendPathTracerOptimalMacros(std::vector<std::pair<std::string, std::strin
 >  - `USE_DLSS_SHADER` from `dlssActive`: DLSS's guide captures, compiled in for the frames DLSS
 >    renders only (`PathTracer::makeVariantKey`; with OptiX or OIDN also on, frame 0). Within that
 >    variant the guide writes still follow the per-frame `ePtUseDlss` flag (off while DLSS loads).
+>  - `universal` (the non-optimal build, `USE_UNIVERSAL`): both gates are compiled in and the
+>    push-constant flags choose per dispatch, so `guideActive` and `dlssActive` are ignored.
 -------------------------------------------------------------------------------------------------*/
-void appendPathTracerDlssShaderMacro(std::vector<std::pair<std::string, std::string>>& macros, bool guideActive, bool dlssActive);
+void appendPathTracerDlssShaderMacro(std::vector<std::pair<std::string, std::string>>& macros, bool guideActive, bool dlssActive, bool universal);
 
 }  // namespace nvvkgltf

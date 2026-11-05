@@ -185,6 +185,8 @@ src/
 │                               #   dockSetup) and Windows > Reset UI Layout
 ├── ui_presentation_mode.cpp/hpp # Presentation mode (F11): hides panels + menu bar, borderless
 │                               #   full screen on the window's monitor; saves/restores both
+├── ui_status_bar.cpp/hpp       # Status bar along the bottom of the window: accumulation, speed,
+│                               #   denoiser, resolution and shader state (PathTracer::getStatus())
 ├── ui_commands.cpp/hpp         # Command registry: every menu/toolbar/keyboard command and its
 │                               #   key binding, and the shortcut routing (see Add a command)
 ├── ui_help.cpp/hpp             # Help menu: Keyboard & Mouse reference (live camera table,
@@ -203,6 +205,7 @@ src/
 ├── oidn_denoiser.cpp/hpp       # Open Image Denoise on Vulkan (vk_oidn) integration
 ├── denoiser_schedule.hpp       # Auto-denoise interval shared by OptiX and OIDN, DLSS hand-off weight
 ├── denoiser_handoff.cpp/hpp    # DLSS hand-off: blend from DLSS-RR's image to OptiX / OIDN's
+├── caustics.cpp/hpp            # Caustics, beta (host): settings, caster bounds, splat buffer, caster clusters, photon map (docs/caustics.md)
 ├── vk_cuda.cpp/hpp             # Vulkan-CUDA interop (shared memory/semaphores)
 │
 ├── gizmo_transform_vk.cpp/hpp  # 3D translate/rotate/scale gizmo
@@ -214,6 +217,8 @@ src/
 ├── tinygltf_converter.cpp/hpp  # OBJ to glTF converter
 ├── tiny_stb_implementation.cpp # STB library implementation (single compilation unit)
 ├── pipeline_cache_util.cpp/hpp # Vulkan pipeline cache persistence
+├── cache_dir.hpp               # The cache folder next to the executable (shaders, pipelines, NGX)
+├── spirv_cache.cpp/hpp         # On-disk cache of the path tracer's specialized SPIR-V
 ├── scene_selection.cpp/hpp     # Selection state and events
 ├── scene_descriptor.cpp/hpp    # Scene descriptor set layout / bindings
 ├── scene_feature_detection.cpp/hpp # Detect which extensions a scene uses
@@ -248,6 +253,9 @@ shaders/
 ├── gizmo_visuals_shaderio.h.slang # Gizmo shader I/O
 ├── optix_image_to_buffer.slang # OptiX denoiser buffer conversion
 ├── denoiser_handoff.slang      # DLSS hand-off blend of two images
+├── caustics.h.slang            # Caustics, beta: photon pass, splats, the gather, the path tracer's side of the partition (USE_CAUSTICS)
+├── caustics_grid.h.slang       # Caustics: the photon grid's hash cells, shared by the gather and the grid passes
+├── caustics_grid.slang         # Caustics: the photon grid's counting sort (five compute passes, a shader of their own)
 ├── gltf_light_ies.h.slang      # EXT_lights_ies: photometric-profile falloff lookup
 ├── sky_background.h.slang      # Background (sun-bearing) field for authored skies; shared by both paths
 ├── sky_background.slang        # Rasterizer background pass that draws it
@@ -286,9 +294,32 @@ are **forked locally** into `shaders/gltf_*.h.slang` rather than using the upstr
    state (`PathTracerState`, volume segment, shadow transmission), and raster extension paths
    without changing buffer layout. Optimal mode passes each gate as `-DGLTF_USE_X=0` or `1`
    from `SceneFeatureSet` (never `-DMAT_EXT_X=0` at runtime). `MAT_EXT_*` remains layout authority
-   on host and device only. Since the gates only drop work, the all-features build renders the
-   same image: interactively, it renders while the optimized one builds in the background
-   (`PathTracer::updateOptimalFallback`), which swaps in once ready.
+   on host and device only. Since the gates only drop work, the universal build renders the
+   same image (see *Shader variants* below).
+
+### Shader variants and start-up
+
+The path tracer's shader exists in two kinds (`PathTracer::VariantKey`):
+
+- **Universal.** The default key: every `GLTF_USE_*` gate on, and the denoiser gates
+  (`USE_GUIDE_SHADER`, `USE_DLSS_SHADER`) compiled in but chosen per dispatch by the push-constant
+  flags (`USE_UNIVERSAL`, `ptGuideActive()` / `ptDlssActive()` in `pathtrace_functions.h.slang`).
+  It is the SPIR-V embedded at build time, so it needs no Slang compile, and its pipeline comes out of
+  `pipeline_cache.bin`. One shader serves DLSS, OptiX, OIDN or none, so turning any of them on or off,
+  or loading a scene, never waits on a compile.
+- **Specialized (optimal).** Only the scene's features and the denoiser state it needs, as macros:
+  smaller, fewer registers, faster. `PathTracer::updateOptimalFallback` builds it on a background
+  thread while the universal shader renders, and the frame after it lands swaps it in like any cached
+  variant. Caustics are the exception to "universal serves everything": they engage when their
+  specialized variant is ready. Which of the two renders is `PathTracer::getShaderStatus()`; the
+  status bar (`ui_status_bar.cpp`) and the Optimize Shader row both read it.
+
+Two caches make a variant seen before ready in milliseconds. Both live in the cache folder next to the
+executable (`cache/`, `cache_dir.hpp`; safe to delete, everything in it is rebuilt), with NGX's
+device-extension answer (`ngx_device_extensions.cache`): `spirv/` holds the SPIR-V per variant
+(`spirv_cache.hpp`, keyed by the macros, the shader sources, Slang and the GPU vendor), and
+`pipeline_cache.bin` holds the driver's compiled pipelines (saved after every background build, not
+only at exit). The variant LRU never evicts the universal entries.
 
 ### Key design points
 

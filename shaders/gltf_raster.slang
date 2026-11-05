@@ -345,6 +345,15 @@ PixelOutput fragmentMain(VertexOutput input, uint primitiveID: SV_PrimitiveID, f
     float3              vizColor;
     VisualizationResult vizResult =
         applyVisualization(pbrMat, hit, pushConst.frameInfo.visualization, pushConst.renderPrimID, primitiveID, -1, vizColor);
+    if(pushConst.frameInfo.visualization == Visualization::eTextureIsolate)
+    {
+      TextureIsolateHit isolateHit;
+      isolateHit.materialIndex = pushConst.materialID;
+      isolateHit.tc            = hit.uv;
+      isolateHit.texGrad       = 0.0f;  // implicit derivatives: hardware mipmapping in the fragment shader
+      vizResult = applyTextureIsolate(allImages, allSamplers, pushConst.gltfScene->textureInfos, isolateHit,
+                                      pushConst.frameInfo.isolate, vizColor);
+    }
     if(vizResult == VisualizationResult::eColorOverride)
     {
       output.color.xyz = vizColor;

@@ -8,6 +8,9 @@
 #define PATHTRACE_FUNCTIONS_H 1
 
 #include "gltf_eval_config.h"
+#ifndef USE_CAUSTICS
+#define USE_CAUSTICS 0  // Beta caustics: see caustics.h.slang
+#endif
 #include "gltf_light_ies.h.slang"
 #include "camera_ray.h.slang"
 #include "sky_background.h.slang"
@@ -108,12 +111,37 @@ struct GuideScratch
 };
 #endif  // USE_GUIDE_SHADER
 
+// Whether the guide captures run in this dispatch. A specialized build compiled them in because they are
+// needed, so the answer is a constant true and the test folds away. The universal build has them in
+// always and asks the flags the host sets for the denoisers actually on this frame.
+bool ptGuideActive()
+{
+#if USE_UNIVERSAL
+  return hasFlag(pushConst.flags, PathtracerFlags::ePtUseDlss) || hasFlag(pushConst.flags, PathtracerFlags::ePtDenoiserGuides);
+#else
+  return true;
+#endif
+}
+
+// Same for DLSS's own captures (specular albedo, hit distance, primary surface replacement).
+bool ptDlssActive()
+{
+#if USE_UNIVERSAL
+  return hasFlag(pushConst.flags, PathtracerFlags::ePtUseDlss);
+#else
+  return true;
+#endif
+}
+
 //-----------------------------------------------------------------------
 // This is the result of sampling a pixel
 //-----------------------------------------------------------------------
 struct SampleResult
 {
   float4 radiance    = float4(0, 0, 0, 0);
+#if USE_CAUSTICS
+  float3 caustic = float3(0, 0, 0);  // What the photon map gave the path: not a path's radiance, so no firefly clamp
+#endif
   float3 hitPosition = 1e34f;  // World-space first-hit position; always present (drives NDC depth + DLSS motion).
 #if USE_GUIDE_SHADER
   float3      hitPositionPrev = 1e34f;  // Previous-frame world-space position of the first-hit point (instance motion).
@@ -211,8 +239,7 @@ float3 safeOffsetRay(float3 worldPosition, float3 offsetDirection, float offsetD
 {
   const float3 offset = offsetDistance * offsetDirection;
   float3       origin = worldPosition + offset;
-  [unroll]
-  for(int i = 0; i < 3; i++)
+  [unroll] for(int i = 0; i < 3; i++)
   {
     if(offset[i] > 0.0F)
       origin[i] = nextFloatUp(origin[i]);
@@ -248,6 +275,14 @@ float getOpacity(GltfRenderNode renderNode, GltfRenderPrimitive renderPrim, int 
   GltfShadeMaterial* materials = pushConst.gltfScene->materials;
   GltfShadeMaterial  mat       = materials[matIndex];
   GltfTextureInfo*   texInfos  = pushConst.gltfScene->textureInfos;
+
+#if USE_VISUALIZE
+  // The texture isolate view shows the whole surface: holes cut by the alpha of the base color would hide
+  // the texture being looked at. (A baked opacity micromap still culls its transparent micro-triangles in
+  // hardware, before any shader runs, so those holes remain.)
+  if(pushConst.frameInfo->visualization == Visualization::eTextureIsolate)
+    return 1.0;
+#endif
 
   if(mat.alphaMode == AlphaMode::eAlphaModeOpaque)
     return 1.0;
@@ -323,7 +358,8 @@ float3 getShadowTransmission(GltfRenderNode      renderNode,
                              float4x3            worldToObject,
                              float3              rayDirection,
                              inout bool          isInside,
-                             inout float3        extinction)
+                             inout float3        extinction,
+                             bool                blockCasters = false)
 {
 #if !GLTF_USE_TRANSMISSION
   return float3(0.0);
@@ -345,6 +381,13 @@ float3 getShadowTransmission(GltfRenderNode      renderNode,
   {
     return float3(0.0);
   }
+
+#if USE_CAUSTICS
+  // Smooth glass in front of a primary receiver is opaque to its light samples: the photons carry
+  // that light, focused (caustics.h.slang)
+  if(blockCasters && isCausticCasterAtHit(renderNode, renderPrim, triangleID, barycentrics, rayDirection))
+    return float3(0.0);
+#endif
 
   uint3 indices = getTriangleIndices(renderPrim, triangleID);
 
@@ -1220,7 +1263,7 @@ DlssGlassPsr dlssTraceClearGlass(PbrMaterial glassMat, HitState glassHit, float3
     }
 
     RayDesc guideRay;
-    guideRay.Origin    = safeOffsetRay(origin, dot(dir, originNormal) > 0.0f ? originNormal : -originNormal, originOffset);
+    guideRay.Origin = safeOffsetRay(origin, dot(dir, originNormal) > 0.0f ? originNormal : -originNormal, originOffset);
     guideRay.Direction = dir;
     guideRay.TMin      = 0.0f;
     guideRay.TMax      = INFINITE;
@@ -1235,7 +1278,7 @@ DlssGlassPsr dlssTraceClearGlass(PbrMaterial glassMat, HitState glassHit, float3
     HitState  hit  = getHitState(prim, barys, node.worldToObject, node.objectToWorld, payload.primitiveID, dir);
     MeshState mesh = MeshState(hit.nrm, hit.tangent, hit.bitangent, hit.geonrm, hit.uv, isInside, 0.0f);
     mesh.baseColorVertexMul = hit.color;
-    mat    = evaluateMaterial(max(0, node.materialID), mesh, allImages, allSamplers, texInfos, materials);
+    mat          = evaluateMaterial(max(0, node.materialID), mesh, allImages, allSamplers, texInfos, materials);
     origin       = hit.pos;
     originNormal = hit.geonrm;
     originOffset = hit.offsetDistance;
@@ -1364,6 +1407,12 @@ struct PathTracerState
 #if GLTF_USE_SCATTER
   int scatterBounces = 0;
 #endif
+#if USE_CAUSTICS
+  int  causticChain    = 0;      // Casters crossed since the last surface that is not one
+  int  causticReceivers = 0;     // Surfaces that are not casters reached so far
+  bool causticReceiver = false;  // The last surface that is not a caster is one the photons carry the light of
+  float3 causticRadiance = float3(0.0F);  // What the photon map gave the path so far
+#endif
 #if USE_GUIDE_SHADER
   GuideScratch guide           = {};
   float3       firstHitPosPrev = float3(1e34f);  // Previous-frame world position of the first hit (instance motion).
@@ -1383,6 +1432,9 @@ struct BounceScratch
   float  shadowRayDist       = 0.0F;
   bool   shadowRayInside     = false;         // The shadow ray starts inside a medium...
   float3 shadowRayExtinction = float3(0.0F);  // ...of this extinction.
+#if USE_CAUSTICS
+  bool shadowBlockCasters = false;  // The light sample is a covered receiver's: casters are opaque to it
+#endif
 };
 
 // Safe accessor for pt.isInside. The field only exists when GLTF_USE_TRANSMISSION or
@@ -1486,6 +1538,9 @@ SampleResult packSampleResult(PathTracerState pt)
 {
   SampleResult sampleResult = {};
   sampleResult.radiance     = float4(pt.radiance, pt.solid ? 1 : 0);
+#if USE_CAUSTICS
+  sampleResult.caustic = pt.causticRadiance;
+#endif
   sampleResult.hitPosition  = pt.firstHitPos;
 #if USE_GUIDE_SHADER
   sampleResult.hitPositionPrev             = pt.firstHitPosPrev;

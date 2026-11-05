@@ -1,0 +1,57 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 960 440" font-family="Segoe UI, Arial, sans-serif" font-size="14">
+  <defs>
+    <marker id="o" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse"><path d="M0 0 L10 5 L0 10 z" fill="#d9822b"/></marker>
+    <marker id="b" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse"><path d="M0 0 L10 5 L0 10 z" fill="#2b6fd9"/></marker>
+    <marker id="g" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse"><path d="M0 0 L10 5 L0 10 z" fill="#555"/></marker>
+  </defs>
+  <rect width="960" height="440" fill="#ffffff"/>
+  <text x="20" y="28" font-size="18" font-weight="bold" fill="#222">One frame with caustics on</text>
+  <rect x="20" y="70" width="168" height="170" rx="8" fill="#e8f0fe" stroke="#4a6fb0" stroke-width="2"/>
+  <text x="104" y="96" fill="#222" font-size="15" font-weight="bold" text-anchor="middle">1  Host</text>
+  <text x="104" y="114" fill="#555" font-size="11" text-anchor="middle">cmdPrepare</text>
+  <text x="104" y="148" fill="#333" font-size="12" text-anchor="middle">casters → clusters</text>
+  <text x="104" y="166" fill="#333" font-size="12" text-anchor="middle">(spheres, view weights)</text>
+  <text x="104" y="184" fill="#333" font-size="12" text-anchor="middle">gather radius,</text>
+  <text x="104" y="202" fill="#333" font-size="12" text-anchor="middle">cell size, params</text>
+  <path d="M190 155 L206 155" stroke="#555" stroke-width="2" fill="none" marker-end="url(#g)"/>
+  <rect x="206" y="70" width="168" height="170" rx="8" fill="#fff1e0" stroke="#d9822b" stroke-width="2"/>
+  <text x="290" y="96" fill="#222" font-size="15" font-weight="bold" text-anchor="middle">2  Photon pass</text>
+  <text x="290" y="114" fill="#555" font-size="11" text-anchor="middle">causticMain</text>
+  <text x="290" y="148" fill="#333" font-size="12" text-anchor="middle">one thread per photon:</text>
+  <text x="290" y="166" fill="#333" font-size="12" text-anchor="middle">emit, aim, follow the</text>
+  <text x="290" y="184" fill="#333" font-size="12" text-anchor="middle">casters; splat, store</text>
+  <path d="M376 155 L392 155" stroke="#555" stroke-width="2" fill="none" marker-end="url(#g)"/>
+  <rect x="392" y="70" width="168" height="170" rx="8" fill="#fff1e0" stroke="#d9822b" stroke-width="2"/>
+  <text x="476" y="96" fill="#222" font-size="15" font-weight="bold" text-anchor="middle">3  Grid</text>
+  <text x="476" y="114" fill="#555" font-size="11" text-anchor="middle">caustics_grid.slang</text>
+  <text x="476" y="148" fill="#333" font-size="12" text-anchor="middle">count, scan, scatter:</text>
+  <text x="476" y="166" fill="#333" font-size="12" text-anchor="middle">photons sorted by</text>
+  <text x="476" y="184" fill="#333" font-size="12" text-anchor="middle">hash cell</text>
+  <path d="M562 155 L578 155" stroke="#555" stroke-width="2" fill="none" marker-end="url(#g)"/>
+  <rect x="578" y="70" width="168" height="170" rx="8" fill="#eef7ee" stroke="#2e7d32" stroke-width="2"/>
+  <text x="662" y="96" fill="#222" font-size="15" font-weight="bold" text-anchor="middle">4  Path tracing</text>
+  <text x="662" y="114" fill="#555" font-size="11" text-anchor="middle">gltf_pathtrace.slang</text>
+  <text x="662" y="148" fill="#333" font-size="12" text-anchor="middle">paths as usual; add the</text>
+  <text x="662" y="166" fill="#333" font-size="12" text-anchor="middle">splats; at covered</text>
+  <text x="662" y="184" fill="#333" font-size="12" text-anchor="middle">receivers, gather</text>
+  <path d="M748 155 L764 155" stroke="#555" stroke-width="2" fill="none" marker-end="url(#g)"/>
+  <rect x="764" y="70" width="168" height="170" rx="8" fill="#f4f4f4" stroke="#888" stroke-width="2"/>
+  <text x="848" y="96" fill="#222" font-size="15" font-weight="bold" text-anchor="middle">5  Accumulate</text>
+  <text x="848" y="114" fill="#555" font-size="11" text-anchor="middle">and denoise</text>
+  <text x="848" y="148" fill="#333" font-size="12" text-anchor="middle">average of the frames;</text>
+  <text x="848" y="166" fill="#333" font-size="12" text-anchor="middle">DLSS-RR, OptiX, OIDN</text>
+  <text x="848" y="184" fill="#333" font-size="12" text-anchor="middle">see one combined image</text>
+  <text x="20" y="270" fill="#222" font-size="14" font-weight="bold" text-anchor="start">Buffers (all rewritten every frame)</text>
+  <rect x="20" y="284" width="290" height="54" rx="6" fill="#fafafa" stroke="#999" stroke-width="1.5"/>
+  <text x="165" y="306" fill="#222" font-size="13" font-weight="bold" text-anchor="middle">photons</text>
+  <text x="165" y="326" fill="#555" font-size="11" text-anchor="middle">one 20-byte slot per photon: position, flux, direction</text>
+  <rect x="330" y="284" width="290" height="54" rx="6" fill="#fafafa" stroke="#999" stroke-width="1.5"/>
+  <text x="475" y="306" fill="#222" font-size="13" font-weight="bold" text-anchor="middle">sorted photons + cell starts</text>
+  <text x="475" y="326" fill="#555" font-size="11" text-anchor="middle">the grid the gather reads</text>
+  <rect x="640" y="284" width="290" height="54" rx="6" fill="#fafafa" stroke="#999" stroke-width="1.5"/>
+  <text x="785" y="306" fill="#222" font-size="13" font-weight="bold" text-anchor="middle">splats</text>
+  <text x="785" y="326" fill="#555" font-size="11" text-anchor="middle">three floats per pixel, added atomically</text>
+  <text x="20" y="372" fill="#333" font-size="12" text-anchor="start">The photon pass and the grid are compute passes before the path tracer, each ordered by a barrier.</text>
+  <text x="20" y="390" fill="#333" font-size="12" text-anchor="start">The grid's five passes are a shader of their own (built once); the photon pass is part of the path tracer's module</text>
+  <text x="20" y="408" fill="#333" font-size="12" text-anchor="start">(it needs the scene), so it is rebuilt whenever that shader is.</text>
+</svg>

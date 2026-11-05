@@ -135,8 +135,10 @@ private:
   // One editable texture slot: name + actions (assign existing / load from file / clear). Returns true
   // when the slot's texture index changed (assign / switch / clear / import), so the caller writes back
   // copy-based rows and records the undo step.
+  // `colorData` marks a texture that holds color (base color, emissive, ...) rather than data, so the
+  // texture isolate view shows it the way it is authored.
   template <typename T>
-  bool renderTextureEditRow(const char* label, T& info);
+  bool renderTextureEditRow(const char* label, T& info, bool colorData = false);
 
   // Renders the "SwitchTexture" modal (filterable list/grid picker of existing textures). Returns true
   // when a selection is committed into info via OK. Must be called within the slot's ImGui ID scope.
@@ -205,6 +207,9 @@ private:
   std::function<ImTextureID(int)> m_getImageThumbnail;  // image index -> ImGui thumbnail (Image inspector)
   std::function<void()>           m_onFocusSelection;   // reveal the selection in the Scene Browser
   std::function<void(const std::filesystem::path&)> m_onOpenScene;
+
+  // The material whose rows are being drawn, for the texture isolate button (-1 outside a material).
+  int m_materialIndex = -1;
 
   // Transform section: the selected node's subtree bounds (Dimensions), and what they were computed for.
   struct SubtreeBounds

@@ -83,9 +83,10 @@ quality whatever the samples per frame, and once more on the final image when th
 reaches **Max Samples**, so the image left on screen is denoised from all its samples. **Denoise
 Now** runs on demand, and the result is shown through the `DisplayBuffer` override of the
 tonemapper input (`GltfRenderer::runTonemapPass`). With DLSS-RR also
-engaged, DLSS owns frame 0 and the accumulated-image denoisers take over from frame 1
-(`PathTracer::getEffectiveDlssEnabled` and its OptiX / OIDN counterparts), blending from DLSS's
-image: see [DLSS hand-off](#dlss-hand-off).
+engaged, DLSS owns frame 0 and the accumulated-image denoisers take over from frame 1, or, in an
+interactive session, once the view has been still for a moment (`PathTracer::updateDlssPhase`; read by
+`getEffectiveDlssEnabled` and its OptiX / OIDN counterparts), blending from DLSS's image: see
+[DLSS hand-off](#dlss-hand-off).
 
 Only one of them is on at a time (`PathTracer::keepOneAccumulationDenoiser`): both would denoise
 the same image, and only one result can be shown. Turning one on turns the other off; when both come
@@ -119,20 +120,27 @@ They differ in where the work runs:
 ## DLSS hand-off
 
 With DLSS-RR and OptiX or OIDN both on, every frame of a moving camera is a frame 0, denoised by
-DLSS. Once the camera stops, the accumulation denoiser takes the frames after it, and its first
+DLSS. A moving camera changes the view only a few times a second, so frames 1, 2, 3 come between two
+changes: DLSS keeps those too, until the view has been still for `PathTracer::kDlssHold`, or the image
+would swap between the two denoisers several times a second (`PathTracer::updateDlssPhase`; off for
+headless, scripted and benchmark runs, which hand over at frame 1 whatever the wall time:
+`Settings::dlssHold`). Then the accumulation denoiser takes the frames after it, and its first
 images, made of few samples, are worse than DLSS's. `DenoiserHandoff` (`src/denoiser_handoff.{hpp,cpp}`)
 blends from one to the other instead of switching:
 
-- **DLSS's image is kept.** Frame 1, before the path tracer overwrites `eImgRendered`, copies it into
-  an image of the same format. This happens once per camera stop, never while moving.
-  `PathTracer::m_dlssFrame0` says DLSS actually rendered frame 0 (not while it is still loading).
-- **It is no sample of the accumulation.** Frame 1 restarts the sample count
+- **DLSS's image is kept.** The first frame after DLSS's (`PathTracer::m_takeover`), before the path
+  tracer overwrites `eImgRendered`, copies it into an image of the same format. This happens once per
+  camera stop, never while moving. `PathTracer::m_dlssFrame0` says DLSS actually rendered frame 0 (not
+  while it is still loading).
+- **It is no sample of the accumulation.** That frame restarts the sample count
   (`PathTracer::setupPushConstant`), whether or not the hand-off is on, so the accumulated image and
   its spp hold path-traced samples only. This also keeps OptiX's 2x upscale from reading DLSS's
   display-size image as its half-size input (`OptiXDenoiser::updateDenoiser`).
 - **The frames after it run the regular shader.** DLSS's guide captures (`USE_DLSS_SHADER`) cost
-  every sample, so they are compiled in only for the frames DLSS renders
-  (`PathTracer::makeVariantKey`). Each camera start and stop swaps the two cached variants in
+  every sample, so the specialized shader compiles them in only for the frames DLSS renders
+  (`PathTracer::makeVariantKey`). The universal shader that renders until the specialized one is
+  ready has them in always and follows `ePtUseDlss` per dispatch, so it serves both frames. Each
+  camera start and stop swaps the two cached variants in
   `PathTracer::prepareFrame`: a queue wait, no recompile. A moving camera stays on DLSS's. Whenever
   one of the two is built, the other one's pipeline is built at the same time on a thread of its own
   (`PathTracer::prefetchSiblingVariant`): the driver compiles a pipeline on a single thread, so the

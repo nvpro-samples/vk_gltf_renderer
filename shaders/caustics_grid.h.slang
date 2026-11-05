@@ -1,0 +1,37 @@
+/*
+ * Copyright (c) 2026, NVIDIA CORPORATION.  All rights reserved.
+ *
+ * Licensed under the Apache License, Version 2.0 (the "License");
+ * you may not use this file except in compliance with the License.
+ * You may obtain a copy of the License at
+ *
+ *     http://www.apache.org/licenses/LICENSE-2.0
+ *
+ * Unless required by applicable law or agreed to in writing, software
+ * distributed under the License is distributed on an "AS IS" BASIS,
+ * WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+ * See the License for the specific language governing permissions and
+ * limitations under the License.
+ *
+ * SPDX-FileCopyrightText: Copyright (c) 2026, NVIDIA CORPORATION.
+ * SPDX-License-Identifier: Apache-2.0
+ */
+
+#ifndef CAUSTICS_GRID_H
+#define CAUSTICS_GRID_H 1
+
+// The photon map's grid cells: what the path tracer (the gather, caustics.h.slang) and the passes that build
+// the grid (caustics_grid.slang) must agree on. Needs xxhash32 (nvshaders/random.h.slang) and shaderio.h.
+
+int3 causticCell(CausticParams* params, float3 position)
+{
+  // Clamped: a position far from the origin over a tiny cell must not leave the range of an int
+  return int3(clamp(floor(position / params->cellSize), float3(-1.0e9F), float3(1.0e9F)));
+}
+
+uint causticCellSlot(CausticParams* params, int3 cell)
+{
+  return xxhash32(asuint(cell)) & params->cellMask;
+}
+
+#endif  // CAUSTICS_GRID_H

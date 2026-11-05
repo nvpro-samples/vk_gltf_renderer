@@ -20,6 +20,7 @@
 #pragma once
 
 #include <filesystem>
+#include <mutex>
 #include <vulkan/vulkan_core.h>
 
 //--------------------------------------------------------------------------------------------------
@@ -49,7 +50,9 @@ public:
   // Save the cache to disk and destroy the cache object
   void deinit();
 
-  // Save the current cache to disk.
+  // Save the current cache to disk, if it grew since the last save or load. The file is replaced
+  // atomically, so a save that is interrupted (or races the end of the process) leaves the old one.
+  // Safe to call from any thread, e.g. after a background pipeline build.
   // Returns true on success, false on failure.
   bool save();
 
@@ -65,6 +68,8 @@ private:
   VkPipelineCache       m_cache{VK_NULL_HANDLE};
   std::filesystem::path m_cacheFilePath;
   size_t                m_initialSize{0};  // Size of cache data loaded from disk at init()
+  size_t                m_savedSize{0};    // Size of the cache data the file holds now
+  std::mutex            m_saveMutex;       // One save at a time
 };
 
 }  // namespace nvvk

@@ -26,6 +26,7 @@
 
 #include "pipeline_cache_util.hpp"
 #include <fstream>
+#include "cache_dir.hpp"
 #include <vector>
 #include <nvvk/check_error.hpp>
 #include <nvvk/debug_util.hpp>
@@ -57,6 +58,7 @@ VkResult PipelineCacheManager::init(VkDevice device, const std::filesystem::path
           file.read(cacheData.data(), fileSize);
           file.close();
           m_initialSize = fileSize;
+          m_savedSize   = fileSize;
           LOGI("Loaded pipeline cache from %s (%zu bytes)\n", m_cacheFilePath.string().c_str(), fileSize);
         }
         else if(fileSize > kMaxPipelineCacheFileSize)
@@ -113,6 +115,7 @@ void PipelineCacheManager::deinit()
 
 bool PipelineCacheManager::save()
 {
+  std::lock_guard<std::mutex> lock(m_saveMutex);
   if(m_cache == VK_NULL_HANDLE)
     return false;
 
@@ -130,6 +133,9 @@ bool PipelineCacheManager::save()
     return true;  // Not an error, just nothing to save
   }
 
+  if(cacheSize == m_savedSize)
+    return true;  // Nothing new since the file was written or loaded
+
   // Allocate memory and get the cache data
   std::vector<char> cacheData(cacheSize);
   if(vkGetPipelineCacheData(m_device, m_cache, &cacheSize, cacheData.data()) != VK_SUCCESS)
@@ -141,7 +147,13 @@ bool PipelineCacheManager::save()
   // Write to disk
   try
   {
-    std::ofstream file(m_cacheFilePath, std::ios::binary);
+    std::error_code ec;
+    std::filesystem::create_directories(m_cacheFilePath.parent_path(), ec);  // the cache folder, the first time
+
+    // Written beside the target, under a name of its own, and renamed over it: a crash mid-write must not
+    // leave half a cache, nor another instance of the application overwrite what this one writes
+    const std::filesystem::path tempPath = nvsamples::uniqueTempPath(m_cacheFilePath);
+    std::ofstream               file(tempPath, std::ios::binary);
     if(file.is_open())
     {
       file.write(cacheData.data(), cacheSize);
@@ -150,10 +162,13 @@ bool PipelineCacheManager::save()
       file.close();
       if(writeOk)
       {
+        std::filesystem::rename(tempPath, m_cacheFilePath);  // replaces an existing file on Windows too
+        m_savedSize           = cacheSize;
         const ptrdiff_t delta = static_cast<ptrdiff_t>(cacheSize) - static_cast<ptrdiff_t>(m_initialSize);
         LOGI("Saved pipeline cache to %s (%zu bytes, %+td vs load)\n", m_cacheFilePath.string().c_str(), cacheSize, delta);
         return true;
       }
+      std::filesystem::remove(tempPath, ec);
       LOGW("Failed to write pipeline cache to %s\n", m_cacheFilePath.string().c_str());
       return false;
     }

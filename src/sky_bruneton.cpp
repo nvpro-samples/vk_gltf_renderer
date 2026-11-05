@@ -495,8 +495,26 @@ void SkyBruneton::recordPrecompute(VkCommandBuffer cmd, Quality quality)
 
 bool SkyBruneton::lutsSatisfy(const shaderio::SkyAtmosphereParameters& parameters, Quality quality) const
 {
-  return m_lutQuality.densitySamples >= quality.densitySamples && m_lutQuality.scatteringOrders >= quality.scatteringOrders
-         && std::memcmp(&parameters, &m_lutParameters, sizeof(parameters)) == 0;
+  if(m_lutQuality.densitySamples < quality.densitySamples || m_lutQuality.scatteringOrders < quality.scatteringOrders)
+    return false;
+
+  // Not a byte compare: the persisted settings are written with six decimals, so an atmosphere
+  // restored from the .ini differs from the full-precision Earth defaults by ~1e-6 and would trigger
+  // a full rebuild on the first frame of every launch. The struct is floats only. The absolute term
+  // covers that six-decimal rounding (<= 5e-7); the relative term is only float noise. Keep it tight:
+  // topRadius is ~6400, so a loose relative bound would swallow a real change of the planet radius
+  // or the atmosphere thickness.
+  static_assert(sizeof(shaderio::SkyAtmosphereParameters) % sizeof(float) == 0);
+  constexpr size_t kFloatCount = sizeof(shaderio::SkyAtmosphereParameters) / sizeof(float);
+  float            wanted[kFloatCount], held[kFloatCount];
+  std::memcpy(wanted, &parameters, sizeof(parameters));
+  std::memcpy(held, &m_lutParameters, sizeof(m_lutParameters));
+  for(size_t i = 0; i < kFloatCount; ++i)
+  {
+    if(std::abs(wanted[i] - held[i]) > 1e-6F + 1e-6F * std::max(std::abs(wanted[i]), std::abs(held[i])))
+      return false;
+  }
+  return true;
 }
 
 //--------------------------------------------------------------------------------------------------

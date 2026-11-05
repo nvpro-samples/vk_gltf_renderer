@@ -164,6 +164,54 @@ VisualizationResult applyVisualization(inout PbrMaterial pbrMat,
   }
 }
 
+// Visualization::eTextureIsolate: the raw, unlit texel of one material texture slot, so a texture can be
+// checked without lighting or the other inputs of the material. Surfaces of any other material are
+// drawn grey. Returns eRenderedOutput until the host has picked a slot (isolate.texInfo > 0).
+// Needs getTexture(): include gltf_material_eval.h.slang first (after RASTER_PIPELINE, in the raster shader).
+struct TextureIsolateHit
+{
+  int    materialIndex;  // material of the surface hit, -1 for none (the infinite plane)
+  float2 tc[2];          // the hit's texture coordinates
+  float  texGrad;        // texture footprint, as for getTexture()
+};
+
+VisualizationResult applyTextureIsolate(Texture2D           images[],
+                                        SamplerState        samplers[],
+                                        GltfTextureInfo*    texInfos,
+                                        in TextureIsolateHit hit,
+                                        in TextureIsolate    isolate,
+                                        out float3           overrideColor)
+{
+  overrideColor = float3(0.5);
+  if(isolate.texInfo <= 0)
+    return VisualizationResult::eRenderedOutput;
+  if(hit.materialIndex != isolate.material)
+    return VisualizationResult::eColorOverride;
+
+  const float4 texel = getTexture(images, samplers, texInfos[isolate.texInfo], hit.tc, hit.texGrad);
+  switch(isolate.channel)
+  {
+    case 1:
+      overrideColor = texel.rrr;
+      break;
+    case 2:
+      overrideColor = texel.ggg;
+      break;
+    case 3:
+      overrideColor = texel.bbb;
+      break;
+    case 4:  // alpha is never color-encoded
+      overrideColor = texel.aaa;
+      return VisualizationResult::eColorOverride;
+    default:
+      overrideColor = texel.rgb;
+      break;
+  }
+  if(isolate.srgb != 0)
+    overrideColor = toSrgb(overrideColor);
+  return VisualizationResult::eColorOverride;
+}
+
 //-----------------------------------------------------------------------
 // Check if a flag is set
 //-----------------------------------------------------------------------

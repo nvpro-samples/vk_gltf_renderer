@@ -120,6 +120,9 @@ public:
   void ensureEmptyScene();
   void createSceneFromDescriptor(const std::filesystem::path& descriptorPath);
   void createHDR(const std::filesystem::path& hdrFilename);
+  // The environment onAttach() builds, so start-up pays for one HdrEnvDome::create (pipelines + prefilter)
+  // instead of a dummy followed by the real file. Empty keeps the dummy. Call before attaching.
+  void setStartupHdr(const std::filesystem::path& hdrFilename) { m_startupHdr = hdrFilename; }
   void onMergeScene(const std::filesystem::path& filename);
   void replaceSceneAsync(const std::filesystem::path& filename);
   void onReferenceScene(const std::filesystem::path& filename);
@@ -134,6 +137,7 @@ public:
   void                                        setSerAvailable(bool available);
   void                                        setBackgroundOptimalShader(bool enable);
   void                                        setCompileInline(bool enable);
+  void                                        setDlssHold(bool enable);
   void                                        setDeviceExtensions(std::vector<std::string> extensions);
   void                                        setOpacityMicromapAvailable(bool hardware, bool enabled);
 #ifdef USE_AGENTIC
@@ -202,6 +206,10 @@ public:
   /// any other transform.
   bool saveSkyPreset(const std::filesystem::path& path) const;
   bool loadSkyPreset(const std::filesystem::path& path);
+
+  /// The start-up `--scenefile` of an interactive run, loaded at the first frame top on the worker
+  /// thread behind the busy indicator, so the window and UI show up while the scene loads.
+  void queueStartupScene(const std::filesystem::path& filename) { m_pendingOpenScene = filename; }
 
   /// The start-up `--loadSkyPreset` / `--saveSkyPreset`, applied at the first frame top rather than
   /// now: the ini restore and the scene's authored sky both land there, and either would otherwise
@@ -383,8 +391,8 @@ private:
   void finalizeSceneSetup(const std::filesystem::path& filename);  // Shared GPU build + UI wiring after a load
   void wireSceneToUi();                                            // Wire current scene into browser/inspector panels
   void buildAccelerationStructures();                              // Helper for BLAS/TLAS building
-  void enqueueCompactedBlasPass();                                 // Static scenes: one BLAS pass, compacted, then the next
-  void enqueueTopLevelAccelerationStructure();                     // Last load work: the TLAS, then staging release
+  void enqueueCompactedBlasPass();              // Static scenes: one BLAS pass, compacted, then the next
+  void enqueueTopLevelAccelerationStructure();  // Last load work: the TLAS, then staging release
   void destroyResources();
   void resetFrame();
   void selectSceneNodeFromScript(int nodeIndex);  // Script-driven selection (Inspector/Scene Browser)
@@ -500,6 +508,13 @@ private:
   void addToRecentFiles(const std::filesystem::path& filePath, int historySize = 20);
   void removeFromRecentFiles(const std::filesystem::path& filePath);
   void mouseClickedInViewport();
+  // False until the first scene has been wired into the panels (see wireSceneToUi)
+  bool m_uiWired{false};
+  // The bar over the viewport while a texture is isolated: its name, the channel shown, and a way out.
+  void renderTextureIsolateBar(const ImVec2& imageTopLeft, const ImVec2& imageSize);
+  // Where that bar was drawn last frame (empty when hidden), so a click on it is not also a viewport pick.
+  ImVec2 m_isolateBarMin{0.0F, 0.0F};
+  ImVec2 m_isolateBarMax{0.0F, 0.0F};
   // True when the current scene has a KHR_interactivity graph and it's actively ticking - the
   // shared gate for every place viewport click behavior changes while a graph is playing (see
   // docs/interactivity.md's design notes): skipping the click-to-deselect toggle
@@ -515,6 +530,8 @@ private:
   nvutils::Bbox getRenderNodesBbox(const std::unordered_set<int>& renderNodeIndices);
   void          windowTitle();
   void          applyGltfCamera(int cameraIndex);
+  void          followGltfCamera();       // per frame, after the animation: viewport tracks the camera node
+  void          endFollowOnNavigation();  // called by followGltfCamera(): navigation ends the follow
   void          applyCameraString(const std::string& text);
   void          setGltfCameraFromView(int cameraIndex);
   void          loadHdrFileDialog();
@@ -632,6 +649,7 @@ private:
   bool                  m_envPreviewPending{false};  // Record a colour-only re-bake into this frame
   bool                  m_envCommitOwed{false};      // Previewed at least once; owes a commit once the edits stop
   bool                  m_envOwnedByBaker{false};    // hdrIbl currently points at EnvBaker's image, not a loaded file
+  std::filesystem::path m_startupHdr;                // see setStartupHdr()
   std::filesystem::path m_lastHdrFile;               // Last HDR handed to createHDR, replayed when returning to eHdr
   EnvironmentState      m_environmentSky;            // Sky the loaded scene authors, preserved verbatim for save
   bool                  m_environmentSkyPending{false};  // Authored sky parsed but not yet pushed to settings
@@ -662,6 +680,11 @@ private:
   // by m_hoverPicker's async G-buffer readback (see updateHoverState()); also settable directly
   // by the `hovernode`/`clearhover` script commands for deterministic testing.
   int m_hoveredNodeIndex = -1;
+  // Viewport camera as followGltfCamera() last set it; any difference means the user navigated.
+  glm::dvec3 m_followEye{0.0}, m_followCenter{0.0}, m_followUp{0.0, 1.0, 0.0};
+  double     m_followFov       = 0.0;
+  int        m_followCameraIdx = -1;  // camera the saved pose belongs to
+  bool       m_followPoseValid = false;
   // Cursor position captured during the UI phase (updateHoverCursorPosition(), ui_renderer.cpp)
   // for onRender()'s later use - ImGui hover/cursor queries aren't valid from onRender() itself.
   glm::ivec2 m_hoverCursorPixel{-1, -1};

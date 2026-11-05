@@ -21,6 +21,7 @@ Built in C++ on [nvpro_core2](https://github.com/nvpro-samples/nvpro_core2) with
 - **glTF PBR material reference** — Monte Carlo path tracer with NEE, MIS, and adaptive sampling for physically accurate glTF PBR material evaluation.
 - **35 glTF extensions** — Anisotropy, clearcoat, transmission, volume, sheen, iridescence, dispersion, retroreflection, Draco, interactivity, opacity micromaps, IES light profiles, and more.
 - **glTF 2.1 complex scenes (preview)** — Compose multi-file scenes with External Assets: reference glTF/GLB files as instances that share geometry, with nested references, cycle detection, and file aliases — re-externalized on save.
+- **Caustics (beta)** — The bright, focused light that glass, water and polished metal throw on the surfaces around them, which a plain path tracer cannot make. A per-frame photon map adds it to the path-traced image (off by default; see [Caustics](docs/caustics.md)).
 - **AI denoising** — DLSS Ray Reconstruction, OptiX AI Denoiser and Open Image Denoise (on Vulkan, through [vk_oidn](https://github.com/nvpro-samples/vk_oidn)) produce clean images at interactive rates.
 - **Agentic AI generation (optional)** — Local **ComfyUI** bridge that *beautifies* the current render or *generates an HDRI* environment from a text prompt.
 - **Rasterizer preview** — Fast PBR rasterizer shares scene resources for instant iteration during editing.
@@ -82,6 +83,7 @@ cmake --build build
 ## Features
 
 - **Ray tracing**: High-quality path tracing reference for glTF PBR materials — Monte Carlo global illumination, next event estimation, multiple importance sampling, and adaptive sampling.
+- **Caustics (beta)**: light focused by glass, water, or polished metal, from a per-frame photon map (Settings > Path Tracer > Caustics; see [Caustics](docs/caustics.md)).
 - Profiler, GPU monitor, GPU memory tracking, and statistics.
 - Shader hot-reload (Ctrl+Shift+R) for developers who want to experiment.
 - AI denoisers: DLSS Ray Reconstruction, OptiX AI Denoiser and Open Image Denoise (vk_oidn).
@@ -103,6 +105,7 @@ cmake --build build
 | Showcase | ![](docs/images/ABeautifulGame.jpg) ![](docs/images/ToyCar.jpg) ![](docs/images/DamagedHelmet.jpg) ![](docs/images/Sponza.jpg) |
 | Material features | ![](docs/images/SunglassesKhronos.jpg) ![](docs/images/SheenCloth.jpg) ![](docs/images/TransmissionTest.jpg) ![](docs/images/volume.png) ![](docs/images/volume_scatter.png) ![](docs/images/IridescenceAbalone.jpg) |
 | Lighting and camera | ![](docs/images/sky_1.jpg) ![](docs/images/hdr_1.jpg) ![](docs/images/dof_1.jpg) ![](docs/images/light.jpg) |
+| Caustics (beta), off then on | ![Cut-glass tumbler, caustics off](docs/images/caustics_tumbler_off.jpg) ![Cut-glass tumbler, caustics on](docs/images/caustics_tumbler_on.jpg) ![Amber carafe, caustics off](docs/images/caustics_amber_off.jpg) ![Amber carafe, caustics on](docs/images/caustics_amber_on.jpg) |
 
 For a **full walkthrough** of rendering modes, editor workflows, and feature screenshots, see the [User Guide](docs/user-guide.md).
 
@@ -224,6 +227,7 @@ See [External Assets](docs/external_assets.md) for design details.
 
 - [User Guide](docs/user-guide.md) — renderer settings, PBR materials, scene editor, camera, environment, tone mapping, common CLI flags, and troubleshooting.
 - [ComfyUI Agentic Setup](docs/comfyui-agentic-setup.md) — set up the local ComfyUI install, models, and bridge to beautify renders and generate HDRIs from prompts.
+- [Caustics (beta)](docs/caustics.md) — what caustics are, how the photon map adds them to the path-traced image, its settings and cost, and its limits.
 - [glTF Resources](docs/resources.md) — curated collection of glTF models, HDR environments, specifications, and tools.
 
 **For contributors**

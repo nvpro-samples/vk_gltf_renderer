@@ -26,7 +26,9 @@
 #include <chrono>
 #include <mutex>
 #include <optional>
+#include <string>
 #include <thread>
+#include <vector>
 
 #include <glm/glm.hpp>
 
@@ -35,6 +37,7 @@
 
 #include <nvvk/sbt_generator.hpp>
 #include <nvutils/profiler.hpp>
+#include "caustics.hpp"
 #include "denoiser_handoff.hpp"
 #include "renderer_base.hpp"
 #include "sample_schedule.hpp"
@@ -105,7 +108,8 @@ public:
 
   // Register command line parameters
   /// Declare this subsystem's settings (command line + benchmark + MCP + persistence).
-  void registerParameters(SettingsRegistry* settings);
+  // `restart` starts a new accumulation, for the settings a script changes without the UI's help
+  void registerParameters(SettingsRegistry* settings, std::function<void()> restart = {});
 
   VkDevice                        m_device{};  // Vulkan device
   VkPipelineLayout                m_pipelineLayout{};
@@ -148,9 +152,12 @@ public:
     bool wireframe = false;  // True when the shader is the wireframe build.
     bool visualize = false;  // True when the debug-visualization code is compiled in (USE_VISUALIZE).
     bool omm       = false;  // True when the ray-query entry points opt in to opacity micromaps (USE_OMM).
-    bool optimal   = false;  // True when the shader is the scene-aware optimized build.
+    bool optimal   = false;  // True when the shader is the scene-aware optimized build; false is the universal build.
+    // The next two only exist in an optimal key. The universal build compiles both in and lets the
+    // push-constant flags choose (USE_UNIVERSAL), so its key never varies with the denoisers.
     bool dlss      = false;  // True on the frames DLSS renders (drives USE_DLSS_SHADER: DLSS's guide captures).
     bool dlssGuide = false;  // True when guide-buffer capture is compiled in (USE_GUIDE_SHADER: DLSS, OptiX or OIDN).
+    bool caustics  = false;  // True when the beta caustics are compiled in (USE_CAUSTICS).
     nvvkgltf::SceneFeatureSet features{};  // only meaningful when `optimal == true`
     int dlssTransparency = 0;  // USE_DLSS_TRANSP the pipeline was specialized with (Dlss::TransparencyMode).
 
@@ -160,8 +167,8 @@ public:
     // set only matters for the optimal build.
     bool sameShader(const VariantKey& o) const
     {
-      return wireframe == o.wireframe && visualize == o.visualize && omm == o.omm && optimal == o.optimal
-             && dlss == o.dlss && dlssGuide == o.dlssGuide && (optimal ? (features == o.features) : true);
+      return wireframe == o.wireframe && visualize == o.visualize && omm == o.omm && optimal == o.optimal && dlss == o.dlss
+             && dlssGuide == o.dlssGuide && caustics == o.caustics && (optimal ? (features == o.features) : true);
     }
     bool operator==(const VariantKey& o) const { return sameShader(o) && dlssTransparency == o.dlssTransparency; }
     // The fields sameShader() sees differ on, e.g. "omm 0->1, dlss 1->0", for the recompile log.
@@ -192,6 +199,8 @@ public:
   // Swaps in the wanted variant if it is cached (cheap; no BusyWindow). Leaves live handles alone on a miss.
   bool tryRestoreCachedVariant(Resources& resources);
   void destroyCacheEntry(Resources& resources, VariantCacheEntry& entry);
+  // The universal variants render whenever anything else is still building, so the LRU never evicts them.
+  static bool isPinnedVariant(const VariantKey& key) { return !key.optimal && !key.visualize && !key.wireframe; }
 
   // Prefetch: variants built on a background thread and added to the cache when done. The driver
   // compiles a pipeline on a single thread, so building them beside the live one costs little wall time.
@@ -231,15 +240,75 @@ public:
     bool           useSER           = false;  // USE_SER specialization constant
     int            dlssTransparency = 0;      // USE_DLSS_TRANSP specialization constant (Dlss::TransparencyMode)
     const char*    label            = "";     // Log prefix, e.g. "RTX (prefetch)"
+    const char*    entry            = "computeMain";  // The entry point of the module to build the compute pipeline for
   };
-  VkPipeline     buildRqPipeline(const PipelineBuildInfo& info) const;
-  RtxBuild       buildRtxPipeline(Resources& resources, const PipelineBuildInfo& info) const;
-  int            currentDlssTransparency() const;  // The DLSS transparency mode the pipelines are specialized with.
-  bool           compileSpirv(Resources& resources, const VariantKey& key);  // gltf_pathtrace.slang for `key`.
+  VkPipeline buildRqPipeline(const PipelineBuildInfo& info) const;
+  RtxBuild   buildRtxPipeline(Resources& resources, const PipelineBuildInfo& info) const;
+  int        currentDlssTransparency() const;  // The DLSS transparency mode the pipelines are specialized with.
+  // gltf_pathtrace.slang for `key`, into `spirv`: from the SPIR-V cache (spirv_cache.hpp) when this variant was built
+  // before, else compiled and stored.
+  bool           compileSpirv(Resources& resources, const VariantKey& key, std::vector<uint32_t>& spirv);
   VkShaderModule createShaderModule(const void* code, size_t codeSize) const;
 
   // The default rendering technique
   RenderTechnique m_renderTechnique{RenderTechnique::RayQuery};
+
+  // Beta caustics (caustics.hpp): the photon pass runs before the paths, as a compute pipeline of
+  // the live module's own causticMain. A pipeline is kept per module (and specialization) for as long as the
+  // module lives: the variant cache swaps modules in and out (DLSS-RR with OIDN does it every frame), and
+  // building one costs hundreds of milliseconds.
+  struct CausticPipeline
+  {
+    VkShaderModule module           = VK_NULL_HANDLE;
+    bool           useSER           = false;
+    int            dlssTransparency = 0;
+    const char*    entry            = "";  // causticMain (the photons)
+    VkPipeline     pipeline         = VK_NULL_HANDLE;
+  };
+  Caustics                     m_caustics;
+  std::vector<CausticPipeline> m_causticPipelines;
+  void                         forgetCausticPipelines(VkShaderModule module);  // Before the module is destroyed
+  VkPipeline                   causticPipeline(const char* entry);             // Of the live module, built when missing
+  void traceCaustics(VkCommandBuffer cmd, Resources& resources, const shaderio::PathtracePushConstant& pushConst);
+
+  // The Settings panel: one tab per concern. Each tab method returns true when
+  // a value changed. eAdvanced is the gear tab at the right of the bar.
+  enum class SettingsTab
+  {
+    eSampling,
+    eTransport,
+    eCaustics,
+    eLens,
+    eAdvanced,
+    eCount
+  };
+  // The settings a tab shows right now, for its changed-from-default dot and its reset. A value the
+  // tab hides (Samples per Frame under Auto SPP, say) is left out: it would mark the tab for
+  // something the user cannot see.
+  struct TabSettings
+  {
+    std::array<const void*, 16> storage{};
+    int                         count = 0;
+    void                        add(const void* settingStorage) { storage[count++] = settingStorage; }
+  };
+  // A tab of the Settings panel: what the bar shows for it
+  struct TabDesc
+  {
+    SettingsTab       tab    = SettingsTab::eSampling;
+    const char*       label  = nullptr;  // The visible text: padded, so the dot has room
+    const char*       id     = nullptr;
+    ImGuiTabItemFlags flags  = ImGuiTabItemFlags_None;
+    const char*       hint   = nullptr;
+  };
+  TabSettings       tabSettings(SettingsTab tab, const Resources& resources) const;
+  bool              isTabChanged(SettingsTab tab, const Resources& resources) const;
+  void              resetTab(SettingsTab tab, Resources& resources);  // the caller restarts the accumulation
+  bool              uiSamplingTab(Resources& resources);
+  bool              uiTransportTab(Resources& resources);
+  bool              uiCausticsTab();
+  bool              uiLensTab(Resources& resources, float apertureMax);
+  bool              uiAdvancedTab(Resources& resources);
+  SettingsRegistry* m_settingsRegistry{};  // Where the defaults live, set by registerParameters()
 
   // Adaptive sampling for performance optimization
   void                                  updateAdaptiveSampling(Resources& resources);
@@ -261,15 +330,24 @@ public:
   bool m_oidnWasOn{false};
   // DLSS-RR rendered frame 0 of this accumulation, and an accumulation denoiser (OptiX, OIDN) takes the
   // frames after it: DLSS's image is no sample of the accumulation, and the hand-off blends from it
-  bool                       m_dlssFrame0{false};
-  DenoiserHandoff            m_handoff;
+  bool m_dlssFrame0{false};
+  // DLSS-RR's part of an accumulation when OptiX or OIDN is also on: frame 0, and, in an interactive session,
+  // the frames after it until the view has been still for kDlssHold (see updateDlssPhase()). While a camera
+  // moves, frames reach 1, 2, 3 between two changes: without the hold the image would swap between DLSS-RR's
+  // and the accumulation denoiser's several times a second.
+  bool m_dlssPhase{false};
+  bool m_takeover{false};  // The first frame the accumulation denoiser has after DLSS-RR's
+  std::chrono::steady_clock::time_point      m_lastViewChange{};
+  static constexpr std::chrono::milliseconds kDlssHold{300};
+  DenoiserHandoff                            m_handoff;
   std::atomic<uint32_t>      m_pipelineGeneration{0};   // Bumped whenever a new or swapped pipeline is installed
   uint64_t                   m_adaptivePipelineKey{0};  // Pipeline (generation, technique) Auto SPP was found with
   nvutils::ProfilerTimeline* m_profilerTimeline{nullptr};
   bool                       m_adaptiveSampling{true};
   int m_adaptiveSamples{MIN_SAMPLES_PER_PIXEL};  // Auto SPP's samples per frame; ptSamples keeps the user's value
   int m_totalSamplesAccumulated{0};              // Track total samples separately
-  int m_frameSamples{1};  // Samples per pixel traced this frame: ptSamples, fewer on a frame that ends on a stop
+  int m_frameSamples{1};      // Samples per pixel traced this frame: ptSamples, fewer on a frame that ends on a stop
+  VkExtent2D m_renderSize{};  // What the last frame traced (see getStatus())
   // Samples traced by the last frames, as far back as the profiler's GPU times lag (Auto SPP)
   std::array<int, nvutils::ProfilerTimeline::MAX_FRAME_DELAY + 1> m_recentFrameSamples{};
 
@@ -315,6 +393,37 @@ public:
   // (ImGui.ini, the command line), OIDN does. Called every frame; returns true when the accumulation
   // must restart.
   bool keepOneAccumulationDenoiser(Resources& resources);
+
+  // Which shader the path trace runs right now (see updateOptimalFallback()): for the status bar
+  // and the Optimize Shader row.
+  enum class ShaderStatus
+  {
+    eOptimized,    // The scene-optimized build
+    eBuilding,     // The all-features build renders while the optimized one is built in the background
+    eAllFeatures,  // The all-features build, since Optimize Shader is off
+    eFailed,       // The optimized build did not compile; the all-features one stays until a shader reload
+  };
+  ShaderStatus getShaderStatus(const Resources& resources) const;
+
+  // What the status bar reports about the path trace (see ui_status_bar.hpp).
+  struct Denoiser
+  {
+    const char* name;
+    bool        active;  // Its image is the one on screen (the others are on, but not showing now)
+  };
+  struct Status
+  {
+    ShaderStatus          shader;
+    int                   samples;          // Samples per pixel in the image
+    int                   maxSamples;       // The count the accumulation stops at
+    int                   samplesPerFrame;  // Traced by the last frame
+    float                 msppPerSecond;    // Mega-sample-pixels per second of wall time, rolling average
+    float                 pathTraceMs;      // GPU time of the path-trace dispatch; 0 while the profiler has none
+    std::vector<Denoiser> denoisers;        // Every denoiser that is on; empty for none
+    VkExtent2D            renderSize;       // What the path tracer traces (below the output size when DLSS upscales)
+    VkExtent2D            outputSize;       // The viewport image
+  };
+  Status getStatus(const Resources& resources);
 
   // Samples per frame the next frame traces before it ends on a stop: Auto SPP's count, the
   // setting (ptSamples), or 1 when DLSS renders every frame
@@ -382,6 +491,7 @@ private:
   void               startAsyncCompile(Resources& resources);
   void               updateStatistics(Resources& resources);
   // Bind the technique's pipeline and launch it over `renderingSize`; the caller times it.
+  void bindComputeSets(VkCommandBuffer cmd, Resources& resources) const;  // The scene, environment and sky of a compute pipeline
   void renderRayQuery(VkCommandBuffer cmd, VkExtent2D renderingSize, Resources& resources);
   void renderRayTrace(VkCommandBuffer cmd, VkExtent2D renderingSize, Resources& resources);
   void traceRays(VkCommandBuffer cmd, VkExtent2D renderingSize, Resources& resources);  // The selected technique
@@ -404,6 +514,7 @@ private:
   bool getEffectiveOptixEnabled(const Resources& resources) const;
   // Determine if OIDN should write its guides and denoise this frame
   bool getEffectiveOidnEnabled(const Resources& resources) const;
+  void updateDlssPhase(const Resources& resources);  // Top of every frame, before anything asks who denoises it
   // Upscale selection ID and depth from render resolution to display resolution (OptiX 2x mode)
   void upscaleSelectionAndDepth(VkCommandBuffer cmd, Resources& resources);
   // Size m_depthStaging / m_depthCopyBuffer to the G-buffer (no-op unless m_depthViaStaging).

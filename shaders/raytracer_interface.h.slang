@@ -54,6 +54,9 @@ struct ShadowPayload
   bool   isInside          = false;         // If true, the shadow ray is considered to start INSIDE a volume
   float3 extinction        = float3(0.0f);  // sigma_t of the medium the ray is in, while isInside
   float3 totalTransmission = float3(1.0f);  // The total transmission of the shadow ray through the volume
+#if USE_CAUSTICS
+  bool blockCasters = false;  // Smooth casters are opaque to this ray (a primary receiver's light sample)
+#endif
 };
 
 // Raytracer interface definition
@@ -63,7 +66,8 @@ interface IRaytracer
   void TraceLow(RayDesc ray, inout HitPayload payload);
   // A shadow ray that starts inside a medium says so, with that medium's extinction: it attenuates
   // every segment it travels inside one, up to TMax.
-  float3 TraceShadow(RayDesc ray, inout uint seed, bool initialInside = false, float3 initialExtinction = float3(0.0));
+  // `blockCasters` (Beta caustics): smooth glass and metal count as opaque, not as a filter.
+  float3 TraceShadow(RayDesc ray, inout uint seed, bool initialInside = false, float3 initialExtinction = float3(0.0), bool blockCasters = false);
 }
 
 // Implementation using RayQuery
@@ -139,7 +143,7 @@ struct RayQueryRaytracer : IRaytracer
     }
   }
 
-  float3 TraceShadow(RayDesc ray, inout uint seed, bool initialInside = false, float3 initialExtinction = float3(0.0))
+  float3 TraceShadow(RayDesc ray, inout uint seed, bool initialInside = false, float3 initialExtinction = float3(0.0), bool blockCasters = false)
   {
     const float MIN_TRANSMISSION  = 0.01;  // Minimum transmission factor to continue tracing
     float3      totalTransmission = float3(1.0);
@@ -177,7 +181,7 @@ struct RayQueryRaytracer : IRaytracer
         prevHitT            = hitT;
         totalTransmission *= shadowMediumTransmittance(isInside, extinction, segmentLength);
         totalTransmission *= getShadowTransmission(renderNode, renderPrim, triangleID, barycentrics, worldToObject,
-                                                   ray.Direction, isInside, extinction);
+                                                   ray.Direction, isInside, extinction, blockCasters);
 
         if(max(max(totalTransmission.r, totalTransmission.g), totalTransmission.b) <= MIN_TRANSMISSION)
         {
@@ -260,10 +264,13 @@ struct TraditionalRaytracer : IRaytracer
   // Visibility needs any occluder, not the closest one: the first committed hit (opaque, or accepted
   // by rahitShadow once the transmission is spent) ends the traversal; transmissive surfaces are
   // ignored by rahitShadow and never committed.
-  float3 TraceShadow(RayDesc ray, inout uint seed, bool initialInside = false, float3 initialExtinction = float3(0.0))
+  float3 TraceShadow(RayDesc ray, inout uint seed, bool initialInside = false, float3 initialExtinction = float3(0.0), bool blockCasters = false)
   {
     ShadowPayload shadowPayload = {};
     shadowPayload.seed          = seed;
+#if USE_CAUSTICS
+    shadowPayload.blockCasters = blockCasters;
+#endif
     shadowPayload.isInside      = initialInside;
     shadowPayload.extinction    = initialExtinction;
 

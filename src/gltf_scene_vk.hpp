@@ -150,6 +150,14 @@ public:
   const nvvk::Buffer&               primitiveBuffer() const { return m_bRenderPrim; }
   const nvvk::Buffer&               renderNodeBuffer() const { return m_bRenderNode; }
   const nvvk::Buffer&               sceneDesc() const { return m_bSceneDesc; }
+  // The materials as the shaders read them, for host code that needs their factors (no per-material glTF lookups)
+  const std::vector<shaderio::GltfShadeMaterial>& shadeMaterials() const { return m_materialCache.getShadeMaterials(); }
+  uint64_t                          shadeMaterialsRevision() const { return m_materialCache.getRevision(); }
+  // The GltfTextureInfo slot through which material `materialIndex` uses `binding` (0 = none)
+  uint16_t textureInfoSlot(int materialIndex, const tinygltf::Material& srcMat, const TextureBinding& binding) const
+  {
+    return m_materialCache.findTextureSlot(materialIndex, srcMat, binding);
+  }
   const std::vector<VertexBuffers>& vertexBuffers() const { return m_vertexBuffers; }
   const std::vector<nvvk::Buffer>&  indices() const { return m_bIndices; }
   const SceneOmm&                   opacityMicromap() const { return m_sceneOmm; }

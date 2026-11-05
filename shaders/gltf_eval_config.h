@@ -30,14 +30,21 @@ layout off). Each pair has a compile-time guard below.
 
 // Denoiser guide-buffer compile gates. Both default to 0 so preprocessor #if checks never
 // hit an undefined identifier (Slang warning E15205). The build-time compile defines
-// USE_GUIDE_SHADER=1 via CMake when DLSS/OptiX/OIDN is available; USE_DLSS_SHADER stays 0 in the
-// embedded shader (DLSS is never active at startup). The runtime from-file recompile sets
-// both explicitly from the active denoiser state.
+// USE_GUIDE_SHADER / USE_DLSS_SHADER = 1 via CMake when DLSS/OptiX/OIDN is available, together with
+// USE_UNIVERSAL (below). A specialized from-file recompile sets both explicitly from the variant key.
 #ifndef USE_GUIDE_SHADER
 #define USE_GUIDE_SHADER 0
 #endif
 #ifndef USE_DLSS_SHADER
 #define USE_DLSS_SHADER 0
+#endif
+
+// The universal build (the one the host always keeps ready, see PathTracer::makeVariantKey): the guide
+// gates above are compiled in and decided per dispatch by the push-constant flags (ptGuideActive(),
+// ptDlssActive() in pathtrace_functions.h.slang), so DLSS, OptiX and OIDN can be switched on and off
+// without a new shader. A specialized build leaves it 0 and keeps the gates as compile-time constants.
+#ifndef USE_UNIVERSAL
+#define USE_UNIVERSAL 0
 #endif
 
 // Make by default the GLTF_USE_X values the same as the MAT_EXT_X values

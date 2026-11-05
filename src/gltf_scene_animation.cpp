@@ -31,6 +31,7 @@
 #include <cmath>
 #include <limits>
 #include <span>
+#include <string_view>
 
 #include <tinygltf/tiny_gltf.h>
 
@@ -194,6 +195,52 @@ void AnimationSystem::parseSamplersAndChannels()
     animation.info.reset();
     m_animations.emplace_back(animation);
   }
+}
+
+//--------------------------------------------------------------------------------------------------
+// Mark every node a channel moves, then walk from `nodeIndex` up to its root.
+bool AnimationSystem::isNodeAnimated(int nodeIndex) const
+{
+  const std::vector<int>& parents = m_scene.getNodeParents();
+  const int               numNodes = static_cast<int>(parents.size());
+  std::vector<bool>       moved(parents.size(), false);
+
+  for(const Animation& animation : m_animations)
+  {
+    for(const AnimationChannel& channel : animation.channels)
+    {
+      int target = -1;
+      switch(channel.path)
+      {
+        case AnimationChannel::PathType::eTranslation:
+        case AnimationChannel::PathType::eRotation:
+        case AnimationChannel::PathType::eScale:
+          target = channel.node;
+          break;
+        case AnimationChannel::PathType::ePointer: {
+          constexpr std::string_view kNodes = "/nodes/";
+          if(channel.pointerPath.starts_with(kNodes))
+          {
+            auto [index, rest] = tinygltf::utils::parsePointerIndexAndRest(channel.pointerPath, kNodes.size());
+            if(rest == "/translation" || rest == "/rotation" || rest == "/scale")
+              target = index;
+          }
+          break;
+        }
+        default:
+          break;
+      }
+      if(target >= 0 && target < numNodes)
+        moved[target] = true;
+    }
+  }
+
+  for(int n = nodeIndex; n >= 0 && n < numNodes; n = parents[n])
+  {
+    if(moved[n])
+      return true;
+  }
+  return false;
 }
 
 //--------------------------------------------------------------------------------------------------

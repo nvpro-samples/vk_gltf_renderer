@@ -1,0 +1,46 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 960 520" font-family="Segoe UI, Arial, sans-serif" font-size="14">
+  <defs>
+    <marker id="o" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse"><path d="M0 0 L10 5 L0 10 z" fill="#d9822b"/></marker>
+    <marker id="b" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse"><path d="M0 0 L10 5 L0 10 z" fill="#2b6fd9"/></marker>
+    <marker id="g" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse"><path d="M0 0 L10 5 L0 10 z" fill="#555"/></marker>
+  </defs>
+  <rect width="960" height="520" fill="#ffffff"/>
+  <text x="20" y="28" font-size="18" font-weight="bold" fill="#222">Why caustics need light tracing</text>
+  <text x="20" y="62" fill="#222" font-size="15" font-weight="bold" text-anchor="start">Path tracing: start at the camera</text>
+  <rect x="20" y="400" width="450" height="10" fill="#bbb"/>
+  <text x="26" y="428" fill="#555" font-size="13" text-anchor="start">floor (a diffuse receiver D)</text>
+  <circle cx="235" cy="340" r="55" fill="#cfe8ff" fill-opacity="0.7" stroke="#4a90c8" stroke-width="2"/>
+  <text x="235" y="345" fill="#235" font-size="13" text-anchor="middle">glass</text>
+  <circle cx="90" cy="110" r="11" fill="#ffd54a" stroke="#c9a200"/>
+  <text x="90" y="93" fill="#222" font-size="13" text-anchor="middle">point light</text>
+  <rect x="390" y="130" width="70" height="30" rx="6" fill="#e8e8e8" stroke="#666"/>
+  <text x="425.0" y="150.0" fill="#222" font-size="13" text-anchor="middle">camera</text>
+  <circle cx="330" cy="400" r="5" fill="#2b6fd9"/>
+  <path d="M425 160 L330 400" stroke="#2b6fd9" stroke-width="2" fill="none" marker-end="url(#b)"/>
+  <path d="M330 400 L112 122" stroke="#b3261e" stroke-width="2" fill="none" stroke-dasharray="6 4"/>
+  <path d="M254 284 L270 300 M254 300 L270 284" stroke="#b3261e" stroke-width="3" fill="none"/>
+  <path d="M330 400 L420 300 M330 400 L390 250 M330 400 L450 340 M330 400 L275 250" stroke="#2b6fd9" stroke-width="1.5" fill="none" stroke-dasharray="3 4" stroke-opacity="0.7"/>
+  <text x="20" y="455" fill="#b3261e" font-size="12" text-anchor="start">The shadow ray to the light hits the glass and stops (red x).</text>
+  <text x="20" y="472" fill="#b3261e" font-size="12" text-anchor="start">A bounce ray would have to refract through the glass and</text>
+  <text x="20" y="489" fill="#b3261e" font-size="12" text-anchor="start">land exactly on a point light: it never does.</text>
+  <line x1="480" y1="50" x2="480" y2="510" stroke="#ddd"/>
+  <text x="500" y="62" fill="#222" font-size="15" font-weight="bold" text-anchor="start">Light tracing: start at the light</text>
+  <rect x="500" y="400" width="440" height="10" fill="#bbb"/>
+  <text x="506" y="428" fill="#555" font-size="13" text-anchor="start">floor (the same receiver D)</text>
+  <circle cx="710" cy="340" r="55" fill="#cfe8ff" fill-opacity="0.7" stroke="#4a90c8" stroke-width="2"/>
+  <text x="710" y="345" fill="#235" font-size="13" text-anchor="middle">glass</text>
+  <circle cx="570" cy="110" r="11" fill="#ffd54a" stroke="#c9a200"/>
+  <text x="570" y="93" fill="#222" font-size="13" text-anchor="middle">point light</text>
+  <rect x="850" y="130" width="70" height="30" rx="6" fill="#e8e8e8" stroke="#666"/>
+  <text x="885.0" y="150.0" fill="#222" font-size="13" text-anchor="middle">camera</text>
+  <path d="M570 110 L672 291 L745 372 L805 400" stroke="#d9822b" stroke-width="2" fill="none" marker-end="url(#o)"/>
+  <path d="M570 110 L705 285 L755 360 L805 400" stroke="#d9822b" stroke-width="2" fill="none" marker-end="url(#o)"/>
+  <path d="M570 110 L735 288 L763 338 L805 400" stroke="#d9822b" stroke-width="2" fill="none" marker-end="url(#o)"/>
+  <circle cx="805" cy="400" r="6" fill="#d9822b"/>
+  <path d="M810 392 L885 162" stroke="#2b6fd9" stroke-width="2" fill="none" stroke-dasharray="6 4" marker-end="url(#b)"/>
+  <text x="822" y="262" fill="#1f4fa0" font-size="12" text-anchor="start">connect the landing</text>
+  <text x="822" y="278" fill="#1f4fa0" font-size="12" text-anchor="start">point to the camera</text>
+  <text x="500" y="455" fill="#a55a10" font-size="12" text-anchor="start">Photons follow the glass (refraction) and land on the floor:</text>
+  <text x="500" y="472" fill="#a55a10" font-size="12" text-anchor="start">that bright spot is the caustic. Each photon carries a share</text>
+  <text x="500" y="489" fill="#a55a10" font-size="12" text-anchor="start">of the light's power; the landing points add up to the picture.</text>
+</svg>

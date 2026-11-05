@@ -48,6 +48,7 @@
 #include <nvvk/resource_allocator.hpp>
 #include <nvvk/sampler_pool.hpp>
 #include <nvvk/frame_uploader.hpp>
+#include "gltf_material_cache.hpp"
 #include "gltf_scene.hpp"
 #include "gltf_scene_gpu.hpp"
 #include "ui_animation.hpp"
@@ -158,11 +159,19 @@ struct Settings
 {
   RenderingMode           renderSystem           = RenderingMode::ePathtracer;          // Renderer to use
   shaderio::Visualization visualization          = shaderio::Visualization::eRendered;  // Visualization mode
-  bool                    wireframe              = false;                      // Wireframe overlay on rendered meshes
+  // Texture isolate: one material texture shown raw and unlit, on top of `visualization`, which comes back
+  // when it is switched off (the Inspector's eye button). Session state, not persisted: a material and
+  // texture index mean nothing once another scene is loaded. Active while both indices are >= 0.
+  int                      isolateMaterial = -1;     // glTF material index
+  nvvkgltf::TextureBinding isolateBinding;           // which use of a texture in that material; texture < 0: none
+  int                      isolateChannel  = 0;      // 0 = RGB, 1..4 = R, G, B, A
+  bool                     isolateSrgb     = false;  // color data (base color, emissive, ...): show it as authored
+  bool                    wireframe       = false;  // Wireframe overlay on rendered meshes
   shaderio::EnvSystem     envSystem              = shaderio::EnvSystem::eSky;  // Environment system: Sky or HDR
   bool                    showAxis               = true;                       // Show the axis (bottom left)
-  bool                    showGrid               = false;                      // Show infinite grid
-  bool                    showGizmo              = false;                      // Show transform gizmo on selected node
+  bool                    showStatusBar          = true;   // Status bar along the bottom of the window
+  bool                    showGrid               = false;  // Show infinite grid
+  bool                    showGizmo              = false;  // Show transform gizmo on selected node
   bool                    snapEnabled            = false;  // Snap gizmo transforms to grid increments
   float                   gridUnit               = 1.0f;   // Grid base unit (world units)
   float                   snapRotation           = 45.0f;  // Rotation snap increment (degrees)
@@ -311,11 +320,28 @@ struct Settings
   // startup). On for headless, scripted and benchmark runs: frames that wait for a background
   // compile draw nothing, and a script counting frames would time and capture those empty frames.
   bool compileInline = false;
+  // With DLSS-RR and OptiX or OIDN both on, DLSS-RR keeps rendering after a view change until the view has
+  // been still for a moment, instead of handing over at the next frame (set at startup). Off for headless,
+  // scripted and benchmark runs, where the hand-over is at a fixed frame, whatever the wall time.
+  bool dlssHold = true;
 
 #ifndef NDEBUG
   bool showGridStyleWindow  = false;  // Show Grid Style debug window
   bool showGizmoStyleWindow = false;  // Show Gizmo Style debug window
 #endif
+
+  [[nodiscard]] bool isolating() const { return isolateMaterial >= 0 && isolateBinding.texture >= 0; }
+  void               stopIsolating()
+  {
+    isolateMaterial        = -1;
+    isolateBinding.texture = -1;
+  }
+
+  // What the shaders draw: the texture isolate view while one is picked, else the chosen visualization.
+  [[nodiscard]] shaderio::Visualization activeVisualization() const
+  {
+    return isolating() ? shaderio::Visualization::eTextureIsolate : visualization;
+  }
 
   // `envRotation` as a quaternion, normalised. The stored value may not be unit -- the command line
   // and MCP write it verbatim -- and a zero-length one is no rotation at all, so it reads as identity.

@@ -1,0 +1,41 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 960 440" font-family="Segoe UI, Arial, sans-serif" font-size="14">
+  <defs>
+    <marker id="o" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse"><path d="M0 0 L10 5 L0 10 z" fill="#d9822b"/></marker>
+    <marker id="b" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse"><path d="M0 0 L10 5 L0 10 z" fill="#2b6fd9"/></marker>
+    <marker id="g" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse"><path d="M0 0 L10 5 L0 10 z" fill="#555"/></marker>
+  </defs>
+  <rect width="960" height="440" fill="#ffffff"/>
+  <text x="20" y="28" font-size="18" font-weight="bold" fill="#222">Why the picture converges: a radius that shrinks as frames accumulate</text>
+  <rect x="80" y="90" width="420" height="260" fill="#fafafa" stroke="#ccc"/>
+  <text x="290.0" y="394" fill="#555" font-size="13" text-anchor="middle">frames accumulated k (log scale)</text>
+  <text x="26" y="220.0" fill="#555" font-size="13" transform="rotate(-90 26 220.0)" text-anchor="middle">gather radius (pixels)</text>
+  <path d="M80.0 118.9 L84.2 122.4 L88.4 125.9 L92.6 129.3 L96.8 132.7 L101.0 136.0 L105.2 139.2 L109.4 142.4 L113.6 145.6 L117.8 148.7 L122.0 151.8 L126.2 154.8 L130.4 157.8 L134.6 160.7 L138.8 163.6 L143.0 166.4 L147.2 169.2 L151.4 172.0 L155.6 174.7 L159.8 177.4 L164.0 180.0 L168.2 182.6 L172.4 185.1 L176.6 187.6 L180.8 190.1 L185.0 192.5 L189.2 194.9 L193.4 197.3 L197.6 199.6 L201.8 201.9 L206.0 204.2 L210.2 206.4 L214.4 208.6 L218.6 210.7 L222.8 212.9 L227.0 215.0 L231.2 217.0 L235.4 219.0 L239.6 221.0 L243.8 223.0 L248.0 224.9 L252.2 226.8 L256.4 228.7 L260.6 230.6 L264.8 232.4 L269.0 234.2 L273.2 235.9 L277.4 237.7 L281.6 239.4 L285.8 241.1 L290.0 242.7 L294.2 244.4 L298.4 246.0 L302.6 247.6 L306.8 249.1 L311.0 250.7 L315.2 252.2 L319.4 253.7 L323.6 255.1 L327.8 256.6 L332.0 258.0 L336.2 259.4 L340.4 260.8 L344.6 262.1 L348.8 263.5 L353.0 264.8 L357.2 266.1 L361.4 267.4 L365.6 268.6 L369.8 269.9 L374.0 271.1 L378.2 272.3 L382.4 273.5 L386.6 274.6 L390.8 275.8 L395.0 276.9 L399.2 278.0 L403.4 279.1 L407.6 280.2 L411.8 281.3 L416.0 282.3 L420.2 283.3 L424.4 284.4 L428.6 285.4 L432.8 286.3 L437.0 287.3 L441.2 288.3 L445.4 289.2 L449.6 290.1 L453.8 291.0 L458.0 291.9 L462.2 292.2 L466.4 292.2 L470.6 292.2 L474.8 292.2 L479.0 292.2 L483.2 292.2 L487.4 292.2 L491.6 292.2 L495.8 292.2 L500.0 292.2" stroke="#d9822b" stroke-width="3" fill="none"/>
+  <text x="80.0" y="368" fill="#555" font-size="12" text-anchor="middle">1</text>
+  <text x="185.0" y="368" fill="#555" font-size="12" text-anchor="middle">10</text>
+  <text x="290.0" y="368" fill="#555" font-size="12" text-anchor="middle">100</text>
+  <text x="395.0" y="368" fill="#555" font-size="12" text-anchor="middle">1000</text>
+  <text x="500.0" y="368" fill="#555" font-size="12" text-anchor="middle">10000</text>
+  <text x="72" y="296.22222222222223" fill="#555" font-size="12" text-anchor="end">1</text>
+  <line x1="80" y1="292.22222222222223" x2="500" y2="292.22222222222223" stroke="#e6e6e6"/>
+  <text x="72" y="238.44444444444446" fill="#555" font-size="12" text-anchor="end">2</text>
+  <line x1="80" y1="234.44444444444446" x2="500" y2="234.44444444444446" stroke="#e6e6e6"/>
+  <text x="72" y="180.66666666666669" fill="#555" font-size="12" text-anchor="end">3</text>
+  <line x1="80" y1="176.66666666666669" x2="500" y2="176.66666666666669" stroke="#e6e6e6"/>
+  <text x="72" y="122.88888888888891" fill="#555" font-size="12" text-anchor="end">4</text>
+  <line x1="80" y1="118.88888888888891" x2="500" y2="118.88888888888891" stroke="#e6e6e6"/>
+  <text x="94" y="112" fill="#a55a10" font-size="12" text-anchor="start">wide: smooth but blurry</text>
+  <text x="488" y="338" fill="#a55a10" font-size="12" text-anchor="end">one pixel: sharp</text>
+  <text x="540" y="110" fill="#333" font-size="13" text-anchor="start">Each frame traces new photons.</text>
+  <text x="540" y="130" fill="#333" font-size="13" text-anchor="start">Each frame's picture is noisy: few photons</text>
+  <text x="540" y="150" fill="#333" font-size="13" text-anchor="start">fall in a disk of a pixel or two.</text>
+  <text x="540" y="170" fill="#333" font-size="13" text-anchor="start"></text>
+  <text x="540" y="190" fill="#333" font-size="13" text-anchor="start">The average of the frames fixes that:</text>
+  <text x="540" y="210" fill="#333" font-size="13" text-anchor="start">noise falls with the square root of the</text>
+  <text x="540" y="230" fill="#333" font-size="13" text-anchor="start">frames, while the radius falls slowly so</text>
+  <text x="540" y="250" fill="#333" font-size="13" text-anchor="start">the blur goes away without the noise</text>
+  <text x="540" y="270" fill="#333" font-size="13" text-anchor="start">coming back.</text>
+  <text x="540" y="330" fill="#333" font-size="13" font-weight="bold" text-anchor="start">Two errors, traded against each other:</text>
+  <text x="540" y="350" fill="#333" font-size="13" text-anchor="start">blur (bias): a wider disk smears the caustic</text>
+  <text x="540" y="370" fill="#333" font-size="13" text-anchor="start">noise (variance): a narrower disk holds fewer photons</text>
+  <text x="80" y="66" fill="#555" font-size="12" text-anchor="start">radius = first radius · k^(-1/6), down to one pixel (the rate of progressive photon mapping)</text>
+</svg>

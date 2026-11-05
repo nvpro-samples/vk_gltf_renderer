@@ -139,7 +139,13 @@ public:
   void emitCameraApply(int cameraIdx);
   void emitCameraSetFromView(int cameraIdx);
 
+  // glTF camera the viewport follows every frame (an animated camera node), -1 when none. The
+  // Inspector toggles it; the renderer applies it and clears it when the user navigates.
+  [[nodiscard]] int followCamera() const { return m_followCamera; }
+  void              setFollowCamera(int cameraIdx) { m_followCamera = cameraIdx; }
+
 private:
+  int              m_followCamera = -1;
   SelectionContext m_selection;
   int              m_clipboardMaterialIndex = -1;
   EventCallback    m_eventCallback;

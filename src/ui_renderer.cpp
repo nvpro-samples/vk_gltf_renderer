@@ -58,6 +58,7 @@
 #include "ui_helpers.hpp"
 #include "ui_interactivity.hpp"
 #include "ui_mouse_state.hpp"
+#include "ui_status_bar.hpp"
 #include "version.hpp"
 
 // The window toggles: the "Windows" commands with an on/off state. The Windows menu and the toolbar
@@ -87,6 +88,10 @@ void GltfRenderer::mouseClickedInViewport()
 
   // Allow input when hovered, or when the gizmo is mid-drag (mouse may have left the viewport).
   if(!ImGui::IsWindowHovered(ImGuiFocusedFlags_RootWindow) && !m_visualHelpers.transform.isDragging())
+    return;
+
+  // The texture isolate bar sits over the image: a click on it is not a pick
+  if(ImGui::IsMouseHoveringRect(m_isolateBarMin, m_isolateBarMax, false))
     return;
 
   // Do not pick if the scene is not valid or the renderer is busy
@@ -417,6 +422,100 @@ static void drawNoLightOverlay(const ImVec2& imageTopLeft, const ImVec2& imageSi
   dl->AddText(ImVec2(cx - sz2.x * 0.5f, boxMin.y + pad.y + sz1.y + spacing), IM_COL32(220, 220, 220, 235), line2);
 }
 
+// While a texture is isolated (the eye button in the Inspector), a bar over the top-left of the viewport
+// says which one, lets the channel be switched (packed textures keep different data per channel), and
+// closes the view. Drawn inside the Viewport window, over the image.
+void GltfRenderer::renderTextureIsolateBar(const ImVec2& imageTopLeft, const ImVec2& imageSize)
+{
+  Settings&              s     = m_resources.settings;
+  const nvvkgltf::Scene* scene = m_resources.getScene();
+  m_isolateBarMin = m_isolateBarMax = ImVec2(0.0F, 0.0F);
+  if(!s.isolating() || !scene)
+    return;
+
+  const tinygltf::Model& model   = scene->getModel();
+  const int              texture = s.isolateBinding.texture;
+  std::string            label   = "Isolate";
+  if(s.isolateMaterial < static_cast<int>(model.materials.size()) && texture < static_cast<int>(model.textures.size()))
+  {
+    label = "Material[" + std::to_string(s.isolateMaterial) + "] " + model.materials[s.isolateMaterial].name + "  /  "
+            + tinygltf::utils::getTextureUiLabel(model, texture);
+  }
+
+  // The name gets what the controls leave of the viewport's width, so a long name or a narrow viewport
+  // cannot push the channel and cancel buttons out of reach (the bar does not scroll)
+  const ImGuiStyle&                style     = ImGui::GetStyle();
+  const std::array<const char*, 5> channels  = {"RGB", "R", "G", "B", "A"};
+  const float                      buttonPad = style.FramePadding.x * 2.0F;
+  float                            controlsW = ImGui::CalcTextSize(ICON_MS_VISIBILITY).x + style.ItemSpacing.x;  // icon
+  for(const char* channel : channels)
+    controlsW += ImGui::CalcTextSize(channel).x + buttonPad + 2.0F;
+  controlsW += ImGui::CalcTextSize(ICON_MS_CANCEL).x + buttonPad + 2.0F * 16.0F;  // cancel and the two gaps
+  const float labelBudget = std::max(80.0F, imageSize.x - 2.0F * 10.0F - 2.0F * 8.0F - controlsW - style.ItemSpacing.x);
+  const bool  clipped     = ImGui::CalcTextSize(label.c_str()).x > labelBudget;
+  std::string shown       = label;
+  while(clipped && shown.size() > 1 && ImGui::CalcTextSize((shown + "...").c_str()).x > labelBudget)
+  {
+    shown.pop_back();
+    while(shown.size() > 1 && (static_cast<unsigned char>(shown.back()) & 0xC0) == 0x80)  // not mid-character
+      shown.pop_back();
+  }
+  if(clipped)
+    shown += "...";
+
+  ImGui::PushStyleVar(ImGuiStyleVar_ChildRounding, 6.0F);
+  ImGui::PushStyleVar(ImGuiStyleVar_WindowPadding, ImVec2(8.0F, 6.0F));
+  ImGui::PushStyleColor(ImGuiCol_ChildBg, ImVec4(0.08F, 0.08F, 0.08F, 0.80F));
+  ImGui::SetCursorScreenPos(ImVec2(imageTopLeft.x + 10.0F, imageTopLeft.y + 10.0F));
+  if(ImGui::BeginChild("##texture_isolate_bar", ImVec2(0.0F, 0.0F),
+                       ImGuiChildFlags_AutoResizeX | ImGuiChildFlags_AutoResizeY | ImGuiChildFlags_AlwaysUseWindowPadding,
+                       ImGuiWindowFlags_NoScrollbar | ImGuiWindowFlags_NoScrollWithMouse))
+  {
+    ImGui::AlignTextToFramePadding();
+    ImGui::TextUnformatted(ICON_MS_VISIBILITY);
+    ImGui::SameLine();
+    ImGui::TextUnformatted(shown.c_str());
+    if(clipped && ImGui::IsItemHovered())
+      nvgui::tooltip(label.c_str());
+    ImGui::SameLine(0.0F, 16.0F);
+
+    bool changed = false;
+    for(int c = 0; c < static_cast<int>(channels.size()); ++c)
+    {
+      if(c > 0)
+        ImGui::SameLine(0.0F, 2.0F);
+      const bool selected = (s.isolateChannel == c);
+      if(selected)
+        ImGui::PushStyleColor(ImGuiCol_Button, ImGui::GetStyleColorVec4(ImGuiCol_ButtonActive));
+      if(ImGui::SmallButton(channels[c]) && !selected)
+      {
+        s.isolateChannel = c;
+        changed          = true;
+      }
+      if(selected)
+        ImGui::PopStyleColor();
+    }
+
+    ImGui::SameLine(0.0F, 16.0F);
+    if(ImGui::SmallButton(ICON_MS_CANCEL))
+    {
+      s.stopIsolating();
+      changed = true;
+    }
+    if(ImGui::IsItemHovered())
+      nvgui::tooltip("Back to the rendered view");
+
+    if(changed)
+      resetFrame();
+
+    m_isolateBarMin = ImGui::GetWindowPos();
+    m_isolateBarMax = ImVec2(m_isolateBarMin.x + ImGui::GetWindowSize().x, m_isolateBarMin.y + ImGui::GetWindowSize().y);
+  }
+  ImGui::EndChild();
+  ImGui::PopStyleColor();
+  ImGui::PopStyleVar(2);
+}
+
 void GltfRenderer::windowTitle()
 {
   static float dirty_timer = 0.0F;
@@ -671,6 +770,7 @@ void GltfRenderer::renderUI()
                                "Anisotropy Strength\0Diffuse Transmission Factor\0Diffuse Transmission Color\0"
                                // Opacity-micromap debug view (must match the Visualization enum order).
                                "Opacity Micromap\0\0");
+          // eTextureIsolate is not a choice here: it needs a texture, which the Inspector's eye button picks.
           changed |= nvgui::hoverScrolling(*reinterpret_cast<int32_t*>(&m_resources.settings.visualization), 0,
                                            int32_t(shaderio::Visualization::eOpacityMicromap));
           changed |= PE::Checkbox("Wireframe", &m_resources.settings.wireframe, "Overlay wireframe on rendered meshes");
@@ -771,6 +871,8 @@ void GltfRenderer::renderUI()
         drawNoLightOverlay(imageTopLeft, imageSize);
     }
 
+    renderTextureIsolateBar(imageTopLeft, imageSize);
+
     // Axis gizmo: anchored to the 3D image's bottom-left, nudged up by one
     // frame-height when the Animation Strip is showing so the two don't overlap.
     const bool stripVisible = m_resources.animationControl.showStrip;
@@ -801,6 +903,11 @@ void GltfRenderer::renderUI()
 
 
   ui::help::renderWindows(m_help, *m_cameraManip, m_commands, m_app->getPhysicalDevice());
+
+  // Status bar along the bottom of the window. Only while it has something to say: the rasterizer has
+  // no shader to report, and an empty strip would only take room from the viewport.
+  if(m_resources.settings.showStatusBar && !m_presentation.isActive() && m_resources.settings.renderSystem == RenderingMode::ePathtracer)
+    ui::statusbar::render({.pathTracer = m_pathTracer.getStatus(m_resources)});
 
   // Show the busy window while a worker is busy or a load is still running on the GPU
   if(m_busy.isVisible())
@@ -871,8 +978,8 @@ void GltfRenderer::renderUI()
       ImGui::Text("Delete node '%s'?", model.nodes[m_pendingDeleteNode].name.c_str());
 
       // One local matrix per render node, so per primitive for an EXT_mesh_gpu_instancing mesh.
-      const tinygltf::Node& pending    = model.nodes[m_pendingDeleteNode];
-      const size_t          locals     = m_resources.getScene()->getRenderNodeLocalMatrices(m_pendingDeleteNode).size();
+      const tinygltf::Node& pending = model.nodes[m_pendingDeleteNode];
+      const size_t          locals  = m_resources.getScene()->getRenderNodeLocalMatrices(m_pendingDeleteNode).size();
       if(locals > 0 && pending.mesh >= 0)
       {
         const size_t primitives = std::max<size_t>(1, model.meshes[pending.mesh].primitives.size());
@@ -1009,6 +1116,7 @@ void GltfRenderer::renderViewMenu()
   ImGui::Separator();
   m_commands.menuItem("view.vsync");
   m_commands.menuItem("view.axis");
+  m_commands.menuItem("view.statusBar");
   ImGui::Separator();
   m_commands.menuItem("view.grid");
   m_commands.menuItem("view.gizmo");
@@ -1388,6 +1496,12 @@ void GltfRenderer::registerCommands()
                   .group   = "View",
                   .run     = toggleFlag(settings.showAxis),
                   .checked = flagIsOn(settings.showAxis)});
+  m_commands.add({.id      = "view.statusBar",
+                  .label   = "Status Bar",
+                  .icon    = ICON_MS_BOTTOM_NAVIGATION,
+                  .group   = "View",
+                  .run     = toggleFlag(settings.showStatusBar),
+                  .checked = flagIsOn(settings.showStatusBar)});
   m_commands.add({.id      = "view.grid",
                   .label   = "Grid",
                   .icon    = ICON_MS_GRID_ON,
@@ -1848,6 +1962,90 @@ void GltfRenderer::applyGltfCamera(int cameraIndex)
 }
 
 //--------------------------------------------------------------------------------------------------
+// Ends the follow when the viewport camera is no longer where followGltfCamera() put it last frame:
+// the user navigated with mouse or keys (orbit, pan, zoom, or Alt+wheel field of view).
+//
+void GltfRenderer::endFollowOnNavigation()
+{
+  const int camIdx = m_sceneSelection.followCamera();
+  if(camIdx != m_followCameraIdx)  // a new camera was picked: its pose is not a navigation
+  {
+    m_followCameraIdx = camIdx;
+    m_followPoseValid = false;
+  }
+  if(camIdx < 0 || !m_followPoseValid)
+    return;
+
+  glm::dvec3 eye, center, up;
+  m_cameraManip->getLookat(eye, center, up);
+  if(eye != m_followEye || center != m_followCenter || up != m_followUp || m_cameraManip->getFov() != m_followFov)
+  {
+    m_sceneSelection.setFollowCamera(-1);
+    m_followCameraIdx = -1;
+    m_followPoseValid = false;
+  }
+}
+
+//--------------------------------------------------------------------------------------------------
+// Make the viewport track the glTF camera picked with "Follow" in the Inspector. Reads the camera
+// node's pose from its TRS chain (the animation writes there), so it costs the node depth only.
+// Runs after the animation update, so the view matches the objects drawn this frame.
+//
+void GltfRenderer::followGltfCamera()
+{
+  endFollowOnNavigation();  // after all of this frame's UI input, commands included
+  const int        camIdx = m_sceneSelection.followCamera();
+  nvvkgltf::Scene* scene  = m_resources.getScene();
+  if(camIdx < 0 || !scene || !scene->valid())
+  {
+    m_followPoseValid = false;
+    return;
+  }
+
+  glm::dvec3 eye, center, up;
+  m_cameraManip->getLookat(eye, center, up);
+
+  const int               nodeIndex = scene->getCameraNode(camIdx);
+  const tinygltf::Model&  model     = scene->getModel();
+  const std::vector<int>& parents   = scene->getNodeParents();
+  if(nodeIndex < 0 || nodeIndex >= static_cast<int>(parents.size()))
+  {
+    m_sceneSelection.setFollowCamera(-1);
+    m_followPoseValid = false;
+    return;
+  }
+
+  // The eye comes from the full chain; the orientation from rotations only, so a non-uniformly
+  // scaled ancestor cannot skew the view.
+  glm::dmat4 world(1.0), worldRot(1.0);
+  for(int n = nodeIndex; n >= 0; n = parents[n])
+  {
+    const tinygltf::Node& node = model.nodes[n];
+    world                      = glm::dmat4(tinygltf::utils::getNodeMatrix(node)) * world;
+    glm::vec3 t, sc;
+    glm::quat r;
+    tinygltf::utils::getNodeTRS(node, t, r, sc);
+    worldRot = glm::dmat4(glm::mat4_cast(r)) * worldRot;
+  }
+
+  const glm::dvec3 newEye = glm::dvec3(world[3]);
+  const glm::dvec3 fwd    = glm::normalize(-glm::dvec3(worldRot[2]));
+  const glm::dvec3 newUp  = glm::normalize(glm::dvec3(worldRot[1]));
+  const double     dist   = std::max(glm::length(center - eye), 1e-3);
+
+  m_cameraManip->setLookat(newEye, newEye + fwd * dist, newUp, true);
+
+  const tinygltf::Camera& cam = model.cameras[camIdx];
+  if(cam.type == "perspective")
+    m_cameraManip->setFov(glm::degrees(cam.perspective.yfov));
+
+  m_cameraManip->getLookat(m_followEye, m_followCenter, m_followUp);
+  m_followFov       = m_cameraManip->getFov();
+  m_followCameraIdx = camIdx;
+  m_followPoseValid = true;
+}
+
+//--------------------------------------------------------------------------------------------------
 // Set a GLTF camera from the current camera manipulator state
 // This function updates the GLTF camera parameters and node extras with the current view
 //
@@ -1968,7 +2166,7 @@ void GltfRenderer::renderMemoryStatistics()
     const bool                       ascending = (spec.SortDirection == ImGuiSortDirection_Ascending);
 
     // Every row is drawn and appended to `clipboardText` (tab-separated) so the copy matches the table
-    clipboardText = "Category\tCurrent\tCount\n";
+    clipboardText   = "Category\tCurrent\tCount\n";
     auto sectionRow = [&](const ImVec4& color, const char* title) {
       ImGui::TableNextRow();
       ImGui::TableNextColumn();
@@ -1988,8 +2186,8 @@ void GltfRenderer::renderMemoryStatistics()
       ImGui::TextColored(color, "%u", count);
       clipboardText += fmt::format("{}\t{}\t{}\n", label, size.c_str(), count);
     };
-    const ImVec4 textColor = ImGui::GetStyleColorVec4(ImGuiCol_Text);
-    auto categoryRows      = [&](const auto& tracker) {
+    const ImVec4 textColor    = ImGui::GetStyleColorVec4(ImGuiCol_Text);
+    auto         categoryRows = [&](const auto& tracker) {
       for(const auto& categoryName : tracker.getActiveCategories(sortBy, ascending))
       {
         GpuMemoryStats stats = tracker.getStats(categoryName);

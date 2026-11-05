@@ -48,6 +48,7 @@
 
 #include <functional>
 #include <string>
+#include <unordered_map>
 #include <utility>
 #include <vector>
 
@@ -144,17 +145,41 @@ public:
   void resetToDefaults() const
   {
     for(size_t i = 0; i < m_defaults.size(); i++)
-      m_defaults[i]();
+      m_defaults[i].reset();
+  }
+
+  // One declared value, looked up by the address of its storage. A value that was never declared
+  // counts as default and resets to nothing, so a caller may list storage it is unsure of.
+  // Like resetToDefaults(), resetToDefault() writes storage directly: the caller restarts whatever
+  // the value drives.
+  [[nodiscard]] bool isDefault(const void* storage) const
+  {
+    const auto it = m_defaultIndex.find(storage);
+    return it == m_defaultIndex.end() || m_defaults[it->second].isDefault();
+  }
+  void resetToDefault(const void* storage) const
+  {
+    const auto it = m_defaultIndex.find(storage);
+    if(it != m_defaultIndex.end())
+      m_defaults[it->second].reset();
   }
 
   [[nodiscard]] const std::vector<std::string>& persistedNames() const { return m_persistedNames; }
 
 private:
+  struct Default
+  {
+    std::function<void()> reset{};
+    std::function<bool()> isDefault{};
+  };
+
   // Capture the declaration-time value so resetToDefaults() can put it back.
   template <class T>
   void rememberDefault(T* storage)
   {
-    m_defaults.push_back([storage, value = *storage]() { *storage = value; });
+    m_defaultIndex[storage] = m_defaults.size();
+    m_defaults.push_back({[storage, value = *storage]() { *storage = value; },
+                          [storage, value = *storage]() { return *storage == value; }});
   }
 
   template <class T>
@@ -168,7 +193,8 @@ private:
   std::vector<std::function<void(nvgui::SettingsHandler&)>> m_persisted;
   std::vector<std::string>                                  m_persistedNames;
   std::vector<std::function<void()>>                        m_postRestoreHooks;
-  std::vector<std::function<void()>>                        m_defaults;
+  std::vector<Default>                                      m_defaults;
+  std::unordered_map<const void*, size_t>                   m_defaultIndex;  // storage address -> m_defaults
   // Flag parameters need somewhere to write; an action only cares that the callback fired.
   std::vector<std::unique_ptr<bool>> m_actionStorage;
 };

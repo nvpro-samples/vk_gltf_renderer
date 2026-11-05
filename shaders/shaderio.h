@@ -161,6 +161,9 @@ enum Visualization
   eDiffuseTransmissionFactor,
   eDiffuseTransmissionColor,
   eOpacityMicromap,
+  // One material texture, raw and unlit, picked with the eye button in the Inspector. Set by the
+  // host together with SceneFrameInfo::isolate*; applyTextureIsolate() draws it.
+  eTextureIsolate,
 };
 
 
@@ -192,6 +195,18 @@ struct SkySunDisk
   // to stand exactly where the bake stood -- see sky_bruneton_radiance.h.slang.
   float observerRadius;
   float _pad;
+};
+
+// The texture Visualization::eTextureIsolate shows: a material and the GltfTextureInfo slot (an index
+// into textureInfos; 0 = none) it binds the texture through. Every other surface is drawn grey.
+// `channel` is 0 for RGB, then 1..4 for R, G, B, A. `srgb` is set for color data (base color, emissive,
+// ...) so it is shown the way it is authored; data textures stay raw.
+struct TextureIsolate
+{
+  int material = -1;
+  int texInfo  = 0;
+  int channel  = 0;
+  int srgb     = 0;
 };
 
 struct SceneFrameInfo
@@ -272,6 +287,9 @@ struct SceneFrameInfo
   // Slang cannot disagree about alignment after the float3 above. (Appended, per the note above.)
   uint envSamplingGridWidth  = 1;
   uint envSamplingGridHeight = 1;
+
+  // Visualization::eTextureIsolate: which texture to show. (Appended, per the note above.)
+  TextureIsolate isolate;
 };
 
 enum PathtracerFlags
@@ -293,6 +311,55 @@ struct CameraMedium
   float  anisotropy;  // Henyey-Greenstein g
 };
 
+
+// Beta caustics (USE_CAUSTICS): one slot of the photon map, the place a photon that followed
+// casters landed. A slot with no flux (0) is empty. 20 bytes: the scalar layout of the shaders is
+// what makes it so (compile_slang's -force-glsl-scalar-layout). See docs/caustics.md.
+struct CausticPhoton
+{
+  float3 position  = {0.0F, 0.0F, 0.0F};
+  uint   flux      = 0;  // The power it carries, times the photons the frame traced: 8-bit RGB and a shared exponent
+  uint   direction = 0;  // The way it travelled, octahedral
+};
+
+// Beta caustics (USE_CAUSTICS): a sphere the photons aim at, around a cluster of the casters, and how many of the
+// photons it gets (a weight: relative to the other spheres').
+#define CAUSTIC_MAX_CASTERS 16
+struct CausticSphere
+{
+  float3 center = {0.0F, 0.0F, 0.0F};
+  float  radius = 0.0F;
+  float  weight = 1.0F;
+};
+
+// Beta caustics (USE_CAUSTICS): what the light-tracing pass needs. Written by the host once per
+// frame and read through PathtracePushConstant::caustics, so the push constant grows by one pointer.
+// See docs/caustics.md.
+struct CausticParams
+{
+  CausticSphere casters[CAUSTIC_MAX_CASTERS];  // Around clusters of the smooth casters (glass, polished metal): photons aim at them
+  uint casterCount = 0;
+  float3 sceneCenter = {0.0F, 0.0F, 0.0F};  // Bounding sphere of the whole scene: where a photon from the sky or the sun starts
+  float sceneRadius = 0.0F;
+  uint* splats      = nullptr;  // 3 floats (as uints, for the atomic add) per pixel: this frame's photon estimate
+  uint  photonCount = 0;        // Photons traced this frame
+  uint photonFirst = 0;  // Emission index of this frame's first photon: the sequence goes on for as long as the app runs
+
+  // The photon map: this frame's photons that landed, and a grid over them built by a counting sort: the
+  // photons ordered by hash cell, so that a cell's photons are contiguous. Nothing outlives the frame, so
+  // there is nothing to keep valid. Null photons: there is no map, and only the camera's primary receivers
+  // are covered (by the splats).
+  CausticPhoton* photons    = nullptr;  // One slot per photon of the frame, in emission order
+  CausticPhoton* sorted     = nullptr;  // The ones that landed, by hash cell
+  uint*          cellStarts = nullptr;  // Hash cells + 1 entries: where each cell's photons start in `sorted`, the
+                                        // last the count; after them, one running total per block of 256 cells
+  uint           mapSlots   = 0;        // Slots of `photons`: the photons of the frame beyond them are not kept
+  uint           cellMask   = 0;        // Hash cells - 1 (a power of two minus one)
+  float          cellSize   = 1.0F;     // Of the grid, in world units
+  float gatherPixels = 0.0F;  // Radius of a gather in pixels of the camera at the receiver, this frame
+  float gatherWorld  = 0.0F;  // ...and at most this, in world units: both shrink as the accumulation grows
+  uint  gatherMax    = 0;     // Where more photons are in the disk, the disk shrinks to hold this many
+};
 
 // Push constant
 struct PathtracePushConstant
@@ -317,6 +384,7 @@ struct PathtracePushConstant
   GltfScene*      gltfScene;                    // GLTF scene
   float4x4*       prevRenderNodeObjectToWorld;  // #DLSS instance motion: previous-frame objectToWorld per render node
   CameraMedium*   cameraMedium;                 // The medium camera paths start in; null when the scene has none
+  CausticParams*  caustics;                     // Beta caustics (see CausticParams); null when off
 };
 
 // OptiX: copy of the images to the linear buffers it reads (optix_image_to_buffer.slang)

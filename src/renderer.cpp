@@ -188,6 +188,8 @@ GltfRenderer::GltfRenderer(nvutils::ParameterRegistry* paramReg, const nvutils::
                   .callbackSuccess = [this](const nvutils::ParameterBase* const) { onRenderSystemChanged(); }},
                  (int*)&m_resources.settings.renderSystem, Persist::eYes, 0, 1);
   m_settings.add({"uiShowAxis", "Show Axis"}, &m_resources.settings.showAxis, Persist::eYes);
+  m_settings.add({"uiShowStatusBar", "Show the status bar at the bottom of the window"},
+                 &m_resources.settings.showStatusBar, Persist::eYes);
   m_settings.add({"uiShowMemStats", "Show Memory Statistics"}, &m_resources.settings.showMemStats, Persist::eYes);
   m_settings.add({"hdrIntensity", "HDR Environment Intensity"}, &m_resources.settings.hdrEnvIntensity, Persist::eYes, 0.0F, 100.0F);
   // One orientation for every environment -- OMI_environment_sky's `rotation`, in its own form. It
@@ -207,6 +209,22 @@ GltfRenderer::GltfRenderer(nvutils::ParameterRegistry* paramReg, const nvutils::
   m_settings.addVector({"silhouetteColor", "Color of the silhouette"}, &m_resources.settings.silhouetteColor, Persist::eYes);
   m_settings.add({"dbgVisualization", "Visualization Mode"}, (int*)&m_resources.settings.visualization, Persist::eYes);
   m_settings.add({"dbgWireframe", "Enable wireframe overlay"}, &m_resources.settings.wireframe, Persist::eYes);
+  // Texture isolate: the Inspector's eye button sets these, and it shows over dbgVisualization while a
+  // material and a texture are both set. They belong to one scene, so none of them is persisted.
+  const auto resetOnChange = [this](const nvutils::ParameterBase* const) { resetFrame(); };
+  m_settings.add({.name            = "dbgIsolateMaterial",
+                  .help            = "Texture Isolate: glTF material index whose texture is shown (-1: none)",
+                  .callbackSuccess = resetOnChange},
+                 &m_resources.settings.isolateMaterial, Persist::eNo, -1, INT_MAX);
+  m_settings.add({.name = "dbgIsolateTexture",
+                  .help = "Texture Isolate: glTF texture index shown on that material (-1: none; isolate is on when both are set). "
+                          "A material that binds the texture more than once shows its first binding",
+                  .callbackSuccess = resetOnChange},
+                 &m_resources.settings.isolateBinding.texture, Persist::eNo, -1, INT_MAX);
+  m_settings.add({.name = "dbgIsolateChannel", .help = "Texture Isolate: channel shown [RGB:0, R:1, G:2, B:3, A:4]", .callbackSuccess = resetOnChange},
+                 &m_resources.settings.isolateChannel, Persist::eNo, 0, 4);
+  m_settings.add({.name = "dbgIsolateSrgb", .help = "Texture Isolate: encode the texture as sRGB (color data)", .callbackSuccess = resetOnChange},
+                 &m_resources.settings.isolateSrgb, Persist::eNo);
   m_settings.add({"ptOptimalShader",
                   "Compile gltf_pathtrace.slang with GLTF_USE_* gates specialized per scene "
                   "(no runtime MAT_EXT_* changes; rebuilt when the scene's material extensions change). Default on."},
@@ -227,6 +245,15 @@ GltfRenderer::GltfRenderer(nvutils::ParameterRegistry* paramReg, const nvutils::
                  &m_resources.settings.cameraMediumMaterial, Persist::eNo, -1, INT_MAX);
   m_settings.add({"useSolidBackground", "Use solid color background"}, &m_resources.settings.useSolidBackground, Persist::eYes, true);
   m_settings.addVector({"solidBackgroundColor", "Solid Background Color"}, &m_resources.settings.solidBackgroundColor, Persist::eYes);
+  // The infinite plane of the Lens tab. Declared so the tab can tell which values left their default and
+  // reset them; not persisted, as before. Its height is left out: it follows each scene's bounds.
+  m_settings.add({.name = "useInfinitePlane", .help = "Show the infinite ground plane", .callbackSuccess = [this](const nvutils::ParameterBase* const) { resetFrame(); }}, &m_resources.settings.useInfinitePlane, Persist::eNo, true);
+  m_settings.add({.name = "isShadowCatcher", .help = "The infinite plane only catches shadows", .callbackSuccess = [this](const nvutils::ParameterBase* const) { resetFrame(); }}, &m_resources.settings.isShadowCatcher, Persist::eNo, true);
+  m_settings.add({.name = "shadowCatcherDarkness", .help = "Shadow catcher: non-physical shadow darkening", .callbackSuccess = [this](const nvutils::ParameterBase* const) { resetFrame(); }},
+                 &m_resources.settings.shadowCatcherDarkness, Persist::eNo, 0.0f, 1.0f);
+  m_settings.addVector({.name = "infinitePlaneBaseColor", .help = "Infinite plane base color", .callbackSuccess = [this](const nvutils::ParameterBase* const) { resetFrame(); }}, &m_resources.settings.infinitePlaneBaseColor, Persist::eNo);
+  m_settings.add({.name = "infinitePlaneMetallic", .help = "Infinite plane metallic", .callbackSuccess = [this](const nvutils::ParameterBase* const) { resetFrame(); }}, &m_resources.settings.infinitePlaneMetallic, Persist::eNo, 0.0f, 1.0f);
+  m_settings.add({.name = "infinitePlaneRoughness", .help = "Infinite plane roughness", .callbackSuccess = [this](const nvutils::ParameterBase* const) { resetFrame(); }}, &m_resources.settings.infinitePlaneRoughness, Persist::eNo, 0.0f, 1.0f);
   // Bounds mirror the "Max Samples" slider in PathTracer::onUIRender.
   m_settings.add({"ptMaxSamples", "Path tracer: stop accumulating at this many samples per pixel"},
                  &m_resources.settings.maxSamples, Persist::eYes, 1, 1000000);
@@ -594,7 +621,7 @@ GltfRenderer::GltfRenderer(nvutils::ParameterRegistry* paramReg, const nvutils::
   });
 
   // Register PathTracer-specific command line parameters
-  m_pathTracer.registerParameters(&m_settings);
+  m_pathTracer.registerParameters(&m_settings, [this] { resetFrame(); });
   m_rasterizer.registerParameters(&m_settings);
 
   m_benchmark.registerParameters(
@@ -841,7 +868,7 @@ void GltfRenderer::onAttach(nvapp::Application* app)
 
   // Create resources
   createDescriptorSets();
-  createHDR("");  // Dummy HDR
+  createHDR(m_startupHdr);  // Empty: dummy HDR
   createResourceBuffers();
 
   // Initialize the renderers
@@ -1552,6 +1579,7 @@ void GltfRenderer::onRender(VkCommandBuffer cmd)
   changed |= m_pathTracer.keepOneAccumulationDenoiser(m_resources);  // OptiX or OIDN, not both
   changed |= interactivityAnimationApplied;
   changed |= updateAnimation(cmd);  // Update the animation
+  followGltfCamera();               // after the animation pose, so the view matches this frame's objects
   changed |= updateSceneChanges(cmd);
   if(changed)
   {
@@ -1576,6 +1604,31 @@ void GltfRenderer::onRender(VkCommandBuffer cmd)
     const glm::mat4          viewProj = m_cameraManip->getPerspectiveMatrix() * m_cameraManip->getViewMatrix();
     const VkExtent2D         gbufSize = m_resources.gBuffers.getSize();
     const glm::quat          envRot   = m_resources.settings.envRotationQuat();  // normalised
+
+    // Texture isolate: the slot is looked up each frame, for the one material only, so it stays right
+    // when an edit adds or removes a texture and moves the slots. A binding the material no longer has
+    // (its texture was removed, or a script named one it never had) ends the isolate rather than
+    // leaving the bar up over a rendered image.
+    int isolateSlot = 0;
+    if(m_resources.settings.isolating())
+    {
+      const nvvkgltf::Scene* isolateScene = m_resources.getScene();
+      const int              material     = m_resources.settings.isolateMaterial;
+      if(isolateScene)
+      {
+        if(material < static_cast<int>(isolateScene->getModel().materials.size()))
+        {
+          isolateSlot = m_resources.sceneVk.textureInfoSlot(material, isolateScene->getModel().materials[material],
+                                                            m_resources.settings.isolateBinding);
+        }
+        if(isolateSlot == 0)
+        {
+          m_resources.settings.stopIsolating();
+          resetFrame();
+        }
+      }
+    }
+
     shaderio::SceneFrameInfo finfo{
         .viewMatrix     = m_cameraManip->getViewMatrix(),
         .projInv        = glm::inverse(m_cameraManip->getPerspectiveMatrix()),
@@ -1600,7 +1653,7 @@ void GltfRenderer::onRender(VkCommandBuffer cmd)
         .envBlur                   = m_resources.settings.hdrBlur,
         .envIntensity              = m_resources.settings.hdrEnvIntensity,
         .backgroundColor           = m_resources.settings.solidBackgroundColor,
-        .visualization             = m_resources.settings.visualization,
+        .visualization             = m_resources.settings.activeVisualization(),
         .infinitePlaneDistance     = m_resources.settings.infinitePlaneDistance,
         .infinitePlaneBaseColor    = m_resources.settings.infinitePlaneBaseColor,
         .infinitePlaneMetallic     = m_resources.settings.infinitePlaneMetallic,
@@ -1631,6 +1684,10 @@ void GltfRenderer::onRender(VkCommandBuffer cmd)
                                                                                                   glm::vec3(0.0F),
         .envSamplingGridWidth  = m_resources.hdrIbl.getSamplingGrid().width,
         .envSamplingGridHeight = m_resources.hdrIbl.getSamplingGrid().height,
+        .isolate               = {.material = m_resources.settings.isolateMaterial,
+                                  .texInfo  = isolateSlot,
+                                  .channel  = m_resources.settings.isolateChannel,
+                                  .srgb     = m_resources.settings.isolateSrgb ? 1 : 0},
     };
     // Update the camera information
     m_prevMVP = finfo.viewProjMatrix;
@@ -2832,7 +2889,7 @@ void GltfRenderer::refreshBakedEnvironment()
   // Rebind the environment into the renderer's own descriptor set. HdrIbl::updateFromGpuImage
   // repoints HdrIbl's internal set, which is what the path tracer binds for the alias table --
   // but `texturesHdr[HDR_IMAGE_INDEX]` lives in set 0 here and still names whichever image was
-  // bound last (at start-up, the dummy from createHDR("")). Without this the scene is lit and
+  // bound last (at start-up, the one from createHDR(m_startupHdr)). Without this the scene is lit and
   // backed by that stale image and the authored sky is silently ignored.
   //
   // Only that one element is rewritten. The BRDF LUT and the prefiltered cubes in the same
@@ -3046,8 +3103,8 @@ bool GltfRenderer::runTonemapPass(VkCommandBuffer cmd, bool skipBeautifiedOverla
 
   // Disable tonemapping for debug buffers or guide buffers (display raw values)
   shaderio::TonemapperData tonemapperData = m_resources.tonemapperData;
-  const bool               vizNormal      = (m_resources.settings.visualization == shaderio::Visualization::eRendered
-                          || m_resources.settings.visualization == shaderio::Visualization::eClay);
+  const bool               vizNormal = (m_resources.settings.activeVisualization() == shaderio::Visualization::eRendered
+                          || m_resources.settings.activeVisualization() == shaderio::Visualization::eClay);
   if(!vizNormal || usingGuideBuffer)
     tonemapperData.isActive = 0;
   if(bypassTonemapper)
@@ -3264,6 +3321,12 @@ void GltfRenderer::setCompileInline(bool enable)
   m_resources.settings.compileInline = enable;
 }
 
+// See Settings::dlssHold: off for automated runs, so the hand-over from DLSS-RR happens at the same frame every time.
+void GltfRenderer::setDlssHold(bool enable)
+{
+  m_resources.settings.dlssHold = enable;
+}
+
 //--------------------------------------------------------------------------------------------------
 // Names of the extensions enabled on the device. Call before the path tracer is attached: the
 // vk_oidn denoiser picks its optional features (tensor cores, ...) from them.
@@ -3430,6 +3493,30 @@ void GltfRenderer::wireSceneToUi()
   host.pickImageFile    = [this] { return pickImageFile(); };
   host.textureThumbnail = [this](int i) { return thumbnailForTexture(i); };
   host.notify           = [this](const std::string& msg, bool err) { notify(msg, err); };
+  const auto isIsolated = [this](int material, const nvvkgltf::TextureBinding& binding) {
+    const Settings& s = m_resources.settings;
+    return s.isolating() && s.isolateMaterial == material && s.isolateBinding == binding;
+  };
+  host.isTextureIsolated    = isIsolated;
+  host.toggleTextureIsolate = [this, isIsolated](int material, const nvvkgltf::TextureBinding& binding, bool srgb) {
+    Settings& s = m_resources.settings;
+    if(isIsolated(material, binding))
+    {
+      s.stopIsolating();  // the same eye button switches it off; the chosen Visualization is back
+    }
+    else
+    {
+      s.isolateMaterial = material;
+      s.isolateBinding  = binding;
+      s.isolateSrgb     = srgb;
+    }
+    resetFrame();
+  };
+  // A material and texture index belong to one scene: a scene that replaces another starts without an
+  // isolate. The first scene keeps what the command line asked for (--dbgIsolate*).
+  if(m_uiWired)
+    m_resources.settings.stopIsolating();
+  m_uiWired = true;
 
   m_sceneBrowser.setScene(scene);
   m_sceneBrowser.setSelection(&m_sceneSelection);
@@ -3589,7 +3676,8 @@ void GltfRenderer::cleanupScene()
   m_resources.sceneGpu.destroy();
   m_sceneBrowser.setScene(nullptr);
   m_inspector.setScene(nullptr);
-  m_sceneSelection.clearSelection();  // Clear selection in new UI system
+  m_sceneSelection.clearSelection();     // Clear selection in new UI system
+  m_sceneSelection.setFollowCamera(-1);  // a stale index must not follow the next scene's camera
   m_resources.selectedRenderNodes.clear();
   m_resources.animationControl      = AnimationControl{};
   m_resources.animationControl.play = m_animPlay;

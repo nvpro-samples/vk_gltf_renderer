@@ -29,8 +29,10 @@
 #include "gltf_environment_sky.hpp"
 #include "undo_redo.hpp"
 #include "gltf_scene.hpp"
+#include "gltf_scene_animation.hpp"
 #include "gltf_scene_editor.hpp"
 #include "tinygltf_utils.hpp"
+#include "ui_interactivity.hpp"
 #include "ui_helpers.hpp"
 #include "ui_linear_color.hpp"
 #include "ui_gltf_labels.hpp"
@@ -109,7 +111,7 @@ bool UiInspector::importTextureIntoSlot(T& info)
 // Texture editing UI - one editable slot. Returns true when the slot's texture index changed (assign /
 // switch / clear / import), so the caller writes back copy-based rows and records the undo step.
 template <typename T>
-bool UiInspector::renderTextureEditRow(const char* label, T& info)
+bool UiInspector::renderTextureEditRow(const char* label, T& info, bool colorData)
 {
   const tinygltf::Model& model       = m_scene->getModel();
   const bool             canPickFile = m_host.canPickImage();
@@ -158,7 +160,8 @@ bool UiInspector::renderTextureEditRow(const char* label, T& info)
 
     // Reserve room for the action buttons that follow (switch, [load], UV transform, delete) so the
     // ellipsized name never overlaps them.
-    const int    buttonCount  = canPickFile ? 4 : 3;
+    const bool   canIsolate   = m_host.canIsolateTexture() && m_materialIndex >= 0;
+    const int    buttonCount  = (canPickFile ? 4 : 3) + (canIsolate ? 1 : 0);
     const float  buttonWidth  = ImGui::CalcTextSize(ICON_MS_DELETE).x + ImGui::GetStyle().FramePadding.x * 2.0f;
     const float  spacing      = ImGui::GetStyle().ItemSpacing.x;
     const float  available    = ImGui::GetContentRegionAvail().x;
@@ -216,6 +219,26 @@ bool UiInspector::renderTextureEditRow(const char* label, T& info)
   ImGui::PushID(label);
   if(hasTexture)
   {
+    // Show this texture on the model, raw and unlit; a second click goes back to the rendered view. Keyed by
+    // the binding (texture, UV set, UV transform), so two rows of one texture that map differently are two views.
+    if(m_host.canIsolateTexture() && m_materialIndex >= 0)
+    {
+      const nvvkgltf::TextureBinding binding = nvvkgltf::makeTextureBinding(info);
+      const bool isolated = m_host.isTextureIsolated && m_host.isTextureIsolated(m_materialIndex, binding);
+      if(isolated)
+        ImGui::PushStyleColor(ImGuiCol_Button, ImGui::GetStyleColorVec4(ImGuiCol_ButtonActive));
+      if(ImGui::SmallButton(ICON_MS_VISIBILITY))
+        m_host.toggleTextureIsolate(m_materialIndex, binding, colorData);
+      if(isolated)
+        ImGui::PopStyleColor();
+      if(ImGui::IsItemHovered())
+      {
+        ImGui::BeginTooltip();
+        ImGui::TextUnformatted(isolated ? "Back to the rendered view" : "Isolate: show this texture unlit");
+        ImGui::EndTooltip();
+      }
+      ImGui::SameLine(0.0f, 2.0f);
+    }
     if(ImGui::SmallButton(ICON_MS_SWAP_HORIZ))
     {
       ImGui::OpenPopup("SwitchTexture");
@@ -1533,11 +1556,27 @@ void UiInspector::renderCameraProperties(int camIdx)
       m_selection->emitCameraApply(camIdx);
   }
 
-  ImGui::SameLine();
   if(ImGui::Button("Set from Current View"))
   {
     if(m_selection)
       m_selection->emitCameraSetFromView(camIdx);
+  }
+
+  if(m_selection)
+  {
+    bool       follow   = m_selection->followCamera() == camIdx;
+    const bool animated = m_scene->animation().isNodeAnimated(m_scene->getCameraNode(camIdx))
+                          || ui::interactivity::hasGraph(m_scene);
+    ImGui::BeginDisabled(!animated && !follow);
+    if(ImGui::Checkbox("Follow (animated camera)", &follow))
+    {
+      m_selection->setFollowCamera(follow ? camIdx : -1);
+      if(follow)
+        m_selection->emitCameraApply(camIdx);  // start from the camera's pose
+    }
+    ImGui::EndDisabled();
+    ImGui::SetItemTooltip(animated ? "The viewport tracks this camera's node while the animation plays. Navigating stops it." :
+                                     "No animation moves this camera's node or its parents.");
   }
 }
 
@@ -2057,6 +2096,7 @@ void UiInspector::renderTransformSection(int nodeIdx)
 void UiInspector::renderMaterialSection(int matIdx)
 {
   tinygltf::Material& material = m_scene->editor().getMaterialForEdit(matIdx);
+  m_materialIndex              = matIdx;
 
   ImGui::Text("Material[%d]: %s", matIdx, material.name.c_str());
 
@@ -2081,7 +2121,7 @@ void UiInspector::renderMaterialSection(int matIdx)
         sg.diffuseFactor = diffuse;
         modif            = true;
       }
-      modif |= renderTextureEditRow("Diffuse", sg.diffuseTexture);
+      modif |= renderTextureEditRow("Diffuse", sg.diffuseTexture, true);
 
       glm::vec3 specular = sg.specularFactor;
       if(colorEdit3Linear("Specular", glm::value_ptr(specular),
@@ -2098,7 +2138,7 @@ void UiInspector::renderMaterialSection(int matIdx)
       {
         modif = true;
       }
-      modif |= renderTextureEditRow("Specular-Glossiness", sg.specularGlossinessTexture);
+      modif |= renderTextureEditRow("Specular-Glossiness", sg.specularGlossinessTexture, true);
 
       if(modif)
         tinygltf::utils::setPbrSpecularGlossiness(material, sg);
@@ -2118,7 +2158,7 @@ void UiInspector::renderMaterialSection(int matIdx)
         pbr.baseColorFactor[3] = baseColor.w;
         modif                  = true;
       }
-      modif |= renderTextureEditRow("Base Color", pbr.baseColorTexture);
+      modif |= renderTextureEditRow("Base Color", pbr.baseColorTexture, true);
 
       float metallic = static_cast<float>(pbr.metallicFactor);
       if(PE::DragFloat("Metallic", &metallic, 0.01f, 0.0f, 1.0f, "%.3f", 0,
@@ -2153,7 +2193,7 @@ void UiInspector::renderMaterialSection(int matIdx)
       material.emissiveFactor[2] = emissive.z;
       modif                      = true;
     }
-    modif |= renderTextureEditRow("Emissive", material.emissiveTexture);
+    modif |= renderTextureEditRow("Emissive", material.emissiveTexture, true);
     modif |= renderTextureEditRow("Normal", material.normalTexture);
     modif |= renderTextureEditRow("Occlusion", material.occlusionTexture);
 
@@ -2643,7 +2683,7 @@ bool UiInspector::materialDiffuseTransmission(tinygltf::Material& material)
                                     "Color that modulates the diffusely transmitted light (shown/edited in linear; swatch/wheel perceptual).\n"
                                     "Acts as a transmission-side tint, independent of base color.");
           modif |= renderTextureEditRow("Diffuse Transmission", dt.diffuseTransmissionTexture);
-          modif |= renderTextureEditRow("Diffuse Transmission Color", dt.diffuseTransmissionColorTexture);
+          modif |= renderTextureEditRow("Diffuse Transmission Color", dt.diffuseTransmissionColorTexture, true);
           PE::end();
         }
         if(modif)
@@ -2767,7 +2807,7 @@ bool UiInspector::materialSheen(tinygltf::Material& material)
           modif |= PE::DragFloat("Sheen Roughness", &sheen.sheenRoughnessFactor, 0.01f, 0.0f, 1.0f, "%.3f", 0,
                                  "Sheen roughness [0,1]. Controls micro-fiber divergence.\n"
                                  "Low = sharp grazing-angle highlights. High = soft, broad sheen.");
-          modif |= renderTextureEditRow("Sheen Color", sheen.sheenColorTexture);
+          modif |= renderTextureEditRow("Sheen Color", sheen.sheenColorTexture, true);
           modif |= renderTextureEditRow("Sheen Roughness", sheen.sheenRoughnessTexture);
           PE::end();
         }
@@ -2794,7 +2834,7 @@ bool UiInspector::materialSpecular(tinygltf::Material& material)
                                  "Strength of dielectric specular reflection [0,1]. 0 = pure diffuse.\n"
                                  "Does not affect metals. Scales both F0 and F90.");
           modif |= renderTextureEditRow("Specular", specular.specularTexture);
-          modif |= renderTextureEditRow("Specular Color", specular.specularColorTexture);
+          modif |= renderTextureEditRow("Specular Color", specular.specularColorTexture, true);
           PE::end();
         }
         if(modif)
@@ -2888,7 +2928,7 @@ bool UiInspector::materialScatter(tinygltf::Material& material)
                                    "0 = isotropic. Positive = forward scattering. Negative = backward scattering.\n"
                                    "Thin-walled: splits the scattered energy between transmission (+1) and reflection (-1).");
           modif |= renderTextureEditRow("Scatter Strength", scatter.scatterStrengthTexture);
-          modif |= renderTextureEditRow("Multiscatter Color", scatter.multiscatterColorTexture);
+          modif |= renderTextureEditRow("Multiscatter Color", scatter.multiscatterColorTexture, true);
           PE::end();
         }
         if(modif)

@@ -26,6 +26,7 @@
 
 #include <fmt/format.h>
 #include <algorithm>
+#include <string_view>
 #include <chrono>
 #include <thread>
 #include <utility>
@@ -38,12 +39,16 @@
 #include <nvvk/sbt_generator.hpp>
 #include <nvvk/specialization.hpp>
 #include <nvutils/parameter_registry.hpp>
+#include <nvgui/fonts.hpp>
 #include <nvgui/tooltip.hpp>
 
 #include "renderer_pathtracer.hpp"
 #include "sample_schedule.hpp"
 
 #include "scene_shader_macros.hpp"
+#include "spirv_cache.hpp"
+#include "cache_dir.hpp"
+#include "utils.hpp"
 #include "ui_helpers.hpp"
 #include "ui_linear_color.hpp"
 
@@ -63,7 +68,7 @@
 PathTracer::PathTracer()
 {
   // Default parameters for overall material
-  m_pushConst.maxDepth              = 5;
+  m_pushConst.maxDepth              = 15;
   m_pushConst.frameCount            = 0;
   m_pushConst.fireflyClampThreshold = 10.;
   m_pushConst.numSamples            = 1;  // Number of samples per pixel
@@ -90,7 +95,10 @@ void PathTracer::onAttach(Resources& resources, nvvk::ProfilerGpuTimer* profiler
   m_device = resources.allocator.getDevice();
 
   // Create pipeline cache for faster pipeline creation
-  m_pipelineCache.init(m_device, nvutils::getExecutablePath().parent_path() / "pipeline_cache.bin");
+  const std::filesystem::path pipelineCachePath = nvsamples::getCacheDir() / "pipeline_cache.bin";
+  nvsamples::adoptLegacyCache(nvutils::getExecutablePath().parent_path() / "pipeline_cache.bin", pipelineCachePath);
+  nvsamples::removeStaleTempFiles(nvsamples::getCacheDir());
+  m_pipelineCache.init(m_device, pipelineCachePath);
 
   // Written by probeCameraMedium() before any path reads it
   NVVK_CHECK(resources.allocator.createBuffer(m_cameraMediumBuffer, sizeof(shaderio::CameraMedium),
@@ -173,8 +181,9 @@ void PathTracer::onAttach(Resources& resources, nvvk::ProfilerGpuTimer* profiler
 
 //--------------------------------------------------------------------------------------------------
 // Register command line parameters for the PathTracer
-void PathTracer::registerParameters(SettingsRegistry* settings)
+void PathTracer::registerParameters(SettingsRegistry* settings, std::function<void()> restart)
 {
+  m_settingsRegistry = settings;  // the Settings panel asks it which values still hold their default
   // PathTracer-specific settings. Persist marks what survives a restart (see settings_registry.hpp).
   // Bounds mirror the UI sliders so CLI and benchmark sequences accept the same range the UI does:
   //   ptMaxDepth  -> "Max Depth" slider in showUI() (0..20)
@@ -198,6 +207,7 @@ void PathTracer::registerParameters(SettingsRegistry* settings)
   settings->add({"ptShadowTransmission", "PathTracer: Let shadow rays pass through transmissive surfaces (biased approximation)"},
                 &m_shadowTransmission, Persist::eYes);
   settings->add({"ptAutoFocus", "PathTracer: Enable auto focus"}, &m_autoFocus, Persist::eYes);
+  m_caustics.registerParameters(settings, std::move(restart));
   settings->add({"ptTechnique", "PathTracer: Rendering technique [RayQuery:0, RayTracing:1]"}, (int*)&m_renderTechnique,
                 Persist::eYes, 0, 1);
   // SER is a specialization constant of both path-tracing pipelines, so a change is picked up by
@@ -254,6 +264,10 @@ void PathTracer::onDetach(Resources& resources)
   vkDestroyShaderModule(m_device, m_shaderModule, nullptr);
   vkDestroyPipeline(m_device, m_rtxPipeline, nullptr);
   vkDestroyPipeline(m_device, m_rqPipeline, nullptr);
+  for(size_t i = 0; i < m_causticPipelines.size(); i++)
+    vkDestroyPipeline(m_device, m_causticPipelines[i].pipeline, nullptr);
+  m_causticPipelines.clear();
+  m_caustics.deinit(resources);
   destroyVariantCache(resources);
   m_pipelineCache.deinit();
 }
@@ -320,183 +334,152 @@ void PathTracer::updateOptiXResources(VkCommandBuffer cmd, Resources& resources)
 #endif
 }
 
-bool PathTracer::onUIRender(Resources& resources)
+//--------------------------------------------------------------------------------------------------
+// The settings a tab shows right now (see TabSettings)
+PathTracer::TabSettings PathTracer::tabSettings(SettingsTab tab, const Resources& resources) const
 {
-  // Setting the aperture max slider value, based on the scene size
-  float sceneRadius =
-      (resources.getScene() && resources.getScene()->valid()) ? resources.getScene()->getSceneBounds().radius() : 1.0f;
-  float scaleFactor = std::log(sceneRadius);
-  scaleFactor       = std::max(scaleFactor, 0.0f);   // Prevent negative values when the scene is small
-  float apertureMax = 0.0001f + scaleFactor * 5.0f;  // Minimum max aperture is 0.0001
+  TabSettings shown;
+  switch(tab)
+  {
+    case SettingsTab::eSampling:
+      shown.add(&resources.settings.maxSamples);
+      shown.add(&m_adaptiveSampling);
+      if(m_adaptiveSampling)
+        shown.add(&m_performanceTarget);
+      else
+        shown.add(&m_pushConst.numSamples);
+      break;
+    case SettingsTab::eTransport:
+      shown.add(&m_pushConst.maxDepth);
+      // Not the firefly clamp: GltfRenderer::calibrateFireflyClamp() sets it for each environment, so
+      // the declared default is not what it should return to
+      shown.add(&m_shadowTransmission);
+      shown.add(&resources.settings.cameraMedium);
+      if(resources.settings.cameraMedium == CameraMediumMode::eOn)
+        shown.add(&resources.settings.cameraMediumMaterial);
+      break;
+    case SettingsTab::eCaustics:
+      m_caustics.forEachShownSetting([&shown](const void* settingStorage) { shown.add(settingStorage); });
+      break;
+    case SettingsTab::eLens:
+      shown.add(&m_pushConst.aperture);
+      shown.add(&m_autoFocus);
+      if(!m_autoFocus)
+        shown.add(&m_pushConst.focalDistance);
+      // The infinite plane's controls sit in this tab too. Not its height: it follows the scene
+      // (the bottom of its bounds), so the declared default is not what it should return to
+      shown.add(&resources.settings.useInfinitePlane);
+      if(resources.settings.useInfinitePlane)
+      {
+        shown.add(&resources.settings.isShadowCatcher);
+        if(resources.settings.isShadowCatcher)
+          shown.add(&resources.settings.shadowCatcherDarkness);
+        shown.add(&resources.settings.infinitePlaneBaseColor);
+        shown.add(&resources.settings.infinitePlaneMetallic);
+        shown.add(&resources.settings.infinitePlaneRoughness);
+      }
+      break;
+    default:  // eAdvanced
+      shown.add(&m_renderTechnique);
+      if(m_supportSER && m_renderTechnique == RenderTechnique::RayTracing)  // as in uiAdvancedTab()
+        shown.add(&m_useSER);
+      shown.add(&resources.settings.optimalShader);
+      shown.add(&m_pushConst.texGradScale);
+      break;
+  }
+  return shown;
+}
 
+//--------------------------------------------------------------------------------------------------
+// True when a value the tab shows differs from its default
+bool PathTracer::isTabChanged(SettingsTab tab, const Resources& resources) const
+{
+  if(m_settingsRegistry == nullptr)
+    return false;
+  const TabSettings shown = tabSettings(tab, resources);
+  for(int i = 0; i < shown.count; i++)
+  {
+    if(!m_settingsRegistry->isDefault(shown.storage[i]))
+      return true;
+  }
+  return false;
+}
+
+// Puts the values the tab shows back to their defaults
+void PathTracer::resetTab(SettingsTab tab, Resources& resources)
+{
+  if(m_settingsRegistry == nullptr)
+    return;
+  // A reset can reveal a setting its parent hid (Performance Target once Auto SPP is back on): look again
+  // until what the tab shows is all default. Each pass resets at least one value, and a parent shows
+  // at most a few children, so a few passes end it.
+  for(int pass = 0; pass < 4; pass++)
+  {
+    const TabSettings shown   = tabSettings(tab, resources);
+    bool              anyReset = false;
+    for(int i = 0; i < shown.count; i++)
+    {
+      if(!m_settingsRegistry->isDefault(shown.storage[i]))
+      {
+        m_settingsRegistry->resetToDefault(shown.storage[i]);
+        anyReset = true;
+      }
+    }
+    if(!anyReset)
+      break;
+  }
+  if(tab == SettingsTab::eSampling)
+    restartAdaptiveSampling();
+}
+
+//--------------------------------------------------------------------------------------------------
+bool PathTracer::uiSamplingTab(Resources& resources)
+{
   namespace PE = nvgui::PropertyEditor;
   bool changed = false;
-  if(PE::begin())
+  if(!PE::begin())
+    return changed;
+
+  // Bounds mirror the ptMaxSamples registration in GltfRenderer
+  PE::SliderInt("Max Samples", &resources.settings.maxSamples, 1, 1000000, "%d spp", ImGuiSliderFlags_Logarithmic,
+                "Stop accumulating once the image holds this many samples per pixel");
+
+  ImGui::BeginDisabled(isDlssEveryFrame());
+  PE::Checkbox("Auto SPP", &m_adaptiveSampling,
+               "After each camera move Auto SPP adds one sample per frame until the path-trace GPU time "
+               "reaches the target, then holds the count while the view is still. It steps down if frames "
+               "run over the target.");
+  ImGui::EndDisabled();
+  if(isDlssEveryFrame())
   {
-    // Rendering technique selector
-    const char* techniques[] = {"Compute / Ray Query", "Ray Tracing Pipeline"};
-    int         current      = static_cast<int>(m_renderTechnique);
-    ImGui::BeginDisabled(!m_supportRayQuery);
-    if(PE::Combo("Rendering Pipeline", &current, techniques, IM_ARRAYSIZE(techniques)))
-    {
-      m_renderTechnique = static_cast<RenderTechnique>(current);
-      changed           = true;
-    }
-    ImGui::EndDisabled();
-    if(!m_supportRayQuery)
-    {
-      ImGui::SameLine();
-      ImGui::TextDisabled("(Ray Query unsupported on this driver)");
-    }
-    nvgui::tooltip(
-        "Both Ray Query and Ray Tracing use hardware accelerated ray tracing."
-        "Ray Query uses a compute shader interface, while Ray Tracing uses the dedicated RTX pipeline.");
-
-    if(m_supportSER && m_renderTechnique == RenderTechnique::RayTracing)
-    {
-      // The toggle only records the wish; ensureShadersAndPipelines() drops the pipelines built with
-      // the old value on the next frame. That path also covers --ptUseSER and the ray-query
-      // pipeline, which this checkbox used to leave stale.
-      changed |= PE::Checkbox("Use SER", &m_useSER, "Use shader execution reorder");
-    }
-
-    // Scene-aware shader optimization.
-    // One row: the checkbox, then the optimized shader's state (PE::entry starts a row of its own)
-    PE::entry(
-        "Optimize Shader",
-        [this, &resources] {
-          const bool toggled = ImGui::Checkbox("###Optimize Shader", &resources.settings.optimalShader);
-          if(resources.settings.optimalShader)
-          {
-            ImGui::SameLine();
-            if(m_optimalFailed)
-              ImGui::TextDisabled("failed to compile (see the log; Reload Shaders retries)");
-            else
-              ImGui::TextDisabled(m_optimalFallback ? "building in the background..." : "active");
-          }
-          return toggled;
-        },
-        "Compile the shader with only the features the scene uses, for better performance.\n"
-        "It builds in the background; the all-features shader renders the same image meanwhile,\n"
-        "and the optimized one swaps in once built, without restarting the accumulation.");
-
-
-#if !defined(NDEBUG)
-    // Status line : which scene features are active (informational)
-    if(resources.settings.optimalShader)
-    {
-      const auto&       fs           = resources.currentFeatureSet;
-      const std::string usedFeatures = fs.toString();
-      std::string sceneExtTooltip = fmt::format("Active scene feature(s): {}", usedFeatures.empty() ? "none" : usedFeatures);
-      nvgui::tooltip(sceneExtTooltip.c_str(), true);
-      std::string featureGatesTooltip = fmt::format("Feature gates: Transmission: {}, Volume: {}, Scatter: {}, DLSS Guide: {}",
-                                                    fs.has(nvvkgltf::SceneFeatureSet::eTransmission) ? "ON" : "off",
-                                                    fs.has(nvvkgltf::SceneFeatureSet::eVolume) ? "ON" : "off",
-                                                    fs.has(nvvkgltf::SceneFeatureSet::eScatter) ? "ON" : "off",
-                                                    fs.has(nvvkgltf::SceneFeatureSet::eDlssGuide) ? "ON" : "off");
-      nvgui::tooltip(featureGatesTooltip.c_str(), true);
-    }
-#endif
-
-    changed |= PE::SliderInt("Max Depth", &m_pushConst.maxDepth, 0, 20, "%d", 0, "Maximum number of bounces");
-    changed |= PE::SliderFloat("FireFly Clamp", &m_pushConst.fireflyClampThreshold, 0.0f, 100.0f, "%.4g", 0,
-                               "Clamp threshold for fireflies. 0 = disabled.");
-    changed |= PE::SliderFloat("Texture LOD", &m_pushConst.texGradScale, 0.0f, 1.0f, "%.2f", 0,
-                               "Ray-footprint gradient scale for texture LOD.\n"
-                               "0 = always mip 0 (default: sharpest, relies on MC accumulation for AA).\n"
-                               "1 = full physically-derived LOD (may look soft at distance).");
-    changed |= PE::Checkbox("Shadow Transmission", &m_shadowTransmission,
-                            "Let shadow rays pass straight through transmissive surfaces (KHR_materials_transmission).\n"
-                            "Biased approximation: brightens what lies behind glass but ignores refraction,\n"
-                            "so caustics are not focused. When disabled, transmissive surfaces block shadow rays\n"
-                            "and light through them comes only from BSDF sampling: no approximation, but caustics\n"
-                            "from small or punctual lights (sun, point, spot, directional) are missing.");
-    const char* cameraMediumModes[] = {"Auto", "On", "Off"};
-    int         cameraMediumMode    = static_cast<int>(resources.settings.cameraMedium);
-    if(PE::Combo("Camera Medium", &cameraMediumMode, cameraMediumModes, IM_ARRAYSIZE(cameraMediumModes), -1,
-                 "The KHR_materials_volume medium (fog, water, tinted glass) the camera starts in.\n"
-                 "Auto: found by following the centre camera ray to the nearest volume surface hit from behind.\n"
-                 "On: the camera is in the volume material picked below, whatever the ray meets.\n"
-                 "Off: the camera is in clear air.\n"
-                 "Turn it off if the scene renders black when a volume surface (e.g. a windshield) is at the\n"
-                 "centre of the view: the asset's winding makes it look like the camera is inside it.\n"
-                 "Turn it on when Auto cannot tell, e.g. under water looking up at the sky."))
-    {
-      resources.settings.cameraMedium = static_cast<CameraMediumMode>(cameraMediumMode);
-      changed                         = true;
-    }
-    if(resources.settings.cameraMedium == CameraMediumMode::eOn)
-    {
-      // The picked material, or the first volume one: constant time, this runs every frame
-      const int picked = resources.cameraMediumMaterial(resources.settings.cameraMediumMaterial);
-      if(picked < 0)
-      {
-        PE::entry("Medium", [] {
-          ImGui::TextDisabled("No KHR_materials_volume material in the scene");
-          return false;
-        });
-      }
-      else
-      {
-        const auto label = [&](int index) {
-          const std::string& name = resources.getScene()->getModel().materials[index].name;
-          return fmt::format("{}: {}", index, name.empty() ? "(unnamed)" : name);
-        };
-        changed |= PE::entry(
-            "Medium",
-            [&] {
-              bool changedPick = false;
-              ImGui::SetNextItemWidth(-FLT_MIN);
-              if(ImGui::BeginCombo("##CameraMedium", label(picked).c_str()))
-              {
-                // A scene can have 500k materials: list the volume ones once per opening, and name only
-                // the rows in view
-                if(ImGui::IsWindowAppearing() || m_volumeMaterialList.empty())
-                  m_volumeMaterialList = resources.volumeMaterials();
-                ImGuiListClipper clipper;
-                clipper.Begin(static_cast<int>(m_volumeMaterialList.size()));
-                while(clipper.Step())
-                {
-                  for(int row = clipper.DisplayStart; row < clipper.DisplayEnd; row++)
-                  {
-                    const int index = m_volumeMaterialList[row];
-                    if(ImGui::Selectable(label(index).c_str(), index == picked))
-                    {
-                      resources.settings.cameraMediumMaterial = index;
-                      changedPick                             = true;
-                    }
-                  }
-                }
-                ImGui::EndCombo();
-              }
-              else
-                m_volumeMaterialList.clear();
-              return changedPick;
-            },
-            "The volume material the camera is in (the absorption and scattering of that material).");
-      }
-    }
-    PE::end();
+    ImGui::SameLine();
+    ImGui::TextDisabled("(DLSS disabled)");
+  }
+  else if(m_adaptiveSampling)
+  {
+    ImGui::SameLine();
+    if(m_performanceTarget == PerformanceTarget::eThroughput)
+      ImGui::TextDisabled(m_throughputSearch.settled() ? "held: fastest" : "searching");
+    else
+      ImGui::TextDisabled(m_frameRateControl.held() ? "held: at target" : "climbing");
   }
 
-  // Manual sampling controls
-  if(PE::begin())
+  if(m_adaptiveSampling)
   {
-    // Progress is counted in samples per pixel: a frame holds a varying number of them
-    const int  maxSamples = std::max(resources.settings.maxSamples, 1);
-    const auto progress   = fmt::format("{} / {} spp", m_totalSamplesAccumulated, maxSamples);
-    PE::entry(
-        "Accumulated",
-        [&] {
-          ImGui::ProgressBar(std::min(float(m_totalSamplesAccumulated) / float(maxSamples), 1.0F), ImVec2(-FLT_MIN, 0),
-                             progress.c_str());
-          return false;
-        },
-        "Samples per pixel in the image, out of Max Samples");
-    // Bounds mirror the ptMaxSamples registration in GltfRenderer
-    PE::SliderInt("Max Samples", &resources.settings.maxSamples, 1, 1000000, "%d spp", ImGuiSliderFlags_Logarithmic,
-                  "Stop accumulating once the image holds this many samples per pixel");
-    // Set by hand, or, with Auto SPP or DLSS, showing the count they trace (ptSamples keeps the hand-set one)
+    const char* targets[] = {"Interactive (60 FPS)", "Balanced (30 FPS)", "Quality (15 FPS)", "Max Quality (10 FPS)",
+                             "Max Throughput (offline)"};
+    int         currentTarget = static_cast<int>(m_performanceTarget);
+    if(PE::Combo("Performance Target", &currentTarget, targets, IM_ARRAYSIZE(targets), -1,
+                 "Frame rate Auto SPP aims at. Max Throughput finds the samples per frame with the lowest frame "
+                 "time per sample, for renders nobody interacts with (the headless default)"))
+    {
+      m_performanceTarget = static_cast<PerformanceTarget>(currentTarget);
+      restartAdaptiveSampling();
+    }
+  }
+  if(!m_adaptiveSampling || isDlssEveryFrame())
+  {
+    // Set by hand, or, with DLSS, showing the count it traces (ptSamples keeps the hand-set one)
     const bool samplesByHand = !m_adaptiveSampling && !isDlssEveryFrame();
     int        shownSamples  = samplesPerFrame();
     ImGui::BeginDisabled(!samplesByHand);
@@ -510,98 +493,335 @@ bool PathTracer::onUIRender(Resources& resources)
       ImGui::SameLine();
       ImGui::TextDisabled("(DLSS: 1 spp)");
     }
-
-    // Adaptive sampling controls
-    ImGui::BeginDisabled(isDlssEveryFrame());
-    PE::Checkbox("Auto SPP", &m_adaptiveSampling, "Automatically adjust samples per pixel based on performance target");
-    ImGui::EndDisabled();
-    if(isDlssEveryFrame())
-    {
-      ImGui::SameLine();
-      ImGui::TextDisabled("(DLSS disabled)");
-    }
-    if(m_adaptiveSampling)
-    {
-      ImGui::SameLine();
-      if(m_performanceTarget == PerformanceTarget::eThroughput)
-        ImGui::TextDisabled(m_throughputSearch.settled() ? "(held: fastest)" : "(searching)");
-      else
-        ImGui::TextDisabled(m_frameRateControl.held() ? "(held: at target)" : "(climbing)");
-      nvgui::tooltip(
-          "After each camera move Auto SPP adds one sample per frame until the path-trace GPU time "
-          "reaches the target, then holds the count while the view is still. It steps down if frames "
-          "run over the target.",
-          true);
-
-      // Performance target selection
-      const char* targets[] = {"Interactive (60 FPS)", "Balanced (30 FPS)", "Quality (15 FPS)", "Max Quality (10 FPS)",
-                               "Max Throughput (offline)"};
-      int         currentTarget = static_cast<int>(m_performanceTarget);
-      if(PE::Combo("Performance Target", &currentTarget, targets, IM_ARRAYSIZE(targets), -1,
-                   "Frame rate Auto SPP aims at. Max Throughput finds the samples per frame with the lowest frame "
-                   "time per sample, for renders nobody interacts with (the headless default)"))
-      {
-        m_performanceTarget = static_cast<PerformanceTarget>(currentTarget);
-        restartAdaptiveSampling();
-      }
-    }
-    // Performance info - always visible
-    const int   frames      = resources.frameCount + 1;
-    const float sppPerFrame = (frames > 0) ? float(m_totalSamplesAccumulated) / float(frames) : 0.f;
-    ImGui::TextDisabled("Frames: %d (%.1f spp/frame)", frames, sppPerFrame);
-    ImGui::TextDisabled("Throughput: %.2f MSPP/s", m_throughputRollingAvg.getAverage());
-    nvgui::tooltip(fmt::format("Mega-sample-pixels per second (rolling average over last {} frames)",
-                               m_throughputRollingAvg.SAMPLE_COUNT)
-                       .c_str(),
-                   true);
-
-    PE::end();
   }
+  PE::end();
+  return changed;
+}
 
-  // Camera controls
-  if(PE::begin())
+//--------------------------------------------------------------------------------------------------
+bool PathTracer::uiTransportTab(Resources& resources)
+{
+  namespace PE = nvgui::PropertyEditor;
+  bool changed = false;
+  if(!PE::begin())
+    return changed;
+
+  changed |= PE::SliderInt("Max Depth", &m_pushConst.maxDepth, 0, 20, "%d", 0, "Maximum number of bounces");
+  changed |= PE::SliderFloat("FireFly Clamp", &m_pushConst.fireflyClampThreshold, 0.0f, 100.0f, "%.4g", 0,
+                             "Clamp threshold for fireflies. 0 = disabled.");
+  changed |= PE::Checkbox("Shadow Transmission", &m_shadowTransmission,
+                          "Let shadow rays pass straight through transmissive surfaces (KHR_materials_transmission).\n"
+                          "Biased approximation: brightens what lies behind glass but ignores refraction,\n"
+                          "so caustics are not focused. When disabled, transmissive surfaces block shadow rays\n"
+                          "and light through them comes only from BSDF sampling: no approximation, but caustics\n"
+                          "from small or punctual lights (sun, point, spot, directional) are missing.");
+  const char* cameraMediumModes[] = {"Auto", "On", "Off"};
+  int         cameraMediumMode    = static_cast<int>(resources.settings.cameraMedium);
+  if(PE::Combo("Camera Medium", &cameraMediumMode, cameraMediumModes, IM_ARRAYSIZE(cameraMediumModes), -1,
+               "The KHR_materials_volume medium (fog, water, tinted glass) the camera starts in.\n"
+               "Auto: found by following the centre camera ray to the nearest volume surface hit from behind.\n"
+               "On: the camera is in the volume material picked below, whatever the ray meets.\n"
+               "Off: the camera is in clear air.\n"
+               "Turn it off if the scene renders black when a volume surface (e.g. a windshield) is at the\n"
+               "centre of the view: the asset's winding makes it look like the camera is inside it.\n"
+               "Turn it on when Auto cannot tell, e.g. under water looking up at the sky."))
   {
-    changed |= PE::SliderFloat("Aperture", &m_pushConst.aperture, 0.0f, apertureMax, "%5.9f",
-                               ImGuiSliderFlags_Logarithmic | ImGuiSliderFlags_NoRoundToFormat, "Out-of-focus effect");
-    changed |= PE::Checkbox("Auto Focus", &m_autoFocus, "Use interest position");
-    ImGui::BeginDisabled(m_autoFocus);
+    resources.settings.cameraMedium = static_cast<CameraMediumMode>(cameraMediumMode);
+    changed                         = true;
+  }
+  if(resources.settings.cameraMedium == CameraMediumMode::eOn)
+  {
+    // The picked material, or the first volume one: constant time, this runs every frame
+    const int picked = resources.cameraMediumMaterial(resources.settings.cameraMediumMaterial);
+    if(picked < 0)
+    {
+      PE::entry("Medium", [] {
+        ImGui::TextDisabled("No KHR_materials_volume material in the scene");
+        return false;
+      });
+    }
+    else
+    {
+      const auto label = [&](int index) {
+        const std::string& name = resources.getScene()->getModel().materials[index].name;
+        return fmt::format("{}: {}", index, name.empty() ? "(unnamed)" : name);
+      };
+      changed |= PE::entry(
+          "Medium",
+          [&] {
+            bool changedPick = false;
+            ImGui::SetNextItemWidth(-FLT_MIN);
+            if(ImGui::BeginCombo("##CameraMedium", label(picked).c_str()))
+            {
+              // A scene can have 500k materials: list the volume ones once per opening, and name only
+              // the rows in view
+              if(ImGui::IsWindowAppearing() || m_volumeMaterialList.empty())
+                m_volumeMaterialList = resources.volumeMaterials();
+              ImGuiListClipper clipper;
+              clipper.Begin(static_cast<int>(m_volumeMaterialList.size()));
+              while(clipper.Step())
+              {
+                for(int row = clipper.DisplayStart; row < clipper.DisplayEnd; row++)
+                {
+                  const int index = m_volumeMaterialList[row];
+                  if(ImGui::Selectable(label(index).c_str(), index == picked))
+                  {
+                    resources.settings.cameraMediumMaterial = index;
+                    changedPick                             = true;
+                  }
+                }
+              }
+              ImGui::EndCombo();
+            }
+            else
+              m_volumeMaterialList.clear();
+            return changedPick;
+          },
+          "The volume material the camera is in (the absorption and scattering of that material).");
+    }
+  }
+  PE::end();
+  return changed;
+}
+
+//--------------------------------------------------------------------------------------------------
+bool PathTracer::uiCausticsTab()
+{
+  namespace PE = nvgui::PropertyEditor;
+  bool changed = false;
+  if(!PE::begin())
+    return changed;
+  changed |= m_caustics.onUiSettings();
+  PE::end();
+  return changed;
+}
+
+//--------------------------------------------------------------------------------------------------
+bool PathTracer::uiLensTab(Resources& resources, float apertureMax)
+{
+  namespace PE = nvgui::PropertyEditor;
+  bool changed = false;
+  if(!PE::begin())
+    return changed;
+
+  changed |= PE::SliderFloat("Aperture", &m_pushConst.aperture, 0.0f, apertureMax, "%5.9f",
+                             ImGuiSliderFlags_Logarithmic | ImGuiSliderFlags_NoRoundToFormat, "Out-of-focus effect");
+  changed |= PE::Checkbox("Auto Focus", &m_autoFocus, "Use interest position");
+  if(!m_autoFocus)
+  {
     changed |= PE::DragFloat("Focal Distance", &m_pushConst.focalDistance, 100.0f, 0.0f, 1000000.0f, "%5.9f",
                              ImGuiSliderFlags_Logarithmic | ImGuiSliderFlags_NoRoundToFormat, "Distance to focal point");
     m_pushConst.focalDistance = std::max(0.000000001f, m_pushConst.focalDistance);
-    ImGui::EndDisabled();
-    PE::end();
   }
 
-  // Infinite plane
-  if(PE::begin())
+  changed |= PE::Checkbox("Infinite Plane", (bool*)&resources.settings.useInfinitePlane);
+  if(resources.settings.useInfinitePlane)
   {
-    changed |= PE::Checkbox("Infinite Plane", (bool*)&resources.settings.useInfinitePlane);
-    if(resources.settings.useInfinitePlane)
+    changed |= PE::Checkbox("Shadow Catcher", (bool*)&resources.settings.isShadowCatcher);
+    const float extentY =
+        (resources.getScene() && resources.getScene()->valid()) ? resources.getScene()->getSceneBounds().extents().y : 10.0f;
+    if(PE::treeNode("Infinite Plane Settings"))
     {
-      changed |= PE::Checkbox("Shadow Catcher", (bool*)&resources.settings.isShadowCatcher);
-      const float extentY =
-          (resources.getScene() && resources.getScene()->valid()) ? resources.getScene()->getSceneBounds().extents().y : 10.0f;
-      if(PE::treeNode("Infinite Plane Settings"))
+      changed |= PE::SliderFloat("Height", &resources.settings.infinitePlaneDistance, -extentY, extentY, "%5.9f",
+                                 ImGuiSliderFlags_NoRoundToFormat, "Distance to infinite plane");
+      changed |= uicolor::colorEdit3Linear("Color", glm::value_ptr(resources.settings.infinitePlaneBaseColor),
+                                           "Infinite-plane base color (shown/edited in linear; swatch/wheel perceptual).");
+      changed |= PE::SliderFloat("Metallic", &resources.settings.infinitePlaneMetallic, 0.0f, 1.0f);
+      changed |= PE::SliderFloat("Roughness", &resources.settings.infinitePlaneRoughness, 0.0f, 1.0f);
+      if(resources.settings.isShadowCatcher)
       {
-        changed |= PE::SliderFloat("Height", &resources.settings.infinitePlaneDistance, -extentY, extentY, "%5.9f",
-                                   ImGuiSliderFlags_NoRoundToFormat, "Distance to infinite plane");
-        changed |= uicolor::colorEdit3Linear("Color", glm::value_ptr(resources.settings.infinitePlaneBaseColor),
-                                             "Infinite-plane base color (shown/edited in linear; swatch/wheel perceptual).");
-        changed |= PE::SliderFloat("Metallic", &resources.settings.infinitePlaneMetallic, 0.0f, 1.0f);
-        changed |= PE::SliderFloat("Roughness", &resources.settings.infinitePlaneRoughness, 0.0f, 1.0f);
-        if(resources.settings.isShadowCatcher)
-        {
-          changed |= PE::SliderFloat("Shadow Darkness", &resources.settings.shadowCatcherDarkness, 0.0f, 1.0f, "%.2f",
-                                     ImGuiSliderFlags_Logarithmic | ImGuiSliderFlags_NoRoundToFormat,
-                                     "Non-physical: 0=default, 1=deeper shadows");
-        }
-        PE::treePop();
+        changed |= PE::SliderFloat("Shadow Darkness", &resources.settings.shadowCatcherDarkness, 0.0f, 1.0f, "%.2f",
+                                   ImGuiSliderFlags_Logarithmic | ImGuiSliderFlags_NoRoundToFormat,
+                                   "Non-physical: 0=default, 1=deeper shadows");
       }
+      PE::treePop();
     }
+  }
+  PE::end();
+  return changed;
+}
 
-    PE::end();
+//--------------------------------------------------------------------------------------------------
+bool PathTracer::uiAdvancedTab(Resources& resources)
+{
+  namespace PE = nvgui::PropertyEditor;
+  bool changed = false;
+  if(!PE::begin())
+    return changed;
+
+  // Rendering technique selector
+  const char* techniques[] = {"Compute / Ray Query", "Ray Tracing Pipeline"};
+  int         current      = static_cast<int>(m_renderTechnique);
+  ImGui::BeginDisabled(!m_supportRayQuery);
+  if(PE::Combo("Rendering Pipeline", &current, techniques, IM_ARRAYSIZE(techniques)))
+  {
+    m_renderTechnique = static_cast<RenderTechnique>(current);
+    changed           = true;
+  }
+  ImGui::EndDisabled();
+  if(!m_supportRayQuery)
+  {
+    ImGui::SameLine();
+    ImGui::TextDisabled("(Ray Query unsupported on this driver)");
+  }
+  nvgui::tooltip(
+      "Both Ray Query and Ray Tracing use hardware accelerated ray tracing."
+      "Ray Query uses a compute shader interface, while Ray Tracing uses the dedicated RTX pipeline.");
+
+  if(m_supportSER && m_renderTechnique == RenderTechnique::RayTracing)
+  {
+    // The toggle only records the wish; ensureShadersAndPipelines() drops the pipelines built with
+    // the old value on the next frame. That path also covers --ptUseSER and the ray-query
+    // pipeline, which this checkbox used to leave stale.
+    changed |= PE::Checkbox("Use SER", &m_useSER, "Use shader execution reorder");
   }
 
+  // Scene-aware shader optimization.
+  // One row: the checkbox, then the optimized shader's state (PE::entry starts a row of its own)
+  PE::entry(
+      "Optimize Shader",
+      [this, &resources] {
+        const bool toggled = ImGui::Checkbox("###Optimize Shader", &resources.settings.optimalShader);
+        if(resources.settings.optimalShader)
+        {
+          ImGui::SameLine();
+          switch(getShaderStatus(resources))
+          {
+            case ShaderStatus::eFailed:
+              ImGui::TextDisabled("failed to compile (see the log; Reload Shaders retries)");
+              break;
+            case ShaderStatus::eBuilding:
+              ImGui::TextDisabled("building in the background...");
+              break;
+            default:
+              ImGui::TextDisabled("active");
+              break;
+          }
+        }
+        return toggled;
+      },
+      "Compile the shader with only the features the scene uses, for better performance.\n"
+      "It builds in the background; the all-features shader renders the same image meanwhile,\n"
+      "and the optimized one swaps in once built, without restarting the accumulation.");
+
+#if !defined(NDEBUG)
+  // Status line : which scene features are active (informational)
+  if(resources.settings.optimalShader)
+  {
+    const auto&       fs           = resources.currentFeatureSet;
+    const std::string usedFeatures = fs.toString();
+    std::string sceneExtTooltip = fmt::format("Active scene feature(s): {}", usedFeatures.empty() ? "none" : usedFeatures);
+    nvgui::tooltip(sceneExtTooltip.c_str(), true);
+    std::string featureGatesTooltip = fmt::format("Feature gates: Transmission: {}, Volume: {}, Scatter: {}, DLSS Guide: {}",
+                                                  fs.has(nvvkgltf::SceneFeatureSet::eTransmission) ? "ON" : "off",
+                                                  fs.has(nvvkgltf::SceneFeatureSet::eVolume) ? "ON" : "off",
+                                                  fs.has(nvvkgltf::SceneFeatureSet::eScatter) ? "ON" : "off",
+                                                  fs.has(nvvkgltf::SceneFeatureSet::eDlssGuide) ? "ON" : "off");
+    nvgui::tooltip(featureGatesTooltip.c_str(), true);
+  }
+#endif
+
+  changed |= PE::SliderFloat("Texture LOD", &m_pushConst.texGradScale, 0.0f, 1.0f, "%.2f", 0,
+                             "Ray-footprint gradient scale for texture LOD.\n"
+                             "0 = always mip 0 (default: sharpest, relies on MC accumulation for AA).\n"
+                             "1 = full physically-derived LOD (may look soft at distance).");
+  PE::end();
+  return changed;
+}
+
+//--------------------------------------------------------------------------------------------------
+// The Settings panel: a tab per concern (the progress is in the status bar). A tab carries a dot while a value
+// in it differs from its default; right-click the tab to reset it. The gear tab at the right holds
+// what rarely changes.
+bool PathTracer::onUIRender(Resources& resources)
+{
+  // Setting the aperture max slider value, based on the scene size
+  float sceneRadius =
+      (resources.getScene() && resources.getScene()->valid()) ? resources.getScene()->getSceneBounds().radius() : 1.0f;
+  float scaleFactor = std::log(sceneRadius);
+  scaleFactor       = std::max(scaleFactor, 0.0f);   // Prevent negative values when the scene is small
+  float apertureMax = 0.0001f + scaleFactor * 5.0f;  // Minimum max aperture is 0.0001
+
+  bool changed = false;
+
+  const TabDesc tabs[] = {
+      {SettingsTab::eSampling, "Sampling  ", "Sampling", ImGuiTabItemFlags_None, nullptr},
+      {SettingsTab::eTransport, "Transport  ", "Transport", ImGuiTabItemFlags_None, nullptr},
+      {SettingsTab::eCaustics, "Caustics  ", "Caustics", ImGuiTabItemFlags_None, nullptr},
+      {SettingsTab::eLens, "Lens  ", "Lens", ImGuiTabItemFlags_None, nullptr},
+      {SettingsTab::eAdvanced, ICON_MS_SETTINGS "  ", "Advanced", ImGuiTabItemFlags_Trailing, "Advanced"},
+  };
+  const int tabCount = static_cast<int>(sizeof(tabs) / sizeof(tabs[0]));
+
+  int changedTabs = 0;
+  if(ImGui::BeginTabBar("##pathTracerTabs"))
+  {
+    for(int tabIndex = 0; tabIndex < tabCount; tabIndex++)
+    {
+      const TabDesc& t     = tabs[tabIndex];
+      const bool     dirty = isTabChanged(t.tab, resources);
+      changedTabs += dirty ? 1 : 0;
+
+      const std::string label = fmt::format("{}###{}", t.label, t.id);
+      const bool        open  = ImGui::BeginTabItem(label.c_str(), nullptr, t.flags);
+      if(dirty)
+      {
+        const ImVec2 itemMin = ImGui::GetItemRectMin();
+        const ImVec2 itemMax = ImGui::GetItemRectMax();
+        const float  radius  = ImGui::GetFontSize() * 0.2F;
+        ImGui::GetWindowDrawList()->AddCircleFilled(ImVec2(itemMax.x - radius - ImGui::GetStyle().FramePadding.x,
+                                                           0.5F * (itemMin.y + itemMax.y)),
+                                                    radius, IM_COL32(227, 163, 59, 255));
+      }
+      if(t.hint)
+        nvgui::tooltip(t.hint);
+      if(ImGui::BeginPopupContextItem())
+      {
+        if(ImGui::MenuItem("Reset tab to defaults", nullptr, false, dirty))
+        {
+          resetTab(t.tab, resources);
+          changed = true;
+        }
+        ImGui::EndPopup();
+      }
+      if(!open)
+        continue;
+
+      switch(t.tab)
+      {
+        case SettingsTab::eSampling:
+          changed |= uiSamplingTab(resources);
+          break;
+        case SettingsTab::eTransport:
+          changed |= uiTransportTab(resources);
+          break;
+        case SettingsTab::eCaustics:
+          changed |= uiCausticsTab();
+          break;
+        case SettingsTab::eLens:
+          changed |= uiLensTab(resources, apertureMax);
+          break;
+        default:
+          changed |= uiAdvancedTab(resources);
+          break;
+      }
+      ImGui::EndTabItem();
+    }
+    ImGui::EndTabBar();
+  }
+  if(changedTabs > 0)
+  {
+    ImGui::TextDisabled("%d tab%s changed from default", changedTabs, changedTabs > 1 ? "s" : "");
+    ImGui::SameLine();
+    if(ImGui::SmallButton("Reset all"))
+    {
+      for(int tabIndex = 0; tabIndex < tabCount; tabIndex++)
+        resetTab(tabs[tabIndex].tab, resources);
+      changed = true;
+    }
+  }
+
+  ImGui::Spacing();
   if(ImGui::CollapsingHeader("AI Denoisers", ImGuiTreeNodeFlags_DefaultOpen))
   {
 #if defined(USE_DLSS)
@@ -829,6 +1049,7 @@ void PathTracer::onRender(VkCommandBuffer cmd, Resources& resources)
     m_dlssFrame0 = false;
     m_handoff.cancel();
   }
+  updateDlssPhase(resources);
 
   if(!prepareFrame(resources))
     return;
@@ -866,13 +1087,14 @@ void PathTracer::onRender(VkCommandBuffer cmd, Resources& resources)
     renderingSize = m_optix->getRenderSize();
   }
 #endif
+  m_renderSize = renderingSize;
 
   // Setting up the push constant
   const shaderio::PathtracePushConstant pushConst = setupPushConstant(cmd, resources, renderingSize);
 
-  // Frame 1 after DLSS's frame 0: keep DLSS's image for the hand-off before the path tracer overwrites
+  // The first frame after DLSS's: keep DLSS's image for the hand-off before the path tracer overwrites
   // it. The barrier below orders that write after the copy.
-  if(resources.frameCount == 1 && m_dlssFrame0)
+  if(m_takeover)
     if(const std::optional<DenoiserHandoff::Denoiser> denoiser = handoffDenoiser(resources))
       m_handoff.cmdCapture(cmd, resources, *denoiser);
 
@@ -884,6 +1106,9 @@ void PathTracer::onRender(VkCommandBuffer cmd, Resources& resources)
   // has no camera medium to find (setupPushConstant leaves the pointer null)
   if(resources.frameCount == 0 && pushConst.cameraMedium != nullptr)
     probeCameraMedium(cmd, resources, pushConst);
+
+  // Beta caustics: the photons first, the paths add what they left
+  traceCaustics(cmd, resources, pushConst);
 
   // Tracing the rays: Ray Query or Ray Tracing
   {
@@ -1209,7 +1434,7 @@ VkPipeline PathTracer::buildRqPipeline(const PipelineBuildInfo& info) const
       .sType               = VK_STRUCTURE_TYPE_PIPELINE_SHADER_STAGE_CREATE_INFO,
       .stage               = VK_SHADER_STAGE_COMPUTE_BIT,
       .module              = info.module,
-      .pName               = "computeMain",
+      .pName               = info.entry,
       .pSpecializationInfo = specialization.getSpecializationInfo(),
   };
 
@@ -1611,14 +1836,15 @@ bool PathTracer::compileShader(Resources& resources, bool fromFile)
   };
 
   // Compile from shader file if requested, used when reloading the shader
-  bool compiledFromFile = false;
+  bool                  compiledFromFile = false;
+  std::vector<uint32_t> fileSpirv;  // shaderInfo points into it until the module is created below
   if(fromFile)
   {
     SCOPED_TIMER("Slang compile from file");
-    if(compileSpirv(resources, key))
+    if(compileSpirv(resources, key, fileSpirv))
     {
-      shaderInfo.codeSize = resources.slangCompiler.getSpirvSize();
-      shaderInfo.pCode    = resources.slangCompiler.getSpirv();
+      shaderInfo.codeSize = fileSpirv.size() * sizeof(uint32_t);
+      shaderInfo.pCode    = fileSpirv.data();
       compiledFromFile    = true;
     }
     else
@@ -1632,26 +1858,22 @@ bool PathTracer::compileShader(Resources& resources, bool fromFile)
   // Create a shader module
   {
     SCOPED_TIMER("Create Shader Module");
+    forgetCausticPipelines(m_shaderModule);
     vkDestroyShaderModule(m_device, m_shaderModule, nullptr);
     m_shaderModule = createShaderModule(shaderInfo.pCode, shaderInfo.codeSize);
   }
 
   // Record which variant this compile is, so getPendingCompileWork() can tell whether the settings
-  // still match it. A from-file compile follows the live settings. The embedded SPIR-V fallback
-  // mirrors the CMake build (see CMakeLists.txt): not optimal, all-on features, USE_GUIDE_SHADER=1
-  // iff DLSS/OptiX/OIDN is available at build time, and USE_DLSS_SHADER=0 (DLSS is never active at
-  // startup; it engages later and triggers a from-file recompile).
+  // still match it. A from-file compile follows the live settings. The embedded SPIR-V mirrors the
+  // CMake build (see CMakeLists.txt): the universal build (not optimal, all-on features, the guide gates
+  // the build supports compiled in), which is the default VariantKey. It needs no Slang compile, and
+  // its SPIR-V is the same bytes every run, so its pipeline comes out of the pipeline cache.
   {
     std::lock_guard<std::mutex> lock(m_compileMutex);
-#if defined(USE_DLSS) || defined(USE_OPTIX_DENOISER) || defined(USE_OIDN_DENOISER)
-    constexpr bool kEmbeddedDlssGuide = true;
-#else
-    constexpr bool kEmbeddedDlssGuide = false;
-#endif
     if(compiledFromFile)
       m_compiled = key;
     else
-      m_compiled = VariantKey{.dlssGuide = kEmbeddedDlssGuide};
+      m_compiled = VariantKey{};
 
     // Destroy pipeline since there is a new shader
     destroyPipelinesLocked();
@@ -1663,11 +1885,8 @@ bool PathTracer::compileShader(Resources& resources, bool fromFile)
 //--------------------------------------------------------------------------------------------------
 // Compile gltf_pathtrace.slang as `key`, into resources.slangCompiler. The shader macros come from the
 // key, so a variant other than the live one (the sibling prefetch) compiles the same way.
-bool PathTracer::compileSpirv(Resources& resources, const VariantKey& key)
+bool PathTracer::compileSpirv(Resources& resources, const VariantKey& key, std::vector<uint32_t>& spirv)
 {
-  resources.slangCompiler.clearMacros();
-  nvvkgltf::applyCommonShaderMacros(resources.slangCompiler);
-
   std::vector<std::pair<std::string, std::string>> macros = {
       {"AVAILABLE_SER", std::to_string(m_supportSER)},
       {"WIREFRAME", std::to_string(key.wireframe ? 1 : 0)},
@@ -1676,8 +1895,11 @@ bool PathTracer::compileSpirv(Resources& resources, const VariantKey& key)
       {"USE_VISUALIZE", std::to_string(key.visualize ? 1 : 0)},
       // Ray queries against a BLAS with an opacity micromap need an explicit opt-in (see gltf_pathtrace.slang).
       {"USE_OMM", std::to_string(key.omm ? 1 : 0)},
+      // Beta caustics: the photon pass and the paths' side of the partition (caustics.h.slang)
+      {"USE_CAUSTICS", std::to_string(key.caustics ? 1 : 0)},
   };
-  nvvkgltf::appendPathTracerDlssShaderMacro(macros, key.dlssGuide, key.dlss);
+  // Not optimal = the universal build: one shader for every denoiser state (see makeVariantKey())
+  nvvkgltf::appendPathTracerDlssShaderMacro(macros, key.dlssGuide, key.dlss, /*universal=*/!key.optimal);
 
   // Scene-aware optimal mode: set every GLTF_USE_* to 0 or 1 from SceneFeatureSet.
   // Never pass MAT_EXT_X=0 (that would change GltfShadeMaterial layout while the host
@@ -1692,10 +1914,33 @@ bool PathTracer::compileSpirv(Resources& resources, const VariantKey& key)
         key.features.toString().c_str(), key.features.unusedExtensionCount());
   }
 
+  // Same variant, same sources, same Slang: the SPIR-V is already on disk
+  std::string variantText = "gltf_pathtrace.slang";
+  for(const auto& [k, v] : macros)
+    variantText += fmt::format("|{}={}", k, v);
+#if defined(USE_DLSS)
+  variantText += "|HAS_DLSS_MOTION=1";  // applyCommonShaderMacros()
+#endif
+  VkPhysicalDeviceProperties gpuProps{};
+  vkGetPhysicalDeviceProperties(resources.allocator.getPhysicalDevice(), &gpuProps);
+  const std::string cacheKey = spirvcache::makeKey(nvsamples::getShaderDirs(), variantText, gpuProps.vendorID);
+  if(spirvcache::load(cacheKey, spirv))
+  {
+    LOGI("[PathTracer] SPIR-V cache hit (%s)\n", cacheKey.c_str());
+    return true;
+  }
+
+  resources.slangCompiler.clearMacros();
+  nvvkgltf::applyCommonShaderMacros(resources.slangCompiler);
   for(const auto& [k, v] : macros)
     resources.slangCompiler.addMacro({k.c_str(), v.c_str()});
 
-  return resources.slangCompiler.compileFile("gltf_pathtrace.slang");
+  if(!resources.slangCompiler.compileFile("gltf_pathtrace.slang"))
+    return false;
+  const uint32_t* code = resources.slangCompiler.getSpirv();
+  spirv.assign(code, code + resources.slangCompiler.getSpirvSize() / sizeof(uint32_t));
+  spirvcache::store(cacheKey, spirv);
+  return true;
 }
 
 VkShaderModule PathTracer::createShaderModule(const void* code, size_t codeSize) const
@@ -1722,21 +1967,31 @@ PathTracer::VariantKey PathTracer::makeVariantKey(const Resources& resources) co
   VariantKey key = wantedVariantKey(resources);
   if(key.optimal && m_optimalFallback)  // see updateOptimalFallback()
   {
-    key.optimal  = false;
-    key.features = {};
+    // The universal build: always at hand, whatever DLSS, OptiX, OIDN and the scene's materials ask
+    // for, so none of them waits on a compile. Caustics are the exception: they are a feature of
+    // their own rather than a state of the denoisers, and engage when their variant is ready (unless
+    // that build failed, then they get a universal build of their own, as before).
+    key.optimal   = false;
+    key.features  = {};
+    key.dlss      = false;
+    key.dlssGuide = false;
+    key.caustics  = key.caustics && m_optimalFailed;
   }
   return key;
 }
 
 PathTracer::VariantKey PathTracer::wantedVariantKey(const Resources& resources) const
 {
+  const bool optimal = resources.settings.optimalShader;
   return VariantKey{
       resources.settings.wireframe,
-      resources.settings.visualization != shaderio::Visualization::eRendered,
+      resources.settings.activeVisualization() != shaderio::Visualization::eRendered,
       wantOpacityMicromapShader(resources),
-      resources.settings.optimalShader,
-      isDlssEnabled() && (!isAccumulationDenoiserEnabled() || resources.frameCount == 0),
-      resources.currentFeatureSet.has(nvvkgltf::SceneFeatureSet::eDlssGuide),
+      optimal,
+      // The universal build serves every denoiser state, so only an optimal key follows them
+      optimal && isDlssEnabled() && (!isAccumulationDenoiserEnabled() || m_dlssPhase),
+      optimal && resources.currentFeatureSet.has(nvvkgltf::SceneFeatureSet::eDlssGuide),
+      m_supportRayQuery && m_caustics.enabled(),  // The photon pass is a compute pipeline of this module
       resources.settings.optimalShader ? resources.currentFeatureSet : nvvkgltf::SceneFeatureSet{},
 #if defined(USE_DLSS)
       m_dlss ? static_cast<int>(m_dlss->getTransparencyMode()) : 0,
@@ -1759,6 +2014,7 @@ std::string PathTracer::VariantKey::shaderDiff(const VariantKey& to) const
   add("optimal", optimal, to.optimal);
   add("dlss", dlss, to.dlss);
   add("dlssGuide", dlssGuide, to.dlssGuide);
+  add("caustics", caustics, to.caustics);
   if(optimal && to.optimal && features != to.features)
     diff += std::string(diff.empty() ? "" : ", ") + "features [" + features.toString() + "] -> [" + to.features.toString() + "]";
   return diff.empty() ? "no shader field changed" : diff;
@@ -1826,7 +2082,10 @@ bool PathTracer::swapVariant(Resources& resources, const VariantKey& newKey)
       {
         // Reclaim any stale handles already cached for this key before overwriting.
         if(e.shaderModule != VK_NULL_HANDLE && e.shaderModule != m_shaderModule)
+        {
+          forgetCausticPipelines(e.shaderModule);
           vkDestroyShaderModule(m_device, e.shaderModule, nullptr);
+        }
         if(e.rtxPipeline != VK_NULL_HANDLE && e.rtxPipeline != m_rtxPipeline)
           vkDestroyPipeline(m_device, e.rtxPipeline, nullptr);
         if(e.rqPipeline != VK_NULL_HANDLE && e.rqPipeline != m_rqPipeline)
@@ -1895,15 +2154,45 @@ bool PathTracer::swapVariant(Resources& resources, const VariantKey& newKey)
   // 3) Enforce LRU bound: drop oldest entries if over capacity.
   while(m_variantCache.size() > kVariantCacheMaxEntries)
   {
-    destroyCacheEntry(resources, m_variantCache.back());
-    m_variantCache.pop_back();
+    // The oldest that is not pinned (see isPinnedVariant())
+    size_t victim = m_variantCache.size();
+    for(size_t i = m_variantCache.size(); i-- > 0;)
+    {
+      if(!isPinnedVariant(m_variantCache[i].key))
+      {
+        victim = i;
+        break;
+      }
+    }
+    if(victim == m_variantCache.size())
+      break;
+    destroyCacheEntry(resources, m_variantCache[victim]);
+    m_variantCache.erase(m_variantCache.begin() + static_cast<ptrdiff_t>(victim));
   }
 
   return false;  // miss: caller must (re)compile + (re)build pipelines + (re)build SBT
 }
 
+// The caustic pipelines of a module that is about to be destroyed (its handle may be handed out again)
+void PathTracer::forgetCausticPipelines(VkShaderModule module)
+{
+  if(module == VK_NULL_HANDLE)
+    return;
+  for(size_t i = 0; i < m_causticPipelines.size();)
+  {
+    if(m_causticPipelines[i].module == module)
+    {
+      vkDestroyPipeline(m_device, m_causticPipelines[i].pipeline, nullptr);
+      m_causticPipelines.erase(m_causticPipelines.begin() + i);
+    }
+    else
+      ++i;
+  }
+}
+
 void PathTracer::destroyCacheEntry(Resources& resources, VariantCacheEntry& entry)
 {
+  forgetCausticPipelines(entry.shaderModule);
   vkDestroyShaderModule(m_device, entry.shaderModule, nullptr);
   vkDestroyPipeline(m_device, entry.rtxPipeline, nullptr);
   vkDestroyPipeline(m_device, entry.rqPipeline, nullptr);
@@ -1929,8 +2218,8 @@ void PathTracer::destroyVariantCache(Resources& resources)
 // makeVariantKey()), so whichever of the two is built, the other is needed a frame later.
 std::optional<PathTracer::VariantKey> PathTracer::siblingVariant(const VariantKey& key) const
 {
-  if(!isDlssEnabled() || !isAccumulationDenoiserEnabled())
-    return std::nullopt;
+  if(!key.optimal || !isDlssEnabled() || !isAccumulationDenoiserEnabled())
+    return std::nullopt;  // the universal build serves both frames
   VariantKey sibling = key;
   sibling.dlss       = !key.dlss;
   return sibling;
@@ -2020,7 +2309,8 @@ void PathTracer::runPrefetch(Resources& resources, RenderTechnique technique)
     if(entry.shaderModule == VK_NULL_HANDLE)
     {
       SCOPED_TIMER("Slang compile (prefetch)");
-      if(!compileSpirv(resources, entry.key))
+      std::vector<uint32_t> spirv;
+      if(!compileSpirv(resources, entry.key, spirv))
       {
         LOGW("PathTracer::runPrefetch(): error compiling gltf_pathtrace.slang (%s)\n",
              VariantKey{}.shaderDiff(entry.key).c_str());
@@ -2031,7 +2321,7 @@ void PathTracer::runPrefetch(Resources& resources, RenderTechnique technique)
         m_prefetch.erase(m_prefetch.begin() + i);
         continue;
       }
-      entry.shaderModule = createShaderModule(resources.slangCompiler.getSpirv(), resources.slangCompiler.getSpirvSize());
+      entry.shaderModule = createShaderModule(spirv.data(), spirv.size() * sizeof(uint32_t));
     }
     ++i;
   }
@@ -2044,6 +2334,8 @@ void PathTracer::runPrefetch(Resources& resources, RenderTechnique technique)
     buildPrefetchPipeline(resources, technique, m_prefetch[0]);
   for(std::thread& t : builders)
     t.join();
+  // Now, not at exit: a crash or a kill must not lose what these builds cost
+  m_pipelineCache.save();
   m_prefetchDone = true;
 }
 
@@ -2134,6 +2426,59 @@ void PathTracer::updateOptimalFallback(Resources& resources)
   startPrefetch(resources, keys);
 }
 
+// Which shader renders now: the optimized one, or the all-features one (by choice, while the optimized one builds, or after it failed).
+PathTracer::ShaderStatus PathTracer::getShaderStatus(const Resources& resources) const
+{
+  if(!resources.settings.optimalShader)
+    return ShaderStatus::eAllFeatures;
+  if(m_optimalFailed)
+    return ShaderStatus::eFailed;
+  return m_optimalFallback ? ShaderStatus::eBuilding : ShaderStatus::eOptimized;
+}
+
+// The path trace as the status bar reports it: progress, speed, the denoisers, the sizes and the shader.
+PathTracer::Status PathTracer::getStatus(const Resources& resources)
+{
+  // Every denoiser that is on, with the one whose image is on screen, chosen as GltfRenderer::runTonemapPass
+  // does: DLSS-RR's image while it has the frames (see updateDlssPhase()) or while the hand-off blends from
+  // it, else the display buffer. A denoiser that is on but not displayed, the noisy image selected by hand
+  // or before its first denoise, is not marked.
+  const bool dlssOn = isDlssEnabled();
+  const bool dlssImage = dlssOn && ((!isAccumulationDenoiserEnabled() || m_dlssPhase) || handoffImage(resources) != nullptr);
+  const DisplayBuffer view = resources.settings.displayBuffer;
+
+  std::vector<Denoiser> denoisers;
+  if(dlssOn)
+    denoisers.push_back({"DLSS-RR", dlssImage});
+#if defined(USE_OPTIX_DENOISER)
+  if(m_optix->isEnabled())
+    denoisers.push_back({"OptiX", !dlssImage && view == DisplayBuffer::eOptixDenoised});
+#endif
+#if defined(USE_OIDN_DENOISER)
+  if(m_oidn->isEnabled())
+    denoisers.push_back({"OIDN", !dlssImage && view == DisplayBuffer::eOidnDenoised});
+#endif
+
+  float                                pathTraceMs = 0.0F;
+  nvutils::ProfilerTimeline::TimerInfo timerInfo;
+  std::string                          apiName;
+  const char* timerName = (m_renderTechnique == RenderTechnique::RayQuery) ? "Path Trace (RQ)" : "Path Trace (RTX)";
+  if(m_profilerTimeline && m_profilerTimeline->getFrameTimerInfo(timerName, timerInfo, apiName) && timerInfo.numAveraged > 0)
+    pathTraceMs = static_cast<float>(timerInfo.gpu.average / 1000.0);
+
+  return Status{
+      .shader          = getShaderStatus(resources),
+      .samples         = m_totalSamplesAccumulated,
+      .maxSamples      = std::max(resources.settings.maxSamples, 1),
+      .samplesPerFrame = m_frameSamples,
+      .msppPerSecond   = m_throughputRollingAvg.getAverage(),
+      .pathTraceMs     = pathTraceMs,
+      .denoisers       = std::move(denoisers),
+      .renderSize      = m_renderSize,
+      .outputSize      = resources.gBuffers.getSize(),
+  };
+}
+
 
 //--------------------------------------------------------------------------------------------------
 // Auto SPP starts over from one sample per frame, e.g. on a new target: the throughput search measures again
@@ -2185,6 +2530,10 @@ void PathTracer::updateAdaptiveSampling(Resources& resources)
 
   // Don't adjust on the first few frames to allow for stabilization
   if(resources.frameCount < 5)
+    return;
+
+  // Frames DLSS-RR keeps (see updateDlssPhase()) trace one sample at its smaller size: no measure of the count
+  if(m_dlssPhase && isDlssEnabled() && isAccumulationDenoiserEnabled())
     return;
 
   // The profiler reports a GPU time frames after it was recorded. The throughput search compares counts,
@@ -2287,10 +2636,17 @@ void PathTracer::renderRayQuery(VkCommandBuffer cmd, VkExtent2D renderingSize, R
   }
 
   // Bind the shader to use
-  VkShaderStageFlagBits stage = VK_SHADER_STAGE_COMPUTE_BIT;
   vkCmdBindPipeline(cmd, VK_PIPELINE_BIND_POINT_COMPUTE, m_rqPipeline);
+  bindComputeSets(cmd, resources);
 
+  // Dispatch the compute shader
+  VkExtent2D numGroups = nvvk::getGroupCounts(renderingSize, VkExtent2D{PT_WORKGROUP_X, PT_WORKGROUP_Y});
+  vkCmdDispatch(cmd, numGroups.width, numGroups.height, 1);
+}
 
+// What every compute pipeline of the path tracer's layout reads: the scene, the environment, the sky
+void PathTracer::bindComputeSets(VkCommandBuffer cmd, Resources& resources) const
+{
   // Bind the descriptor set: TLAS, output image, textures, etc. (Set: 0)
   vkCmdBindDescriptorSets(cmd, VK_PIPELINE_BIND_POINT_COMPUTE, m_pipelineLayout, 0, 1, &resources.descriptorSet, 0, nullptr);
 
@@ -2303,10 +2659,48 @@ void PathTracer::renderRayQuery(VkCommandBuffer cmd, VkExtent2D renderingSize, R
   vkCmdBindDescriptorSets(cmd, VK_PIPELINE_BIND_POINT_COMPUTE, m_pipelineLayout, 3, 1, &resources.skyLutDescriptorSet, 0, nullptr);
 
   pushDescriptorSet(cmd, resources, VK_PIPELINE_BIND_POINT_COMPUTE);
+}
 
-  // Dispatch the compute shader
-  VkExtent2D numGroups = nvvk::getGroupCounts(renderingSize, VkExtent2D{PT_WORKGROUP_X, PT_WORKGROUP_Y});
-  vkCmdDispatch(cmd, numGroups.width, numGroups.height, 1);
+//--------------------------------------------------------------------------------------------------
+// Beta caustics: one thread per photon of this frame, which leave their splats in the buffer
+// the paths add to their pixels and their landing places in the photon map, then the map's grid.
+void PathTracer::traceCaustics(VkCommandBuffer cmd, Resources& resources, const shaderio::PathtracePushConstant& pushConst)
+{
+  if(pushConst.caustics == nullptr || m_caustics.photonGroups() == 0)
+    return;  // Off, or nothing casts a caustic: the per-frame cost of the feature is this test
+
+  nvvk::ProfilerGpuTimer::FrameSection timerSection = m_profiler->cmdFrameSection(cmd, "Caustics");
+
+  vkCmdBindPipeline(cmd, VK_PIPELINE_BIND_POINT_COMPUTE, causticPipeline("causticMain"));
+  bindComputeSets(cmd, resources);
+  vkCmdDispatch(cmd, m_caustics.photonGroups(), 1, 1);
+
+  // The grid over the photons that landed, which the paths gather from
+  m_caustics.cmdBuildGrid(cmd);
+  // The grid's passes have a pipeline layout of their own, which leaves the push constants of this one undefined:
+  // push them again, for the paths
+  vkCmdPushConstants(cmd, m_pipelineLayout, VK_SHADER_STAGE_ALL, 0, sizeof(pushConst), &pushConst);
+
+  // The paths read the splats and the map
+  nvvk::cmdMemoryBarrier(cmd, VK_PIPELINE_STAGE_2_COMPUTE_SHADER_BIT,
+                         VK_PIPELINE_STAGE_2_COMPUTE_SHADER_BIT | VK_PIPELINE_STAGE_2_RAY_TRACING_SHADER_BIT_KHR);
+}
+
+// The compute pipeline of one of the caustic entry points of the live module, built the first time
+VkPipeline PathTracer::causticPipeline(const char* entry)
+{
+  const int dlssTransparency = currentDlssTransparency();
+  for(size_t i = 0; i < m_causticPipelines.size(); i++)
+  {
+    const CausticPipeline& p = m_causticPipelines[i];
+    if(p.module == m_shaderModule && p.useSER == m_useSER && p.dlssTransparency == dlssTransparency
+       && std::string_view(p.entry) == entry)
+      return p.pipeline;
+  }
+  const VkPipeline pipeline = buildRqPipeline(
+      {.module = m_shaderModule, .useSER = m_useSER, .dlssTransparency = dlssTransparency, .label = "Caustics", .entry = entry});
+  m_causticPipelines.push_back({m_shaderModule, m_useSER, dlssTransparency, entry, pipeline});
+  return pipeline;
 }
 
 void PathTracer::renderRayTrace(VkCommandBuffer cmd, VkExtent2D renderingSize, Resources& resources)
@@ -2379,9 +2773,9 @@ shaderio::PathtracePushConstant PathTracer::setupPushConstant(VkCommandBuffer cm
   // Current frame count, can be overridden by DLSS
   int frameCount = resources.frameCount;
 
-  // Handle frame reset detection (needed for both adaptive and non-adaptive modes). Frame 1 after
-  // DLSS's frame 0 starts over too: DLSS's denoised image is no sample of the accumulation.
-  if(resources.frameCount == 0 || (resources.frameCount == 1 && m_dlssFrame0))
+  // Handle frame reset detection (needed for both adaptive and non-adaptive modes). The first frame
+  // after DLSS's starts over too: DLSS's denoised image is no sample of the accumulation.
+  if(resources.frameCount == 0 || m_takeover)
   {
     // Reset sample counter when scene/camera changes. Resources' copy too: what runs before
     // updateStatistics() this frame (the OptiX denoiser) must not see the previous accumulation's count.
@@ -2473,6 +2867,14 @@ shaderio::PathtracePushConstant PathTracer::setupPushConstant(VkCommandBuffer cm
       m_pushConst.cameraMedium = (shaderio::CameraMedium*)m_cameraMediumBuffer.address;
   }
 
+  // Beta caustics: this frame's photon pass, or null when the setting is off or nothing casts one
+  bool causticsCompiled;
+  {
+    std::lock_guard<std::mutex> lock(m_compileMutex);
+    causticsCompiled = m_compiled.caustics;  // The live module has the photon entry points
+  }
+  m_pushConst.caustics = m_caustics.cmdPrepare(cmd, resources, renderingSize, causticsCompiled);
+
   // #DLSS instance motion vectors: previous-frame render-node transforms (snapshotted at frame start
   // in GltfRenderer::onRender, only on frames where transforms actually changed). Bound only when DLSS
   // runs this frame AND the snapshot ran (dlssInstanceMotionActive); null otherwise so the shader
@@ -2506,7 +2908,7 @@ bool PathTracer::getEffectiveDlssEnabled(const Resources& resources) const
 #if defined(USE_DLSS)
   const bool dlssActive = m_dlss->isActive();
   if(dlssActive && isAccumulationDenoiserEnabled())
-    return resources.frameCount == 0;
+    return m_dlssPhase;
   return dlssActive;
 #else
   return false;
@@ -2605,7 +3007,7 @@ bool PathTracer::getEffectiveOptixEnabled(const Resources& resources) const
   const bool dlssEngaged = (s == Dlss::State::eLoading || s == Dlss::State::eActive);
   if(dlssEngaged && optixEnabled)
   {
-    return resources.frameCount > 0;
+    return !m_dlssPhase;
   }
 #endif
 
@@ -2627,10 +3029,32 @@ bool PathTracer::getEffectiveOidnEnabled(const Resources& resources) const
   const auto s           = m_dlss->state();
   const bool dlssEngaged = (s == Dlss::State::eLoading || s == Dlss::State::eActive);
   if(dlssEngaged && oidnEnabled)
-    return resources.frameCount > 0;
+    return !m_dlssPhase;
 #endif
   return oidnEnabled;
 #else
   return false;
 #endif
+}
+
+//--------------------------------------------------------------------------------------------------
+// Who denoises this frame when DLSS-RR and OptiX or OIDN are both on: DLSS-RR renders frame 0 of an
+// accumulation and the accumulation denoiser the frames after it. In an interactive session DLSS-RR also
+// keeps the frames that follow a view change until the view has been still for kDlssHold: a moving camera
+// changes the view a few times a second, and the frames in between (1, 2, 3) would each swap the image
+// to the other denoiser's and back. The first frame DLSS-RR does not have is the takeover.
+void PathTracer::updateDlssPhase(const Resources& resources)
+{
+  const bool wasPhase = m_dlssPhase;
+  const auto now      = std::chrono::steady_clock::now();
+  if(resources.frameCount == 0)
+  {
+    m_lastViewChange = now;
+    m_dlssPhase      = true;
+  }
+  else if(m_dlssPhase)
+  {
+    m_dlssPhase = resources.settings.dlssHold && now - m_lastViewChange < kDlssHold;
+  }
+  m_takeover = wasPhase && !m_dlssPhase && m_dlssFrame0;
 }

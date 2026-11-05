@@ -210,6 +210,8 @@ auto main(int argc, char** argv) -> int
   parameterRegistry.addVector({"size", "Size of the window to be created", "s"}, &appInfo.windowSize);
   parameterRegistry.add({"headless"}, &appInfo.headless, true);
   parameterRegistry.add({"frames", "Number of frames to run in headless mode"}, &appInfo.headlessFrameCount);
+  parameterRegistry.add({"headlessfps", "frame rate limit in headless mode, idles the GPU between frames. 0 unlimited (default)"},
+                        &appInfo.headlessFps);
   parameterRegistry.add({"vsync"}, &appInfo.vSync);
 #ifdef USE_NVMCP
   bool     enableMcp = false;
@@ -575,6 +577,11 @@ auto main(int argc, char** argv) -> int
   elemGltfRenderer->setBackgroundOptimalShader(!automatedRun);
   // ...and every frame it counts is rendered: no frames skipped while a shader compiles
   elemGltfRenderer->setCompileInline(automatedRun);
+  // ...and hands over from DLSS-RR to OptiX or OIDN at the same frame every time
+  elemGltfRenderer->setDlssHold(!automatedRun);
+
+  // Built by onAttach() when the element is added below; a later createHDR would redo the whole prefilter.
+  elemGltfRenderer->setStartupHdr(hdrFilename);
 
   // Create the application
   nvapp::Application app;
@@ -640,28 +647,30 @@ auto main(int argc, char** argv) -> int
 #endif
 
   // Load a scene if specified, otherwise the application starts empty
-  bool sceneLoaded = false;
+  // An interactive run queues it instead: the first frame starts the load on a worker thread behind
+  // the busy indicator, so the window is responsive while it loads. Automated runs need the scene
+  // installed before the first frame. A start-up sky preset is applied at the first frame, before the
+  // worker's scene lands, and would be overwritten by the scene's authored sky: load eagerly then.
+  // (The HDR loads in onAttach(), before app.run(), so it is done before the worker starts.)
+  const bool deferScene  = !automatedRun && loadPresetFilename.empty() && savePresetFilename.empty();
+  bool       sceneLoaded = false;
   if(!sceneFilename.empty())
   {
-    sceneLoaded = elemGltfRenderer->createScene(sceneFilename);
+    if(deferScene)
+      elemGltfRenderer->queueStartupScene(sceneFilename);
+    else
+      sceneLoaded = elemGltfRenderer->createScene(sceneFilename);
   }
 
   // A headless run without its scene would save a blank image, and with --frames 0 never end: it
   // waits for --ptMaxSamples, which an empty scene never accumulates. A sequence may load one later.
   bool headlessFailed = false;
-  if(appInfo.headless && !sceneLoaded && !sequencerInfo.hasScript()
-     && (!sceneFilename.empty() || appInfo.headlessFrameCount == 0))
+  if(appInfo.headless && !sceneLoaded && !sequencerInfo.hasScript() && (!sceneFilename.empty() || appInfo.headlessFrameCount == 0))
   {
     LOGE(sceneFilename.empty() ? "Headless --frames 0 needs a scene: it runs until --ptMaxSamples\n" :
                                  "Headless run stopped: the scene did not load\n");
     headlessFailed = true;
   }
-  // Load an HDR if specified
-  if(!hdrFilename.empty())
-  {
-    elemGltfRenderer->createHDR(hdrFilename);
-  }
-
   // Sky presets. Their parameter callbacks fire while the command line is being read, before this
   // renderer exists, so the start-up values are handed over here -- and applied at the first frame
   // top, not now: the ini restore and the scene's authored sky both land there and would otherwise

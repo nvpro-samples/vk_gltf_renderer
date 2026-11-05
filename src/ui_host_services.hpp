@@ -25,6 +25,8 @@
 
 #include <imgui.h>
 
+#include "gltf_material_cache.hpp"  // nvvkgltf::TextureBinding
+
 // Host-provided services shared by the UI panels (inspector + scene browser). The renderer owns the
 // implementations (file dialog, GPU thumbnails, toast overlay) and hands one filled struct to each
 // panel via setHostServices(), instead of wiring the same three callbacks into both separately. The
@@ -35,6 +37,13 @@ struct UiHostServices
   std::function<ImTextureID(int)>        textureThumbnail;  // glTF texture index -> bounded ImGui thumbnail (0 = none)
   std::function<void(const std::string&, bool)> notify;     // transient toast; second arg = isError (red)
 
+  // Texture isolate (Visualization::eTextureIsolate): show one texture of a material raw and unlit.
+  // Arguments are the glTF material index and the texture binding of the row; `srgb` marks color data
+  // (base color, emissive...).
+  std::function<bool(int, const nvvkgltf::TextureBinding&)> isTextureIsolated;  // is this the one shown?
+  std::function<void(int, const nvvkgltf::TextureBinding&, bool)> toggleTextureIsolate;  // show it, or go back to the rendered view
+
+  bool                  canIsolateTexture() const { return static_cast<bool>(toggleTextureIsolate); }
   bool                  canPickImage() const { return static_cast<bool>(pickImageFile); }
   std::filesystem::path pickImage() const { return pickImageFile ? pickImageFile() : std::filesystem::path{}; }
   ImTextureID           thumbnail(int textureIndex) const

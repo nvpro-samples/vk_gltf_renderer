@@ -27,7 +27,12 @@
 #define _CRT_SECURE_NO_WARNINGS
 #include <volk.h>
 #include <unordered_set>
+#include <fstream>
+#include <map>
+#include <fmt/format.h>
+#include <nvutils/file_operations.hpp>
 
+#include "cache_dir.hpp"
 #include "dlss_wrapper.hpp"
 
 
@@ -236,14 +241,87 @@ NVSDK_NGX_Result NgxContext::getRequiredInstanceExtensions(NVSDK_NGX_Feature    
   return NVSDK_NGX_Result_Success;
 }
 
+// The NGX device-extension query loads the NGX runtime and costs about half a second per feature,
+// paid on every launch before the device can even be created. Its answer only changes with the GPU,
+// the driver or the NGX SDK, so it is remembered in a small text file in the cache folder, one
+// line per query: "<key>\t<name>:<specVersion>,<name>:<specVersion>,...". Only successful queries are stored.
+namespace {
+std::filesystem::path ngxExtensionCachePath()
+{
+  static const std::filesystem::path path = [] {
+    std::filesystem::path current = nvsamples::getCacheDir() / "ngx_device_extensions.cache";
+    nvsamples::adoptLegacyCache(nvutils::getExecutablePath().parent_path() / "ngx_device_extensions.cache", current);
+    return current;
+  }();
+  return path;
+}
+
+std::string ngxExtensionCacheKey(NVSDK_NGX_Feature feature, VkPhysicalDevice physicalDevice)
+{
+  VkPhysicalDeviceProperties props{};
+  vkGetPhysicalDeviceProperties(physicalDevice, &props);
+  return fmt::format("{}:{}:{:x}:{:x}:{:x}:{}", int(NVSDK_NGX_Version_API), int(feature), props.vendorID,
+                     props.deviceID, props.driverVersion, props.deviceName);
+}
+
+// Reads the whole cache file as key -> serialized extension list.
+std::map<std::string, std::string> readNgxExtensionCache()
+{
+  std::map<std::string, std::string> entries;
+  std::ifstream                      in(ngxExtensionCachePath());
+  for(std::string line; std::getline(in, line);)
+  {
+    const size_t tab = line.find('\t');
+    if(tab != std::string::npos)
+      entries[line.substr(0, tab)] = line.substr(tab + 1);
+  }
+  return entries;
+}
+
+bool parseNgxExtensions(const std::string& text, std::vector<VkExtensionProperties>& extensions)
+{
+  std::istringstream list(text);
+  for(std::string item; std::getline(list, item, ',');)
+  {
+    const size_t colon = item.rfind(':');
+    if(colon == std::string::npos || colon == 0 || colon >= VK_MAX_EXTENSION_NAME_SIZE)
+      return false;
+    VkExtensionProperties ext{};
+    std::memcpy(ext.extensionName, item.data(), colon);
+    ext.specVersion = uint32_t(std::strtoul(item.c_str() + colon + 1, nullptr, 10));
+    extensions.push_back(ext);
+  }
+  return true;
+}
+
+void writeNgxExtensionCache(const std::map<std::string, std::string>& entries)
+{
+  std::error_code ec;
+  std::filesystem::create_directories(ngxExtensionCachePath().parent_path(), ec);  // the cache folder, the first time
+  std::ofstream out(ngxExtensionCachePath(), std::ios::trunc);
+  for(const auto& [key, value] : entries)
+    out << key << '\t' << value << '\n';
+}
+}  // namespace
+
 NVSDK_NGX_Result NgxContext::getRequiredDeviceExtensions(NVSDK_NGX_Feature                   feature,
                                                          const ApplicationInfo&              appInfo,
                                                          const VkInstance&                   instance,
                                                          const VkPhysicalDevice&             physicalDevice,
                                                          std::vector<VkExtensionProperties>& extensions)
 {
-  std::wstring appPath = stringToWstring(appInfo.applicationPath);
   extensions.clear();
+
+  const std::string                  cacheKey = ngxExtensionCacheKey(feature, physicalDevice);
+  std::map<std::string, std::string> cache    = readNgxExtensionCache();
+  if(auto it = cache.find(cacheKey); it != cache.end())
+  {
+    if(parseNgxExtensions(it->second, extensions))
+      return NVSDK_NGX_Result_Success;
+    extensions.clear();  // damaged entry: fall through and query again
+  }
+
+  std::wstring appPath = stringToWstring(appInfo.applicationPath);
 
   NVSDK_NGX_FeatureCommonInfo    commonInfo{};
   NVSDK_NGX_FeatureDiscoveryInfo info{};
@@ -263,6 +341,12 @@ NVSDK_NGX_Result NgxContext::getRequiredDeviceExtensions(NVSDK_NGX_Feature      
   CALL_NGX(NVSDK_NGX_VULKAN_GetFeatureDeviceExtensionRequirements(instance, physicalDevice, &info, &numExtensions, &props));
 
   extensions = std::vector<VkExtensionProperties>(props, props + numExtensions);
+
+  std::string serialized;
+  for(const VkExtensionProperties& ext : extensions)
+    serialized += fmt::format("{}{}:{}", serialized.empty() ? "" : ",", ext.extensionName, ext.specVersion);
+  cache[cacheKey] = serialized;
+  writeNgxExtensionCache(cache);
 
   return NVSDK_NGX_Result_Success;
 }

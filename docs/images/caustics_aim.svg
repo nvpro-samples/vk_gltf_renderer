@@ -1,0 +1,62 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 960 470" font-family="Segoe UI, Arial, sans-serif" font-size="14">
+  <defs>
+    <marker id="o" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse"><path d="M0 0 L10 5 L0 10 z" fill="#d9822b"/></marker>
+    <marker id="b" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse"><path d="M0 0 L10 5 L0 10 z" fill="#2b6fd9"/></marker>
+    <marker id="g" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse"><path d="M0 0 L10 5 L0 10 z" fill="#555"/></marker>
+  </defs>
+  <rect width="960" height="470" fill="#ffffff"/>
+  <text x="20" y="28" font-size="18" font-weight="bold" fill="#222">Where the photons aim</text>
+  <text x="20" y="62" fill="#222" font-size="15" font-weight="bold" text-anchor="start">One sphere around all the casters</text>
+  <rect x="20" y="380" width="450" height="10" fill="#bbb"/>
+  <circle cx="245" cy="110" r="11" fill="#ffd54a" stroke="#c9a200"/>
+  <text x="245" y="93" fill="#222" font-size="13" text-anchor="middle">light</text>
+  <path d="M45 330 A200 200 0 0 1 445 330" fill="none" stroke="#888" stroke-dasharray="6 4"/>
+  <circle cx="100" cy="335" r="26" fill="#cfe8ff" fill-opacity="0.7" stroke="#4a90c8" stroke-width="2"/>
+  <circle cx="390" cy="335" r="26" fill="#cfe8ff" fill-opacity="0.7" stroke="#4a90c8" stroke-width="2"/>
+  <path d="M245 120 L47 380" stroke="#e3b78a" stroke-width="1" fill="none" stroke-opacity="0.8"/>
+  <path d="M245 120 L69 380" stroke="#e3b78a" stroke-width="1" fill="none" stroke-opacity="0.8"/>
+  <path d="M245 120 L91 380" stroke="#d9822b" stroke-width="1.4" fill="none" stroke-opacity="1"/>
+  <path d="M245 120 L113 380" stroke="#d9822b" stroke-width="1.4" fill="none" stroke-opacity="1"/>
+  <path d="M245 120 L135 380" stroke="#e3b78a" stroke-width="1" fill="none" stroke-opacity="0.8"/>
+  <path d="M245 120 L157 380" stroke="#e3b78a" stroke-width="1" fill="none" stroke-opacity="0.8"/>
+  <path d="M245 120 L179 380" stroke="#e3b78a" stroke-width="1" fill="none" stroke-opacity="0.8"/>
+  <path d="M245 120 L201 380" stroke="#e3b78a" stroke-width="1" fill="none" stroke-opacity="0.8"/>
+  <path d="M245 120 L223 380" stroke="#e3b78a" stroke-width="1" fill="none" stroke-opacity="0.8"/>
+  <path d="M245 120 L245 380" stroke="#e3b78a" stroke-width="1" fill="none" stroke-opacity="0.8"/>
+  <path d="M245 120 L267 380" stroke="#e3b78a" stroke-width="1" fill="none" stroke-opacity="0.8"/>
+  <path d="M245 120 L289 380" stroke="#e3b78a" stroke-width="1" fill="none" stroke-opacity="0.8"/>
+  <path d="M245 120 L311 380" stroke="#e3b78a" stroke-width="1" fill="none" stroke-opacity="0.8"/>
+  <path d="M245 120 L333 380" stroke="#e3b78a" stroke-width="1" fill="none" stroke-opacity="0.8"/>
+  <path d="M245 120 L355 380" stroke="#e3b78a" stroke-width="1" fill="none" stroke-opacity="0.8"/>
+  <path d="M245 120 L377 380" stroke="#d9822b" stroke-width="1.4" fill="none" stroke-opacity="1"/>
+  <path d="M245 120 L399 380" stroke="#d9822b" stroke-width="1.4" fill="none" stroke-opacity="1"/>
+  <path d="M245 120 L421 380" stroke="#e3b78a" stroke-width="1" fill="none" stroke-opacity="0.8"/>
+  <path d="M245 120 L443 380" stroke="#e3b78a" stroke-width="1" fill="none" stroke-opacity="0.8"/>
+  <text x="20" y="430" fill="#b3261e" font-size="12" text-anchor="start">most photons miss: the casters fill a small part of the sphere</text>
+  <line x1="480" y1="50" x2="480" y2="450" stroke="#ddd"/>
+  <text x="500" y="62" fill="#222" font-size="15" font-weight="bold" text-anchor="start">A sphere around each cluster, weighted by the view</text>
+  <rect x="500" y="380" width="440" height="10" fill="#bbb"/>
+  <circle cx="725" cy="110" r="11" fill="#ffd54a" stroke="#c9a200"/>
+  <text x="725" y="93" fill="#222" font-size="13" text-anchor="middle">light</text>
+  <circle cx="580" cy="335" r="40" fill="none" stroke="#888" stroke-dasharray="6 4"/>
+  <circle cx="870" cy="335" r="40" fill="none" stroke="#888" stroke-dasharray="6 4"/>
+  <circle cx="580" cy="335" r="26" fill="#cfe8ff" fill-opacity="0.7" stroke="#4a90c8" stroke-width="2"/>
+  <circle cx="870" cy="335" r="26" fill="#cfe8ff" fill-opacity="0.7" stroke="#4a90c8" stroke-width="2"/>
+  <path d="M725 120 L548 380" stroke="#d9822b" stroke-width="1.4" fill="none"/>
+  <path d="M725 120 L556 380" stroke="#d9822b" stroke-width="1.4" fill="none"/>
+  <path d="M725 120 L564 380" stroke="#d9822b" stroke-width="1.4" fill="none"/>
+  <path d="M725 120 L572 380" stroke="#d9822b" stroke-width="1.4" fill="none"/>
+  <path d="M725 120 L580 380" stroke="#d9822b" stroke-width="1.4" fill="none"/>
+  <path d="M725 120 L588 380" stroke="#d9822b" stroke-width="1.4" fill="none"/>
+  <path d="M725 120 L596 380" stroke="#d9822b" stroke-width="1.4" fill="none"/>
+  <path d="M725 120 L604 380" stroke="#d9822b" stroke-width="1.4" fill="none"/>
+  <path d="M725 120 L612 380" stroke="#d9822b" stroke-width="1.4" fill="none"/>
+  <path d="M725 120 L858 380" stroke="#d9822b" stroke-width="1.4" fill="none"/>
+  <path d="M725 120 L870 380" stroke="#d9822b" stroke-width="1.4" fill="none"/>
+  <path d="M725 120 L882 380" stroke="#d9822b" stroke-width="1.4" fill="none"/>
+  <rect x="500" y="420" width="60" height="24" rx="6" fill="#e8e8e8" stroke="#666"/>
+  <text x="530.0" y="437.0" fill="#222" font-size="13" text-anchor="middle">camera</text>
+  <path d="M530 420 L575 372" stroke="#2b6fd9" stroke-width="2" fill="none" stroke-dasharray="5 3" marker-end="url(#b)"/>
+  <text x="600" y="430" fill="#a55a10" font-size="12" text-anchor="start">the camera looks at the left ball: it gets most of the</text>
+  <text x="600" y="446" fill="#a55a10" font-size="12" text-anchor="start">photons (weight = share of the view, with a floor for the rest)</text>
+</svg>

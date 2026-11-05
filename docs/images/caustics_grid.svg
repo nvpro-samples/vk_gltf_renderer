@@ -1,0 +1,95 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 960 600" font-family="Segoe UI, Arial, sans-serif" font-size="14">
+  <defs>
+    <marker id="o" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse"><path d="M0 0 L10 5 L0 10 z" fill="#d9822b"/></marker>
+    <marker id="b" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse"><path d="M0 0 L10 5 L0 10 z" fill="#2b6fd9"/></marker>
+    <marker id="g" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse"><path d="M0 0 L10 5 L0 10 z" fill="#555"/></marker>
+  </defs>
+  <rect width="960" height="600" fill="#ffffff"/>
+  <text x="20" y="28" font-size="18" font-weight="bold" fill="#222">The photon grid: a counting sort</text>
+  <text x="20" y="62" fill="#222" font-size="14" font-weight="bold" text-anchor="start">0  Photons of the frame, in emission order (the hash cell each one landed in)</text>
+  <rect x="120" y="76" width="62" height="34" rx="3" fill="#f1c27d" stroke="#666" stroke-width="1.2"/>
+  <text x="151.0" y="98.0" fill="#222" font-size="14" text-anchor="middle">c2</text>
+  <rect x="182" y="76" width="62" height="34" rx="3" fill="#9fd3a8" stroke="#666" stroke-width="1.2"/>
+  <text x="213.0" y="98.0" fill="#222" font-size="14" text-anchor="middle">c0</text>
+  <rect x="244" y="76" width="62" height="34" rx="3" fill="#f1c27d" stroke="#666" stroke-width="1.2"/>
+  <text x="275.0" y="98.0" fill="#222" font-size="14" text-anchor="middle">c2</text>
+  <rect x="306" y="76" width="62" height="34" rx="3" fill="#a8c4ef" stroke="#666" stroke-width="1.2"/>
+  <text x="337.0" y="98.0" fill="#222" font-size="14" text-anchor="middle">c1</text>
+  <rect x="368" y="76" width="62" height="34" rx="3" fill="#fff" stroke="#666" stroke-width="1.2"/>
+  <text x="399.0" y="98.0" fill="#222" font-size="14" text-anchor="middle">lost</text>
+  <rect x="430" y="76" width="62" height="34" rx="3" fill="#9fd3a8" stroke="#666" stroke-width="1.2"/>
+  <text x="461.0" y="98.0" fill="#222" font-size="14" text-anchor="middle">c0</text>
+  <rect x="492" y="76" width="62" height="34" rx="3" fill="#f1c27d" stroke="#666" stroke-width="1.2"/>
+  <text x="523.0" y="98.0" fill="#222" font-size="14" text-anchor="middle">c2</text>
+  <rect x="554" y="76" width="62" height="34" rx="3" fill="#d8a9e6" stroke="#666" stroke-width="1.2"/>
+  <text x="585.0" y="98.0" fill="#222" font-size="14" text-anchor="middle">c3</text>
+  <text x="151" y="126" fill="#666" font-size="12" text-anchor="middle">p0</text>
+  <text x="213" y="126" fill="#666" font-size="12" text-anchor="middle">p1</text>
+  <text x="275" y="126" fill="#666" font-size="12" text-anchor="middle">p2</text>
+  <text x="337" y="126" fill="#666" font-size="12" text-anchor="middle">p3</text>
+  <text x="399" y="126" fill="#666" font-size="12" text-anchor="middle">p4</text>
+  <text x="461" y="126" fill="#666" font-size="12" text-anchor="middle">p5</text>
+  <text x="523" y="126" fill="#666" font-size="12" text-anchor="middle">p6</text>
+  <text x="585" y="126" fill="#666" font-size="12" text-anchor="middle">p7</text>
+  <text x="20" y="160" fill="#222" font-size="14" font-weight="bold" text-anchor="start">1  Count: one atomic add per photon, in the cell it landed in</text>
+  <rect x="120" y="174" width="62" height="34" rx="3" fill="#9fd3a8" stroke="#666" stroke-width="1.2"/>
+  <text x="151.0" y="196.0" fill="#222" font-size="14" text-anchor="middle">2</text>
+  <rect x="182" y="174" width="62" height="34" rx="3" fill="#a8c4ef" stroke="#666" stroke-width="1.2"/>
+  <text x="213.0" y="196.0" fill="#222" font-size="14" text-anchor="middle">1</text>
+  <rect x="244" y="174" width="62" height="34" rx="3" fill="#f1c27d" stroke="#666" stroke-width="1.2"/>
+  <text x="275.0" y="196.0" fill="#222" font-size="14" text-anchor="middle">3</text>
+  <rect x="306" y="174" width="62" height="34" rx="3" fill="#d8a9e6" stroke="#666" stroke-width="1.2"/>
+  <text x="337.0" y="196.0" fill="#222" font-size="14" text-anchor="middle">1</text>
+  <text x="151" y="224" fill="#666" font-size="12" text-anchor="middle">cell 0</text>
+  <text x="213" y="224" fill="#666" font-size="12" text-anchor="middle">cell 1</text>
+  <text x="275" y="224" fill="#666" font-size="12" text-anchor="middle">cell 2</text>
+  <text x="337" y="224" fill="#666" font-size="12" text-anchor="middle">cell 3</text>
+  <text x="20" y="258" fill="#222" font-size="14" font-weight="bold" text-anchor="start">2  Prefix sum: each cell holds where its photons END (a scan per block of 256 cells, then of the blocks)</text>
+  <rect x="120" y="272" width="62" height="34" rx="3" fill="#9fd3a8" stroke="#666" stroke-width="1.2"/>
+  <text x="151.0" y="294.0" fill="#222" font-size="14" text-anchor="middle">2</text>
+  <rect x="182" y="272" width="62" height="34" rx="3" fill="#a8c4ef" stroke="#666" stroke-width="1.2"/>
+  <text x="213.0" y="294.0" fill="#222" font-size="14" text-anchor="middle">3</text>
+  <rect x="244" y="272" width="62" height="34" rx="3" fill="#f1c27d" stroke="#666" stroke-width="1.2"/>
+  <text x="275.0" y="294.0" fill="#222" font-size="14" text-anchor="middle">6</text>
+  <rect x="306" y="272" width="62" height="34" rx="3" fill="#d8a9e6" stroke="#666" stroke-width="1.2"/>
+  <text x="337.0" y="294.0" fill="#222" font-size="14" text-anchor="middle">7</text>
+  <text x="20" y="356" fill="#222" font-size="14" font-weight="bold" text-anchor="start">3  Scatter: each photon takes the slot before its cell's end (an atomic subtract), so the ends become starts</text>
+  <rect x="120" y="370" width="62" height="34" rx="3" fill="#9fd3a8" stroke="#666" stroke-width="1.2"/>
+  <text x="151.0" y="392.0" fill="#222" font-size="14" text-anchor="middle">0</text>
+  <rect x="182" y="370" width="62" height="34" rx="3" fill="#a8c4ef" stroke="#666" stroke-width="1.2"/>
+  <text x="213.0" y="392.0" fill="#222" font-size="14" text-anchor="middle">2</text>
+  <rect x="244" y="370" width="62" height="34" rx="3" fill="#f1c27d" stroke="#666" stroke-width="1.2"/>
+  <text x="275.0" y="392.0" fill="#222" font-size="14" text-anchor="middle">3</text>
+  <rect x="306" y="370" width="62" height="34" rx="3" fill="#d8a9e6" stroke="#666" stroke-width="1.2"/>
+  <text x="337.0" y="392.0" fill="#222" font-size="14" text-anchor="middle">6</text>
+  <text x="378" y="392" fill="#555" font-size="12" text-anchor="start">+ the total, 7, after the last cell</text>
+  <text x="20" y="442" fill="#222" font-size="14" font-weight="bold" text-anchor="start">Sorted photons: the cell's photons are one run</text>
+  <rect x="120" y="456" width="62" height="34" rx="3" fill="#9fd3a8" stroke="#666" stroke-width="1.2"/>
+  <text x="151.0" y="478.0" fill="#222" font-size="14" text-anchor="middle">p5</text>
+  <rect x="182" y="456" width="62" height="34" rx="3" fill="#9fd3a8" stroke="#666" stroke-width="1.2"/>
+  <text x="213.0" y="478.0" fill="#222" font-size="14" text-anchor="middle">p1</text>
+  <rect x="244" y="456" width="62" height="34" rx="3" fill="#a8c4ef" stroke="#666" stroke-width="1.2"/>
+  <text x="275.0" y="478.0" fill="#222" font-size="14" text-anchor="middle">p3</text>
+  <rect x="306" y="456" width="62" height="34" rx="3" fill="#f1c27d" stroke="#666" stroke-width="1.2"/>
+  <text x="337.0" y="478.0" fill="#222" font-size="14" text-anchor="middle">p6</text>
+  <rect x="368" y="456" width="62" height="34" rx="3" fill="#f1c27d" stroke="#666" stroke-width="1.2"/>
+  <text x="399.0" y="478.0" fill="#222" font-size="14" text-anchor="middle">p2</text>
+  <rect x="430" y="456" width="62" height="34" rx="3" fill="#f1c27d" stroke="#666" stroke-width="1.2"/>
+  <text x="461.0" y="478.0" fill="#222" font-size="14" text-anchor="middle">p0</text>
+  <rect x="492" y="456" width="62" height="34" rx="3" fill="#d8a9e6" stroke="#666" stroke-width="1.2"/>
+  <text x="523.0" y="478.0" fill="#222" font-size="14" text-anchor="middle">p7</text>
+  <text x="151" y="506" fill="#666" font-size="12" text-anchor="middle">0</text>
+  <text x="213" y="506" fill="#666" font-size="12" text-anchor="middle">1</text>
+  <text x="275" y="506" fill="#666" font-size="12" text-anchor="middle">2</text>
+  <text x="337" y="506" fill="#666" font-size="12" text-anchor="middle">3</text>
+  <text x="399" y="506" fill="#666" font-size="12" text-anchor="middle">4</text>
+  <text x="461" y="506" fill="#666" font-size="12" text-anchor="middle">5</text>
+  <text x="523" y="506" fill="#666" font-size="12" text-anchor="middle">6</text>
+  <path d="M400 540 L400 516" stroke="#555" stroke-width="1.5" fill="none" marker-end="url(#g)"/>
+  <text x="250" y="558" fill="#333" font-size="12" text-anchor="start">a gather at a point in cell 2 reads starts[2] = 3 and starts[3] = 6,</text>
+  <text x="250" y="574" fill="#333" font-size="12" text-anchor="start">then photons 3, 4, 5 in order: one contiguous run</text>
+  <text x="650" y="96" fill="#555" font-size="12" text-anchor="start">Within a cell the order is arbitrary</text>
+  <text x="650" y="112" fill="#555" font-size="12" text-anchor="start">(the atomics decide). A lost photon</text>
+  <text x="650" y="128" fill="#555" font-size="12" text-anchor="start">(it left the scene, or never met a</text>
+  <text x="650" y="144" fill="#555" font-size="12" text-anchor="start">caster) is not counted.</text>
+</svg>

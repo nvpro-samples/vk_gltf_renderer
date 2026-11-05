@@ -32,6 +32,12 @@
 #ifndef USE_OMM
 #define USE_OMM 0
 #endif
+
+// Beta caustics (see caustics.h.slang). Set by the host only while the setting is on, so the
+// photon pass and the path tracer's side of the partition are compiled out of every other build.
+#ifndef USE_CAUSTICS
+#define USE_CAUSTICS 0
+#endif
 // clang-format off: the SPIR-V ids (%ommEnable) must stay as written
 #if USE_OMM
 #define RAYQUERY_USE_OPACITY_MICROMAP(entryPoint)                                                                      \
@@ -123,6 +129,9 @@ float3 evalPhysicalSkyBackground(float3 worldDir, SceneFrameInfo* frameInfo)
 // clang-format on
 
 #include "pathtrace_functions.h.slang"
+#if USE_CAUSTICS
+#include "caustics.h.slang"
+#endif
 
 //-----------------------------------------------------------------------
 // PATH TRACE ONE BOUNCE
@@ -173,6 +182,12 @@ PathStepResult pathTraceOneBounce(IRaytracer raytracer, inout RayDesc ray, inout
       // Check if we hit the backplate
       if(firstRay && tryPrimaryMissBackplate(ray, frameInfo, pt))
         return PathStepResult.eBreak;
+
+#if USE_CAUSTICS
+      // Light that reached a primary receiver through casters is the photons' (caustics.h.slang)
+      if(causticCovered(pt))
+        return PathStepResult.eBreak;
+#endif
 
 #if USE_DLSS_SHADER
       // #DLSS - If capturing specular hit and we hit environment, use max distance (65504 = fp16 max)
@@ -322,56 +337,70 @@ PathStepResult pathTraceOneBounce(IRaytracer raytracer, inout RayDesc ray, inout
       pt.firstHitPos = hit.pos;
 
 #if USE_GUIDE_SHADER
-      // #DLSS instance motion - Previous-frame world position of this surface point.
-      pt.firstHitPosPrev = hit.pos;
-      if(!hitInfinitePlane && pushConst.prevRenderNodeObjectToWorld != nullptr)
+      if(ptGuideActive())
       {
-        float3 objPos      = mul(float4(hit.pos, 1.0), renderNode.worldToObject).xyz;
-        pt.firstHitPosPrev = mul(float4(objPos, 1.0), pushConst.prevRenderNodeObjectToWorld[payload.rnodeID]).xyz;
-      }
-
-      // Base-color guide albedo (shared by DLSS and the other denoisers). Stored temporarily, written at end to
-      // reduce live state.
-      float3 guideAlbedo = pbrMat.baseColor.xyz;
-#if USE_DLSS_SHADER
-      // #DLSS specular guide - specular albedo + clear-glass albedo refinement. DLSS-only quality
-      // path; the other denoisers need neither, so it is compiled out of their variant.
-      // Apply KHR_materials_specular energy conservation clamping for DLSS guide buffer
-      // Spec formula: dielectric_f0 = min(f0_from_ior * specularColor, 1.0) * specular
-      float  f0_from_ior          = pow((pbrMat.ior2 - pbrMat.ior1) / (pbrMat.ior2 + pbrMat.ior1), 2.0F);
-      float3 specularColorClamped = min(f0_from_ior * pbrMat.specularColor, float3(1.0F));
-      float3 specularAlbedo = EnvBRDFApprox2(specularColorClamped, pbrMat.roughness.x, dot(pbrMat.N, ray.Direction));
-      float3 guideNormal    = pbrMat.N;
-      float  guideRoughness = pbrMat.roughness.x;
-      if(USE_DLSS_TRANSP == 1 && !hasFlag(pushConst.flags, PathtracerFlags::ePtDenoiserGuides) && dlssIsClearGlass(pbrMat))
-      {
-        // #DLSS primary surface replacement: describe what is seen through the glass. The albedo
-        // keeps the glass's Fresnel share; depth and motion come from the replaced surface.
-        DlssGlassPsr psr     = dlssTraceClearGlass(pbrMat, hit, ray.Direction, ptIsInside(pt));
-        float        ndotv   = saturate(dot(pbrMat.N, -ray.Direction));
-        float        fresnel = schlickFresnel((pbrMat.ior2 > 0.0f) ? (pbrMat.ior2 / pbrMat.ior1) : 1.5f, ndotv);
-        guideAlbedo          = dlssEnforceMinAlbedo(lerp(psr.albedo, pbrMat.baseColor.xyz, fresnel), specularAlbedo);
-        if(psr.valid)
+        // #DLSS instance motion - Previous-frame world position of this surface point.
+        pt.firstHitPosPrev = hit.pos;
+        if(!hitInfinitePlane && pushConst.prevRenderNodeObjectToWorld != nullptr)
         {
-          guideNormal        = psr.normal;
-          guideRoughness     = psr.roughness;
-          pt.guide.psrValid  = true;
-          pt.guide.psrPos    = hit.pos + ray.Direction * psr.pathLength;
-          pt.firstHitPosPrev = pt.guide.psrPos + psr.posDelta;
+          float3 objPos      = mul(float4(hit.pos, 1.0), renderNode.worldToObject).xyz;
+          pt.firstHitPosPrev = mul(float4(objPos, 1.0), pushConst.prevRenderNodeObjectToWorld[payload.rnodeID]).xyz;
         }
-      }
-      pt.guide.specularAlbedo = float16_t3(specularAlbedo);
+
+        // Base-color guide albedo (shared by DLSS and the other denoisers). Stored temporarily, written at end to
+        // reduce live state.
+        float3 guideAlbedo = pbrMat.baseColor.xyz;
+#if USE_DLSS_SHADER
+        if(ptDlssActive())
+        {
+          // #DLSS specular guide - specular albedo + clear-glass albedo refinement. DLSS-only quality
+          // path; the other denoisers need neither, so it is compiled out of their variant.
+          // Apply KHR_materials_specular energy conservation clamping for DLSS guide buffer
+          // Spec formula: dielectric_f0 = min(f0_from_ior * specularColor, 1.0) * specular
+          float  f0_from_ior          = pow((pbrMat.ior2 - pbrMat.ior1) / (pbrMat.ior2 + pbrMat.ior1), 2.0F);
+          float3 specularColorClamped = min(f0_from_ior * pbrMat.specularColor, float3(1.0F));
+          float3 specularAlbedo = EnvBRDFApprox2(specularColorClamped, pbrMat.roughness.x, dot(pbrMat.N, ray.Direction));
+          float3 guideNormal    = pbrMat.N;
+          float  guideRoughness = pbrMat.roughness.x;
+          if(USE_DLSS_TRANSP == 1 && !hasFlag(pushConst.flags, PathtracerFlags::ePtDenoiserGuides) && dlssIsClearGlass(pbrMat))
+          {
+            // #DLSS primary surface replacement: describe what is seen through the glass. The albedo
+            // keeps the glass's Fresnel share; depth and motion come from the replaced surface.
+            DlssGlassPsr psr     = dlssTraceClearGlass(pbrMat, hit, ray.Direction, ptIsInside(pt));
+            float        ndotv   = saturate(dot(pbrMat.N, -ray.Direction));
+            float        fresnel = schlickFresnel((pbrMat.ior2 > 0.0f) ? (pbrMat.ior2 / pbrMat.ior1) : 1.5f, ndotv);
+            guideAlbedo = dlssEnforceMinAlbedo(lerp(psr.albedo, pbrMat.baseColor.xyz, fresnel), specularAlbedo);
+            if(psr.valid)
+            {
+              guideNormal        = psr.normal;
+              guideRoughness     = psr.roughness;
+              pt.guide.psrValid  = true;
+              pt.guide.psrPos    = hit.pos + ray.Direction * psr.pathLength;
+              pt.firstHitPosPrev = pt.guide.psrPos + psr.posDelta;
+            }
+          }
+          pt.guide.specularAlbedo = float16_t3(specularAlbedo);
 #if MAT_EXT_DLSS_NR
-      if(materialIndex >= 0)
-        pt.guide.nrMask = float16_t4(materials[materialIndex].nrMask);
+          if(materialIndex >= 0)
+            pt.guide.nrMask = float16_t4(materials[materialIndex].nrMask);
 #endif  // MAT_EXT_DLSS_NR
-      pt.guide.normalRoughness = float16_t4(float16_t3(guideNormal), float16_t(guideRoughness));
-#else
-      pt.guide.normalRoughness = float16_t4(float16_t3(pbrMat.N), float16_t(pbrMat.roughness.x));
+          pt.guide.normalRoughness = float16_t4(float16_t3(guideNormal), float16_t(guideRoughness));
+        }
+        else
 #endif  // USE_DLSS_SHADER
-      pt.guide.albedo = float16_t3(guideAlbedo);
+        {
+          pt.guide.normalRoughness = float16_t4(float16_t3(pbrMat.N), float16_t(pbrMat.roughness.x));
+        }
+        pt.guide.albedo = float16_t3(guideAlbedo);
+      }  // ptGuideActive()
 #endif  // USE_GUIDE_SHADER
     }
+
+#if USE_CAUSTICS
+    // Classified before the roughness clamp below, which would make a path's glass look rough once it
+    // has left a rough surface; the photons see the material as authored
+    const bool causticCaster = !hitInfinitePlane && isCausticCaster(pbrMat);
+#endif
 
     // Keep track of the maximum roughness to prevent firefly artifacts by forcing subsequent bounces to be at least as rough
     pt.maxRoughness  = max(pbrMat.roughness, pt.maxRoughness);
@@ -389,9 +418,19 @@ PathStepResult pathTraceOneBounce(IRaytracer raytracer, inout RayDesc ray, inout
       float3              vizColor;
       VisualizationResult vizResult = applyVisualization(pbrMat, hit, frameInfo->visualization, payload.rprimID,
                                                          payload.primitiveID, payload.ommUnknown ? 1 : 0, vizColor);
+      if(frameInfo->visualization == Visualization::eTextureIsolate)
+      {
+        TextureIsolateHit isolateHit;
+        isolateHit.materialIndex = hitInfinitePlane ? -1 : materialIndex;
+        isolateHit.tc            = hit.uv;
+        isolateHit.texGrad       = worldFoot * hit.texelDensity * pushConst.texGradScale;
+        vizResult = applyTextureIsolate(allImages, allSamplers, texInfos, isolateHit, frameInfo->isolate, vizColor);
+      }
       if(vizResult == VisualizationResult::eColorOverride && firstRay)
       {
         pt.radiance.xyz = vizColor;
+        // A flat debug color is the value itself: the air between the eye and the surface would tint it
+        pt.firstHitHazed = false;
         return PathStepResult.eBreak;
       }
     }
@@ -412,7 +451,12 @@ PathStepResult pathTraceOneBounce(IRaytracer raytracer, inout RayDesc ray, inout
     // Emitters that are also sampled as area lights (constant emissive, no emissive texture) get
     // hit by BSDF rays too; MIS-weight those against the light technique, mirroring the env-hit
     // MIS above. Textured emitters are not in the light list, so they stay unweighted.
-    if(any(pbrMat.emissive > float3(0.0)))
+    bool pathCovered = false;  // The photons have what the path would find from here on
+#if USE_CAUSTICS
+    // Only emitters the photons can start from: a textured emissive mesh is not in the light list
+    pathCovered = causticCovered(pt) && !hitInfinitePlane && !isTexturePresent(materials[materialIndex].emissiveTexture);
+#endif
+    if(!pathCovered && any(pbrMat.emissive > float3(0.0)))
     {
       float emissiveMis = 1.0;
       if(!hitInfinitePlane && !isTexturePresent(materials[materialIndex].emissiveTexture))
@@ -435,6 +479,20 @@ PathStepResult pathTraceOneBounce(IRaytracer raytracer, inout RayDesc ray, inout
     }
 #endif
 
+#if USE_CAUSTICS
+    const bool causticGathers = causticAdvance(pt, causticCaster);
+    // A covered receiver's light samples must not see through casters: their light is the photons'
+    bounce.shadowBlockCasters = !causticCaster && pt.causticReceiver;
+    // Reached through casters: the photon map has the light that came the same way
+    if(causticGathers)
+    {
+      // A gather that is not finite would poison the pixel's running average for good
+      const float3 gathered = pt.throughput * causticGather(hit, pbrMat, -ray.Direction, seed);
+      if(all(isfinite(gathered)))
+        pt.causticRadiance += gathered;
+    }
+#endif
+
     // Normal surface bounce: propagate the cone footprint to the next segment. The new ray
     // starts at hit.pos with the slant-corrected worldFoot as its starting width, so the
     // next Trace()'s texture LOD inherits the full accumulated footprint.
@@ -452,6 +510,12 @@ PathStepResult pathTraceOneBounce(IRaytracer raytracer, inout RayDesc ray, inout
     // The actual test and contribution are delayed to minimize per-bounce state.
     bounce.nextEventValid = (dot(directLight.direction, hit.nrm) > 0.0f || pbrMat.diffuseTransmissionFactor > 0.0f)
                             && directLight.pdf != 0.0f;
+#if USE_CAUSTICS
+    // A caster that extends a chain from the primary receiver: its light is the photons' (a receiver
+    // after the chain resets it, and samples light as usual)
+    if(causticCovered(pt))
+      bounce.nextEventValid = false;
+#endif
 
     //-----------------------------------------------------------------------
     // Evaluating the BSDF for the light
@@ -517,7 +581,8 @@ PathStepResult pathTraceOneBounce(IRaytracer raytracer, inout RayDesc ray, inout
 #if USE_DLSS_SHADER
       // #DLSS - Enable specular hit distance capture on first bounce if this is a glossy reflection
       // Matches reference implementation: only capture for BSDF_EVENT_GLOSSY_REFLECTION
-      if(firstRay && (sampleData.event_type == BSDF_EVENT_GLOSSY_REFLECTION || sampleData.event_type == BSDF_EVENT_IMPULSE_REFLECTION))
+      if(firstRay && ptDlssActive()
+         && (sampleData.event_type == BSDF_EVENT_GLOSSY_REFLECTION || sampleData.event_type == BSDF_EVENT_IMPULSE_REFLECTION))
       {
         pt.guide.captureSpecularHit = true;
       }
@@ -641,7 +706,12 @@ SampleResult pathTrace(IRaytracer raytracer, RayDesc ray, inout uint seed)
       shadowRay.Direction = bounce.shadowRayDir;
       shadowRay.TMin      = 0.0;
       shadowRay.TMax      = bounce.shadowRayDist;
+#if USE_CAUSTICS
+      float3 shadowFactor = raytracer.TraceShadow(shadowRay, seed, bounce.shadowRayInside, bounce.shadowRayExtinction,
+                                                  bounce.shadowBlockCasters);
+#else
       float3 shadowFactor = raytracer.TraceShadow(shadowRay, seed, bounce.shadowRayInside, bounce.shadowRayExtinction);
+#endif
       pt.radiance += bounce.contribution * shadowFactor;
     }
 
@@ -743,6 +813,11 @@ SampleResult samplePixel(IRaytracer raytracer,
   {
     sampleResult.radiance.xyz *= pushConst.fireflyClampThreshold / lum;
   }
+#if USE_CAUSTICS
+  // The photon map's light is an estimate with its own bounded variance (a gather holds a limited number of
+  // photons), and it is the bright peaks that are the caustic: the clamp would dim them, as it does not the splats
+  sampleResult.radiance.xyz += sampleResult.caustic;
+#endif
 
   return sampleResult;
 }
@@ -810,10 +885,7 @@ void processPixel(IRaytracer raytracer, float2 samplePos, float2 imageSize)
     subpixelJitter = gaussianSubpixelJitter(seed);
   }
 
-  // Sampling n times the pixel
-  SampleResult sampleResult = samplePixel(raytracer, seed, samplePos, subpixelJitter, imageSize, pushConst.frameInfo->projInv,
-                                          pushConst.frameInfo->viewInv, pushConst.focalDistance, pushConst.aperture);
-  float4 pixelColor = sampleResult.radiance;
+  float4 pixelColor = float4(0.0f);
 
 #if USE_GUIDE_SHADER
   // The denoiser guides average every sample of the frame, like the color
@@ -821,21 +893,19 @@ void processPixel(IRaytracer raytracer, float2 samplePos, float2 imageSize)
   float3     albedoSum      = float3(0.0f);
   float3     normalSum      = float3(0.0f);
   int        guideCount     = 0;
-  if(denoiserGuides)
-  {
-    addDenoiserGuides(sampleResult, albedoSum, normalSum);
-    guideCount++;
-  }
 #endif
 
   // The frame traces exactly the samples the host counts (numSamples): the host decides, per frame.
   // A frame DLSS denoises gets 1 (DLSS does its own temporal accumulation); with OptiX or OIDN also
-  // on, the frames after DLSS's frame 0 get Auto SPP's or ptSamples' count.
-  for(int s = 1; s < pushConst.numSamples; s++)
+  // on, the frames after DLSS's frame 0 get Auto SPP's or ptSamples' count. One call site for all of
+  // them: a first sample outside the loop and the others inside would inline the path tracer twice.
+  SampleResult sampleResult = {};
+  for(int s = 0; s < max(pushConst.numSamples, 1); s++)
   {
-    subpixelJitter = gaussianSubpixelJitter(seed);  // the same pixel filter as the first sample
-    sampleResult   = samplePixel(raytracer, seed, samplePos, subpixelJitter, imageSize, pushConst.frameInfo->projInv,
-                                 pushConst.frameInfo->viewInv, pushConst.focalDistance, pushConst.aperture);
+    if(s > 0)
+      subpixelJitter = gaussianSubpixelJitter(seed);  // the same pixel filter as the first sample
+    sampleResult = samplePixel(raytracer, seed, samplePos, subpixelJitter, imageSize, pushConst.frameInfo->projInv,
+                               pushConst.frameInfo->viewInv, pushConst.focalDistance, pushConst.aperture);
     pixelColor += sampleResult.radiance;
 #if USE_GUIDE_SHADER
     if(denoiserGuides)
@@ -847,6 +917,18 @@ void processPixel(IRaytracer raytracer, float2 samplePos, float2 imageSize)
   }
   pixelColor /= pushConst.numSamples;
 
+#if USE_CAUSTICS
+  // This frame's photons, already averaged over the frame's samples (the host traced them in
+  // proportion): one more estimate of the same pixel, added to the paths' average
+  if(pushConst.caustics != nullptr)
+  {
+    const uint splat = (uint(samplePos.y) * pushConst.renderSize.x + uint(samplePos.x)) * 3;
+    const float3 photons = float3(asfloat(pushConst.caustics->splats[splat]), asfloat(pushConst.caustics->splats[splat + 1]),
+                                  asfloat(pushConst.caustics->splats[splat + 2]));
+    if(all(isfinite(photons)))
+      pixelColor.rgb += photons;
+  }
+#endif
 
   // NDC depth from first-hit world position (Vulkan [0,1] range, 1.0 = far/miss).
   // Written to two targets: outDepth (main GBuffer, full viewport resolution, frame 0 only)
@@ -1193,8 +1275,13 @@ void rahitShadow(inout ShadowPayload payload, in BuiltInTriangleIntersectionAttr
     bool   isInside   = payload.isInside;
     float3 extinction = payload.extinction;
     payload.totalTransmission *= shadowMediumTransmittance(isInside, extinction, segmentLength);
+#if USE_CAUSTICS
+    const bool blockCasters = payload.blockCasters;
+#else
+    const bool blockCasters = false;
+#endif
     payload.totalTransmission *= getShadowTransmission(renderNode, renderPrim, primitiveID, barycentrics, worldToObject,
-                                                       worldRayDir, isInside, extinction);
+                                                       worldRayDir, isInside, extinction, blockCasters);
     payload.isInside   = isInside;
     payload.extinction = extinction;
 

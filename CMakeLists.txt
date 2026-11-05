@@ -320,6 +320,7 @@ set(SHADER_CAPABILITIES
   spvGroupNonUniformArithmetic   # arithmetic across subgroups
   spvGroupNonUniform             # subgroup ops (required for wave operations)
   nonuniformqualifier            # NonUniformResourceIndex on the bindless texture/sampler arrays
+  spvRayQueryKHR                 # ray queries: DLSS's primary surface replacement traces them (the universal build)
 )
 
 # Probe DLSS / OptiX / OIDN backend availability here (before compile_slang) so the
@@ -409,13 +410,14 @@ endif()
 #   HAS_DLSS_MOTION  : makes gltf_raster.slang emit SV_TARGET2 motion vectors for DLAA.
 #   USE_GUIDE_SHADER : enables the path tracer's per-bounce guide buffers
 #                      (albedo + normalRoughness) consumed by DLSS, OptiX and OIDN.
-#   USE_DLSS_SHADER  : DLSS-only path (drops per-frame MS loop to relieve register
-#                      pressure). Defaults off in the embedded shader; the runtime
-#                      rebuild flips it on when DLSS actually engages.
-# All three stay independently controllable.
-set(SHADER_EXTRA_FLAGS "-I${NVSHADERS_DIR}")
+#   USE_DLSS_SHADER  : DLSS's own guide captures (specular albedo, hit distance, surface replacement).
+#   USE_UNIVERSAL    : the embedded path tracer is the universal build: the two gates above are
+#                      compiled in and chosen per dispatch by push-constant flags, so the renderer
+#                      always has a shader that serves DLSS, OptiX, OIDN or none of them, and the
+#                      scene-optimized variants build in the background (PathTracer::makeVariantKey).
+set(SHADER_EXTRA_FLAGS "-I${NVSHADERS_DIR}" "-DUSE_UNIVERSAL=1")
 if(DLSS_AVAILABLE)
-  list(APPEND SHADER_EXTRA_FLAGS "-DHAS_DLSS_MOTION=1")
+  list(APPEND SHADER_EXTRA_FLAGS "-DHAS_DLSS_MOTION=1" "-DUSE_DLSS_SHADER=1")
 endif()
 if(DLSS_AVAILABLE OR OPTIX_DENOISER_AVAILABLE OR OIDN_DENOISER_AVAILABLE)
   list(APPEND SHADER_EXTRA_FLAGS "-DUSE_GUIDE_SHADER=1")

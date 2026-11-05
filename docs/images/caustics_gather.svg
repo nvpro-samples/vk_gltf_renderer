@@ -1,0 +1,58 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 960 500" font-family="Segoe UI, Arial, sans-serif" font-size="14">
+  <defs>
+    <marker id="o" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse"><path d="M0 0 L10 5 L0 10 z" fill="#d9822b"/></marker>
+    <marker id="b" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse"><path d="M0 0 L10 5 L0 10 z" fill="#2b6fd9"/></marker>
+    <marker id="g" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse"><path d="M0 0 L10 5 L0 10 z" fill="#555"/></marker>
+  </defs>
+  <rect width="960" height="500" fill="#ffffff"/>
+  <text x="20" y="28" font-size="18" font-weight="bold" fill="#222">The gather: turning nearby photons into radiance</text>
+  <text x="20" y="62" fill="#222" font-size="15" font-weight="bold" text-anchor="start">Top view of the floor around the receiver D</text>
+  <circle cx="230" cy="250" r="120" fill="#fff4e0" stroke="#d9822b" stroke-width="2"/>
+  <circle cx="230" cy="250" r="72.0" fill="none" stroke="#d9822b" stroke-dasharray="3 4" stroke-opacity="0.6"/>
+  <circle cx="180" cy="210" r="4.399218940641788" fill="#d9822b"/>
+  <circle cx="265" cy="205" r="4.574780718626077" fill="#d9822b"/>
+  <circle cx="205" cy="290" r="4.820752358492925" fill="#d9822b"/>
+  <circle cx="290" cy="265" r="4.453835390393377" fill="#d9822b"/>
+  <circle cx="232" cy="240" r="5.745049024320361" fill="#d9822b"/>
+  <circle cx="160" cy="270" r="4.179972527679871" fill="#d9822b"/>
+  <circle cx="250" cy="310" r="4.418861169915811" fill="#d9822b"/>
+  <circle cx="300" cy="220" r="4.096056723534023" fill="#d9822b"/>
+  <circle cx="215" cy="200" r="4.694961686386181" fill="#d9822b"/>
+  <circle cx="255" cy="255" r="5.362622560800902" fill="#d9822b"/>
+  <circle cx="80" cy="120" r="4" fill="#bbb"/>
+  <circle cx="390" cy="150" r="4" fill="#bbb"/>
+  <circle cx="380" cy="340" r="4" fill="#bbb"/>
+  <circle cx="120" cy="380" r="4" fill="#bbb"/>
+  <circle cx="330" cy="380" r="4" fill="#bbb"/>
+  <circle cx="90" cy="230" r="4" fill="#bbb"/>
+  <circle cx="370" cy="250" r="4" fill="#bbb"/>
+  <circle cx="230" cy="250" r="6" fill="#2b6fd9"/>
+  <text x="240" y="242" fill="#1f4fa0" font-size="14" font-weight="bold" text-anchor="start">D</text>
+  <path d="M230 250 L334.4 190.0" stroke="#555" stroke-width="1.5" fill="none" marker-end="url(#g)"/>
+  <text x="292" y="198" fill="#333" font-size="14" font-weight="bold" text-anchor="start">r</text>
+  <text x="20" y="410" fill="#333" font-size="12" text-anchor="start">photons inside the disk are summed, closer ones count more</text>
+  <text x="20" y="426" fill="#333" font-size="12" text-anchor="start">(weight 1 - d²/r²: the Epanechnikov kernel; big dots = big weights)</text>
+  <text x="20" y="442" fill="#333" font-size="12" text-anchor="start">photons outside the disk are ignored</text>
+  <line x1="480" y1="50" x2="480" y2="480" stroke="#ddd"/>
+  <text x="500" y="62" fill="#222" font-size="15" font-weight="bold" text-anchor="start">Side view: only photons on the same surface count</text>
+  <rect x="500" y="250" width="440" height="10" fill="#bbb"/>
+  <rect x="900" y="110" width="10" height="150" fill="#bbb"/>
+  <circle cx="700" cy="250" r="6" fill="#2b6fd9"/>
+  <text x="706" y="236" fill="#1f4fa0" font-size="14" font-weight="bold" text-anchor="start">D</text>
+  <rect x="620" y="238" width="160" height="24" fill="#d9822b" fill-opacity="0.12" stroke="#d9822b" stroke-dasharray="3 3"/>
+  <circle cx="650" cy="250" r="5" fill="#d9822b"/>
+  <circle cx="735" cy="250" r="5" fill="#d9822b"/>
+  <circle cx="770" cy="250" r="5" fill="#d9822b"/>
+  <circle cx="900" cy="220" r="5" fill="#bbb"/>
+  <path d="M894 214 L906 226 M894 226 L906 214" stroke="#b3261e" stroke-width="3" fill="none"/>
+  <text x="740" y="300" fill="#333" font-size="12" text-anchor="start">a thin slab around the surface plane:</text>
+  <text x="740" y="316" fill="#333" font-size="12" text-anchor="start">the wall's photons are in the disk's</text>
+  <text x="740" y="332" fill="#333" font-size="12" text-anchor="start">reach but not on D's surface</text>
+  <text x="500" y="350" fill="#222" font-size="15" font-weight="bold" text-anchor="start">How big is the disk?</text>
+  <text x="500" y="372" fill="#333" font-size="12" text-anchor="start">a few pixels of the camera, at D: the pixel's footprint</text>
+  <text x="500" y="389" fill="#333" font-size="12" text-anchor="start">(longer where the surface is seen at a grazing angle)</text>
+  <text x="500" y="406" fill="#333" font-size="12" text-anchor="start">it shrinks as the frames accumulate, down to one pixel</text>
+  <text x="500" y="423" fill="#333" font-size="12" text-anchor="start">if it holds too many photons it shrinks by halves,</text>
+  <text x="500" y="440" fill="#333" font-size="12" text-anchor="start">so a bright caustic keeps its sharp cores</text>
+  <text x="500" y="470" fill="#222" font-size="12" text-anchor="start">radiance at D  =  (1 / photons) · Σ  w · flux · BSDF · 2 / (π r²)  /  cos</text>
+</svg>
