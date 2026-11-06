@@ -81,7 +81,9 @@ inline void addSceneCamerasToWidget(std::shared_ptr<nvutils::CameraManipulator> 
   {
     // Re-adjusting camera to fit the new scene
     cameraManip->fit(sceneBbox.min(), sceneBbox.max(), true);
-    cameraManip->setClipPlanes(glm::vec2(0.001F * sceneBbox.radius(), 100.0F * sceneBbox.radius()));
+    // Planes follow the framing distance fit() just chose (see defaultClipPlanes)
+    cameraManip->setClipPlanes(
+        defaultClipPlanes(glm::length(cameraManip->getEye() - glm::dvec3(sceneBbox.center())), sceneBbox.radius()));
     nvgui::SetHomeCamera(cameraManip->getCamera());
   }
 }

@@ -1623,12 +1623,30 @@ int GltfRenderer::selectedNodeIndex()
 }
 
 // Frame the whole scene, or the selected render nodes. A selection with no readable bounds leaves the camera alone.
+//
+// fit() moves only the eye, never the clip planes, so an authored far (or the one from an earlier
+// fit) can end before the box once the eye backs away, and the scene vanishes behind it. The
+// animated fit also interpolates the planes from the values held when fit() is called, so far is
+// widened first, to cover the farthest the tight fit can place the eye: R / tan(half-FOV of the
+// narrower axis) + R from the box center. It is never lowered.
 void GltfRenderer::fitCamera(bool wholeScene)
 {
   const nvutils::Bbox bbox = wholeScene ? m_resources.getScene()->getSceneBounds() :
                                           GltfRenderer::getRenderNodesBbox(m_resources.selectedRenderNodes);
-  if(!bbox.isEmpty())
-    m_cameraManip->fit(bbox.min(), bbox.max(), false, true, m_cameraManip->getAspectRatio());
+  if(bbox.isEmpty())
+    return;
+
+  const double aspect  = m_cameraManip->getAspectRatio();
+  const double tanHalf = std::tan(glm::radians(m_cameraManip->getFov() * 0.5)) * std::min(1.0, aspect);
+  const double radius  = bbox.radius();
+  if(tanHalf > 0.0 && radius > 0.0)
+  {
+    const double     farNeeded = nvvkgltf::defaultFar(radius / tanHalf + radius, radius);
+    const glm::dvec2 planes    = m_cameraManip->getClipPlanes();
+    if(planes.y < farNeeded)
+      m_cameraManip->setClipPlanes({planes.x, farNeeded});
+  }
+  m_cameraManip->fit(bbox.min(), bbox.max(), false, true, aspect);
 }
 
 void GltfRenderer::renderMenu()

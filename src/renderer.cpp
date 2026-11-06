@@ -247,13 +247,30 @@ GltfRenderer::GltfRenderer(nvutils::ParameterRegistry* paramReg, const nvutils::
   m_settings.addVector({"solidBackgroundColor", "Solid Background Color"}, &m_resources.settings.solidBackgroundColor, Persist::eYes);
   // The infinite plane of the Lens tab. Declared so the tab can tell which values left their default and
   // reset them; not persisted, as before. Its height is left out: it follows each scene's bounds.
-  m_settings.add({.name = "useInfinitePlane", .help = "Show the infinite ground plane", .callbackSuccess = [this](const nvutils::ParameterBase* const) { resetFrame(); }}, &m_resources.settings.useInfinitePlane, Persist::eNo, true);
-  m_settings.add({.name = "isShadowCatcher", .help = "The infinite plane only catches shadows", .callbackSuccess = [this](const nvutils::ParameterBase* const) { resetFrame(); }}, &m_resources.settings.isShadowCatcher, Persist::eNo, true);
-  m_settings.add({.name = "shadowCatcherDarkness", .help = "Shadow catcher: non-physical shadow darkening", .callbackSuccess = [this](const nvutils::ParameterBase* const) { resetFrame(); }},
+  m_settings.add({.name            = "useInfinitePlane",
+                  .help            = "Show the infinite ground plane",
+                  .callbackSuccess = [this](const nvutils::ParameterBase* const) { resetFrame(); }},
+                 &m_resources.settings.useInfinitePlane, Persist::eNo, true);
+  m_settings.add({.name            = "isShadowCatcher",
+                  .help            = "The infinite plane only catches shadows",
+                  .callbackSuccess = [this](const nvutils::ParameterBase* const) { resetFrame(); }},
+                 &m_resources.settings.isShadowCatcher, Persist::eNo, true);
+  m_settings.add({.name            = "shadowCatcherDarkness",
+                  .help            = "Shadow catcher: non-physical shadow darkening",
+                  .callbackSuccess = [this](const nvutils::ParameterBase* const) { resetFrame(); }},
                  &m_resources.settings.shadowCatcherDarkness, Persist::eNo, 0.0f, 1.0f);
-  m_settings.addVector({.name = "infinitePlaneBaseColor", .help = "Infinite plane base color", .callbackSuccess = [this](const nvutils::ParameterBase* const) { resetFrame(); }}, &m_resources.settings.infinitePlaneBaseColor, Persist::eNo);
-  m_settings.add({.name = "infinitePlaneMetallic", .help = "Infinite plane metallic", .callbackSuccess = [this](const nvutils::ParameterBase* const) { resetFrame(); }}, &m_resources.settings.infinitePlaneMetallic, Persist::eNo, 0.0f, 1.0f);
-  m_settings.add({.name = "infinitePlaneRoughness", .help = "Infinite plane roughness", .callbackSuccess = [this](const nvutils::ParameterBase* const) { resetFrame(); }}, &m_resources.settings.infinitePlaneRoughness, Persist::eNo, 0.0f, 1.0f);
+  m_settings.addVector({.name            = "infinitePlaneBaseColor",
+                        .help            = "Infinite plane base color",
+                        .callbackSuccess = [this](const nvutils::ParameterBase* const) { resetFrame(); }},
+                       &m_resources.settings.infinitePlaneBaseColor, Persist::eNo);
+  m_settings.add({.name            = "infinitePlaneMetallic",
+                  .help            = "Infinite plane metallic",
+                  .callbackSuccess = [this](const nvutils::ParameterBase* const) { resetFrame(); }},
+                 &m_resources.settings.infinitePlaneMetallic, Persist::eNo, 0.0f, 1.0f);
+  m_settings.add({.name            = "infinitePlaneRoughness",
+                  .help            = "Infinite plane roughness",
+                  .callbackSuccess = [this](const nvutils::ParameterBase* const) { resetFrame(); }},
+                 &m_resources.settings.infinitePlaneRoughness, Persist::eNo, 0.0f, 1.0f);
   // Bounds mirror the "Max Samples" slider in PathTracer::onUIRender.
   m_settings.add({"ptMaxSamples", "Path tracer: stop accumulating at this many samples per pixel"},
                  &m_resources.settings.maxSamples, Persist::eYes, 1, 1000000);
@@ -632,8 +649,7 @@ GltfRenderer::GltfRenderer(nvutils::ParameterRegistry* paramReg, const nvutils::
                         [this]() {
                           if(m_resources.getScene() && m_resources.getScene()->valid())
                           {
-                            const nvutils::Bbox bbox = m_resources.getScene()->getSceneBounds();
-                            m_cameraManip->fit(bbox.min(), bbox.max(), false, true, m_cameraManip->getAspectRatio());
+                            fitCamera(true);
                             resetFrame();
                           }
                         },
@@ -1601,9 +1617,9 @@ void GltfRenderer::onRender(VkCommandBuffer cmd)
     }
 
     // Update the scene frame information uniform buffer
-    const glm::mat4          viewProj = m_cameraManip->getPerspectiveMatrix() * m_cameraManip->getViewMatrix();
-    const VkExtent2D         gbufSize = m_resources.gBuffers.getSize();
-    const glm::quat          envRot   = m_resources.settings.envRotationQuat();  // normalised
+    const glm::mat4  viewProj = m_cameraManip->getPerspectiveMatrix() * m_cameraManip->getViewMatrix();
+    const VkExtent2D gbufSize = m_resources.gBuffers.getSize();
+    const glm::quat  envRot   = m_resources.settings.envRotationQuat();  // normalised
 
     // Texture isolate: the slot is looked up each frame, for the one material only, so it stays right
     // when an edit adds or removes a texture and moves the slots. A binding the material no longer has

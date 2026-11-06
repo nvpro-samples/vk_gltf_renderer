@@ -1716,8 +1716,9 @@ void nvvkgltf::Scene::createSceneCamera()
   tcamera.name                    = "Camera";
   tcamera.perspective.aspectRatio = 16.0f / 9.0f;
   tcamera.perspective.yfov        = glm::radians(45.0f);
-  tcamera.perspective.zfar        = bbox.radius() * 10.0f;
-  tcamera.perspective.znear       = bbox.radius() * 0.1f;
+  const glm::dvec2 clip           = defaultClipPlanes(glm::length(eye - center), bbox.radius());
+  tcamera.perspective.znear       = clip.x;
+  tcamera.perspective.zfar        = clip.y;
 
   // Add extra information to the node/camera
   tinygltf::Value::Object extras;
@@ -2709,23 +2710,30 @@ bool nvvkgltf::Scene::handleCameraTraversal(int nodeID, const glm::mat4& worldMa
 
   nvutils::Bbox bbox = getSceneBounds();
 
-  // Validate zFar
-  if(camera.zfar <= camera.znear)
-  {
-    camera.zfar = std::max(camera.znear * 2.0, 4.0 * bbox.radius());
-    LOGW("glTF: Camera zFar is less than zNear, max(zNear * 2, 4 * bbos.radius()\n");
-  }
-
   // From the view matrix, we extract the eye, center, and up vectors
   extractCameraVectors(worldMatrix, bbox.center(), camera.eye, camera.center, camera.up);
 
   // If the node/camera has extras, we extract the eye, center, and up vectors from the extras
-  auto& extras = node.extras;
+  auto& extras         = node.extras;
+  bool  hasExplicitCtr = false;  // the file states the point of interest; otherwise it is inferred
   if(extras.IsObject())
   {
     tinygltf::utils::getArrayValue(extras, "camera::eye", camera.eye);
+    hasExplicitCtr = extras.Has("camera::center");
     tinygltf::utils::getArrayValue(extras, "camera::center", camera.center);
     tinygltf::utils::getArrayValue(extras, "camera::up", camera.up);
+  }
+
+  // Validate zFar: take the shared default far when it is absent or not beyond zNear (e.g. glTF's
+  // infinite perspective), or when it ends before the camera's stated point of interest, so the
+  // camera would be looking at nothing. An inferred center (scene bounds projected on the view axis)
+  // proves nothing: a camera framing a near object may clip distant geometry on purpose, so a valid
+  // authored far is kept. This needs the eye, hence after the extraction above.
+  const double eyeDistance = glm::length(camera.eye - camera.center);
+  if(camera.zfar <= camera.znear || (hasExplicitCtr && camera.zfar < eyeDistance))
+  {
+    camera.zfar = std::max(camera.znear * 2.0, defaultFar(eyeDistance, bbox.radius()));
+    LOGW("glTF: Camera zFar does not reach the scene; using the default far %g\n", camera.zfar);
   }
 
   m_cameras.push_back(camera);

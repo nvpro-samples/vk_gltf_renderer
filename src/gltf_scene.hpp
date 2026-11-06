@@ -133,6 +133,28 @@ struct RenderCamera
   double zfar  = {0.0};
 };
 
+// The one rule for default clip planes, wherever a camera has none of its own that is usable:
+// the viewer's camera-less fit, createSceneCamera(), a camera with no valid far, and the fit
+// commands (which only need the far).
+//
+// Planes are set once and not touched while navigating, so they are anchored on where the eye sits
+// (eyeDistance from the scene center, sceneRadius being the bounding sphere's), not on the radius
+// alone. Far is four times the farthest point of the sphere as seen from that eye, which leaves
+// room to zoom out. Near is a fixed 1/1000 of far: that ratio keeps depth resolution at the
+// framing distance to about 1e-5 of the radius (a ratio of 1e5 loses two orders of magnitude),
+// while the eye can still come within ~1% of the radius of a surface before it clips.
+inline double defaultFar(double eyeDistance, double sceneRadius)
+{
+  const double zfar = 4.0 * (eyeDistance + sceneRadius);
+  return zfar > 0.0 ? zfar : 1000.0;  // empty or degenerate scene
+}
+
+inline glm::dvec2 defaultClipPlanes(double eyeDistance, double sceneRadius)
+{
+  const double zfar = defaultFar(eyeDistance, sceneRadius);
+  return {zfar / 1000.0, zfar};
+}
+
 // See: https://github.com/KhronosGroup/glTF/blob/master/extensions/2.0/Khronos/KHR_lights_punctual/README.md
 struct RenderLight
 {
@@ -342,10 +364,10 @@ public:
   [[nodiscard]] int referenceScene(const std::filesystem::path& filename);
   // After mergeScene(), returns the animation list index of the first clip from the merged file (for UI default); -1 if none.
   // Consumed once by the renderer so the animation dropdown selects merged motion instead of staying on a base-scene clip.
-  [[nodiscard]] int                      takeMergePreferredAnimationIndex();
+  [[nodiscard]] int takeMergePreferredAnimationIndex();
   // Use a pre-loaded model; sourceFilename (e.g. the converted .obj) anchors its relative image URIs
-  void takeModel(tinygltf::Model&& model, const std::filesystem::path& sourceFilename = {});
-  std::unordered_set<std::string>&       supportedExtensions() { return m_supportedExtensions; }
+  void                             takeModel(tinygltf::Model&& model, const std::filesystem::path& sourceFilename = {});
+  std::unordered_set<std::string>& supportedExtensions() { return m_supportedExtensions; }
   const std::unordered_set<std::string>& supportedExtensions() const { return m_supportedExtensions; }
   const std::filesystem::path&           getFilename() const { return m_filename; }
   // Order: base scene directory first, then each imported scene's directory in merge order.
