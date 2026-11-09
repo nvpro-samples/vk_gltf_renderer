@@ -401,6 +401,29 @@ environment, it falls back to the point of interest.
 ### Overview
 ![](images/cam_1.png)
 
+### Fit Object and Fit Scene
+
+**Fit Scene** (Ctrl+Shift+F) frames the whole scene. **Fit Object** (Ctrl+F) frames the selected node, primitive, camera or light.
+A node with meshes below it, or a primitive, is fitted to the view. A camera, a light or an empty node has
+no size, so the view stays where it is and turns to look at the node, which becomes the new point of
+interest.
+
+### Light and camera icons
+
+A light or a camera has no geometry, so each one is drawn as a glyph in the viewport. The glyphs keep
+the same size on screen at any distance, and their shape shows which way they point:
+
+- **Point light:** a disc inside a ring.
+- **Spot light:** a disc with its cone, opening by the light's outer cone angle.
+- **Directional light:** a disc with rays and an arrow along the direction the light travels.
+- **Camera:** its frustum, with a triangle above it for "up".
+
+The disc of a light takes the light's color. The selected light or camera is drawn in orange, the others in
+gray. **Click a glyph** to select its node, and **Fit Object** (Ctrl+F) brings the selection to the middle of
+the view. The lightbulb button in the top row of icons, or **View > Light & Camera Icons**, shows or hides
+the glyphs of all lights and cameras, and the choice is remembered. The selected one is always drawn. A scene
+with very many lights draws the first few hundred of them.
+
 ### Copy / Restore / Save
 
 ![](images/cam_2.png)
@@ -488,6 +511,14 @@ The undo history uses a linear model: performing a new action after an undo disc
 - **Transform Gizmo**: Enable via toolbar or **View → Gizmo** (`T`) for interactive translate/rotate/scale directly in the viewport.
 - **Scene Transform**: A popup on the scene root applies a global transform to all root nodes — useful for reorienting imported assets (e.g., Z-up to Y-up).
 
+### What a node carries
+
+Selecting a node shows its Transform, then a section for each element it references: its **mesh** (closed
+by default), its **camera** and its **light**. The light and camera settings are edited there, with no
+click through Relationships. An element used by several nodes says so ("Used by nodes (N)") with a link to
+each, since editing it changes all of them. **Relationships** only lists the structure around the node: its
+parent, its skin and its children, and only what exists.
+
 ### Material Editing
 
 ![The material Inspector showing PBR fields, texture slots, and the extensions list](images/material_editor.png)
@@ -551,7 +582,7 @@ Each light is created as a new node in the scene graph. Position and orient the 
 
 **Editing KHR light properties:**
 
-When a KHR light is selected, the Inspector shows:
+When a KHR light or its node is selected, the Inspector shows:
 
 | Property | Applies to | Description |
 |---|---|---|

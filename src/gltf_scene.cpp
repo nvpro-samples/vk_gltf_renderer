@@ -1085,10 +1085,11 @@ const nvvkgltf::Scene::ElementUsage& nvvkgltf::Scene::elementUsage() const
   ElementUsage&               usage = m_elementUsage;
   const std::array<size_t, 5> counts{m_model.nodes.size(), m_model.meshes.size(), m_model.materials.size(),
                                      m_model.cameras.size(), m_model.lights.size()};
-  if(usage.revision == m_sceneGraphRevision && usage.counts == counts)
+  if(usage.revision == m_sceneGraphRevision && usage.counts == counts && usage.currentScene == m_currentScene)
     return usage;
-  usage.revision = m_sceneGraphRevision;
-  usage.counts   = counts;
+  usage.revision     = m_sceneGraphRevision;
+  usage.counts       = counts;
+  usage.currentScene = m_currentScene;
 
   const int nodeCount     = static_cast<int>(counts[0]);
   const int meshCount     = static_cast<int>(counts[1]);
@@ -1096,73 +1097,74 @@ const nvvkgltf::Scene::ElementUsage& nvvkgltf::Scene::elementUsage() const
   auto      validMesh     = [meshCount](int mesh) { return mesh >= 0 && mesh < meshCount; };
 
   usage.readOnlyMeshes.assign(meshCount, 0);
-  usage.cameraNode.assign(counts[3], -1);
-  usage.lightNode.assign(counts[4], -1);
-  usage.meshNodesOffset.assign(meshCount + 1, 0);
-  usage.meshPlacingOffset.assign(meshCount + 1, 0);
+  usage.meshNodes.reset(meshCount);
+  usage.meshPlacing.reset(meshCount);
+  usage.cameraNodes.reset(static_cast<int>(counts[3]));
+  usage.lightNodes.reset(static_cast<int>(counts[4]));
 
-  // Count first, then fill: the per-mesh lists are flat arrays (two of them can hold a million
-  // entries on a city-scale scene). An instance set lists its placing node once per mesh it draws.
+  // Every (element, node) use, stated once. It runs twice, to count and then to fill, so the lists are
+  // flat arrays (the mesh ones can hold a million entries on a city-scale scene). An instance set
+  // lists its placing node once per mesh it draws.
   std::vector<int> lastPlacing(meshCount, -1);
-  for(int nodeIndex = 0; nodeIndex < nodeCount; ++nodeIndex)
-  {
+  auto             forEachUse = [this, &usage, &lastPlacing, &validMesh](int nodeIndex, auto&& use) {
     const tinygltf::Node& node = m_model.nodes[nodeIndex];
-    if(validMesh(node.mesh))
-    {
-      ++usage.meshNodesOffset[node.mesh + 1];
-      if(hasExternalAssetMarker(node))
-        usage.readOnlyMeshes[node.mesh] = 1;
-    }
-    if(node.camera >= 0 && node.camera < static_cast<int>(usage.cameraNode.size()) && usage.cameraNode[node.camera] < 0)
-      usage.cameraNode[node.camera] = nodeIndex;
-    if(node.light >= 0 && node.light < static_cast<int>(usage.lightNode.size()) && usage.lightNode[node.light] < 0)
-      usage.lightNode[node.light] = nodeIndex;
-    // Placed content drawn through an instance set has no node of its own and is read-only (Make
-    // Editable turns a set into nodes).
+    use(usage.meshNodes, node.mesh);
+    use(usage.cameraNodes, node.camera);
+    use(usage.lightNodes, node.light);
     const InstanceSet* set = getInstanceSet(nodeIndex);
     if(set == nullptr)
-      continue;
-    for(size_t entryIndex = 0; entryIndex < set->entries.size(); ++entryIndex)
-    {
-      const int mesh = set->entries[entryIndex].mesh;
-      if(!validMesh(mesh))
-        continue;
-      usage.readOnlyMeshes[mesh] = 1;
-      if(lastPlacing[mesh] != nodeIndex)
-      {
-        lastPlacing[mesh] = nodeIndex;
-        ++usage.meshPlacingOffset[mesh + 1];
-      }
-    }
-  }
-  for(int mesh = 0; mesh < meshCount; ++mesh)
-  {
-    usage.meshNodesOffset[mesh + 1] += usage.meshNodesOffset[mesh];
-    usage.meshPlacingOffset[mesh + 1] += usage.meshPlacingOffset[mesh];
-  }
-  usage.meshNodes.resize(usage.meshNodesOffset[meshCount]);
-  usage.meshPlacing.resize(usage.meshPlacingOffset[meshCount]);
-  std::vector<int> nodesFill(usage.meshNodesOffset.begin(), usage.meshNodesOffset.end() - 1);
-  std::vector<int> placingFill(usage.meshPlacingOffset.begin(), usage.meshPlacingOffset.end() - 1);
-  std::fill(lastPlacing.begin(), lastPlacing.end(), -1);
-  for(int nodeIndex = 0; nodeIndex < nodeCount; ++nodeIndex)
-  {
-    const int nodeMesh = m_model.nodes[nodeIndex].mesh;
-    if(validMesh(nodeMesh))
-      usage.meshNodes[nodesFill[nodeMesh]++] = nodeIndex;
-    const InstanceSet* set = getInstanceSet(nodeIndex);
-    if(set == nullptr)
-      continue;
+      return;
     for(size_t entryIndex = 0; entryIndex < set->entries.size(); ++entryIndex)
     {
       const int mesh = set->entries[entryIndex].mesh;
       if(validMesh(mesh) && lastPlacing[mesh] != nodeIndex)
       {
-        lastPlacing[mesh]                      = nodeIndex;
-        usage.meshPlacing[placingFill[mesh]++] = nodeIndex;
+        lastPlacing[mesh] = nodeIndex;
+        use(usage.meshPlacing, mesh);
       }
     }
+  };
+  for(int nodeIndex = 0; nodeIndex < nodeCount; ++nodeIndex)
+  {
+    forEachUse(nodeIndex, [](NodeLists& lists, int element) { lists.count(element); });
+    const tinygltf::Node& node = m_model.nodes[nodeIndex];
+    if(validMesh(node.mesh) && hasExternalAssetMarker(node))
+      usage.readOnlyMeshes[node.mesh] = 1;
   }
+  for(NodeLists* lists : {&usage.meshNodes, &usage.meshPlacing, &usage.cameraNodes, &usage.lightNodes})
+    lists->allocate();
+  std::fill(lastPlacing.begin(), lastPlacing.end(), -1);
+  for(int nodeIndex = 0; nodeIndex < nodeCount; ++nodeIndex)
+    forEachUse(nodeIndex, [nodeIndex](NodeLists& lists, int element) { lists.add(element, nodeIndex); });
+
+  // The camera nodes the active scene reaches: a model's other scenes hold nodes the viewport does not show.
+  usage.activeCameraNodes.clear();
+  if(m_currentScene >= 0 && m_currentScene < static_cast<int>(m_model.scenes.size()) && !usage.cameraNodes.all().empty())
+  {
+    std::vector<uint8_t> reached(nodeCount, 0);
+    std::vector<int>     pending = m_model.scenes[m_currentScene].nodes;
+    while(!pending.empty())
+    {
+      const int node = pending.back();
+      pending.pop_back();
+      if(node < 0 || node >= nodeCount || reached[node] != 0)
+        continue;
+      reached[node]                    = 1;
+      const std::vector<int>& children = m_model.nodes[node].children;
+      for(size_t i = 0; i < children.size(); ++i)
+        pending.push_back(children[i]);
+    }
+    const std::span<const int> cameraNodes = usage.cameraNodes.all();
+    for(size_t i = 0; i < cameraNodes.size(); ++i)
+      if(reached[cameraNodes[i]] != 0)
+        usage.activeCameraNodes.push_back(cameraNodes[i]);
+  }
+
+  // Placed content drawn through an instance set has no node of its own and is read-only (Make
+  // Editable turns a set into nodes).
+  for(int mesh = 0; mesh < meshCount; ++mesh)
+    if(!usage.meshPlacing.list(mesh).empty())
+      usage.readOnlyMeshes[mesh] = 1;
 
   // Materials: primitives using each one, and read-only when a read-only mesh uses it. The assigned
   // material only, not KHR_materials_variants mappings: a placed file's variants are not merged
@@ -1197,24 +1199,19 @@ bool nvvkgltf::Scene::isMaterialReadOnly(int materialIndex) const
          && usage.readOnlyMaterials[materialIndex] != 0;
 }
 
+// The nodes with node.mesh == meshIndex, in node order.
 std::span<const int> nvvkgltf::Scene::getMeshNodes(int meshIndex) const
 {
-  const ElementUsage& usage = elementUsage();
-  if(meshIndex < 0 || meshIndex >= static_cast<int>(usage.readOnlyMeshes.size()))
-    return {};
-  return std::span<const int>(usage.meshNodes)
-      .subspan(usage.meshNodesOffset[meshIndex], usage.meshNodesOffset[meshIndex + 1] - usage.meshNodesOffset[meshIndex]);
+  return elementUsage().meshNodes.list(meshIndex);
 }
 
+// The nodes whose instance set draws the mesh, in node order; each once however many entries use it.
 std::span<const int> nvvkgltf::Scene::getMeshPlacingNodes(int meshIndex) const
 {
-  const ElementUsage& usage = elementUsage();
-  if(meshIndex < 0 || meshIndex >= static_cast<int>(usage.readOnlyMeshes.size()))
-    return {};
-  return std::span<const int>(usage.meshPlacing)
-      .subspan(usage.meshPlacingOffset[meshIndex], usage.meshPlacingOffset[meshIndex + 1] - usage.meshPlacingOffset[meshIndex]);
+  return elementUsage().meshPlacing.list(meshIndex);
 }
 
+// How many mesh primitives are assigned the material.
 int nvvkgltf::Scene::getMaterialPrimitiveCount(int materialIndex) const
 {
   const ElementUsage& usage = elementUsage();
@@ -1223,16 +1220,50 @@ int nvvkgltf::Scene::getMaterialPrimitiveCount(int materialIndex) const
              0;
 }
 
-int nvvkgltf::Scene::getCameraNode(int cameraIndex) const
+// The nodes with node.camera == cameraIndex, in node order.
+std::span<const int> nvvkgltf::Scene::getCameraNodes(int cameraIndex) const
 {
-  const ElementUsage& usage = elementUsage();
-  return cameraIndex >= 0 && cameraIndex < static_cast<int>(usage.cameraNode.size()) ? usage.cameraNode[cameraIndex] : -1;
+  return elementUsage().cameraNodes.list(cameraIndex);
 }
 
+// The nodes with node.light == lightIndex, in node order.
+std::span<const int> nvvkgltf::Scene::getLightNodes(int lightIndex) const
+{
+  return elementUsage().lightNodes.list(lightIndex);
+}
+
+// The nodes carrying a camera that the active scene reaches, in node order: the viewport icons draw them.
+std::span<const int> nvvkgltf::Scene::getActiveCameraNodes() const
+{
+  return elementUsage().activeCameraNodes;
+}
+
+// The first node carrying the camera, or -1 when none does.
+int nvvkgltf::Scene::getCameraNode(int cameraIndex) const
+{
+  const std::span<const int> nodes = getCameraNodes(cameraIndex);
+  return nodes.empty() ? -1 : nodes.front();
+}
+
+// The first node carrying the light, or -1 when none does.
 int nvvkgltf::Scene::getLightNode(int lightIndex) const
 {
-  const ElementUsage& usage = elementUsage();
-  return lightIndex >= 0 && lightIndex < static_cast<int>(usage.lightNode.size()) ? usage.lightNode[lightIndex] : -1;
+  const std::span<const int> nodes = getLightNodes(lightIndex);
+  return nodes.empty() ? -1 : nodes.front();
+}
+
+// The lowest-numbered node that renders the light, or -1 when none does (a node of a scene that is not
+// the active one carries the light without rendering it). Walks the render lights, so it is for acting
+// on a click, not for drawing a frame.
+int nvvkgltf::Scene::getRenderedLightNode(int lightIndex) const
+{
+  int node = -1;
+  for(size_t i = 0; i < m_lights.size(); ++i)
+  {
+    if(m_lights[i].light == lightIndex && (node < 0 || m_lights[i].nodeID < node))
+      node = m_lights[i].nodeID;
+  }
+  return node;
 }
 
 bool nvvkgltf::Scene::isNodeSelectable(int nodeIndex) const
@@ -2688,7 +2719,6 @@ bool nvvkgltf::Scene::handleCameraTraversal(int nodeID, const glm::mat4& worldMa
     return false;
 
   tinygltf::Node& node = m_model.nodes[nodeID];
-  m_sceneCameraNode    = nodeID;
 
   tinygltf::Camera&      tcam = m_model.cameras[node.camera];
   nvvkgltf::RenderCamera camera;
@@ -3375,18 +3405,6 @@ void applyRenderCameraToNode(tinygltf::Node& tnode, tinygltf::Camera& tcamera, c
   tnode.extras             = tinygltf::Value(extras);
 }
 }  // namespace
-
-void nvvkgltf::Scene::setSceneCamera(const nvvkgltf::RenderCamera& camera)
-{
-  assert(m_sceneCameraNode != -1 && "No camera node found in the scene");
-  // Never write into a referenced (read-only) external-asset camera node.
-  if(m_sceneCameraNode < 0 || isNodeReadOnly(m_sceneCameraNode))
-    return;
-
-  tinygltf::Node&   tnode   = m_model.nodes[m_sceneCameraNode];
-  tinygltf::Camera& tcamera = m_model.cameras[tnode.camera];
-  applyRenderCameraToNode(tnode, tcamera, camera);
-}
 
 //--------------------------------------------------------------------------------------------------
 // Set the scene cameras

@@ -73,6 +73,7 @@
 #include "ui_presentation_mode.hpp"
 #include "ui_thumbnail_cache.hpp"
 #include "ui_toast.hpp"
+#include "ui_viewport_icons.hpp"
 #include "scene_selection.hpp"
 #include "gizmo_visuals_vk.hpp"
 #include "timeline_pipeline.hpp"
@@ -395,7 +396,8 @@ private:
   void enqueueTopLevelAccelerationStructure();  // Last load work: the TLAS, then staging release
   void destroyResources();
   void resetFrame();
-  void selectSceneNodeFromScript(int nodeIndex);  // Script-driven selection (Inspector/Scene Browser)
+  void handleSelectionEvent(const SceneSelection::Event& event);  // SceneSelection callback, set in the constructor
+  void selectSceneNodeFromScript(int nodeIndex);                  // Script-driven selection (Inspector/Scene Browser)
   // Script-driven *ray-pick* selection (--pickNode, `pickrendernode`): selects the given glTF node's
   // first render primitive the same way a real 3D-viewport click would - unlike
   // selectSceneNodeFromScript() above, this supplies finite (camera-eye/node-position) selectionPoint/
@@ -485,6 +487,9 @@ private:
   void registerCommands();         // The menu, toolbar and keyboard commands (m_commands), once at attach
   bool hasValidScene();
   int  selectedNodeIndex();  // The node of a node or primitive selection, or -1
+  ui::viewport_icons::Request viewportIconRequest(const ImVec2& imageOrigin, const ImVec2& imageSize);  // The light and camera glyphs to show
+  bool selectIconAt(const ImVec2& imageOrigin, const ImVec2& imageSize, const ImVec2& mousePos);  // A click on a glyph selects its node
+  int  framingNodeIndex();  // The node Fit Object frames: a node, primitive, camera or light selection's node, or -1
   void fitCamera(bool wholeScene);
   void renderMenu();
   void renderFileMenu(std::filesystem::path& sceneToLoadFilename);

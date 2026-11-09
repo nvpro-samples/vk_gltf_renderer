@@ -45,8 +45,8 @@
 // BenchmarkController so script-driven changes are observed everywhere.
 struct BenchmarkOptions
 {
-  bool                  enabled{false};            // True when running under the benchmark harness
-  int                   gltfCameraIndex{0};        // Index of the glTF camera to activate
+  bool                  enabled{false};      // True when running under the benchmark harness
+  int                   gltfCameraIndex{0};  // Index of the glTF camera to activate
   std::string           cameraString;  // Free camera "{eye}, {center}, {up}, {fov}, {near, far}"; kept over scene loads
   bool                  fitSceneTrigger{false};    // Pulse: fit camera to scene bounds
   bool                  resetFrameTrigger{false};  // Pulse: reset path-tracer accumulation
@@ -55,6 +55,9 @@ struct BenchmarkOptions
   std::filesystem::path uiScreenshotFilename;  // Output path for the next full-window capture (UI panels + viewport)
   int                   selectNodeIndex{-1};   // Scene-graph node index to select; < 0 or out-of-range clears selection
   int                   pickNodeIndex{-1};  // Scene-graph node to pick as a viewport click would; < 0 clears selection
+  int  selectCameraIndex{-1};               // glTF camera to select (as the Cameras list does); < 0 clears selection
+  int  selectLightIndex{-1};                // glTF light to select (as the Lights list does); < 0 clears selection
+  bool fitObjectTrigger{false};             // Pulse: fit camera to the selection (Fit Object)
 };
 
 //--------------------------------------------------------------------------------------------------
@@ -71,14 +74,17 @@ public:
   // Any callback may be left empty; the controller will silently skip it.
   struct Callbacks
   {
-    std::function<void(int)>                          applyGltfCamera;   // Apply glTF camera by index
+    std::function<void(int)>                applyGltfCamera;             // Apply glTF camera by index
     std::function<void(const std::string&)> applyCameraString;           // Apply a camera string (see BenchmarkOptions)
-    std::function<void()>                             fitScene;          // Fit camera to scene bounds
-    std::function<void()>                             resetFrame;        // Reset path-tracer accumulation
+    std::function<void()>                   fitScene;                    // Fit camera to scene bounds
+    std::function<void()>                   resetFrame;                  // Reset path-tracer accumulation
     std::function<void(const std::filesystem::path&)> saveScreenshot;    // Save tonemapped render (viewport only)
     std::function<void(const std::filesystem::path&)> saveUiScreenshot;  // Save full composited window (UI + viewport)
-    std::function<void(int)> selectSceneNode;  // Select a scene-graph node by index (drives Inspector/Scene Browser)
-    std::function<void(int)> pickSceneNode;    // Pick a scene-graph node's first render node, as a viewport click
+    std::function<void(int)> selectSceneNode;    // Select a scene-graph node by index (drives Inspector/Scene Browser)
+    std::function<void(int)> pickSceneNode;      // Pick a scene-graph node's first render node, as a viewport click
+    std::function<void(int)> selectSceneCamera;  // Select a glTF camera by index, as the Cameras list does
+    std::function<void(int)> selectSceneLight;   // Select a glTF light by index, as the Lights list does
+    std::function<void()>    fitObject;          // Fit the camera to the selection (Ctrl+F)
   };
 
   // Snapshot of the headless run configuration, passed to every timing call.

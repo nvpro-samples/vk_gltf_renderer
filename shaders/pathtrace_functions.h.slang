@@ -8,6 +8,10 @@
 #define PATHTRACE_FUNCTIONS_H 1
 
 #include "gltf_eval_config.h"
+#ifndef USE_VISUALIZE
+#define USE_VISUALIZE                                                                                                  \
+  0  // Debug visualization compiled out unless the host sets it, as raytracer_interface.h.slang does
+#endif
 #ifndef USE_CAUSTICS
 #define USE_CAUSTICS 0  // Beta caustics: see caustics.h.slang
 #endif
@@ -138,7 +142,7 @@ bool ptDlssActive()
 //-----------------------------------------------------------------------
 struct SampleResult
 {
-  float4 radiance    = float4(0, 0, 0, 0);
+  float4 radiance = float4(0, 0, 0, 0);
 #if USE_CAUSTICS
   float3 caustic = float3(0, 0, 0);  // What the photon map gave the path: not a path's radiance, so no firefly clamp
 #endif
@@ -1408,10 +1412,10 @@ struct PathTracerState
   int scatterBounces = 0;
 #endif
 #if USE_CAUSTICS
-  int  causticChain    = 0;      // Casters crossed since the last surface that is not one
-  int  causticReceivers = 0;     // Surfaces that are not casters reached so far
-  bool causticReceiver = false;  // The last surface that is not a caster is one the photons carry the light of
-  float3 causticRadiance = float3(0.0F);  // What the photon map gave the path so far
+  int    causticChain     = 0;      // Casters crossed since the last surface that is not one
+  int    causticReceivers = 0;      // Surfaces that are not casters reached so far
+  bool   causticReceiver  = false;  // The last surface that is not a caster is one the photons carry the light of
+  float3 causticRadiance  = float3(0.0F);  // What the photon map gave the path so far
 #endif
 #if USE_GUIDE_SHADER
   GuideScratch guide           = {};
@@ -1541,7 +1545,7 @@ SampleResult packSampleResult(PathTracerState pt)
 #if USE_CAUSTICS
   sampleResult.caustic = pt.causticRadiance;
 #endif
-  sampleResult.hitPosition  = pt.firstHitPos;
+  sampleResult.hitPosition = pt.firstHitPos;
 #if USE_GUIDE_SHADER
   sampleResult.hitPositionPrev             = pt.firstHitPosPrev;
   sampleResult.guideOutput.albedo          = float16_t4(pt.guide.albedo, pt.solid ? 1.0h : 0.0h);

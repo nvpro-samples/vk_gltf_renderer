@@ -802,7 +802,13 @@ void TransformHelperVk::updateDrag(const glm::vec2& mousePos,
           if(m_enableSnapping && m_snapRotate > 0.0f)
             angleDeg = snapValue(angleDeg, m_snapRotate);
 
-          *m_attachedRotation = m_dragStartRotation + localAxis * angleDeg;
+          // Rotation is stored as Euler angles, which don't compose per axis. Rotate the
+          // start orientation as a quaternion about the gizmo axis, then convert back.
+          glm::quat startQ = glm::quat(glm::radians(m_dragStartRotation));
+          glm::quat deltaQ = glm::angleAxis(glm::radians(angleDeg), localAxis);
+          // The gizmo axes are parent/world axes (only eWorld exists), so pre-multiply.
+          glm::quat newQ      = glm::normalize(deltaQ * startQ);
+          *m_attachedRotation = glm::degrees(glm::eulerAngles(newQ));
 
           if(m_onTransformChange)
             m_onTransformChange();
@@ -1031,9 +1037,15 @@ float TransformHelperVk::getScreenSpaceScale(const glm::vec3& worldPos,
                                              const glm::mat4& projMatrix,
                                              const glm::vec2& viewport) const
 {
-  glm::vec4 clipPos = projMatrix * viewMatrix * glm::vec4(worldPos, 1.0f);
-  float     depth   = clipPos.w;
-  return (m_style.sizePixels / viewport.y) * depth;
+  // World size of one pixel at the gizmo's depth: 2 * depth / (proj[1][1] * viewportHeight).
+  // proj[1][1] = 1/tan(fov/2), so this keeps the gizmo's on-screen size independent of FOV.
+  // Orthographic projections (proj[3][3] == 1) have no depth dependence.
+  glm::vec4   clipPos       = projMatrix * viewMatrix * glm::vec4(worldPos, 1.0f);
+  const float focal         = glm::max(glm::abs(projMatrix[1][1]), 1e-6f);
+  const bool  ortho         = projMatrix[3][3] == 1.0f && projMatrix[2][3] == 0.0f;
+  const float depth         = ortho ? 1.0f : clipPos.w;
+  const float unitsPerPixel = 2.0f * depth / (focal * viewport.y);
+  return m_style.sizePixels * unitsPerPixel;
 }
 
 bool TransformHelperVk::rayIntersectPlane(const glm::vec3& rayOrigin,

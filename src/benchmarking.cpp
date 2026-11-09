@@ -206,6 +206,38 @@ void BenchmarkController::registerParameters(nvutils::ParameterRegistry* paramet
                                 }
                               }},
                          &m_options.pickNodeIndex);
+
+  parameterRegistry->add({.name = "selectCamera",
+                          .help = "Select a glTF camera by index, as a click in the Cameras list does (no render "
+                                  "node is selected). An index with no camera or light selects nothing to frame.",
+                          .callbackSuccess =
+                              [this](const nvutils::ParameterBase* const) {
+                                if(m_callbacks.selectSceneCamera)
+                                  m_callbacks.selectSceneCamera(m_options.selectCameraIndex);
+                              }},
+                         &m_options.selectCameraIndex);
+
+  parameterRegistry->add({.name = "selectLight",
+                          .help = "Select a glTF light by index, as a click in the Lights list does (no render "
+                                  "node is selected). An index with no camera or light selects nothing to frame.",
+                          .callbackSuccess =
+                              [this](const nvutils::ParameterBase* const) {
+                                if(m_callbacks.selectSceneLight)
+                                  m_callbacks.selectSceneLight(m_options.selectLightIndex);
+                              }},
+                         &m_options.selectLightIndex);
+
+  parameterRegistry->add({.name = "fitObject",
+                          .help = "Fit the camera to the current selection, as Fit Object (Ctrl+F) does. Resets "
+                                  "path-tracer accumulation.",
+                          .callbackSuccess =
+                              [this](const nvutils::ParameterBase* const) {
+                                if(m_callbacks.fitObject)
+                                  m_callbacks.fitObject();
+                                if(m_callbacks.resetFrame)
+                                  m_callbacks.resetFrame();
+                              }},
+                         &m_options.fitObjectTrigger, true);
 }
 
 //--------------------------------------------------------------------------------------------------

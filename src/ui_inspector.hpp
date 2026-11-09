@@ -34,6 +34,7 @@
 #include <filesystem>
 #include <functional>
 #include <memory>
+#include <span>
 #include <string>
 #include <vector>
 
@@ -116,8 +117,18 @@ private:
   // Sampler inspectors' reverse "used by textures" lists.
   void renderTexturesUsing(const char* header, const std::function<bool(const tinygltf::Texture&)>& match);
   void renderOpenReferenceButton(int nodeIdx);  // small button opening the glTF this node (or its owner) references
-  void renderNodeRelationships(int nodeIdx);    // parent / mesh / camera / light / skin / children as jump links
-  void renderNodeExtensions(int nodeIdx);       // KHR_node_visibility / selectability / hoverability (+ other exts)
+  void renderNodeRelationships(int nodeIdx);    // parent / skin / children as jump links
+  // One collapsible section per element the node references (mesh, camera, light), each with that
+  // element's own editor, then the data an extension keeps on the node (EXT_lights_ies).
+  void renderNodeAttachments(int nodeIdx);
+  // The editors of an element, without its title: shared by the node's sections and the element's own view.
+  void renderMeshBody(int meshIdx);
+  void renderCameraBody(int camIdx);
+  void renderLightBody(int lightIdx);
+  // "Used by nodes (N)": the nodes using an element as jump links. `placing` lists the nodes whose
+  // instance set draws it (meshes only).
+  void renderUsedBy(std::span<const int> nodes, std::span<const int> placing = {});
+  void renderNodeExtensions(int nodeIdx);  // KHR_node_visibility / selectability / hoverability (+ other exts)
   // One primitive's detail (mode, vertex/triangle counts, attribute->accessor list). Shared by the Mesh
   // inspector (per primitive) and the composite primitive/pick inspector. The material link is not part of
   // this block: callers that want it append their own row (the pick inspector has a full MATERIAL section).

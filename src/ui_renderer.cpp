@@ -59,6 +59,7 @@
 #include "ui_interactivity.hpp"
 #include "ui_mouse_state.hpp"
 #include "ui_status_bar.hpp"
+#include "ui_viewport_icons.hpp"
 #include "version.hpp"
 
 // The window toggles: the "Windows" commands with an on/off state. The Windows menu and the toolbar
@@ -80,6 +81,42 @@ static std::function<void()> toggleFlag(bool& flag)
 static std::function<bool()> flagIsOn(const bool& flag)
 {
   return [&flag] { return flag; };
+}
+
+// What the viewport icons draw and pick: the camera, where the viewport image is, and the selection. The one
+// place that decides whether the glyphs are shown (there is a scene, and not in presentation mode), so that
+// what is drawn and what can be clicked agree.
+ui::viewport_icons::Request GltfRenderer::viewportIconRequest(const ImVec2& imageOrigin, const ImVec2& imageSize)
+{
+  const bool shown = hasValidScene() && !m_presentation.isActive();
+  return {.view         = {.view        = glm::mat4(m_cameraManip->getViewMatrix()),
+                           .projection  = glm::mat4(m_cameraManip->getPerspectiveMatrix()),
+                           .imageOrigin = {imageOrigin.x, imageOrigin.y},
+                           .imageSize   = {imageSize.x, imageSize.y}},
+          .scene        = shown ? m_resources.getScene() : nullptr,
+          .selectedNode = framingNodeIndex(),
+          .showAll      = m_resources.settings.showNodeIcons};
+}
+
+// Selects the light or camera whose glyph is under the cursor, and tells whether a glyph took the click: there
+// is no geometry behind a glyph for the ray to hit. Like a click on geometry it honors KHR_node_selectability,
+// and it drops an earlier geometry click that is still on its way, which would otherwise select after this one.
+bool GltfRenderer::selectIconAt(const ImVec2& imageOrigin, const ImVec2& imageSize, const ImVec2& mousePos)
+{
+  const ui::viewport_icons::Request request = viewportIconRequest(imageOrigin, imageSize);
+  if(request.scene == nullptr)
+    return false;
+  int node = ui::viewport_icons::pickIcon(request, {mousePos.x, mousePos.y});
+  if(node >= 0 && !request.scene->isNodeSelectable(node))
+    node = request.scene->nearestSelectableAncestor(node);
+  if(node < 0)
+    return false;
+
+  m_pendingClickPick.reset();
+  m_pendingClickResult.reset();
+  m_sceneSelection.selectNode(node);
+  m_sceneBrowser.focusOnSelection();
+  return true;
 }
 
 void GltfRenderer::mouseClickedInViewport()
@@ -165,9 +202,14 @@ void GltfRenderer::mouseClickedInViewport()
   if(clicked)
   {
     // Convert screen coordinates to normalized viewport coordinates [0,1]
-    ImVec2 mousePos      = ImGui::GetMousePos();
-    ImVec2 cursorPos     = ImGui::GetCursorScreenPos();
-    ImVec2 avail         = ImGui::GetContentRegionAvail();
+    ImVec2 mousePos  = ImGui::GetMousePos();
+    ImVec2 cursorPos = ImGui::GetCursorScreenPos();
+    ImVec2 avail     = ImGui::GetContentRegionAvail();
+
+    // A light or camera glyph under the cursor takes a selecting click. A double click still centers on
+    // what the ray hits.
+    if(!setCenter && selectIconAt(cursorPos, avail, mousePos))
+      return;
     ImVec2 localMousePos = ImVec2((mousePos.x - cursorPos.x) / avail.x, (mousePos.y - cursorPos.y) / avail.y);
 
     m_pendingClickPick = PendingClickPick{
@@ -639,6 +681,68 @@ void GltfRenderer::renderBenchmarkViewport()
   ImGui::PopStyleVar();
 }
 
+// Translates selection events into the resources the silhouette, Fit Object and the camera/interactivity
+// hooks read: the highlighted render nodes, an applied or recorded glTF camera, KHR_interactivity onSelect.
+// Installed once at construction, not by the UI pass, so a benchmark or headless run (which never reaches
+// renderUI()) reacts to a scripted selection the same way.
+void GltfRenderer::handleSelectionEvent(const SceneSelection::Event& event)
+{
+  switch(event.type)
+  {
+    case SceneSelection::EventType::CameraApply:
+      applyGltfCamera(event.data);
+      break;
+    case SceneSelection::EventType::CameraSetFromView:
+      setGltfCameraFromView(event.data);
+      break;
+    case SceneSelection::EventType::NodeSelected: {
+      m_resources.selectedRenderNodes.clear();
+      nvvkgltf::Scene* scn = m_resources.getScene();
+      if(scn && scn->valid())
+      {
+        const int        nodeIdx = event.data;
+        std::vector<int> renderNodeIDs;
+        scn->getRenderNodeRegistry().getAllRenderNodesForNodeRecursive(
+            nodeIdx,
+            [scn](int nid) {
+              const auto& node = scn->getModel().nodes[static_cast<size_t>(nid)];
+              return node.children;
+            },
+            renderNodeIDs);
+        for(int id : renderNodeIDs)
+          m_resources.selectedRenderNodes.insert(id);
+        // KHR_interactivity event/onSelect: real ray-pick hit point/origin when this selection
+        // was redirected here from an actual 3D-viewport click (e.g. KHR_node_selectability's
+        // nearest-selectable-ancestor fallback in updateSelectionFromPick()) - NaN (the
+        // spec-sanctioned "no ray info" fallback) otherwise (Scene Browser click, script-driven
+        // `selectnode`, ...; SceneSelection::selectNode's default parameters already are NaN).
+        scn->notifyNodeSelected(nodeIdx, event.selectionPoint, event.selectionRayOrigin);
+      }
+      break;
+    }
+    case SceneSelection::EventType::PrimitiveSelected: {
+      m_resources.selectedRenderNodes = {event.renderNodeIndex};
+      nvvkgltf::Scene* scn            = m_resources.getScene();
+      if(scn && scn->valid())
+      {
+        // KHR_interactivity event/onSelect: real ray-pick hit point/origin when this came from
+        // an actual 3D-viewport click (SceneSelection::selectPrimitive's default parameters
+        // are already the spec-sanctioned NaN fallback for callers with no ray - e.g. tests).
+        scn->notifyNodeSelected(event.data, event.selectionPoint, event.selectionRayOrigin);
+      }
+      break;
+    }
+    case SceneSelection::EventType::CameraOrLightSelected:
+      // No render node carries a camera or light: drop the previous mesh highlight, so the
+      // silhouette and Fit Object never act on a stale selection.
+      m_resources.selectedRenderNodes.clear();
+      break;
+    case SceneSelection::EventType::MaterialSelected:
+      // Material selection event
+      break;
+  }
+}
+
 void GltfRenderer::renderUI()
 {
   static int frameCount = 0;
@@ -668,71 +772,16 @@ void GltfRenderer::renderUI()
     ui::interactivity::renderWindow(m_resources.getScene(), m_resources.interactivityControl,
                                     &m_resources.settings.showInteractivityWindow);
 
-    // Scene Browser system: translate selection events into Resources for silhouette and fit-object
-    {
-      m_sceneSelection.setEventCallback([&](const SceneSelection::Event& event) {
-        switch(event.type)
-        {
-          case SceneSelection::EventType::CameraApply:
-            applyGltfCamera(event.data);
-            break;
-          case SceneSelection::EventType::CameraSetFromView:
-            setGltfCameraFromView(event.data);
-            break;
-          case SceneSelection::EventType::NodeSelected: {
-            m_resources.selectedRenderNodes.clear();
-            nvvkgltf::Scene* scn = m_resources.getScene();
-            if(scn && scn->valid())
-            {
-              const int        nodeIdx = event.data;
-              std::vector<int> renderNodeIDs;
-              scn->getRenderNodeRegistry().getAllRenderNodesForNodeRecursive(
-                  nodeIdx,
-                  [scn](int nid) {
-                    const auto& node = scn->getModel().nodes[static_cast<size_t>(nid)];
-                    return node.children;
-                  },
-                  renderNodeIDs);
-              for(int id : renderNodeIDs)
-                m_resources.selectedRenderNodes.insert(id);
-              // KHR_interactivity event/onSelect: real ray-pick hit point/origin when this selection
-              // was redirected here from an actual 3D-viewport click (e.g. KHR_node_selectability's
-              // nearest-selectable-ancestor fallback in updateSelectionFromPick()) - NaN (the
-              // spec-sanctioned "no ray info" fallback) otherwise (Scene Browser click, script-driven
-              // `selectnode`, ...; SceneSelection::selectNode's default parameters already are NaN).
-              scn->notifyNodeSelected(nodeIdx, event.selectionPoint, event.selectionRayOrigin);
-            }
-            break;
-          }
-          case SceneSelection::EventType::PrimitiveSelected: {
-            m_resources.selectedRenderNodes = {event.renderNodeIndex};
-            nvvkgltf::Scene* scn            = m_resources.getScene();
-            if(scn && scn->valid())
-            {
-              // KHR_interactivity event/onSelect: real ray-pick hit point/origin when this came from
-              // an actual 3D-viewport click (SceneSelection::selectPrimitive's default parameters
-              // are already the spec-sanctioned NaN fallback for callers with no ray - e.g. tests).
-              scn->notifyNodeSelected(event.data, event.selectionPoint, event.selectionRayOrigin);
-            }
-            break;
-          }
-          case SceneSelection::EventType::MaterialSelected:
-            // Material selection event
-            break;
-        }
-      });
+    m_sceneBrowser.render(&m_resources.settings.showSceneBrowserWindow, m_busy.isBusy());
+    m_inspector.render(&m_resources.settings.showInspectorWindow, m_busy.isBusy());
 
-      m_sceneBrowser.render(&m_resources.settings.showSceneBrowserWindow, m_busy.isBusy());
-      m_inspector.render(&m_resources.settings.showInspectorWindow, m_busy.isBusy());
-
-      // Top-level so the "Add Primitive" modal surfaces even when the Scene Browser window is
-      // hidden/collapsed (e.g. triggered from the menu-bar "Create"). requestAddPrimitive() remains
-      // the trigger; this just renders the pending modal.
-      m_sceneBrowser.showAddPrimitivePopup();
-      // Same rationale for the image viewer: it can be opened from the inspector (thumbnail click), so
-      // render it here rather than inside the Scene Browser's tab body.
-      m_sceneBrowser.showImageViewer();
-    }
+    // Top-level so the "Add Primitive" modal surfaces even when the Scene Browser window is
+    // hidden/collapsed (e.g. triggered from the menu-bar "Create"). requestAddPrimitive() remains
+    // the trigger; this just renders the pending modal.
+    m_sceneBrowser.showAddPrimitivePopup();
+    // Same rationale for the image viewer: it can be opened from the inspector (thumbnail click), so
+    // render it here rather than inside the Scene Browser's tab body.
+    m_sceneBrowser.showImageViewer();
 
 #ifdef USE_AGENTIC
     agentic::renderAgenticWindow(m_agentic, m_resources);
@@ -872,6 +921,10 @@ void GltfRenderer::renderUI()
     }
 
     renderTextureIsolateBar(imageTopLeft, imageSize);
+
+    // The glyphs of the lights and cameras: they have no geometry, so nothing else shows where they are.
+    // The selected one is drawn even when the glyphs are switched off.
+    ui::viewport_icons::drawIcons(ImGui::GetWindowDrawList(), viewportIconRequest(imageTopLeft, imageSize));
 
     // Axis gizmo: anchored to the 3D image's bottom-left, nudged up by one
     // frame-height when the Animation Strip is showing so the two don't overlap.
@@ -1116,6 +1169,7 @@ void GltfRenderer::renderViewMenu()
   ImGui::Separator();
   m_commands.menuItem("view.vsync");
   m_commands.menuItem("view.axis");
+  m_commands.menuItem("view.nodeIcons");
   m_commands.menuItem("view.statusBar");
   ImGui::Separator();
   m_commands.menuItem("view.grid");
@@ -1305,7 +1359,7 @@ void GltfRenderer::renderMenuToolbarAndGizmos()
   ImGui::SameLine();
   ImGui::SeparatorEx(ImGuiSeparatorFlags_Vertical);
   ImGui::SameLine();
-  static constexpr const char* kGizmoIds[] = {"view.grid", "view.gizmo", "view.snap", "view.animationStrip"};
+  static constexpr const char* kGizmoIds[] = {"view.grid", "view.gizmo", "view.snap", "view.nodeIcons", "view.animationStrip"};
   toggleButtons(kGizmoIds, ImVec2(buttonSize, buttonSize), [](const ui::Command& cmd) {
     if(cmd.binding.isBound())
       ImGui::SetTooltip("Toggle %s (%s in viewport)", cmd.label, ui::shortcutText(cmd.binding).c_str());
@@ -1482,7 +1536,7 @@ void GltfRenderer::registerCommands()
                   .group   = "View",
                   .binding = {kCtrl | ImGuiKey_F},
                   .run     = [this] { fitCamera(false); },
-                  .enabled = [this] { return hasValidScene() && !m_resources.selectedRenderNodes.empty(); }});
+                  .enabled = [this] { return framingNodeIndex() >= 0; }});
   m_commands.add({.id      = "view.vsync",
                   .label   = "V-Sync",
                   .icon    = ICON_MS_BOTTOM_PANEL_OPEN,
@@ -1496,6 +1550,12 @@ void GltfRenderer::registerCommands()
                   .group   = "View",
                   .run     = toggleFlag(settings.showAxis),
                   .checked = flagIsOn(settings.showAxis)});
+  m_commands.add({.id      = "view.nodeIcons",
+                  .label   = "Light & Camera Icons",
+                  .icon    = ICON_MS_LIGHTBULB,
+                  .group   = "View",
+                  .run     = toggleFlag(settings.showNodeIcons),
+                  .checked = flagIsOn(settings.showNodeIcons)});
   m_commands.add({.id      = "view.statusBar",
                   .label   = "Status Bar",
                   .icon    = ICON_MS_BOTTOM_NAVIGATION,
@@ -1622,7 +1682,31 @@ int GltfRenderer::selectedNodeIndex()
   return -1;
 }
 
-// Frame the whole scene, or the selected render nodes. A selection with no readable bounds leaves the camera alone.
+// The glTF node Fit Object frames: the selected node or primitive's node, or the node a selected camera
+// or light is attached to. -1 when nothing frameable is selected. A camera or light shared by several
+// nodes resolves to the first of them (see Scene::getCameraNode / getLightNode).
+int GltfRenderer::framingNodeIndex()
+{
+  if(!hasValidScene() || !m_sceneSelection.hasSelection())
+    return -1;
+  const SceneSelection::SelectionContext& sel = m_sceneSelection.getSelection();
+  switch(sel.type)
+  {
+    case SceneSelection::SelectionType::eNode:
+    case SceneSelection::SelectionType::ePrimitive:
+      return sel.nodeIndex;
+    case SceneSelection::SelectionType::eCamera:
+      return m_resources.getScene()->getCameraNode(sel.cameraIndex);
+    case SceneSelection::SelectionType::eLight:
+      return m_resources.getScene()->getLightNode(sel.lightIndex);
+    default:
+      return -1;
+  }
+}
+
+// Frame the whole scene, or the selection. A selection with bounds (a mesh, or a node whose subtree has
+// meshes) is fitted as a box. One without (a camera, a light, an empty node) has nothing to size the
+// view by, so the eye stays where it is and the view turns to look at the node.
 //
 // fit() moves only the eye, never the clip planes, so an authored far (or the one from an earlier
 // fit) can end before the box once the eye backs away, and the scene vanishes behind it. The
@@ -1631,8 +1715,28 @@ int GltfRenderer::selectedNodeIndex()
 // narrower axis) + R from the box center. It is never lowered.
 void GltfRenderer::fitCamera(bool wholeScene)
 {
-  const nvutils::Bbox bbox = wholeScene ? m_resources.getScene()->getSceneBounds() :
-                                          GltfRenderer::getRenderNodesBbox(m_resources.selectedRenderNodes);
+  nvutils::Bbox bbox;
+  if(wholeScene)
+  {
+    bbox = m_resources.getScene()->getSceneBounds();
+  }
+  else
+  {
+    const int node = framingNodeIndex();
+    if(node < 0)
+      return;
+    // The render-node set is the node's subtree for a node or primitive selection, and empty for a
+    // camera or light (see CameraOrLightSelected), so it never holds a stale mesh.
+    bbox = getRenderNodesBbox(m_resources.selectedRenderNodes);
+    if(bbox.isEmpty())
+    {
+      const glm::dvec3 target = glm::dvec3(m_resources.getScene()->computeNodeWorldMatrix(node)[3]);
+      // Looking at the eye itself is no direction.
+      if(glm::distance(target, m_cameraManip->getEye()) > 1e-6)
+        m_cameraManip->setCenter(target, false);
+      return;
+    }
+  }
   if(bbox.isEmpty())
     return;
 
@@ -1974,9 +2078,6 @@ void GltfRenderer::applyGltfCamera(int cameraIndex)
     m_cameraManip->adjustOrthographicAspect();
     m_cameraManip->setClipPlanes({camera.znear, camera.zfar});
   }
-
-  // Also update the scene's camera to keep extras (eye, center, up) in sync
-  m_resources.getScene()->setSceneCamera(camera);
 }
 
 //--------------------------------------------------------------------------------------------------
@@ -2127,6 +2228,7 @@ void GltfRenderer::setGltfCameraFromView(int cameraIndex)
 
   // Clear any existing matrix since we're using TRS
   node.matrix.clear();
+  m_resources.getScene()->markNodeDirty(nodeIndex);  // the scene's cached transform of the node, and the glyph, follow
 
   // Update the node extras with the current eye, center, and up vectors
   if(!node.extras.IsObject())

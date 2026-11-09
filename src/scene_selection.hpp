@@ -76,8 +76,9 @@ public:
     NodeSelected,
     PrimitiveSelected,
     MaterialSelected,
-    CameraApply,       // User wants to apply camera to view
-    CameraSetFromView  // User wants to set camera from current view
+    CameraOrLightSelected,  // A camera or light picked by index: no render node, so the geometry highlight must go
+    CameraApply,            // User wants to apply camera to view
+    CameraSetFromView       // User wants to set camera from current view
   };
 
   struct Event

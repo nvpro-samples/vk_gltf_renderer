@@ -99,7 +99,8 @@ with the code, the code wins (fix the doc — see "Keep the docs true").
   (OIDN runs on Vulkan compute through the prebuilt [vk_oidn](https://github.com/nvpro-samples/vk_oidn) package).
   `src/denoiser_handoff*` blends from DLSS-RR's image to OptiX / OIDN's when both are on
   ([docs/denoising.md](docs/denoising.md#dlss-hand-off)).
-- `src/gizmo_*` — transform gizmo, grid, overlays.
+- `src/gizmo_*` — transform gizmo, grid, overlays. `src/ui_viewport_icons.*` draws the lights and cameras as
+  glyphs (ImGui draw list).
 - `shaders/*.slang` + `shaders/shaderio.h` — GPU code and host/device structs.
 
 ## Invariants — do not break these

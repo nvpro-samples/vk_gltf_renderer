@@ -188,6 +188,8 @@ GltfRenderer::GltfRenderer(nvutils::ParameterRegistry* paramReg, const nvutils::
                   .callbackSuccess = [this](const nvutils::ParameterBase* const) { onRenderSystemChanged(); }},
                  (int*)&m_resources.settings.renderSystem, Persist::eYes, 0, 1);
   m_settings.add({"uiShowAxis", "Show Axis"}, &m_resources.settings.showAxis, Persist::eYes);
+  m_settings.add({"uiShowNodeIcons", "Draw the glyph of every light and camera in the viewport"},
+                 &m_resources.settings.showNodeIcons, Persist::eYes);
   m_settings.add({"uiShowStatusBar", "Show the status bar at the bottom of the window"},
                  &m_resources.settings.showStatusBar, Persist::eYes);
   m_settings.add({"uiShowMemStats", "Show Memory Statistics"}, &m_resources.settings.showMemStats, Persist::eYes);
@@ -674,9 +676,18 @@ GltfRenderer::GltfRenderer(nvutils::ParameterRegistry* paramReg, const nvutils::
                             LOGW("--uiScreenshot ignored: requires a windowed run (no swapchain in headless mode)\n");
                           }
                         },
-                    .selectSceneNode = [this](int index) { selectSceneNodeFromScript(index); },
-                    .pickSceneNode   = [this](int index) { pickSceneNodeFromScript(index); },
+                    .selectSceneNode   = [this](int index) { selectSceneNodeFromScript(index); },
+                    .pickSceneNode     = [this](int index) { pickSceneNodeFromScript(index); },
+                    .selectSceneCamera = [this](int index) { m_sceneSelection.selectCamera(index); },
+                    .selectSceneLight  = [this](int index) { m_sceneSelection.selectLight(index); },
+                    .fitObject =
+                        [this]() {
+                          if(framingNodeIndex() >= 0)
+                            fitCamera(false);
+                        },
                 });
+
+  m_sceneSelection.setEventCallback([this](const SceneSelection::Event& event) { handleSelectionEvent(event); });
 
   // Initialize camera manipulator
   m_cameraManip = std::make_shared<AnchorCameraManipulator>();

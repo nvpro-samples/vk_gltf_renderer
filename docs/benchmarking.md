@@ -275,11 +275,13 @@ The headless workflow captures the **viewport render only** — it never composi
   --scenefile shader_ball.gltf --hdrfile std_env.hdr --size 1600 900
 ```
 
-Three script parameters support this (registered alongside the other sequencer commands — see `BenchmarkController::registerParameters` in `src/benchmarking.cpp`):
+These script parameters support this (registered alongside the other sequencer commands — see `BenchmarkController::registerParameters` in `src/benchmarking.cpp` for the full, current set):
 
 - **`--uiScreenshot <file>`** — capture the full composited window (panels + viewport). This reads the swapchain PRESENT image, so it works only in a windowed run; it is ignored in `--headless` mode (no swapchain). Contrast with `--screenshot`, which saves the viewport render (gbuffer) only.
 - **`--selectNode <index>`** — select a scene-graph node by glTF node index (as listed in the Scene Browser tree), driving the Inspector contents and the Scene Browser highlight, exactly as a click in the tree would; the Scene Browser also expands and scrolls to it, as on a pick. A negative or out-of-range index clears the selection.
 - **`--pickNode <index>`** — pick that node's first render node as a viewport click would: the click rules apply (a primitive is selected, a read-only placed node redirects to its editable ancestor, an instance-set entry selects its primitive) and the Scene Browser expands to the selection.
+- **`--selectCamera <index>`** / **`--selectLight <index>`** — select a glTF camera or light by index, as a click in the Cameras or Lights list does. No render node is selected, so the geometry highlight clears.
+- **`--fitObject`** — fit the view to the current selection, as Ctrl+F does. Pair it with the selection parameters above to check how a camera, light or empty node is framed.
 
 Two ordering rules matter (both illustrated in [`utils/benchmark/ui_inspect.cfg`](../utils/benchmark/ui_inspect.cfg)):
 

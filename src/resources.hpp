@@ -157,33 +157,36 @@ inline bool environmentTurns(shaderio::EnvSystem env)
 
 struct Settings
 {
-  RenderingMode           renderSystem           = RenderingMode::ePathtracer;          // Renderer to use
-  shaderio::Visualization visualization          = shaderio::Visualization::eRendered;  // Visualization mode
+  RenderingMode           renderSystem  = RenderingMode::ePathtracer;          // Renderer to use
+  shaderio::Visualization visualization = shaderio::Visualization::eRendered;  // Visualization mode
   // Texture isolate: one material texture shown raw and unlit, on top of `visualization`, which comes back
   // when it is switched off (the Inspector's eye button). Session state, not persisted: a material and
   // texture index mean nothing once another scene is loaded. Active while both indices are >= 0.
-  int                      isolateMaterial = -1;     // glTF material index
-  nvvkgltf::TextureBinding isolateBinding;           // which use of a texture in that material; texture < 0: none
-  int                      isolateChannel  = 0;      // 0 = RGB, 1..4 = R, G, B, A
-  bool                     isolateSrgb     = false;  // color data (base color, emissive, ...): show it as authored
-  bool                    wireframe       = false;  // Wireframe overlay on rendered meshes
-  shaderio::EnvSystem     envSystem              = shaderio::EnvSystem::eSky;  // Environment system: Sky or HDR
-  bool                    showAxis               = true;                       // Show the axis (bottom left)
-  bool                    showStatusBar          = true;   // Status bar along the bottom of the window
-  bool                    showGrid               = false;  // Show infinite grid
-  bool                    showGizmo              = false;  // Show transform gizmo on selected node
-  bool                    snapEnabled            = false;  // Snap gizmo transforms to grid increments
-  float                   gridUnit               = 1.0f;   // Grid base unit (world units)
-  float                   snapRotation           = 45.0f;  // Rotation snap increment (degrees)
-  float                   snapScale              = 0.1f;   // Scale snap increment
-  bool                    showMemStats           = false;  // Show memory statistics window
-  bool                    showCameraWindow       = true;   // Show Camera window
-  bool                    showSettingsWindow     = true;   // Show Settings window
-  bool                    showEnvironmentWindow  = true;   // Show Environment window
-  bool                    showTonemapperWindow   = true;   // Show Tonemapper window
-  bool                    showStatisticsWindow   = false;  // Show Statistics window
-  bool                    showSceneBrowserWindow = true;   // Show Scene Browser window
-  bool                    showInspectorWindow    = true;   // Show Inspector window
+  int                      isolateMaterial = -1;    // glTF material index
+  nvvkgltf::TextureBinding isolateBinding;          // which use of a texture in that material; texture < 0: none
+  int                      isolateChannel = 0;      // 0 = RGB, 1..4 = R, G, B, A
+  bool                     isolateSrgb    = false;  // color data (base color, emissive, ...): show it as authored
+  bool                     wireframe      = false;  // Wireframe overlay on rendered meshes
+  shaderio::EnvSystem      envSystem      = shaderio::EnvSystem::eSky;  // Environment system: Sky or HDR
+  bool                     showAxis       = true;                       // Show the axis (bottom left)
+
+  bool showNodeIcons = true;  // Glyph of every light and camera (the selected one is always shown)
+
+  bool  showStatusBar           = true;   // Status bar along the bottom of the window
+  bool  showGrid                = false;  // Show infinite grid
+  bool  showGizmo               = false;  // Show transform gizmo on selected node
+  bool  snapEnabled             = false;  // Snap gizmo transforms to grid increments
+  float gridUnit                = 1.0f;   // Grid base unit (world units)
+  float snapRotation            = 45.0f;  // Rotation snap increment (degrees)
+  float snapScale               = 0.1f;   // Scale snap increment
+  bool  showMemStats            = false;  // Show memory statistics window
+  bool  showCameraWindow        = true;   // Show Camera window
+  bool  showSettingsWindow      = true;   // Show Settings window
+  bool  showEnvironmentWindow   = true;   // Show Environment window
+  bool  showTonemapperWindow    = true;   // Show Tonemapper window
+  bool  showStatisticsWindow    = false;  // Show Statistics window
+  bool  showSceneBrowserWindow  = true;   // Show Scene Browser window
+  bool  showInspectorWindow     = true;   // Show Inspector window
   bool  showInteractivityWindow = false;  // Show KHR_interactivity Graphs window (opt-in, unlike the above)
   bool  showAgenticWindow       = false;  // Show Agentic bridge window
   bool  showGridSettingsWindow  = false;  // Show Grid & Snap settings window

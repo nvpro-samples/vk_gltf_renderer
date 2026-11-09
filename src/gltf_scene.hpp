@@ -27,6 +27,7 @@
 #include <cstdint>
 #include <map>
 #include <memory>
+#include <numeric>
 #include <optional>
 #include <ranges>
 #include <span>
@@ -479,8 +480,12 @@ public:
   [[nodiscard]] std::span<const int> getMeshNodes(int meshIndex) const;         // nodes with node.mesh == meshIndex
   [[nodiscard]] std::span<const int> getMeshPlacingNodes(int meshIndex) const;  // nodes whose instance set draws it
   [[nodiscard]] int                  getMaterialPrimitiveCount(int materialIndex) const;  // mesh primitives using it
+  [[nodiscard]] std::span<const int> getCameraNodes(int cameraIndex) const;  // nodes with node.camera == cameraIndex
+  [[nodiscard]] std::span<const int> getLightNodes(int lightIndex) const;    // nodes with node.light == lightIndex
+  [[nodiscard]] std::span<const int> getActiveCameraNodes() const;  // nodes carrying a camera, in the active scene
   [[nodiscard]] int                  getCameraNode(int cameraIndex) const;  // first node carrying it, or -1
   [[nodiscard]] int                  getLightNode(int lightIndex) const;    // first node carrying it, or -1
+  [[nodiscard]] int getRenderedLightNode(int lightIndex) const;  // lowest rendering node, or -1 (walks lights)
   // Rebuild the usage index on its next query: for edits that change what it records without a
   // scene-graph revision bump (camera attachment).
   void invalidateElementUsage() { m_elementUsage.revision = ~uint64_t(0); }
@@ -592,7 +597,6 @@ public:
 
   // Rebuild: if true, clears and repopulates the camera list from the scene graph before returning.
   const std::vector<nvvkgltf::RenderCamera>& getRenderCameras(bool rebuild = false);
-  void                                       setSceneCamera(const nvvkgltf::RenderCamera& camera);
   void                                       setSceneCameras(const std::vector<nvvkgltf::RenderCamera>& cameras);
 
   //--------------------------------------------------------------------------------------------------
@@ -917,6 +921,58 @@ private:
   // -- those do not bump m_sceneGraphRevision.
   mutable uint64_t m_shadedCacheSceneGraphRevision = 0;
 
+  // For each element of one kind, the nodes that use it, in node order. One flat array plus offsets,
+  // so a scene of a million nodes holds no vector per element. Built in two passes over the same uses:
+  // count() each one, allocate(), then add() each one. Indices out of range are ignored.
+  class NodeLists
+  {
+  public:
+    // Empties the lists and sizes them for `elementCount` elements.
+    void reset(int elementCount)
+    {
+      m_offset.assign(elementCount + 1, 0);
+      m_items.clear();
+    }
+    // First pass: counts one use of `element`.
+    void count(int element)
+    {
+      if(valid(element))
+        ++m_offset[element + 1];
+    }
+    // Between the passes: turns the counts into offsets and sizes the item array.
+    void allocate()
+    {
+      std::partial_sum(m_offset.begin(), m_offset.end(), m_offset.begin());
+      m_items.resize(m_offset.back());
+      m_cursor.assign(m_offset.begin(), m_offset.end() - 1);
+    }
+    // Second pass: records that `node` uses `element`.
+    void add(int element, int node)
+    {
+      if(valid(element))
+        m_items[m_cursor[element]++] = node;
+    }
+    // Every use of every element: the nodes that use any element, grouped by element.
+    [[nodiscard]] std::span<const int> all() const { return m_items; }
+    // The nodes using `element`, empty when it is out of range.
+    [[nodiscard]] std::span<const int> list(int element) const
+    {
+      return valid(element) ?
+                 std::span<const int>(m_items).subspan(m_offset[element], m_offset[element + 1] - m_offset[element]) :
+                 std::span<const int>{};
+    }
+
+  private:
+    [[nodiscard]] bool valid(int element) const
+    {
+      return element >= 0 && element + 1 < static_cast<int>(m_offset.size());
+    }
+
+    std::vector<int> m_offset;  // element e: m_items[m_offset[e], m_offset[e + 1])
+    std::vector<int> m_items;
+    std::vector<int> m_cursor;  // next free slot of each element while adding
+  };
+
   // The index behind isMeshReadOnly(), getMeshNodes() and the other usage queries, rebuilt by
   // elementUsage() when m_sceneGraphRevision or an element count changes: parseScene, reparenting
   // and material assignment bump the revision; adding or removing an element changes a count. An
@@ -925,13 +981,15 @@ private:
   struct ElementUsage
   {
     uint64_t              revision = ~uint64_t(0);
-    std::array<size_t, 5> counts{};  // nodes, meshes, materials, cameras, lights it was built for
+    std::array<size_t, 5> counts{};           // nodes, meshes, materials, cameras, lights it was built for
+    int                   currentScene = -1;  // the active scene it was built for
     std::vector<uint8_t>  readOnlyMeshes;
     std::vector<uint8_t>  readOnlyMaterials;
-    std::vector<int>      meshNodesOffset, meshNodes;      // mesh m: meshNodes[offset[m], offset[m + 1])
-    std::vector<int>      meshPlacingOffset, meshPlacing;  // same layout, placing nodes of instance sets
+    NodeLists             meshNodes;    // nodes with node.mesh == mesh
+    NodeLists             meshPlacing;  // placing nodes of the instance sets drawing the mesh
+    NodeLists             cameraNodes, lightNodes;
+    std::vector<int>      activeCameraNodes;  // the camera nodes the active scene reaches, in node order
     std::vector<int>      materialPrimitives;
-    std::vector<int>      cameraNode, lightNode;
   };
   const ElementUsage&  elementUsage() const;
   mutable ElementUsage m_elementUsage;

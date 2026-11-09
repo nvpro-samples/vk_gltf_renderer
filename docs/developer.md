@@ -167,7 +167,9 @@ src/
 ├── ies_profile.cpp/hpp         # EXT_lights_ies: IESNA LM-63 photometric profile parser
 │
 ├── ui_inspector.cpp/hpp        # Property inspector (per selection type: node/primitive/material/
-│                               #   mesh/camera/light/texture/image/sampler/animation)
+│                               #   mesh/camera/light/texture/image/sampler/animation). A node's mesh, camera
+│                               #   and light are sections of the node view, one row each in the table of
+│                               #   `renderNodeAttachments()`; a new kind of element is a new row.
 ├── ui_scene_browser.cpp/hpp    # Scene Browser window: Scene Graph tree + the Elements tab host
 ├── ui_scene_browser_elements.cpp # Elements tab: builds the ElementTypeDesc registry and the one
 │                               #   generic list renderer (icon tabs, columns, toolbar, sort, filter)
@@ -187,6 +189,8 @@ src/
 │                               #   full screen on the window's monitor; saves/restores both
 ├── ui_status_bar.cpp/hpp       # Status bar along the bottom of the window: accumulation, speed,
 │                               #   denoiser, resolution and shader state (PathTracer::getStatus())
+├── ui_viewport_icons.cpp/hpp   # Glyphs of the lights and cameras (ImGui draw list over the viewport
+│                               #   image) and click-to-select: world-space wireframes, constant pixel size
 ├── ui_commands.cpp/hpp         # Command registry: every menu/toolbar/keyboard command and its
 │                               #   key binding, and the shortcut routing (see Add a command)
 ├── ui_help.cpp/hpp             # Help menu: Keyboard & Mouse reference (live camera table,

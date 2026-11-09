@@ -797,28 +797,104 @@ void UiInspector::renderNodeProperties(int nodeIdx)
     renderTransformSection(nodeIdx);
   ImGui::EndDisabled();
 
+  renderNodeAttachments(nodeIdx);
+
   // Pure navigation (jump links), not an edit -- stays clickable on a read-only node.
   if(ImGui::CollapsingHeader("RELATIONSHIPS", ImGuiTreeNodeFlags_DefaultOpen))
     renderNodeRelationships(nodeIdx);
-
-  // EXT_lights_ies is standalone per spec. If the node also carries KHR_lights_punctual, the KHR
-  // attachment is ignored (see Scene::handleLightTraversal) -- surface that inline so the author
-  // knows why edits to the KHR light have no effect on this node.
-  if(tinygltf::utils::getNodeIesLight(node).light >= 0)
-  {
-    if(ImGui::CollapsingHeader((std::string(ICON_MS_FLASHLIGHT_ON) + " IES LIGHT (EXT_lights_ies)").c_str(), ImGuiTreeNodeFlags_DefaultOpen))
-    {
-      if(node.light >= 0)
-        ImGui::TextColored(ImVec4(1.0f, 0.8f, 0.3f, 1.0f),
-                           "%s KHR_lights_punctual on this node is ignored (EXT_lights_ies is standalone).", ICON_MS_WARNING);
-      renderIesEditor(nodeIdx);
-    }
-  }
 
   ImGui::BeginDisabled(readOnly);
   if(ImGui::CollapsingHeader("NODE EXTENSIONS"))
     renderNodeExtensions(nodeIdx);
   ImGui::EndDisabled();
+}
+
+//==================================================================================================
+// NODE ATTACHMENTS: the elements a node references, edited where the node is
+//==================================================================================================
+
+// Draws a section for each element the node references, so a light or a camera is edited from its
+// node with no hop through Relationships. The table below is the only place that knows the kinds:
+// a new one is a row. Only the selected node is visited, and a closed section draws nothing, so the
+// cost does not grow with the scene. The section's id is fixed per kind ("###"), so a section the
+// user closed stays closed on the next node. A mesh's users are its nodes and the placing nodes of the
+// instance sets that draw it, as in the mesh's own view.
+void UiInspector::renderNodeAttachments(int nodeIdx)
+{
+  using Kind  = SceneSelection::SelectionType;
+  using Users = std::span<const int> (nvvkgltf::Scene::*)(int) const;
+  struct Attachment
+  {
+    Kind kind                             = Kind::eMesh;
+    int (*indexOf)(const tinygltf::Node&) = nullptr;  // the node's reference, or -1
+    Users users                           = nullptr;  // the nodes using an element
+    Users placing                         = nullptr;  // the placing nodes drawing it, if any
+    void (UiInspector::*body)(int)        = nullptr;  // the element's editors
+    bool defaultOpen                      = false;
+  };
+  // Static: a constant table of non-capturing lambdas and member pointers, built once and not on every frame.
+  static constexpr Attachment kAttachments[] = {
+      {Kind::eMesh, [](const tinygltf::Node& n) { return n.mesh; }, &nvvkgltf::Scene::getMeshNodes,
+       &nvvkgltf::Scene::getMeshPlacingNodes, &UiInspector::renderMeshBody, false},
+      {Kind::eCamera, [](const tinygltf::Node& n) { return n.camera; }, &nvvkgltf::Scene::getCameraNodes, nullptr,
+       &UiInspector::renderCameraBody, true},
+      {Kind::eLight, [](const tinygltf::Node& n) { return n.light; }, &nvvkgltf::Scene::getLightNodes, nullptr,
+       &UiInspector::renderLightBody, true},
+  };
+
+  const tinygltf::Node& node = m_scene->getModel().nodes[nodeIdx];
+  for(size_t i = 0; i < std::size(kAttachments); ++i)
+  {
+    const Attachment& attachment = kAttachments[i];
+    const int         index      = attachment.indexOf(node);
+    if(index < 0)
+      continue;
+    const std::string title = elementRefLabel(attachment.kind, index) + "###attachment" + std::to_string(int(attachment.kind));
+    ImGui::PushID(int(attachment.kind));
+    if(ImGui::CollapsingHeader(title.c_str(), attachment.defaultOpen ? ImGuiTreeNodeFlags_DefaultOpen : 0))
+    {
+      const std::span<const int> users = (m_scene->*attachment.users)(index);
+      const std::span<const int> placing = attachment.placing ? (m_scene->*attachment.placing)(index) : std::span<const int>{};
+      if(users.size() + placing.size() > 1)  // alone, the node is the one the user came from
+        renderUsedBy(users, placing);
+      (this->*attachment.body)(index);
+    }
+    ImGui::PopID();
+  }
+
+  // EXT_lights_ies is standalone per spec, data on the node and not an element it references. If the
+  // node also carries KHR_lights_punctual, that attachment is ignored (see Scene::handleLightTraversal):
+  // say so, so the author knows why edits to the KHR light have no effect on this node.
+  if(tinygltf::utils::getNodeIesLight(node).light >= 0
+     && ImGui::CollapsingHeader((std::string(ICON_MS_FLASHLIGHT_ON) + " IES LIGHT (EXT_lights_ies)").c_str(), ImGuiTreeNodeFlags_DefaultOpen))
+  {
+    if(node.light >= 0)
+      ImGui::TextColored(ImVec4(1.0f, 0.8f, 0.3f, 1.0f),
+                         "%s KHR_lights_punctual on this node is ignored (EXT_lights_ies is standalone).", ICON_MS_WARNING);
+    renderIesEditor(nodeIdx);
+  }
+}
+
+// The nodes using an element, as jump links under a "Used by nodes (N)" header. Open when there is a
+// single one, so the way back to the node is a click away. Clipped: a placed kit piece can have a
+// million users.
+void UiInspector::renderUsedBy(std::span<const int> nodes, std::span<const int> placing)
+{
+  const int users = int(nodes.size() + placing.size());
+  char      header[64];
+  std::snprintf(header, sizeof(header), "Used by nodes (%d)###used_by", users);
+  if(!ImGui::CollapsingHeader(header, users <= 1 ? ImGuiTreeNodeFlags_DefaultOpen : 0))
+    return;
+  ImGuiListClipper clipper;
+  clipper.Begin(users);
+  while(clipper.Step())
+    for(int i = clipper.DisplayStart; i < clipper.DisplayEnd; ++i)
+    {
+      const int node = i < int(nodes.size()) ? nodes[i] : placing[i - nodes.size()];
+      ImGui::PushID(i);
+      elementLink(elementRefLabel(SceneSelection::SelectionType::eNode, node).c_str(), SceneSelection::SelectionType::eNode, node);
+      ImGui::PopID();
+    }
 }
 
 //==================================================================================================
@@ -971,31 +1047,34 @@ void UiInspector::renderTexturesUsing(const char* header, const std::function<bo
   ImGui::Unindent();
 }
 
+// The structure around a node, compact: its parent and skin on one line each, then its children
+// under one header. What the node carries (mesh, camera, light) is shown by renderNodeAttachments,
+// and what does not exist is not drawn.
 void UiInspector::renderNodeRelationships(int nodeIdx)
 {
   const tinygltf::Model& model = m_scene->getModel();
   const tinygltf::Node&  node  = model.nodes[nodeIdx];
 
-  elementLinkRow("Parent", SceneSelection::SelectionType::eNode, m_scene->editor().getNodeParent(nodeIdx), 120.0f, "Scene root");
-  elementLinkRow("Mesh", SceneSelection::SelectionType::eMesh, node.mesh);
-  elementLinkRow("Camera", SceneSelection::SelectionType::eCamera, node.camera);
-  elementLinkRow("Light", SceneSelection::SelectionType::eLight, node.light);
-
-  // Skin has no dedicated inspector/selection kind yet; show its index/name for reference.
-  ImGui::AlignTextToFramePadding();
-  ImGui::TextUnformatted("Skin");
-  ImGui::SameLine(120.0f);
-  if(node.skin < 0)
-    ImGui::TextDisabled("-");
-  else
+  // Rows as tall as their text: the default frame padding makes a one-line row twice as high.
+  ImGui::PushStyleVar(ImGuiStyleVar_FramePadding, ImVec2(ImGui::GetStyle().FramePadding.x, 1.0f));
+  constexpr float labelWidth = 60.0f;
+  elementLinkRow("Parent", SceneSelection::SelectionType::eNode, m_scene->editor().getNodeParent(nodeIdx), labelWidth, "Scene root");
+  if(node.skin >= 0)  // no selection kind of its own yet: index and name for reference
+  {
+    ImGui::AlignTextToFramePadding();
+    ImGui::TextUnformatted("Skin");
+    ImGui::SameLine(labelWidth);
     ImGui::Text("[%d] %s", node.skin, node.skin < int(model.skins.size()) ? model.skins[node.skin].name.c_str() : "");
+  }
+  ImGui::PopStyleVar();
 
-  // Children (each a jump link). A node of a placed district can hold thousands, so the list is clipped.
-  ImGui::Spacing();
-  ImGui::Text("Children (%zu)", node.children.size());
-  ImGui::Indent();
+  // Children, each a jump link. A node of a placed district can hold thousands, so the list is clipped.
   if(node.children.empty())
-    ImGui::TextDisabled("none");
+    return;
+  char header[48];
+  std::snprintf(header, sizeof(header), "Children (%zu)###children", node.children.size());
+  if(!ImGui::TreeNodeEx(header, ImGuiTreeNodeFlags_SpanAvailWidth | (node.children.size() <= 8 ? ImGuiTreeNodeFlags_DefaultOpen : 0)))
+    return;
   ImGuiListClipper clipper;
   clipper.Begin(int(node.children.size()));
   while(clipper.Step())
@@ -1007,7 +1086,7 @@ void UiInspector::renderNodeRelationships(int nodeIdx)
         elementLink(elementRefLabel(SceneSelection::SelectionType::eNode, c).c_str(), SceneSelection::SelectionType::eNode, c);
       ImGui::PopID();
     }
-  ImGui::Unindent();
+  ImGui::TreePop();
 }
 
 // A viewport click on read-only placed content selects its first editable ancestor (so the gizmo
@@ -1424,6 +1503,7 @@ void UiInspector::renderPrimitiveDetail(int meshIdx, int primIdx)
     ImGui::TextDisabled("Morph targets: %zu", prim.targets.size());
 }
 
+// The Inspector's view of a mesh picked by index: its title, its editors, and the nodes using it.
 void UiInspector::renderMeshProperties(int meshIdx)
 {
   const tinygltf::Model& model = m_scene->getModel();
@@ -1437,6 +1517,20 @@ void UiInspector::renderMeshProperties(int meshIdx)
   ImGui::SameLine();
   ui_xmp::renderInfoButton(&m_scene->getModel(), mesh.extensions, popupId.c_str());
   ImGui::Separator();
+
+  renderMeshBody(meshIdx);
+
+  ImGui::Separator();
+  renderUsedBy(m_scene->getMeshNodes(meshIdx), m_scene->getMeshPlacingNodes(meshIdx));
+}
+
+// A mesh's totals, bounds and primitives.
+void UiInspector::renderMeshBody(int meshIdx)
+{
+  const tinygltf::Model& model = m_scene->getModel();
+  if(meshIdx < 0 || meshIdx >= static_cast<int>(model.meshes.size()))
+    return;
+  const tinygltf::Mesh& mesh = model.meshes[meshIdx];
 
   // Totals and mesh-space bounds across primitives.
   long long     totalVerts = 0, totalTris = 0;
@@ -1479,37 +1573,28 @@ void UiInspector::renderMeshProperties(int meshIdx)
     }
     ImGui::PopID();
   }
-
-  ImGui::Separator();
-
-  // Used by nodes: the nodes carrying the mesh, then the placing nodes whose instance set draws it
-  // (glTF 2.1 placed content), as jump links. A placed kit piece can be used by thousands of nodes,
-  // so the list is clipped.
-  const std::span<const int> meshNodes    = m_scene->getMeshNodes(meshIdx);
-  const std::span<const int> placingNodes = m_scene->getMeshPlacingNodes(meshIdx);
-  const int                  users        = int(meshNodes.size() + placingNodes.size());
-  char                       usedHdr[64];
-  std::snprintf(usedHdr, sizeof(usedHdr), "Used by nodes (%d)##used_by_%d", users, meshIdx);
-  if(ImGui::CollapsingHeader(usedHdr))
-  {
-    ImGuiListClipper clipper;
-    clipper.Begin(users);
-    while(clipper.Step())
-      for(int i = clipper.DisplayStart; i < clipper.DisplayEnd; ++i)
-      {
-        const int n = i < int(meshNodes.size()) ? meshNodes[i] : placingNodes[i - meshNodes.size()];
-        ImGui::PushID(i);
-        elementLink(elementRefLabel(SceneSelection::SelectionType::eNode, n).c_str(), SceneSelection::SelectionType::eNode, n);
-        ImGui::PopID();
-      }
-  }
 }
 
 //==================================================================================================
 // CAMERA PROPERTIES
 //==================================================================================================
 
+// The Inspector's view of a camera picked by index: its title, the nodes carrying it, and its editors.
 void UiInspector::renderCameraProperties(int camIdx)
+{
+  const tinygltf::Model& model = m_scene->getModel();
+  if(camIdx < 0 || camIdx >= static_cast<int>(model.cameras.size()))
+    return;
+
+  ImGui::Text("%s Camera[%d]: %s", ICON_MS_CAMERA_ALT, camIdx, model.cameras[camIdx].name.c_str());
+  renderUsedBy(m_scene->getCameraNodes(camIdx));
+  ImGui::Separator();
+
+  renderCameraBody(camIdx);
+}
+
+// A camera's projection parameters and its link with the viewport.
+void UiInspector::renderCameraBody(int camIdx)
 {
   const tinygltf::Model& model = m_scene->getModel();
   if(camIdx < 0 || camIdx >= static_cast<int>(model.cameras.size()))
@@ -1517,10 +1602,7 @@ void UiInspector::renderCameraProperties(int camIdx)
 
   tinygltf::Camera& camera = m_scene->getModel().cameras[camIdx];  // No getCameraForEdit yet; direct access
 
-  ImGui::Text("%s Camera[%d]: %s", ICON_MS_CAMERA_ALT, camIdx, camera.name.c_str());
   ImGui::TextDisabled("Type: %s", camera.type.empty() ? "perspective" : camera.type.c_str());
-  elementLinkRow("Attached to", SceneSelection::SelectionType::eNode, m_scene->getCameraNode(camIdx), 100.0f, "(unattached)");
-  ImGui::Separator();
 
   if(PE::begin())
   {
@@ -1564,9 +1646,9 @@ void UiInspector::renderCameraProperties(int camIdx)
 
   if(m_selection)
   {
-    bool       follow   = m_selection->followCamera() == camIdx;
-    const bool animated = m_scene->animation().isNodeAnimated(m_scene->getCameraNode(camIdx))
-                          || ui::interactivity::hasGraph(m_scene);
+    bool       follow = m_selection->followCamera() == camIdx;
+    const bool animated =
+        m_scene->animation().isNodeAnimated(m_scene->getCameraNode(camIdx)) || ui::interactivity::hasGraph(m_scene);
     ImGui::BeginDisabled(!animated && !follow);
     if(ImGui::Checkbox("Follow (animated camera)", &follow))
     {
@@ -1584,7 +1666,25 @@ void UiInspector::renderCameraProperties(int camIdx)
 // LIGHT PROPERTIES
 //==================================================================================================
 
+// The Inspector's view of a light picked by index: its title, the nodes carrying it, and its editors.
 void UiInspector::renderLightProperties(int lightIdx)
+{
+  const tinygltf::Model& model = m_scene->getModel();
+  if(lightIdx < 0 || lightIdx >= static_cast<int>(model.lights.size()))
+    return;
+
+  ImGui::Text("%s Light[%d]: %s", ICON_MS_LIGHTBULB, lightIdx, model.lights[lightIdx].name.c_str());
+  renderUsedBy(m_scene->getLightNodes(lightIdx));
+
+  // EXT_lights_ies is standalone per spec: even if the attached node also carries a profile, it
+  // does not compose with this KHR light -- see Scene::handleLightTraversal and the Node inspector.
+  ImGui::Separator();
+
+  renderLightBody(lightIdx);
+}
+
+// A light's editors, with the undo step of an edit.
+void UiInspector::renderLightBody(int lightIdx)
 {
   const tinygltf::Model& model = m_scene->getModel();
   if(lightIdx < 0 || lightIdx >= static_cast<int>(model.lights.size()))
@@ -1594,13 +1694,6 @@ void UiInspector::renderLightProperties(int lightIdx)
 
   // Snapshot before any widget can modify the light (for undo)
   tinygltf::Light preEditLight = light;
-
-  ImGui::Text("%s Light[%d]: %s", ICON_MS_LIGHTBULB, lightIdx, light.name.c_str());
-  elementLinkRow("Attached to", SceneSelection::SelectionType::eNode, m_scene->getLightNode(lightIdx), 100.0f, "(unattached)");
-
-  // EXT_lights_ies is standalone per spec: even if the attached node also carries a profile, it
-  // does not compose with this KHR light -- see Scene::handleLightTraversal and the Node inspector.
-  ImGui::Separator();
 
   bool modif = false;
 
@@ -1658,27 +1751,18 @@ void UiInspector::renderLightProperties(int lightIdx)
       //
       // One light may be instanced by several nodes, and the marker lives on a node. When the
       // marked node is one of this light's, that is the node the checkbox speaks for; otherwise it
-      // would mark the first instance.
+      // marks the lowest node that renders the light (a node outside the active scene would not
+      // make it the sun).
       //
-      // The sun is the scene's resolved answer, and this light's nodes come from the render lights:
-      // this runs each frame the light is shown, so it never walks the node list.
+      // This runs each frame the light is shown, so it asks the scene's resolved sun and the usage
+      // index and walks neither the lights nor the nodes. Finding the node to mark walks the render
+      // lights, once, on the click.
       const std::vector<nvvkgltf::RenderLight>& rlights  = m_scene->getRenderLights();
       const int                                 sunLight = m_scene->getSkySunLight();
       const int                                 sunNode  = sunLight >= 0 ? rlights[sunLight].nodeID : -1;
-      int                                       thisNode = -1;
-      if(sunLight >= 0 && rlights[sunLight].light == lightIdx)
-        thisNode = sunNode;
-      else
+      if(m_undoStack != nullptr && m_scene->getLightNode(lightIdx) >= 0)
       {
-        for(const nvvkgltf::RenderLight& rl : rlights)
-        {
-          if(rl.light == lightIdx && (thisNode < 0 || rl.nodeID < thisNode))
-            thisNode = rl.nodeID;
-        }
-      }
-      if(thisNode >= 0 && m_undoStack != nullptr)
-      {
-        bool isSun = (sunNode == thisNode);
+        bool isSun = sunLight >= 0 && rlights[sunLight].light == lightIdx;
         if(PE::Checkbox("Sky's Sun", &isSun,
                         "Make this light the sun of the Sky and Gradient environments.\n\n"
                         "It then drives the sky's direction and takes the atmosphere's brightness and "
@@ -1686,7 +1770,9 @@ void UiInspector::renderLightProperties(int lightIdx)
                         "it off and the renderer supplies its own sun instead, without touching this "
                         "light."))
         {
-          m_undoStack->executeCommand(std::make_unique<SetSkySunCommand>(*m_scene, sunNode, isSun ? thisNode : -1));
+          const int thisNode = isSun ? m_scene->getRenderedLightNode(lightIdx) : -1;  // isSun is the new state
+          if(!isSun || thisNode >= 0)
+            m_undoStack->executeCommand(std::make_unique<SetSkySunCommand>(*m_scene, sunNode, thisNode));
         }
       }
     }

@@ -91,7 +91,7 @@ void SceneSelection::selectCamera(int camIdx)
   m_selection.type        = SelectionType::eCamera;
   m_selection.cameraIndex = camIdx;
 
-  // No event emitted for camera selection (events are for Apply/SetFromView)
+  emitEvent({EventType::CameraOrLightSelected, camIdx, -1});
 }
 
 //--------------------------------------------------------------------------------------------------
@@ -103,7 +103,7 @@ void SceneSelection::selectLight(int lightIdx)
   m_selection.type       = SelectionType::eLight;
   m_selection.lightIndex = lightIdx;
 
-  // No event emitted for light selection (internal UI only)
+  emitEvent({EventType::CameraOrLightSelected, lightIdx, -1});
 }
 
 //--------------------------------------------------------------------------------------------------

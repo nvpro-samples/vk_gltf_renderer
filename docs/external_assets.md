@@ -444,7 +444,7 @@ by canonical source path so a file shared by several entries is copied at most o
 | Load a file, aliases, image rebase, meshopt | `nvvkgltf::detail`, `gltf_scene_loading.hpp` |
 | Instance sets | `InstanceSet`, `Scene::getInstanceSet`, `Scene::getInstanceSetDraw` / `getInstanceSetRenderNode`, `Scene::materializeInstanceSets`, `ExternalAssetPlacer::staticTree` / `addInstanceSet` |
 | Read-only marker + queries | `Scene::kExternalAssetContentKey`, `isNodeReadOnly`, `isMeshReadOnly`, `isMaterialReadOnly`, `ReferencedAsset`, `gltf_scene.{hpp,cpp}` |
-| Element usage (who draws a mesh, uses a material, carries a camera or light) | `Scene::elementUsage`, `getMeshNodes`, `getMeshPlacingNodes`, `getMaterialPrimitiveCount`, `getCameraNode`, `getLightNode`, `gltf_scene.cpp` |
+| Element usage (who draws a mesh, uses a material, carries a camera or light) | `Scene::elementUsage`, `getMeshNodes`, `getMeshPlacingNodes`, `getMaterialPrimitiveCount`, `getCameraNodes`, `getLightNodes`, `gltf_scene.cpp` |
 | Editor guards | `SceneEditor::blockIfNodeReadOnly` + guarded mutators, `gltf_scene_editor.cpp` |
 | UI (badge / disabled controls / gizmo skip / clicked part / Elements lock) | `ui_inspector.cpp`, `ui_scene_browser.cpp`, `ui_scene_browser_elements.cpp` |
 | Save (re-externalize / flatten) | `Scene::save`, `removeExternalAssetContent`, `flattenExternalAssets`, `gltf_scene.cpp` + `gltf_compact_scene.cpp` |
