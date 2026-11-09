@@ -448,22 +448,21 @@ PathStepResult pathTraceOneBounce(IRaytracer raytracer, inout RayDesc ray, inout
     //-----------------------------------------------------------------------
     // Adding emissive
     //-----------------------------------------------------------------------
-    // Emitters that are also sampled as area lights (constant emissive, no emissive texture) get
-    // hit by BSDF rays too; MIS-weight those against the light technique, mirroring the env-hit
-    // MIS above. Textured emitters are not in the light list, so they stay unweighted.
+    // Emitters that are also sampled as area lights get hit by BSDF rays too; MIS-weight
+    // those against the light technique, mirroring the env-hit MIS above.
     bool pathCovered = false;  // The photons have what the path would find from here on
 #if USE_CAUSTICS
-    // Only emitters the photons can start from: a textured emissive mesh is not in the light list
-    pathCovered = causticCovered(pt) && !hitInfinitePlane && !isTexturePresent(materials[materialIndex].emissiveTexture);
+    pathCovered = causticCovered(pt) && !hitInfinitePlane;
 #endif
     if(!pathCovered && any(pbrMat.emissive > float3(0.0)))
     {
       float emissiveMis = 1.0;
-      if(!hitInfinitePlane && !isTexturePresent(materials[materialIndex].emissiveTexture))
+      if(!hitInfinitePlane)
       {
-        // Power-weighted MIS pdf needs only the emitter's own radiance, its geometric normal, and
-        // W_total (the area cancels) -- no per-triangle lookup.
-        emissiveMis = computeEmitterHitMisWeight(pt.lastSamplePdf, pbrMat.emissive, hit.geonrm, ray.Direction, payload.hitT);
+        // Power-weighted MIS pdf needs only the emitter's evaluated radiance (pbrMat.emissive),
+        // its geometric normal, and W_total (the area cancels) -- no per-triangle lookup.
+        emissiveMis = computeEmitterHitMisWeight(pt.lastSamplePdf, pbrMat.emissive,
+                                                 hit.geonrm, ray.Direction, payload.hitT);
       }
       pt.radiance += emissiveMis * pbrMat.emissive * pt.throughput;
     }

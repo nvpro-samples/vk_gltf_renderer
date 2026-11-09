@@ -666,6 +666,30 @@ EmissiveSample sampleEmissiveTriangle(int emissiveIndex, float3 shadingPos, inou
   // of a far emitter (missed occluders -> light leak). Clamp so very near emitters stay positive.
   es.distance = dist - min(dist * 0.5f, 1e-2f);
   es.radiance = et.radiance;
+
+  // Modulate by the emissive texture at the sampled point, mirroring gltf_material_eval.h.slang's
+  // emissive-term evaluation. The barycentrics (1-b1-b2, b1, b2) give the interpolated UV.
+  {
+    GltfRenderNode      node     = pushConst.gltfScene.renderNodes[et.renderNodeID];
+    GltfShadeMaterial*  mats     = pushConst.gltfScene->materials;
+    GltfShadeMaterial   mat      = mats[max(0, node.materialID)];
+    if(isTexturePresent(mat.emissiveTexture))
+    {
+      GltfRenderPrimitive prim      = pushConst.gltfScene.renderPrimitives[et.renderPrimID];
+      uint3               idx       = getTriangleIndices(prim, int(et.triangleID));
+      GltfTextureInfo*    texInfos  = pushConst.gltfScene->textureInfos;
+      GltfTextureInfo     texInfo   = texInfos[mat.emissiveTexture];
+      float3              bary      = float3(1.0 - b1 - b2, b1, b2);
+      float2              uv        = getInterpolatedVertexTexCoord(prim, texInfo.texCoord, idx, bary);
+      uv                            = applyTextureTransform(texInfo, uv);
+      float3 texColor = allImages[NonUniformResourceIndex(texInfo.index)]
+                             .SampleLevel(allSamplers[NonUniformResourceIndex(texInfo.samplerIndex)], uv, 0.0f)
+                             .rgb;
+      es.radiance *= texColor;
+    }
+  }
+  es.radiance = max(float3(0.0F), es.radiance);
+
   // Power-weighted solid-angle pdf; the triangle area cancels (see header). Uses the defensive
   // luminance so it matches the host selection weight.
   es.pdf = emitterDefensiveLuminance(et.radiance) * dist2 / (wtot * cosLight);
