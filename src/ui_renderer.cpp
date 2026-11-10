@@ -2448,6 +2448,10 @@ void GltfRenderer::renderStatisticsWindow()
     }
   }
 
+  // Files loaded by the scene's external assets, at every nesting level (a nested file is not placed by
+  // the scene's own nodes, so the count above stops at the first level).
+  numReferencedFiles = std::max(numReferencedFiles, m_resources.getScene()->externalFileCount());
+
   // Create a table for better organization
   if(ImGui::BeginTable("StatisticsTable", 2, ImGuiTableFlags_Borders | ImGuiTableFlags_RowBg))
   {

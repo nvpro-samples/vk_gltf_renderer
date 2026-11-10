@@ -885,22 +885,25 @@ void TransformHelperVk::createRayFromMouse(const glm::vec2& mousePos,
   float ndcY = (2.0f * mousePos.y) / viewport.y - 1.0f;
 
   glm::mat4 invView = glm::inverse(viewMatrix);
-  glm::mat4 invProj = glm::inverse(projMatrix);
 
-  glm::vec4 rayStartNDC(ndcX, ndcY, 0.0f, 1.0f);
-  glm::vec4 rayEndNDC(ndcX, ndcY, 1.0f, 1.0f);
+  // Build the ray analytically from the projection terms instead of unprojecting the near and far
+  // planes through a float inverse: with a large far/near ratio that inverse is imprecise and the
+  // ray (hence picking and hover) goes wrong, which is why changing the clip planes "fixed" it.
+  const bool ortho = projMatrix[2][3] == 0.0f;
+  glm::vec3  originView, dirView;
+  if(ortho)
+  {
+    originView = glm::vec3((ndcX - projMatrix[3][0]) / projMatrix[0][0], (ndcY - projMatrix[3][1]) / projMatrix[1][1], 0.0f);
+    dirView = glm::vec3(0.0f, 0.0f, -1.0f);
+  }
+  else
+  {
+    originView = glm::vec3(0.0f);
+    dirView = glm::vec3((ndcX + projMatrix[2][0]) / projMatrix[0][0], (ndcY + projMatrix[2][1]) / projMatrix[1][1], -1.0f);
+  }
 
-  glm::vec4 rayStartView = invProj * rayStartNDC;
-  glm::vec4 rayEndView   = invProj * rayEndNDC;
-
-  rayStartView /= rayStartView.w;
-  rayEndView /= rayEndView.w;
-
-  glm::vec4 rayStartWorld = invView * rayStartView;
-  glm::vec4 rayEndWorld   = invView * rayEndView;
-
-  rayOrigin = glm::vec3(rayStartWorld);
-  rayDir    = glm::normalize(glm::vec3(rayEndWorld - rayStartWorld));
+  rayOrigin = glm::vec3(invView * glm::vec4(originView, 1.0f));
+  rayDir    = glm::normalize(glm::vec3(invView * glm::vec4(dirView, 0.0f)));
 }
 
 bool TransformHelperVk::rayIntersectsBounds(const glm::vec3& rayOrigin,

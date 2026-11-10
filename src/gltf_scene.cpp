@@ -479,6 +479,7 @@ bool nvvkgltf::Scene::load(const std::filesystem::path& filename)
   // data); reset it here, once per file load. The per-node read-only markers live in the model
   // itself and are reset when m_model is cleared above.
   m_referencedAssets.clear();
+  m_externalFileCount = 0;
   m_instanceSets.clear();
 
   if(m_loadProgress)
@@ -995,6 +996,7 @@ void nvvkgltf::Scene::takeModel(tinygltf::Model&& model, const std::filesystem::
   m_model = std::move(model);
   setSourceFilename(sourceFilename);
   m_referencedAssets.clear();
+  m_externalFileCount = 0;
   m_instanceSets.clear();
   if(m_animation)
     m_animation->resetPointer();
@@ -2397,6 +2399,7 @@ void nvvkgltf::Scene::destroy()
   m_validSceneParsed = false;
   m_model            = {};
   m_referencedAssets.clear();
+  m_externalFileCount = 0;
   m_instanceSets.clear();
 }
 

@@ -379,6 +379,9 @@ public:
   void          setLoadProgress(LoadProgress* progress) { m_loadProgress = progress; }
   LoadProgress* loadProgress() const { return m_loadProgress; }
 
+  // The .gltf/.glb files the scene's external assets loaded, nested ones included, each counted once.
+  uint64_t externalFileCount() const { return m_externalFileCount; }
+
   //--------------------------------------------------------------------------------------------------
   // Model Access
   //--------------------------------------------------------------------------------------------------
@@ -891,6 +894,7 @@ private:
   // Frees the JSON of the files placed by the last load: as long as placing them on large scenes, so
   // done off the load path. It owns what it frees; joined before the next load and on destruction.
   std::thread m_externalAssetRelease;
+  uint64_t    m_externalFileCount = 0;  // set by resolveExternalAssets()
 
   //--------------------------------------------------------------------------------------------------
   // Data Members: Render Data (Built from Model)

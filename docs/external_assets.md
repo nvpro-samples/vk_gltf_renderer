@@ -63,7 +63,7 @@ flowchart TD
         G --> H["SceneMerger::appendResources<br/>meshes, materials, accessors,<br/>animation samplers - no nodes"]
     end
     E -->|yes| L
-    H --> L{"Content static?<br/>no skin, animation, light,<br/>camera, nested placement<br/>or node extension"}
+    H --> L{"Content static?<br/>no skin, animation, light,<br/>nested placement<br/>or node extension"}
     F -.->|missing / invalid| W2["warn once,<br/>place nothing"]
 
     L -->|yes| M["InstanceSet on the placing node<br/>entry per mesh node:<br/>mesh + transform in the file"]
@@ -166,8 +166,8 @@ throwaway copy.
    The cache key is the canonical path **and the alias context**: aliases belong to the referencing
    file, so the same file reached with other aliases is another entry.
 3. **Places** it under the referencing node, in one of two ways:
-   - **Static content** — no node of the file's default scene is skinned, animated, a light or a
-     camera, places a file, or carries an extension (which may need a node of its own, e.g.
+   - **Static content** — no node of the file's default scene is skinned, animated or a light,
+     places a file, or carries an extension (which may need a node of its own, e.g.
      `EXT_mesh_gpu_instancing`). The placing node gets an **instance set**
      (`nvvkgltf::InstanceSet`, found through `Scene::kInstanceSetKey` in its `extras`): one entry
      per mesh node of the file, with the mesh and its transform relative to the file's scene. No
@@ -179,7 +179,9 @@ throwaway copy.
      offsets (`SceneMerger::remapNodeResources`). A node of the placed file that has an
      `externalAsset` places its own file inside the copy, recursively, through the same cache.
      Skins that target copied nodes, and animation channels, are duplicated per copy, so each
-     placement animates on its own.
+     placement animates on its own. A placed file's **cameras are ignored**: the copied nodes do not
+     carry them (a camera belongs to the referencing scene, and a prop with a stray one would add
+     one per placement). Its `cameras` entries are still appended, so they stay listed but unused.
 4. **Tags** every node it created read-only via `recordReferencedAsset` (which stamps the marker
    through `setExternalAssetMarker`) (§4).
 

@@ -367,6 +367,21 @@ TEST_F(Gltf21Test, Placement_StaticTreesAreInstanceSets)
   EXPECT_EQ(setRenderNodes, 10);  // everything but the local child
 }
 
+// camera_prop.gltf: a camera inside a placed file is ignored, so a prop with a stray one adds no camera
+// node per placement and is still static content.
+TEST_F(Gltf21Test, Placement_PlacedFileCamerasAreIgnored)
+{
+  nvvkgltf::Scene scene;
+  ASSERT_TRUE(scene.load(kFixtures / "placement/camera_prop.gltf"));
+  const tinygltf::Model& model = scene.getModel();
+  // The scene has no camera of its own, so the loader adds one default camera node: the only one.
+  ASSERT_EQ(scene.getActiveCameraNodes().size(), 1u);
+  const tinygltf::Camera& camera = model.cameras[model.nodes[scene.getActiveCameraNodes()[0]].camera];
+  EXPECT_NE(camera.name, "stray");
+  for(int placing = 0; placing < 3; ++placing)
+    EXPECT_NE(scene.getInstanceSet(placing), nullptr) << model.nodes[placing].name;
+}
+
 // Each entry primitive of an instance set has its own render node, found both ways, so the Scene
 // Browser can list placed content under its placing node and a viewport pick can select it.
 TEST_F(Gltf21Test, Placement_InstanceSetDrawsMapToRenderNodes)

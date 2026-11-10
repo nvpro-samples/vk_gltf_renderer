@@ -328,12 +328,14 @@ public:
     return files;
   }
 
+  size_t loadedFiles() const { return m_loadedCanonical.size(); }  // unique files loaded, nested ones included
+
   void logSummary() const
   {
     const double total = m_timer.getSeconds();
     LOGI("External assets: %zu file(s) loaded once each (%.2f s), %zu image(s) and %zu buffer(s) shared, %zu placement(s), %zu drawn as instance sets, %zu node(s) and %zu animation channel(s) created (%.2f s)\n",
-         m_loadedFiles, m_loadSeconds, m_sharedImages, m_sharedBuffers, m_placements, m_instanceSetPlacements,
-         m_placedNodes, m_channelCopies, total - m_loadSeconds);
+         m_loadedCanonical.size(), m_loadSeconds, m_sharedImages, m_sharedBuffers, m_placements,
+         m_instanceSetPlacements, m_placedNodes, m_channelCopies, total - m_loadSeconds);
   }
 
 private:
@@ -420,7 +422,7 @@ private:
     const PlacedFile& x = *placed;
     m_ancestry.push_back(ref.canonical);
 
-    // Static content (nothing skinned, animated, lit, with a camera, placing a file or carrying a
+    // Static content (nothing skinned, animated, lit, placing a file or carrying a
     // node extension) is drawn through an instance set: one entry per mesh node, no node copied.
     // Anything else is copied as nodes, which own their skins and animation channels.
     if(const StaticTree* tree = staticTree(x))
@@ -531,7 +533,7 @@ private:
       std::vector<unsigned char>().swap(image.image);
 
     x.loaded = true;
-    m_loadedFiles++;
+    m_loadedCanonical.insert(x.canonical);  // an alias context of a loaded file is not another file
 
     // The files it places, resolved while loading it.
     for(auto& [fileIndex, childRef] : loaded.placed)
@@ -679,14 +681,17 @@ private:
     node.matrix      = src.matrix;
     node.weights     = src.weights;
     node.light       = src.light;
-    node.camera      = src.camera;
-    node.mesh        = src.mesh >= 0 && src.mesh < static_cast<int>(x.model.meshes.size()) ? src.mesh : -1;
-    node.extensions  = src.extensions;
-    node.extras      = src.extras;
+    // A placed file's cameras are not copied: a camera is the scene's to place, and a prop that
+    // carries one (a stray export leftover) would otherwise add one per placement.
+    node.camera     = -1;
+    node.mesh       = src.mesh >= 0 && src.mesh < static_cast<int>(x.model.meshes.size()) ? src.mesh : -1;
+    node.extensions = src.extensions;
+    node.extras     = src.extras;
     SceneMerger::remapNodeResources(node, x.offsets);
     if(node.mesh >= 0)
     {
-      tinygltf::Value::Object obj = node.extras.IsObject() ? node.extras.Get<tinygltf::Value::Object>() : tinygltf::Value::Object{};
+      tinygltf::Value::Object obj =
+          node.extras.IsObject() ? node.extras.Get<tinygltf::Value::Object>() : tinygltf::Value::Object{};
       obj[Scene::kPlacedSourceKey] = tinygltf::Value(fmt::format("{}#{}", x.canonical, nodeIndex));
       node.extras                  = tinygltf::Value(std::move(obj));
     }
@@ -717,7 +722,7 @@ private:
       if(nodeMap[n] < 0 || skin < 0 || skin >= static_cast<int>(x.model.skins.size()))
         continue;
       const std::pair<std::unordered_map<int, int>::iterator, bool> copied = skinCopies.try_emplace(skin, -1);
-      const std::unordered_map<int, int>::iterator                 it     = copied.first;
+      const std::unordered_map<int, int>::iterator                  it     = copied.first;
       if(copied.second)
       {
         tinygltf::Skin copy = x.model.skins[skin];
@@ -770,12 +775,12 @@ private:
   // weights, extras) that materializing an instance set writes back, shared by every placement.
   struct StaticTree
   {
-    std::vector<TreeMesh>                               meshes;
+    std::vector<TreeMesh>                              meshes;
     std::shared_ptr<const std::vector<tinygltf::Node>> sources;
   };
 
   // The static content of `x`, if it can be drawn through an instance set: nullptr if a node in it
-  // is skinned, animated, a light or a camera (which the placement keeps), places a file, or has an
+  // is skinned, animated or a light (which the placement keeps), places a file, or has an
   // extension (which may need a node of its own, e.g. EXT_mesh_gpu_instancing). Computed once per
   // file.
   const StaticTree* staticTree(const PlacedFile& x)
@@ -810,8 +815,7 @@ private:
   {
     const tinygltf::Node& node  = x.model.nodes[n];
     const int             count = static_cast<int>(x.model.nodes.size());
-    if(node.skin >= 0 || x.animatedNode[n] || node.light >= 0 || node.camera >= 0 || node.externalAsset >= 0
-       || !node.extensions.empty() || level > count)
+    if(node.skin >= 0 || x.animatedNode[n] || node.light >= 0 || node.externalAsset >= 0 || !node.extensions.empty() || level > count)
       return false;  // (a level deeper than the node count is a malformed cycle)
     if(node.mesh >= 0 && node.mesh < static_cast<int>(x.model.meshes.size()))
     {
@@ -855,19 +859,19 @@ private:
     return index;
   }
 
-  using ResolvedPaths  = std::map<std::pair<const PlacedFile*, int>, FileRef>;
-  using PlacedFiles    = std::unordered_map<std::string, std::unique_ptr<PlacedFile>>;
-  using StaticTrees    = std::unordered_map<const PlacedFile*, std::optional<StaticTree>>;
+  using ResolvedPaths = std::map<std::pair<const PlacedFile*, int>, FileRef>;
+  using PlacedFiles   = std::unordered_map<std::string, std::unique_ptr<PlacedFile>>;
+  using StaticTrees   = std::unordered_map<const PlacedFile*, std::optional<StaticTree>>;
 
   Scene&           m_scene;
   tinygltf::Model& m_model;
   PlacedFile       m_sceneFile;
 
-  PlacedFiles                                                  m_files;     // (canonical path, alias context)
-  std::vector<std::string>                                     m_ancestry;  // files on the current placement path
-  std::unordered_set<std::string>                              m_warned;
-  ResolvedPaths m_resolvedPaths;  // (file, files index) -> what it points at
-  StaticTrees   m_staticTrees;    // empty optional: not static
+  PlacedFiles                     m_files;     // (canonical path, alias context)
+  std::vector<std::string>        m_ancestry;  // files on the current placement path
+  std::unordered_set<std::string> m_warned;
+  ResolvedPaths                   m_resolvedPaths;  // (file, files index) -> what it points at
+  StaticTrees                     m_staticTrees;    // empty optional: not static
 
   nvutils::PerformanceTimer m_timer;              // since construction
   double                    m_loadSeconds = 0.0;  // of which loading and appending files
@@ -880,14 +884,14 @@ private:
 
   std::unordered_map<std::string, LoadedFile> m_preloaded;  // by FileRef::key, until acquired
 
-  size_t m_loadedFiles           = 0;
-  size_t m_sharedImages          = 0;
-  size_t m_sharedBuffers         = 0;
-  size_t m_placements            = 0;
-  size_t m_instanceSetPlacements = 0;  // placements drawn through an instance set
-  size_t m_placedNodes           = 0;
-  size_t m_channelCopies         = 0;
-  bool   m_truncated             = false;
+  std::unordered_set<std::string> m_loadedCanonical;  // canonical paths of the files loaded
+  size_t                          m_sharedImages          = 0;
+  size_t                          m_sharedBuffers         = 0;
+  size_t                          m_placements            = 0;
+  size_t                          m_instanceSetPlacements = 0;  // placements drawn through an instance set
+  size_t                          m_placedNodes           = 0;
+  size_t                          m_channelCopies         = 0;
+  bool                            m_truncated             = false;
 };
 
 //--------------------------------------------------------------------------------------------------
@@ -922,6 +926,7 @@ bool Scene::resolveExternalAssets()
       m_loadProgress->advance(1, m_model.nodes[node].name);
   }
   placer.logSummary();
+  m_externalFileCount = placer.loadedFiles();
   // Freeing thousands of parsed files takes as long as placing them (the heap serializes the frees,
   // so threads don't help): it happens on a thread of its own while the scene goes on to the GPU.
   if(m_externalAssetRelease.joinable())

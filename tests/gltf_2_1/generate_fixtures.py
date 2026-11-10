@@ -325,6 +325,23 @@ def placement(out_dir: Path) -> None:
     single_scene(m, range(5))
     write(out_dir, "placement/static.gltf", m)
 
+    # camera_prop.gltf: kit/camera_prop.gltf is a quad with a stray camera node (an export leftover),
+    # placed three times. A placed file's camera is ignored: no placement gets a camera node, and the
+    # prop still counts as static content (an instance set).
+    prop = new_model()
+    prop["meshes"] = [{"name": "prop", "primitives": [quad_geometry(prop, 1.0)]}]
+    prop["cameras"] = [{"type": "perspective", "name": "stray",
+                        "perspective": {"yfov": 0.8, "znear": 0.1, "aspectRatio": 1.5}}]
+    prop["nodes"] = [{"name": "prop", "mesh": 0}, {"name": "stray_camera", "camera": 0}]
+    single_scene(prop, [0, 1])
+    write(out_dir, "placement/kit/camera_prop.gltf", prop)
+
+    m = new_model()
+    prop_ref = external_reference(m, "kit/camera_prop.gltf")
+    m["nodes"] = [{"name": f"prop_{i}", "externalAsset": prop_ref, "translation": [2.0 * i, 0.0, 0.0]} for i in range(3)]
+    single_scene(m, range(3))
+    write(out_dir, "placement/camera_prop.gltf", m)
+
     # shared_kit.gltf places district_a and district_b, which both place kit/piece.gltf twice: the
     # piece is loaded once, so its two primitives are two RenderPrimitives, not four.
     for name, x in (("district_a", 0.0), ("district_b", 10.0)):
