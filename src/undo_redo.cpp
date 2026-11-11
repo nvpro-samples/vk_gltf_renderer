@@ -699,6 +699,85 @@ std::string AddLightCommand::description() const
 }
 
 //--------------------------------------------------------------------------------------------------
+// AddCameraCommand
+//--------------------------------------------------------------------------------------------------
+
+AddCameraCommand::AddCameraCommand(nvvkgltf::Scene&              scene,
+                                   const std::string&            name,
+                                   const nvvkgltf::RenderCamera& view,
+                                   int                           parentIndex,
+                                   SceneSelection*               selection)
+    : m_scene(scene)
+    , m_name(name)
+    , m_view(view)
+    , m_parentIndex(parentIndex)
+    , m_selection(selection)
+{
+  m_snapshot = std::make_unique<nvvkgltf::SceneGraphSnapshot>(m_scene.editor().snapshotForDelete());
+}
+
+AddCameraCommand::~AddCameraCommand() = default;
+
+void AddCameraCommand::execute()
+{
+  m_newNodeIndex = m_scene.editor().addCameraNode(m_name, m_view, m_parentIndex);
+  if(m_newNodeIndex >= 0 && m_selection)
+    m_selection->selectNode(m_newNodeIndex);
+}
+
+void AddCameraCommand::undo()
+{
+  if(m_snapshot)
+  {
+    if(m_selection)
+      m_selection->clearSelection();
+    m_scene.editor().restoreFromSnapshot(*m_snapshot);
+    m_newNodeIndex = -1;
+  }
+}
+
+std::string AddCameraCommand::description() const
+{
+  return fmt::format("Add Camera '{}'", m_name);
+}
+
+//--------------------------------------------------------------------------------------------------
+// RemoveCameraCommand
+//--------------------------------------------------------------------------------------------------
+
+RemoveCameraCommand::RemoveCameraCommand(nvvkgltf::Scene& scene, int cameraIndex, SceneSelection* selection)
+    : m_scene(scene)
+    , m_cameraIndex(cameraIndex)
+    , m_selection(selection)
+{
+  m_name     = m_scene.getModel().cameras[cameraIndex].name;
+  m_snapshot = std::make_unique<nvvkgltf::SceneGraphSnapshot>(m_scene.editor().snapshotForDelete());
+}
+
+RemoveCameraCommand::~RemoveCameraCommand() = default;
+
+void RemoveCameraCommand::execute()
+{
+  if(m_selection)
+    m_selection->clearSelection();
+  m_scene.editor().removeCamera(m_cameraIndex);
+}
+
+void RemoveCameraCommand::undo()
+{
+  if(m_snapshot)
+    m_scene.editor().restoreFromSnapshot(*m_snapshot);
+  m_scene.invalidateElementUsage();
+  if(m_selection)
+    m_selection->selectCamera(m_cameraIndex);
+}
+
+std::string RemoveCameraCommand::description() const
+{
+  return fmt::format("Delete Camera '{}'", m_name);
+}
+
+//--------------------------------------------------------------------------------------------------
 // AddPrimitiveCommand
 //--------------------------------------------------------------------------------------------------
 

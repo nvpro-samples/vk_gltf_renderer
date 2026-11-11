@@ -129,4 +129,11 @@ LocalClock systemLocalClock();
 /// ini file carry.
 bool parseIsoDate(const std::string& text, int& year, int& month, int& day);
 
+/// Days in `year` (365 or 366), and the 1-based day of the year for a valid month/day.
+int daysInYear(int year);
+int dayOfYear(int year, int month, int day);
+
+/// The inverse: month and day for a 1-based day of the year, clamped to the year's length.
+void dateFromDayOfYear(int year, int dayOfYear, int& month, int& day);
+
 }  // namespace sun_position

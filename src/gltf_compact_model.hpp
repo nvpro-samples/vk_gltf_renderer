@@ -35,6 +35,14 @@ Returns true if any data was removed, false if model was already compact.
 bool compactModel(tinygltf::Model& model);
 
 /*-------------------------------------------------------------------------------------------------
+## Function `pruneUnusedAnimationSamplers`
+
+Drops the samplers of `animation` that no channel references and renumbers `channel.sampler` to
+match. Channels sharing one sampler keep it. Returns true if any sampler was removed.
+-------------------------------------------------------------------------------------------------*/
+bool pruneUnusedAnimationSamplers(tinygltf::Animation& animation);
+
+/*-------------------------------------------------------------------------------------------------
 ## Function `removeExternalAssetContent`
 
 Re-externalization for glTF 2.1 complex scenes: removes every node that was merged in from a

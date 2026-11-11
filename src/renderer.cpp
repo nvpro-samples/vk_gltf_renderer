@@ -910,6 +910,7 @@ void GltfRenderer::onAttach(nvapp::Application* app)
   // Wire the create-catalog hook up front so the menu-bar "Create" works with nothing loaded:
   // it stands up an empty, UI-wired scene on demand (wireSceneToUi re-sets this same hook later).
   m_sceneBrowser.setBeforeCreateCallback([this] { ensureEmptyScene(); });
+  m_sceneBrowser.setCurrentViewCallback([this] { return currentView(); });
   m_sceneBrowser.setOpenSceneCallback([this](const std::filesystem::path& p) { m_pendingOpenScene = p; });
 
   // The Environment panel. It edits Settings through m_resources directly; everything below is a
@@ -2043,31 +2044,10 @@ bool GltfRenderer::save(const std::filesystem::path& filename, bool selfContaine
 {
   if(m_resources.getScene() && m_resources.getScene()->valid() && !filename.empty())
   {
-    std::vector<nvvkgltf::RenderCamera> cameras = nvvkgltf::getCamerasFromWidget();
-
-    // Replace the first camera with the current view
-    if(!cameras.empty())
-    {
-      nvvkgltf::RenderCamera& camera = cameras[0];
-      m_cameraManip->getLookat(camera.eye, camera.center, camera.up);
-      camera.znear = m_cameraManip->getClipPlanes().x;
-      camera.zfar  = m_cameraManip->getClipPlanes().y;
-
-      if(m_cameraManip->getProjectionType() == nvutils::CameraManipulator::Orthographic)
-      {
-        camera.type = nvvkgltf::RenderCamera::CameraType::eOrthographic;
-        camera.xmag = static_cast<double>(m_cameraManip->getOrthographicXmag());
-        camera.ymag = static_cast<double>(m_cameraManip->getOrthographicYmag());
-      }
-      else
-      {
-        camera.type = nvvkgltf::RenderCamera::CameraType::ePerspective;
-        camera.yfov = glm::radians(m_cameraManip->getFov());
-      }
-
-      // Set all cameras
-      m_resources.getScene()->setSceneCameras(cameras);
-    }
+    // The viewport view goes in the scene's extras so a reload resumes where this one stopped. The glTF
+    // cameras are real nodes the user edits explicitly (Create > Camera, Set from Current View); saving
+    // never rewrites them.
+    m_resources.getScene()->setSavedView(currentView());
 
     // Install the environment-sky writer for this save. Done here rather than at scene creation
     // so that no load path can forget it -- there is exactly one place a scene is saved.
@@ -3474,7 +3454,7 @@ void GltfRenderer::finalizeSceneSetup(const std::filesystem::path& filename)
   m_resources.settings.infinitePlaneDistance = scene->getSceneBounds().min().y;  // Set the infinite plane distance to the bottom of the scene
 
   // Set camera from scene, unless a camera string overrides it
-  nvvkgltf::addSceneCamerasToWidget(m_cameraManip, filename, scene->getRenderCameras(), scene->getSceneBounds());
+  nvvkgltf::setupSceneView(m_cameraManip, filename, *scene);
   applyCameraString(m_benchmark.cameraString());
 
   // Viewer-side environment controls (hdrEnvIntensity, envRotation, the backplate override)
@@ -3670,7 +3650,7 @@ void GltfRenderer::createSceneFromDescriptor(const std::filesystem::path& descri
 
   m_resources.settings.infinitePlaneDistance = scene->getSceneBounds().min().y;
 
-  nvvkgltf::addSceneCamerasToWidget(m_cameraManip, descriptorPath, scene->getRenderCameras(), scene->getSceneBounds());
+  nvvkgltf::setupSceneView(m_cameraManip, descriptorPath, *scene);
   applyCameraString(m_benchmark.cameraString());
 
   if(!updateTextures())

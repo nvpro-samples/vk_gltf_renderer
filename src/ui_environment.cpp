@@ -652,9 +652,9 @@ bool UiEnvironment::atmospherePresetPicker(bool& atmoChanged)
   Settings&          st             = m_resources->settings;
   const int          match          = matchingAtmospherePreset(st);
   int                shown          = (match < 0) ? eAtmospherePresetCount : match;
-  const bool         picked         = PE::Combo("Preset", &shown, kPresetNames, IM_ARRAYSIZE(kPresetNames), -1,
-                                                "A whole atmosphere at once. Mars and Alien are plausible, not authoritative -- "
-                                                                "somewhere to start, not numbers to cite.")
+  const bool picked = PE::Combo("Preset", &shown, kPresetNames, IM_ARRAYSIZE(kPresetNames), -1,
+                                "A whole atmosphere at once. Mars and Alien are plausible, not authoritative -- "
+                                "somewhere to start, not numbers to cite.")
                       && shown < eAtmospherePresetCount;
   if(picked)
   {
@@ -1158,6 +1158,33 @@ bool UiEnvironment::sunLocationAndDate(const TimeOfDayEvents& events)
     ImGui::SameLine();
     ImGui::TextColored(ImVec4(1.0F, 0.6F, 0.2F, 1.0F), ICON_MS_WARNING);
     nvgui::tooltip("Not a yyyy-mm-dd date, so the sun is staying where it is.");
+  }
+
+  // A season slider over the same date: a quick sweep through the year, while the field above stays
+  // the exact entry. It rewrites the text rather than keeping a second copy of the date, so the two
+  // can never disagree. Greyed out while the text is not a date -- there is no year to sweep.
+  {
+    static const char* kMonths[] = {"Jan", "Feb", "Mar", "Apr", "May", "Jun", "Jul", "Aug", "Sep", "Oct", "Nov", "Dec"};
+    int                year = 0, month = 1, day = 1;
+    const bool         validDate = sun_position::parseIsoDate(st.todDate, year, month, day);
+    int                doy       = validDate ? sun_position::dayOfYear(year, month, day) : 1;
+    char               shown[24] = "--";
+    if(validDate)
+      snprintf(shown, sizeof(shown), "%s %d", kMonths[month - 1], day);
+
+    ImGui::BeginDisabled(!validDate);
+    if(PE::SliderInt("Day of Year", &doy, 1, validDate ? sun_position::daysInYear(year) : 365, shown, ImGuiSliderFlags_AlwaysClamp,
+                     "Sweep the date through the year, keeping the year typed above. Ctrl+click to type a day "
+                     "number; use the Date field for an exact date.")
+       && validDate)
+    {
+      sun_position::dateFromDayOfYear(year, doy, month, day);
+      char text[16];
+      snprintf(text, sizeof(text), "%04d-%02d-%02d", year, month, day);
+      st.todDate = text;
+      moved      = true;
+    }
+    ImGui::EndDisabled();
   }
 
   moved |= PE::SliderFloat("UTC Offset", &st.todUtcOffset, -12.0F, 14.0F, "%+.1f h", 0,

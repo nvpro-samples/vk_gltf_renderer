@@ -52,7 +52,7 @@ TEST(PrimitivesTest, AddToFreshSceneBuildsPayload)
   EXPECT_EQ(m.buffers.size(), 1u);
   EXPECT_EQ(m.bufferViews.size(), 4u);
   EXPECT_EQ(m.accessors.size(), 4u);
-  EXPECT_EQ(m.nodes.size(), 2u);  // primitive node + synthesized default camera node
+  EXPECT_EQ(m.nodes.size(), 1u);  // the primitive node; no camera is synthesized
 
   ASSERT_EQ(m.meshes[0].primitives.size(), 1u);
   const tinygltf::Primitive& prim = m.meshes[0].primitives[0];

@@ -68,9 +68,10 @@ struct ElementTypeDesc
   const char*                   plural   = "";  // "Nodes" - tab tooltip, footer counts
   SceneSelection::SelectionType selKind  = SceneSelection::SelectionType::eNone;
 
-  std::function<int()>            count;   // number of elements
-  std::function<std::string(int)> name;    // display-only label (may be derived: URI, "Sampler N", ...)
-  std::function<void(int)>        select;  // set the shared selection to this element
+  std::function<int()>            count;     // number of elements
+  std::function<std::string(int)> name;      // display-only label (may be derived: URI, "Sampler N", ...)
+  std::function<void(int)>        select;    // set the shared selection to this element
+  std::function<void(int)>        activate;  // optional: double-click on a row (e.g. look through a camera)
 
   // Optional override: return the list index [0, count) that corresponds to the current selection,
   // or -1 if nothing in this category is selected. When null, the default selKind-based lookup

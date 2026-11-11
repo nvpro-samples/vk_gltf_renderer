@@ -81,6 +81,8 @@ public:
   // Called at the start of every create action so a scene can be stood up on demand (e.g. the
   // menu-bar "Create" running with nothing loaded). No-op when a scene already exists.
   void setBeforeCreateCallback(std::function<void()> cb) { m_onBeforeCreate = std::move(cb); }
+  // The viewport camera, which a new glTF camera (Create > Camera) starts from.
+  void setCurrentViewCallback(std::function<nvvkgltf::RenderCamera()> cb) { m_getCurrentView = std::move(cb); }
   // Host services shared with the inspector: image file dialog, texture thumbnails, toasts. Enables
   // the Textures thumbnails, the image viewer's "Replace from file", and image-replace error toasts.
   void setHostServices(UiHostServices services) { m_host = std::move(services); }
@@ -97,6 +99,8 @@ public:
   // from an always-rendered top-level UI path -- NOT from render(), which is skipped when the Scene
   // Browser window is hidden/collapsed -- so the modal still surfaces when triggered from the menu bar.
   void showAddPrimitivePopup();
+  // Same for the "Add Camera" name dialog (opened by requestAddCamera).
+  void showAddCameraPopup();
 
   // Request the large image viewer for a glTF image index (e.g. from an inspector thumbnail click).
   void openImageViewer(int imageIndex);
@@ -185,7 +189,8 @@ private:
   void renderAddLightItems(int parentIndex);      // one item per nvvkgltf::kLightKinds (Light)
   void addEmptyNode(int parentIndex);             // undoable empty-node creation
   void addLight(const char* lightType, const char* lightName, int parentIndex);  // undoable light creation
-  void requestAddPrimitive(nvvkgltf::PrimitiveKind kind, int parentIndex);       // opens the size/subdiv popup
+  void requestAddCamera(int parentIndex);  // asks for the name, then adds a camera looking through the viewport view
+  void requestAddPrimitive(nvvkgltf::PrimitiveKind kind, int parentIndex);  // opens the size/subdiv popup
 
   //==================================================================================================
   // DIALOG RENDERING
@@ -295,6 +300,7 @@ private:
   // Add-primitive popup state (deferred-open pattern like rename/delete)
   std::function<void()>                             m_onGeometryChanged;
   std::function<void()>                             m_onBeforeCreate;  // ensure a scene exists before any create action
+  std::function<nvvkgltf::RenderCamera()>           m_getCurrentView;  // the viewport camera
   std::function<void(const std::filesystem::path&)> m_onOpenScene;     // open a node's referenced glTF
   std::function<ImTextureID(int)>                   m_getImageThumbnail;  // image index -> ImGui thumbnail
   UiHostServices m_host;  // shared services (file dialog, texture thumbnails, toasts)
@@ -307,4 +313,10 @@ private:
   nvvkgltf::PrimitiveParams m_pendingPrimitiveParams;
   int                       m_pendingPrimitiveParent         = -1;
   bool                      m_openAddPrimitivePopupNextFrame = false;
+
+  // "Add Camera" dialog: the view is captured when Add is clicked, the name is typed in the dialog.
+  nvvkgltf::RenderCamera m_pendingCameraView;
+  int                    m_pendingCameraParent = -1;
+  char                   m_pendingCameraName[128]{};
+  bool                   m_openAddCameraPopupNextFrame = false;
 };

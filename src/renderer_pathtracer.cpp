@@ -186,10 +186,10 @@ void PathTracer::registerParameters(SettingsRegistry* settings, std::function<vo
   m_settingsRegistry = settings;  // the Settings panel asks it which values still hold their default
   // PathTracer-specific settings. Persist marks what survives a restart (see settings_registry.hpp).
   // Bounds mirror the UI sliders so CLI and benchmark sequences accept the same range the UI does:
-  //   ptMaxDepth  -> "Max Depth" slider in showUI() (0..20)
+  //   ptMaxDepth  -> "Max Depth" slider in showUI() (0..100)
   //   ptSamples   -> "Samples per Frame" slider in onUIRender() (MIN_SAMPLES_PER_PIXEL..MAX_SAMPLES_PER_PIXEL);
   //                  the adaptive-sampling autopilot also clamps to the same range at runtime.
-  settings->add({"ptMaxDepth", "PathTracer: Maximum ray depth"}, &m_pushConst.maxDepth, Persist::eYes, 0, 20);
+  settings->add({"ptMaxDepth", "PathTracer: Maximum ray depth"}, &m_pushConst.maxDepth, Persist::eYes, 0, 100);
   settings->add({.name            = "ptSamples",
                  .help            = "PathTracer: Samples per pixel traced each frame (see ptMaxSamples for the total)",
                  .callbackSuccess = [this](const nvutils::ParameterBase* const) { m_adaptiveSampling = false; }},
@@ -415,7 +415,7 @@ void PathTracer::resetTab(SettingsTab tab, Resources& resources)
   // at most a few children, so a few passes end it.
   for(int pass = 0; pass < 4; pass++)
   {
-    const TabSettings shown   = tabSettings(tab, resources);
+    const TabSettings shown    = tabSettings(tab, resources);
     bool              anyReset = false;
     for(int i = 0; i < shown.count; i++)
     {
@@ -506,7 +506,7 @@ bool PathTracer::uiTransportTab(Resources& resources)
   if(!PE::begin())
     return changed;
 
-  changed |= PE::SliderInt("Max Depth", &m_pushConst.maxDepth, 0, 20, "%d", 0, "Maximum number of bounces");
+  changed |= PE::SliderInt("Max Depth", &m_pushConst.maxDepth, 0, 100, "%d", 0, "Maximum number of bounces");
   changed |= PE::SliderFloat("FireFly Clamp", &m_pushConst.fireflyClampThreshold, 0.0f, 100.0f, "%.4g", 0,
                              "Clamp threshold for fireflies. 0 = disabled.");
   changed |= PE::Checkbox("Shadow Transmission", &m_shadowTransmission,

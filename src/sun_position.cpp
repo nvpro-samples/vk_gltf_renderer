@@ -27,6 +27,7 @@
 // polynomials below amplify it.
 //
 
+#include <algorithm>
 #include <cctype>
 #include <cmath>
 #include <ctime>
@@ -163,6 +164,39 @@ LocalClock systemLocalClock()
   out.hour = static_cast<float>(local.tm_hour) + static_cast<float>(local.tm_min) / 60.0F + static_cast<float>(local.tm_sec) / 3600.0F;
   out.utcOffsetHours = static_cast<float>(std::difftime(localAsItIs, utcAsLocal) / 3600.0);
   return out;
+}
+
+static bool isLeap(int y)
+{
+  return (y % 4 == 0 && y % 100 != 0) || y % 400 == 0;
+}
+
+static int daysInMonthOf(int year, int month)  // month 1-12
+{
+  const int days[] = {31, isLeap(year) ? 29 : 28, 31, 30, 31, 30, 31, 31, 30, 31, 30, 31};
+  return days[month - 1];
+}
+
+int daysInYear(int year)
+{
+  return isLeap(year) ? 366 : 365;
+}
+
+int dayOfYear(int year, int month, int day)
+{
+  int n = day;
+  for(int m = 1; m < month; ++m)
+    n += daysInMonthOf(year, m);
+  return n;
+}
+
+void dateFromDayOfYear(int year, int doy, int& month, int& day)
+{
+  doy   = std::clamp(doy, 1, daysInYear(year));
+  month = 1;
+  while(doy > daysInMonthOf(year, month))
+    doy -= daysInMonthOf(year, month++);
+  day = doy;
 }
 
 bool parseIsoDate(const std::string& text, int& year, int& month, int& day)

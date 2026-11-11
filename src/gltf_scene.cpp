@@ -1583,28 +1583,6 @@ void nvvkgltf::Scene::parseScene()
                                  });
   }
 
-  // Search for the first camera in the scene and exit traversal upon finding it. Cameras belonging
-  // to a referenced (read-only) external asset are part of the asset, not the editable scene's
-  // viewport camera, so they are skipped here (an editable default camera is created below instead).
-  for(auto& sceneNode : m_model.scenes[m_currentScene].nodes)
-  {
-    tinygltf::utils::traverseSceneGraph(
-        m_model, sceneNode, glm::mat4(1),
-        [&](int nodeID, glm::mat4) {
-          if(isNodeReadOnly(nodeID))
-            return false;  // keep searching for an editable camera
-          m_sceneCameraNode = nodeID;
-          return true;  // Stop traversal
-        },
-        nullptr, nullptr);
-  }
-
-  // Create a default camera if none is found in the scene
-  if(m_sceneCameraNode == -1)
-  {
-    createSceneCamera();
-  }
-
   // Parse various scene components
   parseVariants();
   parseInteractivityGraphs();
@@ -1727,44 +1705,6 @@ void nvvkgltf::Scene::setSceneElementsDefaultNames()
   setDefaultName(m_model.lights, "Light");
 }
 
-
-// If there is no camera in the scene, we create one
-// The camera is placed at the center of the scene, looking at the scene
-void nvvkgltf::Scene::createSceneCamera()
-{
-  tinygltf::Camera& tcamera        = m_model.cameras.emplace_back();  // Add a camera
-  int               newCameraIndex = static_cast<int>(m_model.cameras.size() - 1);
-  tinygltf::Node&   tnode          = m_model.nodes.emplace_back();  // Add a node for the camera
-  int               newNodeIndex   = static_cast<int>(m_model.nodes.size() - 1);
-  tnode.name                       = "Camera";
-  tnode.camera                     = newCameraIndex;
-  m_model.scenes[m_currentScene].nodes.push_back(newNodeIndex);  // Add the camera node to the scene
-
-  // Set the camera to look at the scene
-  nvutils::Bbox bbox   = getSceneBounds();
-  glm::dvec3    center = bbox.center();
-  glm::dvec3 eye = center + glm::dvec3(0, 0, bbox.radius() * 2.414);  //2.414 units away from the center of the sphere to fit it within a 45 - degree FOV
-  glm::dvec3 up                   = glm::dvec3(0, 1, 0);
-  tcamera.type                    = "perspective";
-  tcamera.name                    = "Camera";
-  tcamera.perspective.aspectRatio = 16.0f / 9.0f;
-  tcamera.perspective.yfov        = glm::radians(45.0f);
-  const glm::dvec2 clip           = defaultClipPlanes(glm::length(eye - center), bbox.radius());
-  tcamera.perspective.znear       = clip.x;
-  tcamera.perspective.zfar        = clip.y;
-
-  // Add extra information to the node/camera
-  tinygltf::Value::Object extras;
-  extras["camera::eye"]    = tinygltf::utils::convertToTinygltfValue(3, glm::value_ptr(eye));
-  extras["camera::center"] = tinygltf::utils::convertToTinygltfValue(3, glm::value_ptr(center));
-  extras["camera::up"]     = tinygltf::utils::convertToTinygltfValue(3, glm::value_ptr(up));
-  tnode.extras             = tinygltf::Value(extras);
-
-  // Set the node transformation
-  tnode.translation = {eye.x, eye.y, eye.z};
-  glm::dquat q      = glm::quatLookAt(glm::normalize(center - eye), up);
-  tnode.rotation    = {q.x, q.y, q.z, q.w};
-}
 
 //--------------------------------------------------------------------------------------------------
 // Update world matrices for dirty nodes and populate render-node dirty flags.
@@ -2373,9 +2313,8 @@ void nvvkgltf::Scene::clearParsedData()
   m_defaultInteractivityGraph = 0;
   m_nodeParents.clear();
   m_nodesLocalMatrices.clear();
-  m_numTriangles    = 0;
-  m_sceneBounds     = {};
-  m_sceneCameraNode = -1;
+  m_numTriangles = 0;
+  m_sceneBounds  = {};
   m_dirtyFlags.clear();
   m_gpuStaleNodes.clear();  // node IDs are scene-relative; must not survive into a newly parsed model
 
@@ -2725,6 +2664,7 @@ bool nvvkgltf::Scene::handleCameraTraversal(int nodeID, const glm::mat4& worldMa
 
   tinygltf::Camera&      tcam = m_model.cameras[node.camera];
   nvvkgltf::RenderCamera camera;
+  camera.cameraIndex = node.camera;
   if(tcam.type == "perspective")
   {
     camera.type  = nvvkgltf::RenderCamera::CameraType::ePerspective;
@@ -3373,12 +3313,12 @@ bool nvvkgltf::Scene::hasTransmissionMaterials() const
 }
 
 
-namespace {
-void applyRenderCameraToNode(tinygltf::Node& tnode, tinygltf::Camera& tcamera, const nvvkgltf::RenderCamera& camera)
+void nvvkgltf::applyRenderCameraToNode(tinygltf::Node& tnode, tinygltf::Camera& tcamera, const nvvkgltf::RenderCamera& camera)
 {
   glm::quat q       = glm::quatLookAt(glm::normalize(camera.center - camera.eye), camera.up);
   tnode.translation = {camera.eye.x, camera.eye.y, camera.eye.z};
   tnode.rotation    = {q.x, q.y, q.z, q.w};
+  tnode.scale       = {1.0, 1.0, 1.0};
   tnode.matrix      = {};  // Clear the matrix to avoid conflicts with translation/rotation/scale
 
   if(camera.type == nvvkgltf::RenderCamera::CameraType::eOrthographic)
@@ -3407,60 +3347,97 @@ void applyRenderCameraToNode(tinygltf::Node& tnode, tinygltf::Camera& tcamera, c
   extras["camera::up"]     = tinygltf::utils::convertToTinygltfValue(3, glm::value_ptr(camera.up));
   tnode.extras             = tinygltf::Value(extras);
 }
-}  // namespace
 
 //--------------------------------------------------------------------------------------------------
-// Set the scene cameras
-// The cameras are stored in the model as nodes, and the camera index is stored in the node
-void nvvkgltf::Scene::setSceneCameras(const std::vector<nvvkgltf::RenderCamera>& cameras)
+// The viewport view saved with the scene. It lives in the extras of the current scene (a free-form glTF
+// field) under the same camera:: keys a camera node uses for its point of interest, plus the lens, which
+// a camera node keeps in its glTF camera. It adds no node and no camera, and other viewers ignore it.
+void nvvkgltf::Scene::setSavedView(const nvvkgltf::RenderCamera& view)
 {
-  assert(!cameras.empty() && "cameras must not be empty");
+  if(m_currentScene < 0 || m_currentScene >= static_cast<int>(m_model.scenes.size()))
+    return;
 
-  // Collect the scene's editable camera nodes in traversal order. Cameras embedded in a referenced
-  // (read-only) external asset are skipped: they belong to the asset, are re-merged on load and
-  // stripped on save, so we must never overwrite them here.
-  std::vector<int> cameraNodeIds;
-  for(auto& sceneNode : m_model.scenes[m_currentScene].nodes)
+  tinygltf::Scene&        scene = m_model.scenes[m_currentScene];
+  tinygltf::Value::Object extras =
+      scene.extras.IsObject() ? scene.extras.Get<tinygltf::Value::Object>() : tinygltf::Value::Object{};
+
+  extras["camera::eye"]    = tinygltf::utils::convertToTinygltfValue(3, glm::value_ptr(view.eye));
+  extras["camera::center"] = tinygltf::utils::convertToTinygltfValue(3, glm::value_ptr(view.center));
+  extras["camera::up"]     = tinygltf::utils::convertToTinygltfValue(3, glm::value_ptr(view.up));
+  extras["camera::znear"]  = tinygltf::Value(view.znear);
+  extras["camera::zfar"]   = tinygltf::Value(view.zfar);
+  if(view.type == nvvkgltf::RenderCamera::CameraType::eOrthographic)
   {
-    tinygltf::utils::traverseSceneGraph(m_model, sceneNode, glm::mat4(1), [&](int nodeID, const glm::mat4&) {
-      if(m_model.nodes[nodeID].camera >= 0 && !isNodeReadOnly(nodeID))
-        cameraNodeIds.push_back(nodeID);
-      return false;
-    });
+    extras["camera::type"] = tinygltf::Value(std::string("orthographic"));
+    extras["camera::xmag"] = tinygltf::Value(view.xmag);
+    extras["camera::ymag"] = tinygltf::Value(view.ymag);
+    extras.erase("camera::yfov");
   }
-
-  for(size_t i = 0; i < cameras.size(); ++i)
+  else
   {
-    // Reuse an existing editable camera node, or add a new one when the user has more cameras.
-    int nodeIndex = -1;
-    if(i < cameraNodeIds.size())
-    {
-      nodeIndex = cameraNodeIds[i];
-    }
-    else
-    {
-      tinygltf::Node& tnode = m_model.nodes.emplace_back();
-      nodeIndex             = static_cast<int>(m_model.nodes.size() - 1);
-      tnode.name            = fmt::format("Camera-{}", i);
-      m_model.scenes[m_currentScene].nodes.push_back(nodeIndex);
-    }
-
-    // Write into the node's own camera entry (append one for a brand-new node). Editable camera
-    // entries are disjoint from referenced ones, so this leaves the referenced cameras untouched.
-    tinygltf::Node& tnode = m_model.nodes[nodeIndex];
-    if(tnode.camera < 0)
-    {
-      m_model.cameras.emplace_back();
-      tnode.camera = static_cast<int>(m_model.cameras.size() - 1);
-    }
-    applyRenderCameraToNode(tnode, m_model.cameras[tnode.camera], cameras[i]);
+    extras["camera::type"] = tinygltf::Value(std::string("perspective"));
+    extras["camera::yfov"] = tinygltf::Value(view.yfov);
+    extras.erase("camera::xmag");
+    extras.erase("camera::ymag");
   }
+  scene.extras = tinygltf::Value(std::move(extras));
+}
 
-  // Fewer cameras than before (the user removed some): detach the surplus editable camera nodes so
-  // they no longer appear as viewport cameras. Their now-unused camera entries are pruned on save.
-  for(size_t i = cameras.size(); i < cameraNodeIds.size(); ++i)
-    m_model.nodes[cameraNodeIds[i]].camera = -1;
-  invalidateElementUsage();  // getCameraNode() reads the attachments
+std::optional<nvvkgltf::RenderCamera> nvvkgltf::Scene::getSavedView() const
+{
+  if(m_currentScene < 0 || m_currentScene >= static_cast<int>(m_model.scenes.size()))
+    return std::nullopt;
+  const tinygltf::Value& extras = m_model.scenes[m_currentScene].extras;
+  if(!extras.IsObject())
+    return std::nullopt;
+
+  // An incomplete or malformed entry is ignored: the first camera or a fit takes over.
+  const char* const points[3] = {"camera::eye", "camera::center", "camera::up"};
+  for(size_t i = 0; i < 3; i++)
+  {
+    if(!extras.Has(points[i]) || !extras.Get(points[i]).IsArray() || extras.Get(points[i]).ArrayLen() < 3)
+      return std::nullopt;
+  }
+  nvvkgltf::RenderCamera view;
+  tinygltf::utils::getArrayValue(extras, "camera::eye", view.eye);
+  tinygltf::utils::getArrayValue(extras, "camera::center", view.center);
+  tinygltf::utils::getArrayValue(extras, "camera::up", view.up);
+
+  // The lens: the keys of the stored projection must be there, with usable values.
+  const bool orthographic = extras.Has("camera::type") && extras.Get("camera::type").IsString()
+                            && extras.Get("camera::type").Get<std::string>() == "orthographic";
+  const char* const perspectiveKeys[3]  = {"camera::yfov", "camera::znear", "camera::zfar"};
+  const char* const orthographicKeys[4] = {"camera::xmag", "camera::ymag", "camera::znear", "camera::zfar"};
+  const size_t      keyCount            = orthographic ? 4 : 3;
+  double            values[4]           = {};
+  for(size_t i = 0; i < keyCount; i++)
+  {
+    const char* key = orthographic ? orthographicKeys[i] : perspectiveKeys[i];
+    if(!extras.Has(key) || !extras.Get(key).IsNumber())
+      return std::nullopt;
+    values[i] = extras.Get(key).GetNumberAsDouble();
+  }
+  if(orthographic)
+  {
+    view.type  = nvvkgltf::RenderCamera::CameraType::eOrthographic;
+    view.xmag  = values[0];
+    view.ymag  = values[1];
+    view.znear = values[2];
+    view.zfar  = values[3];
+    if(view.xmag <= 0.0 || view.ymag <= 0.0)
+      return std::nullopt;
+  }
+  else
+  {
+    view.yfov  = values[0];
+    view.znear = values[1];
+    view.zfar  = values[2];
+    if(view.yfov <= 0.0)
+      return std::nullopt;
+  }
+  if(view.znear <= 0.0 || view.zfar <= view.znear)
+    return std::nullopt;
+  return view;
 }
 
 // Parse the variants of the materials

@@ -305,7 +305,8 @@ Y-up scene; in a Z-up scene north is −Y.
 on that same compass: 0° north, 90° east), **Gizmo on sun light**
 (selects the sun light and shows the transform gizmo; needs a scene light as the sun), and
 **Location & Date**: **Now** fills today's date, time and UTC offset from this machine, then
-**City**, latitude and longitude, date, and **UTC Offset**. Offsets are standard time, with no
+**City**, latitude and longitude, date (type an exact `yyyy-mm-dd`, or sweep the year with **Day of
+Year** right under it; both edit the same date), and **UTC Offset**. Offsets are standard time, with no
 daylight saving, so adjust **UTC Offset** for a summer date.
 
 Location, date and time are saved in the `.ini`, not in the glTF, which keeps the sun light's
@@ -434,6 +435,22 @@ with very many lights draws the first few hundred of them.
 - Click the **paste** icon to set the camera from clipboard data.
 - Click a **camera number** to recall that saved view.
 
+These saved views are **bookmarks**: they live in a `<scene name>.json` next to the executable, are never written into the glTF, and
+are shared by every scene file of that name (a Save As into another folder keeps them).
+
+### Scene cameras
+
+The glTF cameras of the scene are in **Elements > Cameras** (add, rename, delete). Double-click a camera there, or its node in the
+Scene Graph, to glide the view to it. Deleting a camera deletes its node when the node only carries the camera, and otherwise just
+removes the camera from the node. A scene without cameras opens on a view fitted to the scene; the viewer adds no camera of its own.
+
+To add a camera to the scene, use **Create > Camera** (also in the Scene Graph context menu and the Elements toolbar). A dialog asks
+for its name, then OK creates a node with a glTF camera that looks through the current view. Navigate somewhere else, select the camera and click **Set from
+Current View** in the Inspector to move it. Saving never rewrites the cameras.
+
+When you save, the current view is stored in the scene's `extras` (the same `camera::` keys a camera node uses, plus the lens), so reopening the file resumes where you stopped. It is not a
+camera: it adds no node, and it takes priority over the first glTF camera as the starting view and the **home** icon.
+
 ### Navigation Modes 
 
 ![](images/cam_3.png)
@@ -479,7 +496,7 @@ Right-click any node in the Scene Graph tree, use the Elements tab's Nodes toolb
 
 | Operation | Shortcut | Description |
 |---|---|---|
-| **Add Child** | — | Create an empty child node, or a Point / Directional / Spot light node under the selected node |
+| **Add Child** | — | Create an empty child node, a Point / Directional / Spot light node, or a Camera (from the current view) under the selected node |
 | **Duplicate** | `Ctrl+D` | Deep-copy the node and its entire subtree (geometry, materials, hierarchy) |
 | **Delete** | `Del` | Delete the node and all descendants (undoable) |
 | **Rename** | — | Inline rename for any node, mesh, or material |
@@ -496,7 +513,7 @@ All node editing operations support full undo/redo:
 
 The **Edit** menu also provides Undo and Redo items with a description of the action (e.g., "Undo Transform 'Cube'", "Redo Delete 'Light'").
 
-**Supported operations:** Transform (gizmo + inspector), Material editing (PBR properties + all extensions), Light editing (type, color, intensity, range, spot angles), Rename node, Duplicate, Delete, Add Child, Add Light, Re-parent (drag & drop).
+**Supported operations:** Transform (gizmo + inspector), Material editing (PBR properties + all extensions), Light editing (type, color, intensity, range, spot angles), Rename node, Duplicate, Delete, Add Child, Add Light, Add Camera, Re-parent (drag & drop).
 
 The undo history uses a linear model: performing a new action after an undo discards the redo stack. History is automatically cleared when loading, merging, or referencing a scene to prevent stale references.
 

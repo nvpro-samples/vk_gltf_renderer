@@ -23,6 +23,9 @@
 #include "common/test_utils.hpp"
 #include <filesystem>
 #include <fstream>
+#include <set>
+#include <string>
+#include <vector>
 
 using namespace gltf_test;
 
@@ -498,4 +501,124 @@ TEST_F(BasicEditingTest, RemoveUnattachedLight)
   EXPECT_EQ(model.nodes[1].light, 0);
   for(size_t i = 0; i < scene.getRenderLights().size(); i++)
     EXPECT_EQ(scene.getRenderLights()[i].light, model.nodes[scene.getRenderLights()[i].nodeID].light);
+}
+
+// Adds `nodeIndex` and every node below it to `subtree`.
+static void collectSubtreeNodes(const tinygltf::Model& model, int nodeIndex, std::set<int>& subtree)
+{
+  subtree.insert(nodeIndex);
+  const std::vector<int>& children = model.nodes[nodeIndex].children;
+  for(size_t childIndex = 0; childIndex < children.size(); childIndex++)
+    collectSubtreeNodes(model, children[childIndex], subtree);
+}
+
+// What a channel animates: its sampler's payload and the target it drives.
+struct ChannelSignature
+{
+  int         input         = -1;
+  int         output        = -1;
+  std::string interpolation = {};
+  std::string targetPath    = {};
+
+  bool operator==(const ChannelSignature& other) const
+  {
+    return input == other.input && output == other.output && interpolation == other.interpolation && targetPath == other.targetPath;
+  }
+};
+
+static ChannelSignature channelSignature(const tinygltf::Animation& animation, size_t channelIndex)
+{
+  const tinygltf::AnimationChannel& channel = animation.channels[channelIndex];
+  const tinygltf::AnimationSampler& sampler = animation.samplers[channel.sampler];
+  return {sampler.input, sampler.output, sampler.interpolation, channel.target_path};
+}
+
+// Deleting a node removes the animation channels that target it; the samplers only those channels
+// used must go with them. Every surviving channel keeps its own sampler data, and channels that
+// shared a sampler still share it.
+TEST_F(BasicEditingTest, DeleteNodePrunesUnusedAnimationSamplers)
+{
+  auto assetsPath = TestResources::getSampleAssetsPath();
+  if(assetsPath.empty())
+    GTEST_SKIP() << "glTF-Sample-Assets not found at: " << GLTF_SAMPLE_ASSETS_PATH;
+
+  nvvkgltf::Scene scene;
+  ASSERT_TRUE(scene.load(assetsPath / "Models/Fox/glTF/Fox.gltf"));
+
+  // Channels 0 and 1 share one sampler.
+  tinygltf::Animation& animation = scene.getModel().animations[0];
+  ASSERT_GE(animation.channels.size(), 3u);
+  animation.channels[1].sampler = animation.channels[0].sampler;
+
+  // Pick a node whose subtree drives some channels but neither of the two sharing a sampler.
+  int           target = -1;
+  std::set<int> removedNodes;
+  for(size_t channelIndex = animation.channels.size(); channelIndex-- > 2 && target < 0;)
+  {
+    std::set<int> subtree;
+    collectSubtreeNodes(scene.getModel(), animation.channels[channelIndex].target_node, subtree);
+    if(subtree.count(animation.channels[0].target_node) == 0 && subtree.count(animation.channels[1].target_node) == 0)
+    {
+      target       = animation.channels[channelIndex].target_node;
+      removedNodes = subtree;
+    }
+  }
+  ASSERT_GE(target, 0);
+
+  // The channels expected to survive, in order, with their sampler payload before the delete.
+  std::vector<ChannelSignature> expected;
+  for(size_t channelIndex = 0; channelIndex < animation.channels.size(); channelIndex++)
+  {
+    if(removedNodes.count(animation.channels[channelIndex].target_node) == 0)
+      expected.push_back(channelSignature(animation, channelIndex));
+  }
+  ASSERT_GE(expected.size(), 2u);
+  ASSERT_LT(expected.size(), animation.channels.size());  // the delete removes at least one channel
+
+  scene.editor().deleteNode(target);
+
+  const tinygltf::Animation& after = scene.getModel().animations[0];
+  ASSERT_EQ(after.channels.size(), expected.size());
+  std::vector<bool> samplerUsed(after.samplers.size(), false);
+  for(size_t channelIndex = 0; channelIndex < after.channels.size(); channelIndex++)
+  {
+    ASSERT_GE(after.channels[channelIndex].sampler, 0);
+    ASSERT_LT(static_cast<size_t>(after.channels[channelIndex].sampler), after.samplers.size());
+    samplerUsed[after.channels[channelIndex].sampler] = true;
+    EXPECT_TRUE(channelSignature(after, channelIndex) == expected[channelIndex]) << "channel " << channelIndex;
+  }
+  for(size_t samplerIndex = 0; samplerIndex < samplerUsed.size(); samplerIndex++)
+    EXPECT_TRUE(samplerUsed[samplerIndex]) << "sampler " << samplerIndex << " is unused";
+  EXPECT_EQ(after.channels[0].sampler, after.channels[1].sampler);  // still shared
+}
+
+// A file can already carry a sampler no channel uses (saved by an older build). Compact Scene drops it
+// and every channel keeps its own sampler data.
+TEST_F(BasicEditingTest, CompactPrunesUnusedAnimationSampler)
+{
+  auto assetsPath = TestResources::getSampleAssetsPath();
+  if(assetsPath.empty())
+    GTEST_SKIP() << "glTF-Sample-Assets not found at: " << GLTF_SAMPLE_ASSETS_PATH;
+
+  nvvkgltf::Scene scene;
+  ASSERT_TRUE(scene.load(assetsPath / "Models/Fox/glTF/Fox.gltf"));
+
+  tinygltf::Animation&          animation = scene.getModel().animations[0];
+  std::vector<ChannelSignature> expected;
+  for(size_t channelIndex = 0; channelIndex < animation.channels.size(); channelIndex++)
+    expected.push_back(channelSignature(animation, channelIndex));
+  const size_t samplersCount = animation.samplers.size();
+
+  // An orphan at index 0; the channels keep pointing at their original samplers.
+  animation.samplers.insert(animation.samplers.begin(), animation.samplers.back());
+  for(size_t channelIndex = 0; channelIndex < animation.channels.size(); channelIndex++)
+    animation.channels[channelIndex].sampler++;
+
+  ASSERT_TRUE(scene.compactModel());
+
+  const tinygltf::Animation& after = scene.getModel().animations[0];
+  EXPECT_EQ(after.samplers.size(), samplersCount);
+  ASSERT_EQ(after.channels.size(), expected.size());
+  for(size_t channelIndex = 0; channelIndex < after.channels.size(); channelIndex++)
+    EXPECT_TRUE(channelSignature(after, channelIndex) == expected[channelIndex]) << "channel " << channelIndex;
 }

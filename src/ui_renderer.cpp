@@ -779,6 +779,7 @@ void GltfRenderer::renderUI()
     // hidden/collapsed (e.g. triggered from the menu-bar "Create"). requestAddPrimitive() remains
     // the trigger; this just renders the pending modal.
     m_sceneBrowser.showAddPrimitivePopup();
+    m_sceneBrowser.showAddCameraPopup();
     // Same rationale for the image viewer: it can be opened from the inspector (thumbnail click), so
     // render it here rather than inside the Scene Browser's tab body.
     m_sceneBrowser.showImageViewer();
@@ -2055,17 +2056,23 @@ void GltfRenderer::applyGltfCamera(int cameraIndex)
   // Force refresh of render cameras to reflect latest UI changes
   const std::vector<nvvkgltf::RenderCamera>& cameras = m_resources.getScene()->getRenderCameras(true);
 
-  if(cameraIndex < 0 || cameraIndex >= static_cast<int>(cameras.size()))
+  const nvvkgltf::RenderCamera* found = nullptr;
+  for(size_t i = 0; i < cameras.size() && found == nullptr; i++)
+  {
+    if(cameras[i].cameraIndex == cameraIndex)
+      found = &cameras[i];
+  }
+  if(found == nullptr)
     return;
 
-  const nvvkgltf::RenderCamera& camera = cameras[cameraIndex];
+  const nvvkgltf::RenderCamera& camera = *found;
 
   if(camera.type == nvvkgltf::RenderCamera::CameraType::ePerspective)
   {
     double                             fov = glm::degrees(camera.yfov);
     nvutils::CameraManipulator::Camera cam{camera.eye, camera.center, camera.up, fov};
     cam.projectionType = nvutils::CameraManipulator::Perspective;
-    m_cameraManip->setCamera(cam);
+    m_cameraManip->setCamera(cam, false);  // animated: the view glides to the camera
     m_cameraManip->setClipPlanes({camera.znear, camera.zfar});
   }
   else if(camera.type == nvvkgltf::RenderCamera::CameraType::eOrthographic)
@@ -2074,7 +2081,7 @@ void GltfRenderer::applyGltfCamera(int cameraIndex)
     nvutils::CameraManipulator::Camera cam{camera.eye, camera.center, camera.up, fov};
     cam.projectionType = nvutils::CameraManipulator::Orthographic;
     cam.orthMag        = {camera.xmag, camera.ymag};
-    m_cameraManip->setCamera(cam);
+    m_cameraManip->setCamera(cam, false);
     m_cameraManip->adjustOrthographicAspect();
     m_cameraManip->setClipPlanes({camera.znear, camera.zfar});
   }
@@ -2165,84 +2172,41 @@ void GltfRenderer::followGltfCamera()
 }
 
 //--------------------------------------------------------------------------------------------------
-// Set a GLTF camera from the current camera manipulator state
-// This function updates the GLTF camera parameters and node extras with the current view
+// The viewport camera as a glTF camera description: the view that is saved with the scene, becomes a new
+// glTF camera (Create > Camera) or replaces an existing one (Set from Current View).
 //
-void GltfRenderer::setGltfCameraFromView(int cameraIndex)
+nvvkgltf::RenderCamera GltfRenderer::currentView() const
 {
-  if(!m_resources.getScene() || !m_resources.getScene()->valid() || !m_cameraManip)
+  nvvkgltf::RenderCamera view;
+  m_cameraManip->getLookat(view.eye, view.center, view.up);
+  view.znear = m_cameraManip->getClipPlanes().x;
+  view.zfar  = m_cameraManip->getClipPlanes().y;
+  if(m_cameraManip->getProjectionType() == nvutils::CameraManipulator::Orthographic)
   {
-    return;
-  }
-
-  // Get the node that contains this camera
-  int nodeIndex = m_resources.getScene()->getCameraNode(cameraIndex);
-  if(nodeIndex < 0)
-  {
-    return;
-  }
-
-  tinygltf::Node&   node   = m_resources.getScene()->getModel().nodes[nodeIndex];
-  tinygltf::Camera& camera = m_resources.getScene()->getModel().cameras[cameraIndex];
-
-  // Get current camera state from manipulator
-  nvutils::CameraManipulator::Camera cameraState = m_cameraManip->getCamera();
-  glm::dvec2                         clipPlanes  = m_cameraManip->getClipPlanes();
-
-  // Update the camera parameters
-  if(cameraState.projectionType == nvutils::CameraManipulator::Orthographic)
-  {
-    camera.type                         = "orthographic";
-    tinygltf::OrthographicCamera& ortho = camera.orthographic;
-    ortho.xmag                          = cameraState.orthMag.x;
-    ortho.ymag                          = cameraState.orthMag.y;
-    ortho.znear                         = clipPlanes.x;
-    ortho.zfar                          = clipPlanes.y;
+    view.type = nvvkgltf::RenderCamera::CameraType::eOrthographic;
+    view.xmag = static_cast<double>(m_cameraManip->getOrthographicXmag());
+    view.ymag = static_cast<double>(m_cameraManip->getOrthographicYmag());
   }
   else
   {
-    camera.type                        = "perspective";
-    tinygltf::PerspectiveCamera& persp = camera.perspective;
-    // Convert FOV from degrees (manipulator) to radians (GLTF)
-    persp.yfov  = glm::radians(cameraState.fov);
-    persp.znear = clipPlanes.x;
-    persp.zfar  = clipPlanes.y;
-    // Aspect ratio will be calculated from viewport when camera is applied
+    view.type = nvvkgltf::RenderCamera::CameraType::ePerspective;
+    view.yfov = glm::radians(m_cameraManip->getFov());
   }
+  return view;
+}
 
-  // Update the node transformation to match the current camera position
-  // The camera's eye position becomes the node's translation
-  node.translation = {cameraState.eye.x, cameraState.eye.y, cameraState.eye.z};
+//--------------------------------------------------------------------------------------------------
+// Set a glTF camera from the current viewport view (Inspector > Set from Current View)
+//
+void GltfRenderer::setGltfCameraFromView(int cameraIndex)
+{
+  nvvkgltf::Scene* scene = m_resources.getScene();
+  if(!scene || !scene->valid() || !m_cameraManip)
+    return;
 
-  // Calculate the rotation that points the camera from eye to center with the given up vector
-  glm::dvec3 forward = glm::normalize(cameraState.ctr - cameraState.eye);
-  glm::dvec3 right   = glm::normalize(glm::cross(forward, cameraState.up));
-  glm::dvec3 up      = glm::normalize(glm::cross(right, forward));
-
-  // Create rotation matrix and convert to quaternion
-  glm::dmat3 rotationMatrix(right, up, -forward);  // -forward because GLTF cameras look down -Z
-  glm::dquat rotation = glm::quat_cast(rotationMatrix);
-
-  node.rotation = {rotation.x, rotation.y, rotation.z, rotation.w};
-  node.scale    = {1.0, 1.0, 1.0};
-
-  // Clear any existing matrix since we're using TRS
-  node.matrix.clear();
-  m_resources.getScene()->markNodeDirty(nodeIndex);  // the scene's cached transform of the node, and the glyph, follow
-
-  // Update the node extras with the current eye, center, and up vectors
-  if(!node.extras.IsObject())
-  {
-    node.extras = tinygltf::Value(tinygltf::Value::Object());
-  }
-
-  tinygltf::Value::Object extras = node.extras.Get<tinygltf::Value::Object>();
-
-  // Store eye vector
-  extras["camera::eye"]    = tinygltf::utils::convertToTinygltfValue(3, glm::value_ptr(cameraState.eye));
-  extras["camera::center"] = tinygltf::utils::convertToTinygltfValue(3, glm::value_ptr(cameraState.ctr));
-  extras["camera::up"]     = tinygltf::utils::convertToTinygltfValue(3, glm::value_ptr(cameraState.up));
-  node.extras              = tinygltf::Value(extras);
+  const int nodeIndex = scene->getCameraNode(cameraIndex);
+  if(nodeIndex >= 0)
+    scene->editor().setCameraNodeFromView(nodeIndex, currentView());
 }
 
 //--------------------------------------------------------------------------------------------------

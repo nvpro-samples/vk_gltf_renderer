@@ -213,7 +213,7 @@ Early support for the [glTF 2.1 complex-scene](https://www.khronos.org/blog/intr
 - ✅ External Assets — reference other glTF/GLB files from scene nodes (`node.externalAsset`) and instantiate them at load time
 - ✅ Multiple instances of the same asset share geometry (meshes / BLAS), across every file that references it: each file is loaded once per scene, and static content is drawn without copying its nodes
 - ✅ Nested external assets — recursive resolution with cycle detection
-- ✅ Unified file references — top-level `files` array (external `uri`)
+- ✅ File references — top-level `files` array (external `uri`)
 - ✅ File aliases — inner-URI redirection for shared or overridden resources
 - ✅ Re-externalized on save (references preserved); "Make Editable" embeds an asset inline
 - 🚧 Packaging — embedded external assets (`bufferView` / `data:` URI) not yet resolved

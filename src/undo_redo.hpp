@@ -626,6 +626,54 @@ private:
 };
 
 //--------------------------------------------------------------------------------------------------
+// AddCameraCommand - Undo/redo for adding a camera node looking through a given view (snapshot-based,
+// like AddLightCommand: the snapshot holds the node graph and the camera definitions).
+//--------------------------------------------------------------------------------------------------
+
+class AddCameraCommand : public ICommand
+{
+public:
+  AddCameraCommand(nvvkgltf::Scene& scene, const std::string& name, const nvvkgltf::RenderCamera& view, int parentIndex, SceneSelection* selection);
+  ~AddCameraCommand() override;
+
+  void                      execute() override;
+  void                      undo() override;
+  [[nodiscard]] std::string description() const override;
+  [[nodiscard]] int         getNewNodeIndex() const { return m_newNodeIndex; }
+
+private:
+  nvvkgltf::Scene&                              m_scene;
+  std::string                                   m_name;
+  nvvkgltf::RenderCamera                        m_view;
+  int                                           m_parentIndex  = -1;
+  int                                           m_newNodeIndex = -1;
+  SceneSelection*                               m_selection    = nullptr;
+  std::unique_ptr<nvvkgltf::SceneGraphSnapshot> m_snapshot;
+};
+
+//--------------------------------------------------------------------------------------------------
+// RemoveCameraCommand - Undo/redo for removing a glTF camera (snapshot-based, like AddCameraCommand).
+//--------------------------------------------------------------------------------------------------
+
+class RemoveCameraCommand : public ICommand
+{
+public:
+  RemoveCameraCommand(nvvkgltf::Scene& scene, int cameraIndex, SceneSelection* selection);
+  ~RemoveCameraCommand() override;
+
+  void                      execute() override;
+  void                      undo() override;
+  [[nodiscard]] std::string description() const override;
+
+private:
+  nvvkgltf::Scene&                              m_scene;
+  int                                           m_cameraIndex = -1;
+  std::string                                   m_name;
+  SceneSelection*                               m_selection = nullptr;
+  std::unique_ptr<nvvkgltf::SceneGraphSnapshot> m_snapshot;
+};
+
+//--------------------------------------------------------------------------------------------------
 // AddPrimitiveCommand - Undo/redo for adding a procedural primitive (plane/cube/sphere)
 //
 // Adding a primitive appends geometry (buffer/bufferViews/accessors), a material, a mesh and a node.

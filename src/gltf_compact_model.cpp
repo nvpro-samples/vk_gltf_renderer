@@ -519,6 +519,38 @@ void updateModelReferences(tinygltf::Model& model, const std::vector<int>& acces
 //--------------------------------------------------------------------------------------------------
 // compactModel - Removes orphaned geometry data (accessors, buffer views, buffers) from a glTF model.
 //--------------------------------------------------------------------------------------------------
+bool pruneUnusedAnimationSamplers(tinygltf::Animation& animation)
+{
+  std::vector<int> newIndex(animation.samplers.size(), -1);
+  for(size_t channelIndex = 0; channelIndex < animation.channels.size(); channelIndex++)
+  {
+    const int sampler = animation.channels[channelIndex].sampler;
+    if(sampler >= 0 && sampler < static_cast<int>(newIndex.size()))
+      newIndex[sampler] = 0;  // mark as used
+  }
+
+  int keptCount = 0;
+  for(size_t samplerIndex = 0; samplerIndex < animation.samplers.size(); samplerIndex++)
+  {
+    if(newIndex[samplerIndex] < 0)
+      continue;
+    newIndex[samplerIndex] = keptCount;
+    if(static_cast<size_t>(keptCount) != samplerIndex)  // never move a sampler onto itself
+      animation.samplers[keptCount] = std::move(animation.samplers[samplerIndex]);
+    keptCount++;
+  }
+  const bool removed = static_cast<size_t>(keptCount) < animation.samplers.size();
+  animation.samplers.resize(keptCount);
+
+  for(size_t channelIndex = 0; channelIndex < animation.channels.size(); channelIndex++)
+  {
+    int& sampler = animation.channels[channelIndex].sampler;
+    if(sampler >= 0 && sampler < static_cast<int>(newIndex.size()))
+      sampler = newIndex[sampler];
+  }
+  return removed;
+}
+
 bool compactModel(tinygltf::Model& model)
 {
   if(model.accessors.empty() && model.bufferViews.empty() && model.buffers.empty())

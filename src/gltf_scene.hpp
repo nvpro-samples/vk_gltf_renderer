@@ -118,10 +118,11 @@ struct RenderCamera
     eOrthographic
   };
 
-  CameraType type   = ePerspective;
-  glm::dvec3 eye    = {0.0, 0.0, 0.0};
-  glm::dvec3 center = {0.0, 0.0, 0.0};
-  glm::dvec3 up     = {0.0, 1.0, 0.0};
+  CameraType type        = ePerspective;
+  int        cameraIndex = -1;  // index into model.cameras (-1: not from a glTF camera)
+  glm::dvec3 eye         = {0.0, 0.0, 0.0};
+  glm::dvec3 center      = {0.0, 0.0, 0.0};
+  glm::dvec3 up          = {0.0, 1.0, 0.0};
 
   // Perspective
   double yfov = {0.0};  // in radians
@@ -134,8 +135,13 @@ struct RenderCamera
   double zfar  = {0.0};
 };
 
+// Writes `camera` into a camera node and its glTF camera: the node's pose (world pose, the node is
+// assumed to have no transformed parent) and the lens, plus the eye/center/up extras that keep the
+// point of interest. The one place a viewport view becomes a glTF camera.
+void applyRenderCameraToNode(tinygltf::Node& node, tinygltf::Camera& gltfCamera, const RenderCamera& camera);
+
 // The one rule for default clip planes, wherever a camera has none of its own that is usable:
-// the viewer's camera-less fit, createSceneCamera(), a camera with no valid far, and the fit
+// the viewer's camera-less fit, a camera with no valid far, and the fit
 // commands (which only need the far).
 //
 // Planes are set once and not touched while navigating, so they are anchored on where the eye sits
@@ -600,7 +606,11 @@ public:
 
   // Rebuild: if true, clears and repopulates the camera list from the scene graph before returning.
   const std::vector<nvvkgltf::RenderCamera>& getRenderCameras(bool rebuild = false);
-  void                                       setSceneCameras(const std::vector<nvvkgltf::RenderCamera>& cameras);
+
+  // The viewport view stored with the scene (scene.extras), restored when the file is loaded again.
+  // It is viewer state, not a glTF camera: no node is created and the authored cameras stay untouched.
+  void                                                setSavedView(const nvvkgltf::RenderCamera& view);
+  [[nodiscard]] std::optional<nvvkgltf::RenderCamera> getSavedView() const;
 
   //--------------------------------------------------------------------------------------------------
   // Light Management
@@ -794,7 +804,6 @@ private:
   int recordReferencedAsset(int firstNode, int lastNode, int instanceNode, int externalAssetIndex, int fileIndex, const std::string& uri);
   void parseVariants();
   void setSceneElementsDefaultNames();
-  void createSceneCamera();
 
   //--------------------------------------------------------------------------------------------------
   // Private Methods: Render Node Helpers
@@ -1052,9 +1061,8 @@ private:
   // Data Members: Scene State
   //--------------------------------------------------------------------------------------------------
 
-  int                   m_currentScene    = 0;
-  int                   m_sceneCameraNode = -1;
-  uint64_t              m_numTriangles    = 0;  // 64-bit: instanced scenes exceed 2^32
+  int                   m_currentScene = 0;
+  uint64_t              m_numTriangles = 0;  // 64-bit: instanced scenes exceed 2^32
   mutable nvutils::Bbox m_sceneBounds;
 
   //--------------------------------------------------------------------------------------------------

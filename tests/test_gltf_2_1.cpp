@@ -116,8 +116,8 @@ void expectCoreProperties(const tinygltf::Model& model)
   EXPECT_EQ(model.shapes[4].type, "plane");
   EXPECT_DOUBLE_EQ(model.shapes[4].plane.sizeX, 4.0);
 
-  // #32 uid and #37 bounding volumes, on the two-level hierarchy. Scene::load appends a default
-  // camera node after them when the file has no camera.
+  // #32 uid and #37 bounding volumes, on the two-level hierarchy. Scene::load adds no camera
+  // node when the file has none.
   ASSERT_GE(model.nodes.size(), 2u);
   EXPECT_EQ(model.nodes[0].uid, "root-node");
   EXPECT_EQ(model.nodes[0].boundingVolume.shape, 0);
@@ -374,10 +374,8 @@ TEST_F(Gltf21Test, Placement_PlacedFileCamerasAreIgnored)
   nvvkgltf::Scene scene;
   ASSERT_TRUE(scene.load(kFixtures / "placement/camera_prop.gltf"));
   const tinygltf::Model& model = scene.getModel();
-  // The scene has no camera of its own, so the loader adds one default camera node: the only one.
-  ASSERT_EQ(scene.getActiveCameraNodes().size(), 1u);
-  const tinygltf::Camera& camera = model.cameras[model.nodes[scene.getActiveCameraNodes()[0]].camera];
-  EXPECT_NE(camera.name, "stray");
+  // The scene has no camera of its own, and the stray one of the placed file is not an active camera.
+  EXPECT_TRUE(scene.getActiveCameraNodes().empty());
   for(int placing = 0; placing < 3; ++placing)
     EXPECT_NE(scene.getInstanceSet(placing), nullptr) << model.nodes[placing].name;
 }

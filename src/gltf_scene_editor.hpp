@@ -155,6 +155,16 @@ public:
   [[nodiscard]] int addNode(const std::string& name = "", int parentIndex = -1);
   [[nodiscard]] int addLightNode(const std::string& lightType, const std::string& name, int parentIndex = -1);
 
+  // ---------- Camera ops ----------
+  // Adds a node carrying a new glTF camera that looks through `view` (world pose and lens).
+  [[nodiscard]] int addCameraNode(const std::string& name, const nvvkgltf::RenderCamera& view, int parentIndex = -1);
+  // Moves and reconfigures the camera of `nodeIndex` to `view`; a transformed parent is compensated
+  // so the camera ends up at the world pose of `view`.
+  void setCameraNodeFromView(int nodeIndex, const nvvkgltf::RenderCamera& view);
+  // Removes a camera. A node that only carries it (no mesh, light, skin or children) is deleted; a node
+  // with other content keeps it and just loses the camera. The unused camera definition is dropped.
+  void removeCamera(int cameraIndex);
+
   // ---------- Light ops ----------
   // Why the light cannot be removed with removeLightAt(), or empty when it can: a node carries it, an
   // animation pointer addresses it, or a KHR_interactivity graph exists (its pointers can name any
@@ -167,7 +177,7 @@ public:
   void removeLightAt(int lightIndex);
 
   // Inverse of removeLightAt(): shift light indices at/after lightIndex up and insert `light` there.
-  void insertLightAt(int lightIndex, const tinygltf::Light& light);
+  void              insertLightAt(int lightIndex, const tinygltf::Light& light);
   [[nodiscard]] int duplicateNode(int originalIndex, bool reparse = true);
   void              deleteNode(int nodeIndex);
 

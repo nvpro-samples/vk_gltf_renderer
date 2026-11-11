@@ -539,7 +539,8 @@ private:
   void          endFollowOnNavigation();  // called by followGltfCamera(): navigation ends the follow
   void          applyCameraString(const std::string& text);
   void          setGltfCameraFromView(int cameraIndex);
-  void          loadHdrFileDialog();
+  [[nodiscard]] nvvkgltf::RenderCamera currentView() const;  // the viewport camera, as a glTF camera description
+  void                                 loadHdrFileDialog();
   /// The `.sky.json` pickers behind the Environment panel's two preset buttons.
   void loadSkyPresetDialog();
   void saveSkyPresetDialog();

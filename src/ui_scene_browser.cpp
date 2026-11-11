@@ -34,6 +34,7 @@
 #include "tinygltf_utils.hpp"
 #include "ui_gltf_labels.hpp"
 
+#include <fmt/format.h>
 #include <imgui.h>
 #include <imgui_internal.h>
 #include <nvgui/fonts.hpp>
@@ -812,6 +813,9 @@ void UiSceneBrowser::renderNodeHierarchy(int nodeIdx, float rowHeight, bool canV
         m_selection->selectNode(nodeIdx);
       }
     }
+    // Double-click on a camera node: look through it (as Inspector > Apply to Current View)
+    if(m_selection && node.camera >= 0 && ImGui::IsItemHovered() && ImGui::IsMouseDoubleClicked(ImGuiMouseButton_Left))
+      m_selection->emitCameraApply(node.camera);
 
     // Drag-and-drop source (for moving nodes)
     if(ImGui::BeginDragDropSource(ImGuiDragDropFlags_None))
@@ -1387,6 +1391,9 @@ void UiSceneBrowser::renderCreateCatalog(int parentIndex)
     renderAddLightItems(parentIndex);
     ImGui::EndMenu();
   }
+
+  if(ImGui::MenuItem(ICON_MS_CAMERA_ALT " Camera"))
+    requestAddCamera(parentIndex);
 }
 
 // Wrap the catalog in a labeled submenu (used by the context menus).
@@ -1454,6 +1461,24 @@ void UiSceneBrowser::addLight(const char* lightType, const char* lightName, int 
     m_onGeometryChanged();  // first object in an empty scene needs the initial GPU build
   markSceneTransformsDirty();
   markCachesDirty();
+}
+
+//--------------------------------------------------------------------------------------------------
+// Camera creation, step 1: remember the current viewport view and the parent, then open the name dialog on
+// the next frame (deferred-open pattern, like requestAddPrimitive). The camera is created by the dialog.
+//--------------------------------------------------------------------------------------------------
+void UiSceneBrowser::requestAddCamera(int parentIndex)
+{
+  if(m_onBeforeCreate)
+    m_onBeforeCreate();
+  if(!m_scene || !m_undoStack || !m_getCurrentView)
+    return;
+
+  m_pendingCameraView    = m_getCurrentView();
+  m_pendingCameraParent  = parentIndex;
+  const std::string name = fmt::format("Camera {}", m_scene->getModel().cameras.size());
+  std::snprintf(m_pendingCameraName, sizeof(m_pendingCameraName), "%s", name.c_str());
+  m_openAddCameraPopupNextFrame = true;
 }
 
 //--------------------------------------------------------------------------------------------------
@@ -1584,6 +1609,54 @@ void UiSceneBrowser::showAddPrimitivePopup()
       m_undoStack->executeCommand(std::move(cmd));
       if(m_onGeometryChanged)
         m_onGeometryChanged();  // renderer (re)creates GPU vertex/index buffers + acceleration structures
+      markSceneTransformsDirty();
+      markCachesDirty();
+      ImGui::CloseCurrentPopup();
+    }
+    ImGui::EndDisabled();
+    ImGui::SameLine();
+    if(ImGui::Button(ICON_MS_CANCEL " Cancel", ImVec2(120, 0)))
+      ImGui::CloseCurrentPopup();
+
+    ImGui::EndPopup();
+  }
+}
+
+//--------------------------------------------------------------------------------------------------
+// Name dialog for a new camera. OK runs an undoable AddCameraCommand: a node with a glTF camera that looks
+// through the view captured by requestAddCamera ("Set from Current View" in the Inspector moves it later).
+//--------------------------------------------------------------------------------------------------
+void UiSceneBrowser::showAddCameraPopup()
+{
+  if(m_openAddCameraPopupNextFrame)
+  {
+    ImGui::OpenPopup("Add Camera");
+    m_openAddCameraPopupNextFrame = false;
+  }
+
+  if(ImGui::BeginPopupModal("Add Camera", nullptr, ImGuiWindowFlags_AlwaysAutoResize))
+  {
+    ImGui::TextUnformatted("The new camera looks through the current view.");
+    if(m_pendingCameraParent >= 0)
+      ImGui::TextDisabled("Parent: node %d", m_pendingCameraParent);
+    else
+      ImGui::TextDisabled("Parent: scene root");
+    ImGui::Separator();
+
+    if(ImGui::IsWindowAppearing())
+      ImGui::SetKeyboardFocusHere();
+    const bool entered = ImGui::InputText("Name", m_pendingCameraName, sizeof(m_pendingCameraName),
+                                          ImGuiInputTextFlags_EnterReturnsTrue | ImGuiInputTextFlags_AutoSelectAll);
+    ImGui::Separator();
+
+    const bool canAdd = m_scene && m_undoStack && m_pendingCameraName[0] != '\0';
+    ImGui::BeginDisabled(!canAdd);
+    if(ImGui::Button(ICON_MS_CHECK " OK", ImVec2(120, 0)) || (entered && canAdd))
+    {
+      m_undoStack->executeCommand(std::make_unique<AddCameraCommand>(*m_scene, m_pendingCameraName, m_pendingCameraView,
+                                                                     m_pendingCameraParent, m_selection));
+      if(m_onGeometryChanged)
+        m_onGeometryChanged();  // first object in an empty scene needs the initial GPU build
       markSceneTransformsDirty();
       markCachesDirty();
       ImGui::CloseCurrentPopup();

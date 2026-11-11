@@ -420,12 +420,13 @@ bool remapNodePointer(tinygltf::AnimationChannel& channel, const std::function<i
   const tinygltf::ExtensionMap::iterator ext = channel.target_extensions.find("KHR_animation_pointer");
   if(ext == channel.target_extensions.end() || !ext->second.Has("pointer") || !ext->second.Get("pointer").IsString())
     return true;
-  const std::string      pointer = ext->second.Get("pointer").Get<std::string>();
-  constexpr const char*  kNodes  = "/nodes/";
+  const std::string     pointer = ext->second.Get("pointer").Get<std::string>();
+  constexpr const char* kNodes  = "/nodes/";
   if(!pointer.starts_with(kNodes))
     return true;
-  const std::pair<int, std::string> parsed = tinygltf::utils::parsePointerIndexAndRest(pointer, std::char_traits<char>::length(kNodes));
-  const int                         node   = remapNode(parsed.first);
+  const std::pair<int, std::string> parsed =
+      tinygltf::utils::parsePointerIndexAndRest(pointer, std::char_traits<char>::length(kNodes));
+  const int node = remapNode(parsed.first);
   if(node < 0)
     return false;
   ext->second.Get<tinygltf::Value::Object>()["pointer"] = tinygltf::Value(kNodes + std::to_string(node) + parsed.second);
@@ -953,6 +954,19 @@ bool Scene::compactModel()
                          || (used.samplers.size() < origSamp) || (used.skins.size() < origSkin)
                          || (used.cameras.size() < origCam) || (used.animations.size() < origAnim)
                          || (used.lights.size() < origLight) || (m_model.buffers.size() > 1);
+  // Samplers no channel uses (left by deleted nodes, or already in the file) are dropped as well.
+  for(size_t animationIndex = 0; animationIndex < m_model.animations.size(); animationIndex++)
+  {
+    const tinygltf::Animation& animation = m_model.animations[animationIndex];
+    std::vector<bool>          samplerUsed(animation.samplers.size(), false);
+    for(size_t channelIndex = 0; channelIndex < animation.channels.size(); channelIndex++)
+    {
+      const int sampler = animation.channels[channelIndex].sampler;
+      if(sampler >= 0 && sampler < static_cast<int>(samplerUsed.size()))
+        samplerUsed[sampler] = true;
+    }
+    needsCompaction |= std::find(samplerUsed.begin(), samplerUsed.end(), false) != samplerUsed.end();
+  }
   if(!needsCompaction)
   {
     LOGI("Scene compaction: No orphaned resources found\n");
@@ -1001,7 +1015,9 @@ bool Scene::compactModel()
   m_model.skins      = std::move(newSkins);
   m_model.cameras    = std::move(newCameras);
   m_model.animations = std::move(newAnimations);
-  m_model.lights     = std::move(newLights);
+  for(size_t animationIndex = 0; animationIndex < m_model.animations.size(); animationIndex++)
+    pruneUnusedAnimationSamplers(m_model.animations[animationIndex]);
+  m_model.lights = std::move(newLights);
 
   // Compact geometry (accessors → bufferViews → buffers) now that orphaned meshes are gone.
   // Merges all surviving data into a single buffer[0].

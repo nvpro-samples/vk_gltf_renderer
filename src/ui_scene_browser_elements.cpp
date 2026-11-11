@@ -227,6 +227,7 @@ void UiSceneBrowser::ensureElementRegistry()
       d.addVariants.push_back({info.name, ICON_MS_VIEW_IN_AR, [this, info] { requestAddPrimitive(info.kind, -1); }});
     for(const auto& info : nvvkgltf::kLightKinds)
       d.addVariants.push_back({info.name, ICON_MS_LIGHTBULB, [this, info] { addLight(info.type, info.name, -1); }});
+    d.addVariants.push_back({"Camera", ICON_MS_CAMERA_ALT, [this] { requestAddCamera(-1); }});
 
     d.duplicate = [this](int i) {
       if(m_scene->isNodeReadOnly(i))
@@ -399,6 +400,25 @@ void UiSceneBrowser::ensureElementRegistry()
     d.count    = [this] { return int(m_scene->getModel().cameras.size()); };
     d.name     = [this](int i) { return m_scene->getModel().cameras[i].name; };
     d.select   = [this](int i) { m_selection->selectCamera(i); };
+    d.activate = [this](int i) { m_selection->emitCameraApply(i); };  // double-click: look through it
+    d.addVariants.push_back({"Camera", ICON_MS_CAMERA_ALT, [this] { requestAddCamera(-1); }});
+    d.canDelete = [this](int i) {
+      const std::span<const int> nodes = m_scene->getCameraNodes(i);
+      for(size_t n = 0; n < nodes.size(); n++)
+      {
+        if(m_scene->isNodeReadOnly(nodes[n]))
+          return false;
+      }
+      return true;
+    };
+    d.deleteDisabledReason = [](int) { return std::string("Read-only (external asset) - Make Editable first"); };
+    d.remove               = [this](int i) {
+      m_undoStack->executeCommand(std::make_unique<RemoveCameraCommand>(*m_scene, i, m_selection));
+      if(m_onGeometryChanged)
+        m_onGeometryChanged();
+      markSceneTransformsDirty();
+      markCachesDirty();
+    };
     d.columns.push_back({"Name", 0.0f, false, [this](int i) {
                            ImGui::Text("%s %s", ICON_MS_CAMERA_ALT, m_scene->getModel().cameras[i].name.c_str());
                          }});
@@ -622,7 +642,7 @@ void UiSceneBrowser::ensureElementRegistry()
     };
     d.deleteDisabledReason = [this](int i) {
       return i < int(m_scene->getModel().lights.size()) ? m_scene->editor().lightRemovalBlocker(i) :
-                                                           std::string("IES light: delete its node in the Scene Graph");
+                                                          std::string("IES light: delete its node in the Scene Graph");
     };
     d.remove = [this](int i) {
       m_undoStack->executeCommand(std::make_unique<RemoveLightCommand>(*m_scene, i, m_scene->getModel().lights[i]));
@@ -1266,9 +1286,10 @@ void UiSceneBrowser::renderElementTable(const ElementTypeDesc& desc)
     }
     buildElementView(desc, m_activeElementTab, sortCol, sortAsc);
 
-    const bool useRows  = !m_elementView.identity;
-    const int  rowCount = useRows ? int(m_elementView.rows.size()) : total;
-    const int  selected = selectedElementIndex(desc);
+    const bool useRows       = !m_elementView.identity;
+    const int  rowCount      = useRows ? int(m_elementView.rows.size()) : total;
+    const int  selected      = selectedElementIndex(desc);
+    int        pendingRemove = -1;  // a Delete picked in a row menu runs after the table, not while its rows are drawn
 
     ImGuiListClipper clipper;
     clipper.Begin(rowCount);
@@ -1285,6 +1306,8 @@ void UiSceneBrowser::renderElementTable(const ElementTypeDesc& desc)
         const ImGuiSelectableFlags sflags = ImGuiSelectableFlags_SpanAllColumns | ImGuiSelectableFlags_AllowOverlap;
         if(ImGui::Selectable("##sel", idx == selected, sflags))
           desc.select(idx);
+        if(desc.activate && ImGui::IsItemHovered() && ImGui::IsMouseDoubleClicked(ImGuiMouseButton_Left))
+          desc.activate(idx);
 
         if(ImGui::BeginPopupContextItem("##rowctx"))
         {
@@ -1300,7 +1323,7 @@ void UiSceneBrowser::renderElementTable(const ElementTypeDesc& desc)
             const bool canDel = !desc.canDelete || desc.canDelete(idx);
             ImGui::BeginDisabled(!canDel);
             if(ImGui::MenuItem(ICON_MS_DELETE " Delete"))
-              desc.remove(idx);
+              pendingRemove = idx;
             ImGui::EndDisabled();
           }
           ImGui::EndPopup();
@@ -1318,6 +1341,8 @@ void UiSceneBrowser::renderElementTable(const ElementTypeDesc& desc)
       }
     }
     ImGui::EndTable();
+    if(pendingRemove >= 0 && desc.remove)
+      desc.remove(pendingRemove);  // the rows above indexed the elements as they were: now they may shift
   }
 
   // Footer summary: count (filtered "shown / total" when a filter is active) + optional aggregate.

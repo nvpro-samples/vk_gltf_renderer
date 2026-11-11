@@ -19,6 +19,7 @@ set(TEST_SOURCES
     test_model_primary.cpp
     # Phase 2C: Basic editing operations tests
     test_basic_editing.cpp
+    test_scene_cameras.cpp
     # Phase 2D.1: Basic index remapping tests
     test_index_remapping_basic.cpp
     # Phase 2D.2: Advanced index remapping tests

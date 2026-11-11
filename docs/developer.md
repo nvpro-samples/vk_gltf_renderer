@@ -229,7 +229,7 @@ src/
 ├── scene_shader_macros.cpp/hpp # Emit -DGLTF_USE_* macros from detected features
 ├── timeline_pipeline.cpp/hpp   # Timeline-semaphore submission helper
 ├── benchmarking.cpp/hpp        # Headless timing / scripted GPU benchmarks
-├── gltf_camera_utils.hpp       # Camera utility functions
+├── gltf_camera_utils.hpp       # Camera utility functions; setupSceneView(): starting view + bookmarks on load
 ├── gpu_memory_tracker.hpp      # GPU memory category tracking
 ├── scoped_banner.hpp           # Scoped UI banner helper
 └── utils.hpp                   # Miscellaneous utilities

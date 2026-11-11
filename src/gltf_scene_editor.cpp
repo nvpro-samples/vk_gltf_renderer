@@ -535,22 +535,175 @@ int SceneEditor::addLightNode(const std::string& lightType, const std::string& n
 }
 
 //--------------------------------------------------------------------------------------------------
+// Camera ops
+//--------------------------------------------------------------------------------------------------
+
+namespace {
+// The local pose (translation, rotation, scale) that puts a node under `parent` at the world pose of `view`.
+// False when the parent chain cannot hold it: a node's TRS has no shear and no mirroring, which a
+// non-uniformly scaled or mirrored parent would need.
+bool worldToLocalPose(const tinygltf::Model&        model,
+                      const std::vector<int>&       parents,
+                      int                           parent,
+                      const nvvkgltf::RenderCamera& view,
+                      glm::dvec3&                   translation,
+                      glm::dquat&                   rotation,
+                      glm::dvec3&                   scale)
+{
+  glm::dmat4 parentWorld(1.0);
+  for(int n = parent; n >= 0; n = parents[n])
+    parentWorld = glm::dmat4(tinygltf::utils::getNodeMatrix(model.nodes[n])) * parentWorld;
+  if(!(std::abs(glm::determinant(parentWorld)) > 1e-12))
+    return false;  // a zero scale: the parent cannot be inverted
+
+  const glm::dquat worldRotation = glm::quatLookAt(glm::normalize(view.center - view.eye), view.up);
+  const glm::dmat4 world         = glm::translate(glm::dmat4(1.0), view.eye) * glm::mat4_cast(worldRotation);
+  const glm::dmat4 local         = glm::inverse(parentWorld) * world;
+
+  const glm::dvec3 axes[3]    = {glm::dvec3(local[0]), glm::dvec3(local[1]), glm::dvec3(local[2])};
+  const double     lengths[3] = {glm::length(axes[0]), glm::length(axes[1]), glm::length(axes[2])};
+  for(int i = 0; i < 3; i++)
+  {
+    if(lengths[i] < 1e-12)
+      return false;
+    const int j = (i + 1) % 3;
+    if(std::abs(glm::dot(axes[i], axes[j])) > 1e-6 * lengths[i] * lengths[j])
+      return false;  // not perpendicular: shear
+  }
+  if(glm::dot(glm::cross(axes[0], axes[1]), axes[2]) <= 0.0)
+    return false;  // mirrored: a quaternion cannot hold a reflection
+
+  translation = glm::dvec3(local[3]);
+  scale       = glm::dvec3(lengths[0], lengths[1], lengths[2]);
+  rotation    = glm::quat_cast(glm::dmat3(axes[0] / lengths[0], axes[1] / lengths[1], axes[2] / lengths[2]));
+  return std::isfinite(translation.x) && std::isfinite(translation.y) && std::isfinite(translation.z)
+         && std::isfinite(scale.x) && std::isfinite(scale.y) && std::isfinite(scale.z) && std::isfinite(rotation.x)
+         && std::isfinite(rotation.y) && std::isfinite(rotation.z) && std::isfinite(rotation.w);
+}
+}  // namespace
+
+int SceneEditor::addCameraNode(const std::string& name, const nvvkgltf::RenderCamera& view, int parentIndex)
+{
+  tinygltf::Model& model = m_scene.m_model;
+
+  // A parent whose transform cannot hold the view (shear, mirror) is not used: the camera goes to the
+  // scene root, where its pose is exact.
+  glm::dvec3 translation;
+  glm::dquat rotation;
+  glm::dvec3 scale;
+  if(parentIndex >= 0 && isValidNodeIndex(parentIndex)
+     && !worldToLocalPose(model, m_scene.m_nodeParents, parentIndex, view, translation, rotation, scale))
+  {
+    LOGW("Camera '%s': the transform of node %d cannot hold its pose (scale or mirror); added at the scene root\n",
+         name.c_str(), parentIndex);
+    parentIndex = -1;
+  }
+
+  const int nodeIndex = addNode(name, parentIndex);
+  if(nodeIndex < 0)
+    return -1;
+
+  tinygltf::Camera camera;
+  camera.name = name;
+  model.cameras.push_back(camera);
+  model.nodes[nodeIndex].camera = static_cast<int>(model.cameras.size()) - 1;
+
+  setCameraNodeFromView(nodeIndex, view);
+  m_scene.invalidateElementUsage();  // Scene::getCameraNode() reads the attachments
+  return nodeIndex;
+}
+
+void SceneEditor::setCameraNodeFromView(int nodeIndex, const nvvkgltf::RenderCamera& view)
+{
+  if(!isValidNodeIndex(nodeIndex) || blockIfNodeReadOnly(nodeIndex, "edit"))
+    return;
+  tinygltf::Model& model = m_scene.m_model;
+  tinygltf::Node&  node  = model.nodes[nodeIndex];
+  if(node.camera < 0 || node.camera >= static_cast<int>(model.cameras.size()))
+    return;
+
+  // Under a transformed parent, the local pose is the world pose seen from the parent.
+  const int  parent = m_scene.m_nodeParents[nodeIndex];
+  glm::dvec3 translation;
+  glm::dquat rotation;
+  glm::dvec3 scale;
+  const bool useParent = parent >= 0;
+  if(useParent && !worldToLocalPose(model, m_scene.m_nodeParents, parent, view, translation, rotation, scale))
+  {
+    LOGW("Camera node %d: the transform of its parent cannot hold this view (scale or mirror); not changed\n", nodeIndex);
+    return;
+  }
+
+  // Lens, world pose as the local pose, and the eye/center/up extras (all in world space).
+  nvvkgltf::applyRenderCameraToNode(node, model.cameras[node.camera], view);
+  if(useParent)
+  {
+    node.translation = {translation.x, translation.y, translation.z};
+    node.rotation    = {rotation.x, rotation.y, rotation.z, rotation.w};
+    node.scale       = {scale.x, scale.y, scale.z};
+  }
+
+  m_scene.m_cameras.clear();  // the cached render cameras are rebuilt from the model on next use
+  m_scene.markNodeDirty(nodeIndex);
+}
+
+void SceneEditor::removeCamera(int cameraIndex)
+{
+  tinygltf::Model& model = m_scene.m_model;
+  if(cameraIndex < 0 || cameraIndex >= static_cast<int>(model.cameras.size()))
+    return;
+
+  // Highest node first, so the deletes below leave the lower indices of this list valid.
+  const std::span<const int> attached = m_scene.getCameraNodes(cameraIndex);
+  std::vector<int>           nodes(attached.begin(), attached.end());
+  std::sort(nodes.begin(), nodes.end(), std::greater<int>());
+
+  for(size_t i = 0; i < nodes.size(); i++)
+  {
+    const int n = nodes[i];
+    if(!isValidNodeIndex(n) || blockIfNodeReadOnly(n, "delete"))
+      continue;
+    const tinygltf::Node& node = model.nodes[n];
+    if(node.children.empty() && node.mesh < 0 && node.skin < 0 && node.light < 0)
+    {
+      const size_t nodeCount = model.nodes.size();
+      deleteNode(n);                       // refuses the last root node of the scene
+      if(model.nodes.size() != nodeCount)  // deleted (and the node list shifted)
+        continue;
+    }
+    model.nodes[n].camera = -1;
+  }
+
+  pruneOrphanCameras();  // also renumbers the animation pointers into model.cameras
+  m_scene.invalidateElementUsage();
+  m_scene.m_cameras.clear();
+  m_scene.parseScene();
+}
+
+//--------------------------------------------------------------------------------------------------
 // Light ops
 //--------------------------------------------------------------------------------------------------
 
 namespace {
 constexpr std::string_view kLightPointerPrefix = "/extensions/KHR_lights_punctual/lights/";
 
-// The light a KHR_animation_pointer channel addresses, with the rest of its pointer, or {-1, {}}.
-std::pair<int, std::string> pointerLight(const tinygltf::AnimationChannel& channel)
+// The element a KHR_animation_pointer channel addresses under `prefix` (e.g. "/cameras/"), with the rest of
+// its pointer, or {-1, {}}.
+std::pair<int, std::string> pointerIndexAndRest(const tinygltf::AnimationChannel& channel, std::string_view prefix)
 {
   const std::map<std::string, tinygltf::Value>::const_iterator ext = channel.target_extensions.find("KHR_animation_pointer");
   if(ext == channel.target_extensions.end() || !ext->second.Has("pointer") || !ext->second.Get("pointer").IsString())
     return {-1, {}};
   const std::string& pointer = ext->second.Get("pointer").Get<std::string>();
-  if(!pointer.starts_with(kLightPointerPrefix))
+  if(!pointer.starts_with(prefix))
     return {-1, {}};
-  return tinygltf::utils::parsePointerIndexAndRest(pointer, kLightPointerPrefix.size());
+  return tinygltf::utils::parsePointerIndexAndRest(pointer, prefix.size());
+}
+
+// The light a KHR_animation_pointer channel addresses, with the rest of its pointer, or {-1, {}}.
+std::pair<int, std::string> pointerLight(const tinygltf::AnimationChannel& channel)
+{
+  return pointerIndexAndRest(channel, kLightPointerPrefix);
 }
 
 // Renumber every reference to a KHR_lights_punctual light through `remap` (old index -> new): node.light,
@@ -1269,6 +1422,10 @@ void SceneEditor::remapIndicesAfterNodeDeletion(int deletedIndex)
       anim.channels.erase(anim.channels.begin() + *it);
     }
 
+    // Samplers only the removed channels used would otherwise stay behind as unused data.
+    if(!channelsToRemove.empty())
+      pruneUnusedAnimationSamplers(anim);
+
     if(anim.channels.empty())
     {
       animationsToRemove.push_back(static_cast<int>(animIdx));
@@ -1358,7 +1515,10 @@ namespace {
 // entries were removed. Kept file-local -- SceneEditor's pruneOrphan{Lights,Cameras}() thin
 // wrappers exist so the header stays type-agnostic.
 template <typename T>
-bool pruneOrphanPool(std::vector<T>& pool, std::vector<tinygltf::Node>& nodes, int tinygltf::Node::* refField)
+bool pruneOrphanPool(std::vector<T>&              pool,
+                     std::vector<tinygltf::Node>& nodes,
+                     int tinygltf::Node::*                               refField,
+                     const std::function<void(const std::vector<int>&)>& onCompacted = {})
 {
   if(pool.empty())
     return false;
@@ -1398,6 +1558,8 @@ bool pruneOrphanPool(std::vector<T>& pool, std::vector<tinygltf::Node>& nodes, i
       n.*refField = remap[n.*refField];  // guaranteed >= 0: we set used[.] before building remap
   }
 
+  if(onCompacted)
+    onCompacted(remap);
   return true;
 }
 
@@ -1408,9 +1570,49 @@ void SceneEditor::pruneOrphanLights()
   pruneOrphanPool(m_scene.m_model.lights, m_scene.m_model.nodes, &tinygltf::Node::light);
 }
 
+namespace {
+constexpr std::string_view kCameraPointerPrefix = "/cameras/";
+
+// After the camera pool was compacted: renumber the KHR_animation_pointer channels that address a camera
+// (`remap` is old index -> new, -1 for a removed camera). A channel of a removed camera is dropped with
+// the samplers only it used, and an animation left without channels is removed, like for a deleted node.
+void remapCameraPointers(tinygltf::Model& model, const std::vector<int>& remap)
+{
+  for(size_t a = model.animations.size(); a-- > 0;)
+  {
+    tinygltf::Animation& animation = model.animations[a];
+    bool                 dropped   = false;
+    for(size_t c = animation.channels.size(); c-- > 0;)
+    {
+      const std::pair<int, std::string> cameraAndRest = pointerIndexAndRest(animation.channels[c], kCameraPointerPrefix);
+      const int camera = cameraAndRest.first;
+      if(camera < 0)
+        continue;
+      const int mapped = camera < static_cast<int>(remap.size()) ? remap[camera] : -1;
+      if(mapped < 0)
+      {
+        animation.channels.erase(animation.channels.begin() + c);
+        dropped = true;
+      }
+      else if(mapped != camera)
+      {
+        animation.channels[c].target_extensions.at("KHR_animation_pointer").Get<tinygltf::Value::Object>()["pointer"] =
+            tinygltf::Value(std::string(kCameraPointerPrefix) + std::to_string(mapped) + cameraAndRest.second);
+      }
+    }
+    if(dropped)
+      pruneUnusedAnimationSamplers(animation);
+    if(animation.channels.empty())
+      model.animations.erase(model.animations.begin() + a);
+  }
+}
+}  // namespace
+
 void SceneEditor::pruneOrphanCameras()
 {
-  pruneOrphanPool(m_scene.m_model.cameras, m_scene.m_model.nodes, &tinygltf::Node::camera);
+  tinygltf::Model& model = m_scene.m_model;
+  pruneOrphanPool(model.cameras, model.nodes, &tinygltf::Node::camera,
+                  [&model](const std::vector<int>& remap) { remapCameraPointers(model, remap); });
 }
 
 //--------------------------------------------------------------------------------------------------

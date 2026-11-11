@@ -197,3 +197,17 @@ TEST(SunPosition, ParseIsoDateRejectsImpossibleDates)
   EXPECT_FALSE(sun_position::parseIsoDate("2026-06-21x", y, m, d));  // trailing characters
   EXPECT_FALSE(sun_position::parseIsoDate("2026-06-21 ", y, m, d));
 }
+
+TEST(SunPosition, DayOfYearRoundTrips)
+{
+  EXPECT_EQ(sun_position::dayOfYear(2026, 11, 10), 314);
+  EXPECT_EQ(sun_position::dayOfYear(2024, 12, 31), 366);
+  for(int year : {2026, 2024})
+    for(int doy = 1; doy <= sun_position::daysInYear(year); ++doy)
+    {
+      int m = 0, d = 0;
+      sun_position::dateFromDayOfYear(year, doy, m, d);
+      EXPECT_EQ(sun_position::dayOfYear(year, m, d), doy);
+    }
+}
+

@@ -439,7 +439,9 @@ PbrMaterial evaluateMaterial(in GltfShadeMaterial material, MeshState state, Tex
   {
     // Ensure T, B, and N are orthonormal
     pbrMat.B            = normalize(cross(pbrMat.N, pbrMat.T));
-    float bitangentSign = sign(dot(state.B, pbrMat.B));
+    // Not sign(): it is 0 when the two bitangents are exactly perpendicular (which a normal-map texel
+    // can give), which zeroed B and made the normalize below NaN: a black pixel.
+    float bitangentSign = dot(state.B, pbrMat.B) < 0.0F ? -1.0F : 1.0F;
     pbrMat.B            = pbrMat.B * bitangentSign;
     pbrMat.T            = normalize(cross(pbrMat.B, pbrMat.N) * bitangentSign);
   }
