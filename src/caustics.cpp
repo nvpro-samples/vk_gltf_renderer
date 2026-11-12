@@ -95,7 +95,7 @@ bool Caustics::onUiSettings()
                           "them splatted into the image, or gathered from the photon map behind glass.\n"
                           "Casters become opaque to the light samples of those surfaces, so the photons carry that light,\n"
                           "focused. Off: nothing is traced and the render is unchanged. Changing it recompiles the shader.\n"
-                          "Not covered: volume scattering, rough or partly diffuse casters, textured emitters.\n"
+                          "Not covered: volume scattering, rough or partly diffuse casters.\n"
                           "See docs/caustics.md.");
   if(m_enabled)
   {

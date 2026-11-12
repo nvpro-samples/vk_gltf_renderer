@@ -72,6 +72,13 @@ struct GltfRenderPrimitive
   VertexBuffers vertexBuffer;
 };
 
+// EmissiveTriangle::flags
+enum EmissiveTriangleFlags
+{
+  eEmissiveTriangleDoubleSided = 1 << 0,  // emit from both faces
+  eEmissiveTriangleTextured    = 1 << 1,  // the material has an emissive texture, which multiplies the radiance
+};
+
 // One emissive triangle referenced for area-light sampling (next-event estimation). Stored as a
 // reference (render node + primitive + triangle) rather than baked world-space vertices, so the
 // sampler reads live geometry/transforms and the list depends only on materials (rebuilt on the
@@ -83,7 +90,7 @@ struct EmissiveTriangle
   uint   renderNodeID;  // index into GltfScene.renderNodes
   uint   renderPrimID;  // index into GltfScene.renderPrimitives
   uint   triangleID;    // triangle within the primitive
-  uint   doubleSided;   // 1 = emit from both faces
+  uint   flags;         // EmissiveTriangleFlags
   uint   aliasIndex;    // Vose alias table: fallback bin
 };
 
@@ -366,9 +373,9 @@ struct GltfScene
   GltfLight*           lights;
   int                  numLights;  // number of punctual lights
   EmissiveTriangle*    emissiveTriangles;
-  int                  numEmissiveTriangles;  // number of sampled emissive triangles (area lights)
-  float                emissiveTotalWeight;   // sum of per-triangle selection weights (area * defensive luminance)
-  float                emissiveMeanLum;       // area-weighted mean emitter luminance (for defensive sampling)
+  int                  numEmissiveTriangles;      // number of sampled emissive triangles (area lights)
+  float                emissiveTotalWeight;       // sum of per-triangle selection weights (area * defensive luminance)
+  float                emissiveMeanLum;           // area-weighted mean emitter luminance (for defensive sampling)
 
   // EXT_lights_ies: flattened [profile][sample] table, sample = normalized candela (peak = 1) at
   // vertical angle sample/(iesProfileSampleCount-1) * 180 degrees off the light's photometric axis,

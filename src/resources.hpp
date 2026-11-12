@@ -190,7 +190,10 @@ struct Settings
   bool  showInteractivityWindow = false;  // Show KHR_interactivity Graphs window (opt-in, unlike the above)
   bool  showAgenticWindow       = false;  // Show Agentic bridge window
   bool  showGridSettingsWindow  = false;  // Show Grid & Snap settings window
-  float hdrEnvIntensity         = 1.0f;   // Intensity of the environment (HDR)
+  float hdrEnvIntensity         = 1.0f;   // Intensity of the loaded HDR; the only environment with a slider for it
+  // What every shader and light computation multiplies the environment by: the HDR's intensity for an HDR,
+  // 1 for the skies, so a dimmed HDR does not leave a hidden multiplier behind when the environment changes.
+  [[nodiscard]] float envIntensity() const { return envSystem == shaderio::EnvSystem::eHdr ? hdrEnvIntensity : 1.0f; }
   // The environment's orientation: a unit quaternion taking its own frame to world, stored x, y, z, w
   // -- OMI_environment_sky's `rotation`, verbatim, and the only orientation any environment has. It
   // turns the HDR image, every analytic sky, and the compass Time of Day places the sun with.

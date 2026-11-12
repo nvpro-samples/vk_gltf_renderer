@@ -621,6 +621,27 @@ int selectEmissiveTriangle(float u01)
   return (uf < et.aliasProb) ? bin : int(et.aliasIndex);
 }
 
+// Emissive texture of an emissive triangle at the point with barycentrics (1-b1-b2, b1, b2);
+// float3(1) when the material has none. Mirrors gltf_material_eval.h.slang's emissive term, but
+// always at the sharpest mip: this is shared by the light sampler and the photon emitter, which
+// draw points on the triangle and weigh them by the same selection pdf (the constant radiance).
+float3 emissiveTextureAt(EmissiveTriangle et, float b1, float b2)
+{
+  if(!hasFlag(int(et.flags), EmissiveTriangleFlags::eEmissiveTriangleTextured))
+    return float3(1.0F);  // a flat emitter: no node or material to read
+
+  GltfRenderNode     node = pushConst.gltfScene.renderNodes[et.renderNodeID];
+  GltfShadeMaterial* mats = pushConst.gltfScene->materials;
+  GltfShadeMaterial  mat  = mats[max(0, node.materialID)];
+  if(!isTexturePresent(mat.emissiveTexture))
+    return float3(1.0F);
+
+  GltfRenderPrimitive prim    = pushConst.gltfScene.renderPrimitives[et.renderPrimID];
+  uint3               idx     = getTriangleIndices(prim, int(et.triangleID));
+  GltfTextureInfo     texInfo = pushConst.gltfScene->textureInfos[mat.emissiveTexture];
+  return max(float3(0.0F), sampleShadowTexture(prim, texInfo, idx, float3(1.0 - b1 - b2, b1, b2)).rgb);
+}
+
 // Power-weighted sample of emissive triangle `emissiveIndex` as seen from `shadingPos`.
 EmissiveSample sampleEmissiveTriangle(int emissiveIndex, float3 shadingPos, inout uint seed)
 {
@@ -651,7 +672,7 @@ EmissiveSample sampleEmissiveTriangle(int emissiveIndex, float3 shadingPos, inou
   float3 lightN = ng / twoArea;
 
   float cosLight = dot(lightN, -dir);
-  if(et.doubleSided != 0)
+  if(hasFlag(int(et.flags), EmissiveTriangleFlags::eEmissiveTriangleDoubleSided))
     cosLight = abs(cosLight);
   if(cosLight <= 1e-6)
     return es;  // one-sided emitter facing away, or grazing
@@ -665,7 +686,8 @@ EmissiveSample sampleEmissiveTriangle(int emissiveIndex, float3 shadingPos, inou
   // absolute offset rather than a dist-relative one: scaling by dist skips a large segment in front
   // of a far emitter (missed occluders -> light leak). Clamp so very near emitters stay positive.
   es.distance = dist - min(dist * 0.5f, 1e-2f);
-  es.radiance = et.radiance;
+  es.radiance = et.radiance * emissiveTextureAt(et, b1, b2);
+
   // Power-weighted solid-angle pdf; the triangle area cancels (see header). Uses the defensive
   // luminance so it matches the host selection weight.
   es.pdf = emitterDefensiveLuminance(et.radiance) * dist2 / (wtot * cosLight);

@@ -821,10 +821,11 @@ void nvvkgltf::SceneVk::uploadLights(nvvk::CmdUploaderInterface& staging, const 
 // World area is computed from the render node's transform, so the list is rebuilt on material or
 // render-node changes (see syncFromScene). A null buffer with count 0 is a valid "no emitters" state.
 // True when a dirty material changed what the emissive list takes from it (constant emitted radiance,
-// doubleSided) since the list was last built, or the material count changed. Records the new state.
+// doubleSided, an emissive texture or not) since the list was last built, or the material count
+// changed. Records the new state.
 nvvkgltf::SceneVk::MaterialEmission nvvkgltf::SceneVk::materialEmissionOf(const tinygltf::Material& material)
 {
-  return {tinygltf::utils::getConstantEmissiveRadiance(material), material.doubleSided};
+  return {tinygltf::utils::getConstantEmissiveRadiance(material), material.doubleSided, material.emissiveTexture.index >= 0};
 }
 
 bool nvvkgltf::SceneVk::materialEmissionChanged(const nvvkgltf::Scene& scn, const std::unordered_set<int>& dirtyMaterials)
@@ -872,7 +873,9 @@ void nvvkgltf::SceneVk::uploadEmissiveTriangles(nvvk::CmdUploaderInterface& stag
 
     const tinygltf::Material& mat = materials[rn.materialID];
 
-    const glm::vec3 radiance = tinygltf::utils::getConstantEmissiveRadiance(mat);  // 0 for textured/non-emitters
+    // Constant radiance: 0 for non-emitters, and an emissive texture is not part of it.
+    const glm::vec3 radiance = tinygltf::utils::getConstantEmissiveRadiance(mat);
+    const bool      textured = mat.emissiveTexture.index >= 0;
     // Rec. 709 luminance; must match the shader's luminance() (nvshaders/functions.h.slang) so the
     // pdf's area term cancels.
     const float lum = 0.2126f * radiance.x + 0.7152f * radiance.y + 0.0722f * radiance.z;
@@ -912,7 +915,8 @@ void nvvkgltf::SceneVk::uploadEmissiveTriangles(nvvk::CmdUploaderInterface& stag
 
     const glm::mat4& worldMatrix = rn.worldMatrix;
     const uint32_t   numTri      = static_cast<uint32_t>(indices.size() / 3);
-    const uint32_t   doubleSided = mat.doubleSided ? 1u : 0u;
+    const uint32_t   flags       = (mat.doubleSided ? shaderio::eEmissiveTriangleDoubleSided : 0u)
+                           | (textured ? shaderio::eEmissiveTriangleTextured : 0u);
     for(uint32_t t = 0; t < numTri; ++t)
     {
       const uint32_t i0 = indices[3 * t + 0], i1 = indices[3 * t + 1], i2 = indices[3 * t + 2];
@@ -932,7 +936,7 @@ void nvvkgltf::SceneVk::uploadEmissiveTriangles(nvvk::CmdUploaderInterface& stag
       et.renderNodeID = nodeIdx;
       et.renderPrimID = static_cast<uint32_t>(rn.renderPrimID);
       et.triangleID   = t;
-      et.doubleSided  = doubleSided;
+      et.flags        = flags;
       // aliasProb / aliasIndex are filled in the alias-table pass below.
       tris.push_back(et);
       triArea.push_back(area);

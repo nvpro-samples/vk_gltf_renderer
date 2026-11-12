@@ -119,9 +119,6 @@ void tinygltf::utils::setEmissiveStrength(tinygltf::Material& tmat, const KHR_ma
 
 glm::vec3 tinygltf::utils::getConstantEmissiveRadiance(const tinygltf::Material& tmat)
 {
-  // Textured emitters keep BSDF-only behavior; only constant emitters are sampled as area lights.
-  if(tmat.emissiveTexture.index >= 0)
-    return glm::vec3(0.0f);
   glm::vec3 radiance(0.0f);
   if(tmat.emissiveFactor.size() == 3)
     radiance = glm::make_vec3<double>(tmat.emissiveFactor.data());

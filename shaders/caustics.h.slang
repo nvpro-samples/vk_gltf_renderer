@@ -236,7 +236,7 @@ float3 causticDiskOrigin(float3 toLight, float2 u, inout uint seed, out float di
 }
 
 // Pick an emitter as sampleLights() would -- the same technique and sub-technique probabilities --
-// and send a photon from it toward the casters. Textured emissive meshes are not in the light list.
+// and send a photon from it toward the casters.
 PhotonEmission causticEmit(inout uint seed, float2 aim)
 {
   PhotonEmission photon        = {};
@@ -334,7 +334,7 @@ PhotonEmission causticEmit(inout uint seed, float2 aim)
       photon.origin    = p0 * (1.0F - b1 - b2) + p1 * b1 + p2 * b2;
       photon.direction = causticSampleDirection(photon.origin, aim, seed, pdf);
       float cosL       = dot(normal / twoArea, photon.direction);
-      if(emissiveTriangle.doubleSided != 0)
+      if(hasFlag(int(emissiveTriangle.flags), EmissiveTriangleFlags::eEmissiveTriangleDoubleSided))
         cosL = abs(cosL);
       if(cosL <= 1e-6F)
         return photon;  // one-sided emitter facing away
@@ -344,8 +344,10 @@ PhotonEmission causticEmit(inout uint seed, float2 aim)
                        * (1e-5F * causticParams->sceneRadius);
 
       const float areaPdf = emitterDefensiveLuminance(emissiveTriangle.radiance) / totalWeight;  // selection pmf over the area
-      photon.flux = emissiveTriangle.radiance * cosL / (probs.lightWeight * probs.emissiveWeight * areaPdf * pdf * count);
-      photon.valid = true;
+      // The texture rides on the flux, as in the light sampler: the pick above ignores it (constant radiance).
+      photon.flux = emissiveTriangle.radiance * emissiveTextureAt(emissiveTriangle, b1, b2) * cosL
+                    / (probs.lightWeight * probs.emissiveWeight * areaPdf * pdf * count);
+      photon.valid = any(photon.flux > 0.0F);
     }
   }
   else if(probs.envWeight > 0.0F)

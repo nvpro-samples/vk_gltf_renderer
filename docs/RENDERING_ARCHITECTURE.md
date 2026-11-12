@@ -247,10 +247,14 @@ Path tracer only — the rasterizer is unaffected.
 Host — build the emitter list (`SceneVk::uploadEmissiveTriangles`):
 
 1. Walk every **render node** (an instance of a primitive) and look at its material.
-2. Keep it only if it is a **constant emitter**: emissive (`emissiveFactor × emissiveStrength`) is
-   non-black **and** it has no emissive texture. (Textured emitters stay on the BSDF-only path.)
+2. Keep it if it emits: `emissiveFactor × emissiveStrength` is non-black. An emissive texture does not
+   change that. Selection uses the constant factor only, and the shader multiplies the radiance by the
+   texture at the sampled point (`emissiveTextureAt`, sharpest mip; the photon emitter of the caustics
+   does the same). The texture is therefore unbiased but not importance-sampled: a high-contrast
+   texture (a thin line, a small bright area) stays noisy.
 3. For each triangle of that primitive, store a **reference** — render node, primitive, triangle
-   index — plus the **radiance** (not baked vertices, so the shader reads live geometry/transforms).
+   index — plus the **radiance** (not baked vertices, so the shader reads live geometry/transforms)
+   and a flags word: double-sided, and has an emissive texture (a flat emitter skips the texture read).
 4. Compute the triangle's **world-space area** (verts × node transform) and give it a **selection
    weight = area × luminance** (see the defensive tweak below). Build a **Vose alias table** from the
    weights (`aliasProb` / `aliasIndex` per triangle) for O(1) GPU selection, plus the totals
@@ -264,8 +268,7 @@ Device — sample a light at each surface hit (`sampleLights`):
    vs "an emissive triangle" (the probabilities balance the categories).
 8. **For an emissive triangle**: pick one in **O(1) via the alias table** (bright/large ones win more)
    → read its live world vertices → **sample a random point** on it → form direction/distance and the
-   sample's **pdf** → evaluate the surface BSDF toward it → **cast a shadow ray**; if unblocked, add
-   the light, **MIS-weighted** against BSDF sampling.
+   sample's **pdf** → evaluate the surface BSDF toward it → **cast a shadow ray**; if unblocked, add the light, **MIS-weighted** against BSDF sampling.
 9. Separately, when a normal bounce ray **hits an emitter directly** (`gltf_pathtrace.slang`, the
    emissive add), its glow is added but **MIS-weighted**, so the "sampled via NEE" and "hit by chance"
    paths combine without double-counting.
@@ -282,7 +285,8 @@ Device — sample a light at each surface hit (`sampleLights`):
 The list is derived data, regenerated wholesale (never patched). It stores references, but each
 emitter's **selection weight is its world-space area × luminance**, so it also depends on the
 emitter's transform. `syncFromScene` rebuilds it when a material's emission, the emitter set, or an emitter's
-transform change. A material edit counts only if it changes the material's constant emitted radiance
+transform change. A material edit counts only if it changes what the list takes from the material: its
+constant emitted radiance, `doubleSided`, or whether it has an emissive texture
 (`SceneVk::materialEmissionChanged`): a base-colour or roughness edit leaves a list of millions of
 emitters alone. A `DirtyFlags::emissiveDirty` latch is consumed independently of the sync mask so
 the GPU-transform path (which syncs only materials + lights) rebuilds it too. The shader samples the

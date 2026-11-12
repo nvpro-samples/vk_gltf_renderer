@@ -307,12 +307,14 @@ protected:
   float        m_emissiveTotalWeight  = 0.0f;  // Sum of per-triangle selection weights (area * defensive luminance)
   float        m_emissiveMeanLum      = 0.0f;  // Area-weighted mean emitter luminance (defensive sampling)
   // What the emissive list takes from each material, as of its last build: the constant emitted
-  // radiance and the doubleSided flag. A material edit rebuilds the list (millions of triangles on a
-  // large scene) only when it changes one of these.
+  // radiance, the doubleSided flag, and whether an emissive texture modulates the radiance (the
+  // light sampler skips the texture read of a flat emitter). A material
+  // edit rebuilds the list (millions of triangles on a large scene) only when it changes one of these.
   struct MaterialEmission
   {
     glm::vec3 radiance{0.0f};
     bool      doubleSided                               = false;
+    bool      textured                                  = false;
     bool      operator==(const MaterialEmission&) const = default;
   };
   std::vector<MaterialEmission> m_materialEmission;

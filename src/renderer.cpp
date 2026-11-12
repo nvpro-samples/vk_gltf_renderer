@@ -1679,7 +1679,7 @@ void GltfRenderer::onRender(VkCommandBuffer cmd)
             | ((m_resources.settings.useInfinitePlane && m_resources.settings.isShadowCatcher) ? shaderio::eSceneInfinitePlaneShadowCatcher : 0),
         .envRotation               = {envRot.x, envRot.y, envRot.z, envRot.w},
         .envBlur                   = m_resources.settings.hdrBlur,
-        .envIntensity              = m_resources.settings.hdrEnvIntensity,
+        .envIntensity              = m_resources.settings.envIntensity(),
         .backgroundColor           = m_resources.settings.solidBackgroundColor,
         .visualization             = m_resources.settings.activeVisualization(),
         .infinitePlaneDistance     = m_resources.settings.infinitePlaneDistance,
@@ -2368,7 +2368,7 @@ void GltfRenderer::writeSkySunLight(tinygltf::Model& outModel) const
     // convert; the illuminance is scaled against the dome instead. Same number the renderer lights
     // with, so the file describes what is on screen.
     angularRadius = kGradientSunAngularRadius;
-    illuminance   = gradientSunIlluminance() * m_resources.settings.hdrEnvIntensity;
+    illuminance   = gradientSunIlluminance() * m_resources.settings.envIntensity();
   }
 
   const float     peak  = std::max({illuminance.x, illuminance.y, illuminance.z});
@@ -2978,7 +2978,7 @@ glm::vec3 GltfRenderer::skySunIlluminanceAboveAtmosphere() const
   using shaderio::float3;
   // The sun's factor set, not the sky's -- this is the sun. See SUN_SPECTRAL_TO_LUMINANCE.
   const glm::vec3 radianceToLuminance = SUN_RADIANCE_TO_LUMINANCE;
-  return buildAtmosphereParameters().solarIrradiance * radianceToLuminance * m_resources.settings.hdrEnvIntensity;
+  return buildAtmosphereParameters().solarIrradiance * radianceToLuminance * m_resources.settings.envIntensity();
 }
 
 float GltfRenderer::defaultFireflyClamp() const
@@ -3018,7 +3018,7 @@ float GltfRenderer::defaultFireflyClamp() const
   if(env == shaderio::EnvSystem::eSky)
     sun = skySunIlluminanceAboveAtmosphere();
   else if(env == shaderio::EnvSystem::eGradient)
-    sun = gradientSunIlluminance() * m_resources.settings.hdrEnvIntensity;
+    sun = gradientSunIlluminance() * m_resources.settings.envIntensity();
   clamp += std::max({sun.x, sun.y, sun.z});
   return clamp;
 }

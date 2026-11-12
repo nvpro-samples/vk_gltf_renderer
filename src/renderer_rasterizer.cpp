@@ -477,7 +477,7 @@ void Rasterizer::onRender(VkCommandBuffer cmd, Resources& resources)
         resources.hdrDome.setOutImage(target);
         m_lastHdrDomeView = targets.colorView;
       }
-      resources.hdrDome.draw(cmd, viewMatrix, projMatrix, targets.extent, glm::vec4(resources.settings.hdrEnvIntensity),
+      resources.hdrDome.draw(cmd, viewMatrix, projMatrix, targets.extent, glm::vec4(resources.settings.envIntensity()),
                              resources.settings.envRotationQuat(), resources.settings.hdrBlur);
 
       if(resources.settings.envSystem == shaderio::EnvSystem::eSky)

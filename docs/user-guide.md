@@ -542,7 +542,7 @@ parent, its skin and its children, and only what exists.
 
 The **Inspector** panel provides full PBR material editing when a material or primitive is selected:
 
-- Base color factor and texture, metallic, roughness, emissive (factor + strength)
+- Base color factor and texture, metallic, roughness, emissive (factor, strength and texture). An emissive texture lights the scene as an area light, like a flat emitter; the texture is not importance-sampled, so a high-contrast one (a thin line, a small bright area) lights noisily
 - Normal map scale, occlusion strength, alpha mode and cutoff
 - Double-sided toggle
 - All glTF PBR material extensions: clearcoat, transmission, volume, volume scatter, sheen, specular, IOR, iridescence, anisotropy, diffuse transmission, dispersion, emissive strength, unlit, and retroreflection

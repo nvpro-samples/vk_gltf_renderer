@@ -165,7 +165,8 @@ all into one `CausticParams` struct (`shaders/shaderio.h`) that the shaders read
 One GPU thread per photon (`causticMain` in `shaders/caustics.h.slang`, dispatched by `PathTracer::traceCaustics`):
 
 1. **Pick an emitter** the way the light sampler picks one (`causticEmit`): an emissive triangle (chosen in
-   proportion to its power), a punctual light, the sun, or the environment sky. Then a point on it.
+   proportion to its power), a punctual light, the sun, or the environment sky. Then a point on it; an
+   emissive texture multiplies the flux there, as in the light sampler (the pick ignores it).
 2. **Aim** at a caster sphere (section 4.1). The aim of photon *i* in a frame is a point of a low-discrepancy
    sequence (`causticAim`, the R2 sequence), so a frame with few photons covers the target evenly, not in clumps.
 3. **Fly, bend, repeat** (`tracePhoton`): trace a ray; if it hits a caster, sample a refraction or reflection with the
@@ -371,7 +372,7 @@ more noise (the old limit forced sharper, noisier disks in the cores).
 - A transmissive material without `KHR_materials_volume` thickness is thin-walled (the glTF rule): no refraction, so
   no caustic, and it is not a caster: the path tracer handles the light seen through it as without this feature.
 - Casters are smooth (see `isCausticCaster()`) and opaque in coverage; a stochastic-blend caster is not handled. No
-  volume scattering inside casters; textured emitters are not photon sources; with an orthographic camera the feature is
+  volume scattering inside casters; with an orthographic camera the feature is
   off (the splats project with a perspective camera's measure); the camera medium is ignored; no dispersion.
 - The path tracer's **roughness regularization** (a surface after a rough one is at least as rough, glass included)
   still blurs the glass of paths the photons do not cover. That is a separate known issue of the path tracer.
@@ -515,7 +516,7 @@ Section 11 explains how to measure a change.
   a solid, or a converter that writes a thickness, so that scenes like the Cornell Caustic work as authored.
 - **Dispersion** (continuous wavelengths on the photons), **alpha cutouts** and **media** (photon
   beams for the caustics through water with scattering), **rough casters** (glossy caustics through the gather),
-  **textured emitters**, **orthographic** cameras.
+  **orthographic** cameras.
 - **Gather at later receivers** without the fixed count: Russian roulette on the number of receivers.
 - **Interaction with the path tracer's roughness regularization**: skip it on casters when the photons cover the
   path, or on transmissive hits in general (GitHub issue 50).
