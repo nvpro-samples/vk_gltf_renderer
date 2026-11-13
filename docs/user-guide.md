@@ -437,12 +437,16 @@ with very many lights draws the first few hundred of them.
 
 These saved views are **bookmarks**: they live in a `<scene name>.json` next to the executable, are never written into the glTF, and
 are shared by every scene file of that name (a Save As into another folder keeps them).
+When the scene has glTF cameras, a **Scene cameras** button at the top of the Camera window opens the list described below.
 
 ### Scene cameras
 
 The glTF cameras of the scene are in **Elements > Cameras** (add, rename, delete). Double-click a camera there, or its node in the
 Scene Graph, to glide the view to it. Deleting a camera deletes its node when the node only carries the camera, and otherwise just
 removes the camera from the node. A scene without cameras opens on a view fitted to the scene; the viewer adds no camera of its own.
+The Inspector's **Type** combo switches a camera between perspective and orthographic (undoable); the new projection starts from values
+close to the old framing. The bookmark-plus button next to **Scene cameras** in the Camera window imports every scene camera as a bookmark (snapshots: they neither
+follow later edits of the cameras nor change the scene when removed).
 
 To add a camera to the scene, use **Create > Camera** (also in the Scene Graph context menu and the Elements toolbar). A dialog asks
 for its name, then OK creates a node with a glTF camera that looks through the current view. Navigate somewhere else, select the camera and click **Set from

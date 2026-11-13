@@ -764,3 +764,28 @@ private:
 
   void restore(const tinygltf::Light& light);
 };
+
+//--------------------------------------------------------------------------------------------------
+// EditCameraCommand - Undo/redo for a discrete camera change (e.g. perspective <-> orthographic)
+//
+// Full tinygltf::Camera snapshots (before/after). Cameras carry no derived GPU state: the viewport
+// reads them when a camera is applied, so restoring the struct is the whole job.
+//--------------------------------------------------------------------------------------------------
+
+class EditCameraCommand : public ICommand
+{
+public:
+  EditCameraCommand(nvvkgltf::Scene& scene, int cameraIndex, const tinygltf::Camera& oldCamera, const tinygltf::Camera& newCamera);
+  ~EditCameraCommand() override;
+
+  void                      execute() override;
+  void                      undo() override;
+  [[nodiscard]] std::string description() const override;
+
+private:
+  nvvkgltf::Scene&                  m_scene;
+  int                               m_cameraIndex = -1;
+  std::string                       m_cameraName;
+  std::unique_ptr<tinygltf::Camera> m_oldCamera = nullptr;
+  std::unique_ptr<tinygltf::Camera> m_newCamera = nullptr;
+};

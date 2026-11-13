@@ -117,6 +117,14 @@ public:
   // Selection synchronization (called from external picker)
   void focusOnSelection();  // Auto-expand/scroll to selection
 
+  // Brings the scene cameras list forward: focuses the Scene Browser, selects its Elements tab and
+  // the Cameras category. Applied on the next render(); the caller makes the window visible.
+  void showSceneCameras()
+  {
+    m_showCamerasRequested = true;
+    m_elementFilter[0]     = '\0';  // a stale filter would open the Cameras tab with no rows
+  }
+
   // Shared state for delete requests (application owns the storage, renders the confirmation dialog)
   void setPendingDelete(int* nodeIndex, bool* openPopup)
   {
@@ -251,8 +259,9 @@ private:
   uint64_t m_revision = 1;
 
   std::vector<ElementTypeDesc> m_elementTypes;  // built once by ensureElementRegistry()
-  int                          m_activeElementTab   = 0;
-  char                         m_elementFilter[128] = {};
+  int                          m_activeElementTab     = 0;
+  bool                         m_showCamerasRequested = false;  // set by showSceneCameras(), consumed on render
+  char                         m_elementFilter[128]   = {};
 
   // Lazy view of the active category: filtered (+ sorted) element indices. Rebuilt only when the
   // (revision, tab, filter, sort) key changes; empty `rows` means "identity" (iterate 0..count).

@@ -535,6 +535,7 @@ private:
   nvutils::Bbox getRenderNodesBbox(const std::unordered_set<int>& renderNodeIndices);
   void          windowTitle();
   void          applyGltfCamera(int cameraIndex);
+  void          addGltfCamerasToBookmarks();
   void          followGltfCamera();       // per frame, after the animation: viewport tracks the camera node
   void          endFollowOnNavigation();  // called by followGltfCamera(): navigation ends the follow
   void          applyCameraString(const std::string& text);

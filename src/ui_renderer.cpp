@@ -47,6 +47,7 @@
 
 
 #include "env_image_loader.hpp"
+#include "gltf_camera_utils.hpp"
 #include "renderer.hpp"
 #include "gltf_create_tangent.hpp"
 #include "gltf_scene_editor.hpp"
@@ -761,6 +762,31 @@ void GltfRenderer::renderUI()
       if(ImGui::Begin("Camera", &m_resources.settings.showCameraWindow))
       {
         nvgui::tooltip("Press F1 to toggle this window");
+
+        // The widget below holds view bookmarks only (shared with other samples). The cameras that
+        // belong to the scene live in Scene Browser > Elements > Cameras: point users there.
+        if(const nvvkgltf::Scene* scene = m_resources.getScene(); scene && !scene->getModel().cameras.empty())
+        {
+          char label[64];  // stack buffer: no per-frame heap allocation
+          snprintf(label, sizeof(label), ICON_MS_CAMERA_ALT " Scene cameras (%zu)", scene->getModel().cameras.size());
+          const float importWidth = ImGui::CalcTextSize(ICON_MS_BOOKMARK_ADD).x + 2.0F * ImGui::GetStyle().FramePadding.x;
+          if(ImGui::Button(label, ImVec2(-(importWidth + ImGui::GetStyle().ItemSpacing.x), 0)))
+          {
+            m_resources.settings.showSceneBrowserWindow = true;
+            m_sceneBrowser.showSceneCameras();
+          }
+          nvgui::tooltip(
+              "Open the scene's camera list (Scene Browser > Elements > Cameras).\n"
+              "The bookmarks below are not part of the scene.");
+          ImGui::SameLine();
+          if(ImGui::Button(ICON_MS_BOOKMARK_ADD "##importSceneCameras"))
+            addGltfCamerasToBookmarks();
+          nvgui::tooltip(
+              "Import all scene cameras as bookmarks.\n"
+              "Snapshots: later edits of a scene camera are not reflected, and removing a\n"
+              "bookmark does not touch the scene.");
+          ImGui::Separator();
+        }
         nvgui::CameraWidget(m_cameraManip);
       }
       ImGui::End();  // End Camera
@@ -2032,59 +2058,65 @@ void GltfRenderer::applyCameraString(const std::string& text)
   resetFrame();
 }
 
+// The render camera of glTF camera `cameraIndex` with its pose current, or nullptr (read-only/unplaced).
+// With clearExtras, the node's stored eye/center/up are dropped first so the pose comes from its transform.
+static const nvvkgltf::RenderCamera* findRenderCamera(nvvkgltf::Scene& scene, int cameraIndex, bool clearExtras)
+{
+  if(clearExtras)
+  {
+    int nodeIndex = scene.getCameraNode(cameraIndex);
+    if(nodeIndex >= 0)
+    {
+      tinygltf::Node& node = scene.getModel().nodes[nodeIndex];
+      if(node.extras.IsObject())
+      {
+        tinygltf::Value::Object extras = node.extras.Get<tinygltf::Value::Object>();
+        extras.erase("camera::eye");
+        extras.erase("camera::center");
+        extras.erase("camera::up");
+        node.extras = tinygltf::Value(extras);
+      }
+    }
+  }
+
+  // Force refresh of render cameras to reflect latest UI changes
+  const std::vector<nvvkgltf::RenderCamera>& renderCameras = scene.getRenderCameras(true);
+  for(size_t i = 0; i < renderCameras.size(); i++)
+  {
+    if(renderCameras[i].cameraIndex == cameraIndex)
+      return &renderCameras[i];
+  }
+  return nullptr;
+}
+
 void GltfRenderer::applyGltfCamera(int cameraIndex)
 {
   if(!m_resources.getScene() || !m_resources.getScene()->valid())
     return;
 
-  // Get the node that contains this camera to clear its extras
-  int nodeIndex = m_resources.getScene()->getCameraNode(cameraIndex);
-  if(nodeIndex >= 0)
-  {
-    // Clear the camera extras so that eye/center/up are recalculated from the world matrix
-    tinygltf::Node& node = m_resources.getScene()->getModel().nodes[nodeIndex];
-    if(node.extras.IsObject())
-    {
-      tinygltf::Value::Object extras = node.extras.Get<tinygltf::Value::Object>();
-      extras.erase("camera::eye");
-      extras.erase("camera::center");
-      extras.erase("camera::up");
-      node.extras = tinygltf::Value(extras);
-    }
-  }
-
-  // Force refresh of render cameras to reflect latest UI changes
-  const std::vector<nvvkgltf::RenderCamera>& cameras = m_resources.getScene()->getRenderCameras(true);
-
-  const nvvkgltf::RenderCamera* found = nullptr;
-  for(size_t i = 0; i < cameras.size() && found == nullptr; i++)
-  {
-    if(cameras[i].cameraIndex == cameraIndex)
-      found = &cameras[i];
-  }
+  const nvvkgltf::RenderCamera* found = findRenderCamera(*m_resources.getScene(), cameraIndex, true);
   if(found == nullptr)
     return;
 
-  const nvvkgltf::RenderCamera& camera = *found;
-
-  if(camera.type == nvvkgltf::RenderCamera::CameraType::ePerspective)
-  {
-    double                             fov = glm::degrees(camera.yfov);
-    nvutils::CameraManipulator::Camera cam{camera.eye, camera.center, camera.up, fov};
-    cam.projectionType = nvutils::CameraManipulator::Perspective;
-    m_cameraManip->setCamera(cam, false);  // animated: the view glides to the camera
-    m_cameraManip->setClipPlanes({camera.znear, camera.zfar});
-  }
-  else if(camera.type == nvvkgltf::RenderCamera::CameraType::eOrthographic)
-  {
-    double                             fov = 45.0;
-    nvutils::CameraManipulator::Camera cam{camera.eye, camera.center, camera.up, fov};
-    cam.projectionType = nvutils::CameraManipulator::Orthographic;
-    cam.orthMag        = {camera.xmag, camera.ymag};
-    m_cameraManip->setCamera(cam, false);
+  const nvutils::CameraManipulator::Camera cam = nvvkgltf::toManipulatorCamera(*found);
+  m_cameraManip->setCamera(cam, false);  // animated: the view glides to the camera
+  if(cam.projectionType == nvutils::CameraManipulator::Orthographic)
     m_cameraManip->adjustOrthographicAspect();
-    m_cameraManip->setClipPlanes({camera.znear, camera.zfar});
-  }
+  m_cameraManip->setClipPlanes(cam.nearFar);
+}
+
+// Copies every scene camera into the Camera window's bookmarks. One way: bookmarks are plain snapshots, they
+// neither follow later edits of the scene cameras nor change the scene when removed. A camera already
+// bookmarked is skipped by the widget itself (AddCamera only keeps distinct views), so importing twice
+// does not duplicate. The bookmarks are saved with the widget's other settings next to the executable.
+void GltfRenderer::addGltfCamerasToBookmarks()
+{
+  if(!m_resources.getScene() || !m_resources.getScene()->valid())
+    return;
+
+  const std::vector<nvvkgltf::RenderCamera>& renderCameras = m_resources.getScene()->getRenderCameras(true);
+  for(size_t i = 0; i < renderCameras.size(); i++)
+    nvgui::AddCamera(nvvkgltf::toManipulatorCamera(renderCameras[i]));
 }
 
 //--------------------------------------------------------------------------------------------------

@@ -59,8 +59,7 @@ namespace PE = nvgui::PropertyEditor;
 // CONSTANTS
 //==================================================================================================
 
-static const double f64_zero = 0., f64_one = 1., f64_ten = 10., f64_179 = 179., f64_001 = 0.001, f64_1000 = 1000.,
-                    f64_10000 = 10000., f64_01 = 0.1, f64_100 = 100., f64_neg1000 = -1000.;
+static const double f64_zero = 0., f64_one = 1., f64_ten = 10., f64_001 = 0.001, f64_01 = 0.1, f64_100 = 100.;
 
 
 // Linear color-factor editors (linear numbers + perceptual sRGB swatch/wheel). See header for details.
@@ -1579,6 +1578,41 @@ void UiInspector::renderMeshBody(int meshIdx)
 // CAMERA PROPERTIES
 //==================================================================================================
 
+// Switches a camera between perspective and orthographic, seeding the new projection from the old one.
+// The visible height at distance d of a perspective camera is 2*d*tan(yfov/2), so the orthographic
+// ymag is that at a reference distance (eye to point of interest, as in the camera widget); the
+// reverse derives the field of view from ymag. Values the target projection already holds (e.g. a camera switched there before) are kept.
+static void switchCameraProjection(tinygltf::Camera& camera, bool toOrthographic, double referenceDistance)
+{
+  const double aspect = camera.perspective.aspectRatio > 0.0 ? camera.perspective.aspectRatio : 16.0 / 9.0;
+  referenceDistance   = std::max(referenceDistance, 1e-3);
+  if(toOrthographic)
+  {
+    // Always re-derived, like the widget: stale orthographic values from an earlier life of this camera
+    // would change the framing.
+    const double yfov         = camera.perspective.yfov > 0.0 ? camera.perspective.yfov : 0.8;
+    camera.orthographic.ymag  = std::tan(0.5 * yfov) * referenceDistance;
+    camera.orthographic.xmag  = camera.orthographic.ymag * aspect;
+    camera.orthographic.znear = camera.perspective.znear;
+    camera.orthographic.zfar  = camera.perspective.zfar > camera.perspective.znear ?
+                                    camera.perspective.zfar :
+                                    std::max(2.0 * referenceDistance, 2.0 * camera.perspective.znear);  // finite and beyond znear
+    camera.type               = "orthographic";
+  }
+  else
+  {
+    if(camera.orthographic.ymag > 0.0)
+      camera.perspective.yfov = std::clamp(2.0 * std::atan(camera.orthographic.ymag / referenceDistance), 0.001, 3.13);
+    else if(camera.perspective.yfov <= 0.0)
+      camera.perspective.yfov = 0.8;
+    camera.perspective.znear =
+        camera.orthographic.znear > 0.0 ? camera.orthographic.znear : std::max(camera.perspective.znear, 0.01);
+    if(camera.orthographic.zfar > camera.perspective.znear)
+      camera.perspective.zfar = camera.orthographic.zfar;
+    camera.type = "perspective";
+  }
+}
+
 // The Inspector's view of a camera picked by index: its title, the nodes carrying it, and its editors.
 void UiInspector::renderCameraProperties(int camIdx)
 {
@@ -1602,28 +1636,60 @@ void UiInspector::renderCameraBody(int camIdx)
 
   tinygltf::Camera& camera = m_scene->getModel().cameras[camIdx];  // No getCameraForEdit yet; direct access
 
-  ImGui::TextDisabled("Type: %s", camera.type.empty() ? "perspective" : camera.type.c_str());
-
   if(PE::begin())
   {
     bool modif = false;
 
-    if(camera.type == "perspective")
+    // Projection switch. One undoable step; the new projection is seeded from the old one so the
+    // framing stays close (the inactive projection keeps its own last values in the glTF struct).
+    const char* projections[] = {"perspective", "orthographic"};
+    int         projection    = camera.type == "orthographic" ? 1 : 0;
+    if(PE::Combo("Type", &projection, projections, 2, -1,
+                 "Perspective: field of view, objects shrink with distance.\n"
+                 "Orthographic: parallel projection sized by X/Y magnification."))
     {
-      tinygltf::PerspectiveCamera& persp = camera.perspective;
-      modif |= PE::DragScalar("Y FOV (rad)", ImGuiDataType_Double, &persp.yfov, 0.01f, &f64_001, &f64_179);
-      modif |= PE::DragScalar("Aspect Ratio", ImGuiDataType_Double, &persp.aspectRatio, 0.01f, &f64_01, &f64_ten);
-      modif |= PE::DragScalar("Z Near", ImGuiDataType_Double, &persp.znear, 0.01f, &f64_001, &f64_1000);
-      modif |= PE::DragScalar("Z Far", ImGuiDataType_Double, &persp.zfar, 0.01f, &f64_001, &f64_10000);
+      tinygltf::Camera switched = camera;
+      // Same rule as the camera widget (CameraManipulator::convertToOrthographic): the size is taken at
+      // the distance from the eye to the point of interest, so the view stays the same. Rebuilt on
+      // click only (rare), so the pose is current. Scene radius is the fallback for an unplaced camera.
+      double                                     referenceDistance = m_scene->getSceneBounds().radius();
+      const std::vector<nvvkgltf::RenderCamera>& renderCameras     = m_scene->getRenderCameras(true);
+      for(size_t i = 0; i < renderCameras.size(); i++)
+      {
+        if(renderCameras[i].cameraIndex == camIdx)
+        {
+          referenceDistance = glm::length(renderCameras[i].eye - renderCameras[i].center);
+          break;
+        }
+      }
+      switchCameraProjection(switched, projection == 1, referenceDistance);
+      if(m_undoStack)
+        m_undoStack->executeCommand(std::make_unique<EditCameraCommand>(*m_scene, camIdx, camera, switched));
+      else
+        camera = switched;
     }
-    else if(camera.type == "orthographic")
+
+    // Sizes and clip distances follow the scene's scale (a city is thousands of units wide), so they
+    // have no upper limit, and the drag speed scales with the value so large numbers stay editable.
+    auto dragSpeed = [](double v) { return float(std::max(0.01, std::abs(v) * 0.005)); };
+
+    if(camera.type != "orthographic")
+    {
+      tinygltf::PerspectiveCamera& persp  = camera.perspective;
+      const double                 fovMax = 3.13;  // just under pi: a perspective FOV is < 180 degrees
+      modif |= PE::DragScalar("Y FOV (rad)", ImGuiDataType_Double, &persp.yfov, 0.01f, &f64_001, &fovMax);
+      modif |= PE::DragScalar("Aspect Ratio", ImGuiDataType_Double, &persp.aspectRatio, 0.01f, &f64_01, &f64_ten);
+      modif |= PE::DragScalar("Z Near", ImGuiDataType_Double, &persp.znear, dragSpeed(persp.znear), &f64_001);
+      modif |= PE::DragScalar("Z Far", ImGuiDataType_Double, &persp.zfar, dragSpeed(persp.zfar), &f64_001);
+    }
+    else
     {
       tinygltf::OrthographicCamera& ortho = camera.orthographic;
-      modif |= PE::DragScalar("X Mag", ImGuiDataType_Double, &ortho.xmag, 0.01f, &f64_neg1000, &f64_1000);
-      modif |= PE::DragScalar("Y Mag", ImGuiDataType_Double, &ortho.ymag, 0.01f, &f64_neg1000, &f64_1000);
-      modif |= PE::DragScalar("Z Near", ImGuiDataType_Double, &ortho.znear, 0.01f, &f64_neg1000, &f64_1000);
+      modif |= PE::DragScalar("X Mag", ImGuiDataType_Double, &ortho.xmag, dragSpeed(ortho.xmag));
+      modif |= PE::DragScalar("Y Mag", ImGuiDataType_Double, &ortho.ymag, dragSpeed(ortho.ymag));
+      modif |= PE::DragScalar("Z Near", ImGuiDataType_Double, &ortho.znear, dragSpeed(ortho.znear));
       double ortho_zfar_min = ortho.znear + 1.0;
-      modif |= PE::DragScalar("Z Far", ImGuiDataType_Double, &ortho.zfar, 0.01f, &ortho_zfar_min, &f64_10000);
+      modif |= PE::DragScalar("Z Far", ImGuiDataType_Double, &ortho.zfar, dragSpeed(ortho.zfar), &ortho_zfar_min);
     }
 
     PE::end();
@@ -1643,6 +1709,7 @@ void UiInspector::renderCameraBody(int camIdx)
     if(m_selection)
       m_selection->emitCameraSetFromView(camIdx);
   }
+
 
   if(m_selection)
   {

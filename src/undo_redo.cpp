@@ -942,3 +942,33 @@ void EditLightCommand::mergeWith(const ICommand& other)
   auto& o     = dynamic_cast<const EditLightCommand&>(other);
   *m_newLight = *o.m_newLight;
 }
+
+//--------------------------------------------------------------------------------------------------
+// EditCameraCommand
+//--------------------------------------------------------------------------------------------------
+
+EditCameraCommand::EditCameraCommand(nvvkgltf::Scene& scene, int cameraIndex, const tinygltf::Camera& oldCamera, const tinygltf::Camera& newCamera)
+    : m_scene(scene)
+    , m_cameraIndex(cameraIndex)
+    , m_cameraName(oldCamera.name)
+    , m_oldCamera(std::make_unique<tinygltf::Camera>(oldCamera))
+    , m_newCamera(std::make_unique<tinygltf::Camera>(newCamera))
+{
+}
+
+EditCameraCommand::~EditCameraCommand() = default;
+
+void EditCameraCommand::execute()
+{
+  m_scene.getModel().cameras[m_cameraIndex] = *m_newCamera;
+}
+
+void EditCameraCommand::undo()
+{
+  m_scene.getModel().cameras[m_cameraIndex] = *m_oldCamera;
+}
+
+std::string EditCameraCommand::description() const
+{
+  return fmt::format("Edit Camera '{}'", m_cameraName);
+}

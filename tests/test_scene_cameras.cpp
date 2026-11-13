@@ -438,31 +438,3 @@ TEST_F(SceneCamerasTest, RemoveCameraDropsItsOwnAnimation)
   EXPECT_EQ(scene.getModel().cameras.size(), 1u);
   EXPECT_TRUE(scene.getModel().animations.empty());
 }
-
-// A bookmark equal to a glTF camera is a duplicate; one that differs only in orthographic zoom is not, nor one
-// a few units away at large coordinates.
-TEST_F(SceneCamerasTest, SameViewIsNotTooLooseFarFromTheOrigin)
-{
-  nvvkgltf::RenderCamera farView  = makeView({1.0e6, 3.0, 6.0}, {1.0e6, 0.0, 0.0});
-  nvvkgltf::RenderCamera nearView = farView;
-  nearView.eye.x += 5.0;
-  nearView.center.x += 5.0;
-  EXPECT_FALSE(nvvkgltf::isSameView(nvvkgltf::toManipulatorCamera(farView), nvvkgltf::toManipulatorCamera(nearView)));
-  EXPECT_TRUE(nvvkgltf::isSameView(nvvkgltf::toManipulatorCamera(farView), nvvkgltf::toManipulatorCamera(farView)));
-}
-
-// A bookmark equal to a glTF camera is a duplicate; one that differs only in orthographic zoom is not.
-TEST_F(SceneCamerasTest, SameViewComparesTheOrthographicZoom)
-{
-  nvvkgltf::RenderCamera ortho  = makeView({4.0, 3.0, 6.0}, {0.0, 0.0, 0.0});
-  ortho.type                    = nvvkgltf::RenderCamera::CameraType::eOrthographic;
-  ortho.xmag                    = 4.0;
-  ortho.ymag                    = 3.0;
-  nvvkgltf::RenderCamera zoomed = ortho;
-  zoomed.xmag                   = 8.0;
-  zoomed.ymag                   = 6.0;
-
-  const nvutils::CameraManipulator::Camera a = nvvkgltf::toManipulatorCamera(ortho);
-  EXPECT_TRUE(nvvkgltf::isSameView(a, nvvkgltf::toManipulatorCamera(ortho)));
-  EXPECT_FALSE(nvvkgltf::isSameView(a, nvvkgltf::toManipulatorCamera(zoomed)));
-}

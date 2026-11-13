@@ -194,6 +194,8 @@ void UiSceneBrowser::render(bool* show, bool isBusy)
   if(show && !*show)
     return;
 
+  if(m_showCamerasRequested)
+    ImGui::SetNextWindowFocus();  // also un-collapses/raises it when docked in a tab group
   if(ImGui::Begin("Scene Browser", show))
   {
     if(!m_scene)
@@ -243,7 +245,7 @@ void UiSceneBrowser::render(bool* show, bool isBusy)
         ImGui::EndTabItem();
       }
 
-      if(ImGui::BeginTabItem("Elements"))
+      if(ImGui::BeginTabItem("Elements", nullptr, m_showCamerasRequested ? ImGuiTabItemFlags_SetSelected : 0))
       {
         m_currentTab = ViewTab::Elements;
         renderElementsTab();

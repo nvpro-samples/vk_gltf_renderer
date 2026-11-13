@@ -422,20 +422,18 @@ void UiSceneBrowser::ensureElementRegistry()
     d.columns.push_back({"Name", 0.0f, false, [this](int i) {
                            ImGui::Text("%s %s", ICON_MS_CAMERA_ALT, m_scene->getModel().cameras[i].name.c_str());
                          }});
-    d.columns.push_back({"Type", 100.0f, false, [this](int i) {
-                           const std::string& t = m_scene->getModel().cameras[i].type;
-                           ImGui::TextUnformatted(t.empty() ? "perspective" : t.c_str());
-                         }});
-    d.columns.push_back({"FOV / Mag", 84.0f, true, [this](int i) {
+    // One compact column for the projection: "43°" for perspective (the common case, no type text),
+    // "ortho 2.00" for orthographic. Keeps the width for the camera name.
+    d.columns.push_back({"FOV", 72.0f, true, [this](int i) {
                            const tinygltf::Camera& c = m_scene->getModel().cameras[i];
                            char                    buf[32];
                            if(c.type == "orthographic")
-                             std::snprintf(buf, sizeof(buf), "%.2f", c.orthographic.ymag);
+                             std::snprintf(buf, sizeof(buf), "ortho %.2f", c.orthographic.ymag);
                            else
                              std::snprintf(buf, sizeof(buf), "%.0f\xc2\xb0", glm::degrees(c.perspective.yfov));
                            cellRightText(buf);
                          }});
-    d.columns[2].sortKey = [this](int i) {
+    d.columns[1].sortKey = [this](int i) {
       const tinygltf::Camera& c = m_scene->getModel().cameras[i];
       return c.type == "orthographic" ? c.orthographic.ymag : glm::degrees(c.perspective.yfov);
     };
@@ -1385,8 +1383,9 @@ void UiSceneBrowser::renderElementsTab()
       const ElementTypeDesc& d = m_elementTypes[t];
       // Icon-only display, but a stable ASCII id (### => id is the plural) so UI-test scenarios and
       // tooltips can address the tab by name regardless of the glyph.
-      const std::string label = std::string(d.icon) + "###" + d.plural;
-      if(ImGui::BeginTabItem(label.c_str()))
+      const std::string label       = std::string(d.icon) + "###" + d.plural;
+      const bool        wantCameras = m_showCamerasRequested && d.selKind == SceneSelection::SelectionType::eCamera;
+      if(ImGui::BeginTabItem(label.c_str(), nullptr, wantCameras ? ImGuiTabItemFlags_SetSelected : 0))
       {
         if(m_activeElementTab != t)
           m_activeElementTab = t;  // switching category invalidates the filtered view on next build
@@ -1397,6 +1396,7 @@ void UiSceneBrowser::renderElementsTab()
     }
     ImGui::EndTabBar();
   }
+  m_showCamerasRequested = false;  // both tab selections above have been issued this frame
 
   if(m_activeElementTab < 0 || m_activeElementTab >= int(m_elementTypes.size()))
     m_activeElementTab = 0;
