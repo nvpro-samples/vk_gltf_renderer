@@ -414,6 +414,8 @@ private:
 #endif
 
   bool dlssGuideRequired() const;  // True when the path tracer currently needs DLSS/OptiX/OIDN guide-buffer capture code.
+  float sceneLightPeak() const;    // Brightest emitter radiance + largest directional illuminance, from SceneVk (O(1))
+  void  followSceneLightPeak();    // Per frame, two float compares: moves the clamp when the light term changed
   float defaultFireflyClamp() const;  // Scene-appropriate firefly clamp: HDR luminance integral, else a fixed baseline.
   void  updateGizmoAttachment();
   bool  updateTextures();
@@ -631,8 +633,11 @@ private:
   // Which environment the firefly clamp was last calibrated for, as an int so it can hold a
   // "none yet" sentinel. The clamp is a starting point the user is free to override, so it is
   // recalibrated when the environment changes *kind* and not on every re-bake.
-  int  m_fireflyClampCalibratedFor{-1};
-  bool m_envBakeDirty{true};  // Baked environment needs rebuilding before the next frame
+  int m_fireflyClampCalibratedFor{-1};
+  // The scene's light term (emitters + directional lights) inside the clamp as last set or followed, so an edit
+  // that moves it moves the clamp by the same amount and keeps what the user set on top.
+  float m_fireflyClampScenePeak{0.0f};
+  bool  m_envBakeDirty{true};  // Baked environment needs rebuilding before the next frame
   // Set when a Time of Day value arrives from outside the UI -- the command line, a benchmark
   // sequence or MCP. It decides a precedence question the ini restore would otherwise settle
   // wrongly: see the post-restore hook beside the tod* declarations.

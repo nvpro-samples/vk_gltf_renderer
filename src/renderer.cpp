@@ -2941,7 +2941,28 @@ void GltfRenderer::refreshBakedEnvironment()
 void GltfRenderer::calibrateFireflyClamp()
 {
   m_fireflyClampCalibratedFor                    = int(m_resources.settings.envSystem);
+  m_fireflyClampScenePeak                        = sceneLightPeak();
   m_pathTracer.m_pushConst.fireflyClampThreshold = defaultFireflyClamp();
+}
+
+float GltfRenderer::sceneLightPeak() const
+{
+  return m_resources.sceneVk.emissivePeakRadiance() + m_resources.sceneVk.directionalPeakIlluminance();
+}
+
+// Adding a light, changing its type or intensity, or editing an emissive material changes the scene's light term
+// after the clamp was calibrated. The clamp is then reset to the default, even if the user had changed it: it is a
+// starting point, and a light edit is a new scene as far as it is concerned. A clamp of 0 is "disabled" and stays so.
+void GltfRenderer::followSceneLightPeak()
+{
+  const float peak = sceneLightPeak();
+  if(peak == m_fireflyClampScenePeak)
+    return;
+  m_fireflyClampScenePeak = peak;
+  float& clamp            = m_pathTracer.m_pushConst.fireflyClampThreshold;
+  if(clamp > 0.0f)
+    clamp = defaultFireflyClamp();
+  resetFrame();
 }
 
 //--------------------------------------------------------------------------------------------------
@@ -2984,8 +3005,18 @@ glm::vec3 GltfRenderer::skySunIlluminanceAboveAtmosphere() const
 float GltfRenderer::defaultFireflyClamp() const
 {
   const shaderio::EnvSystem env = m_resources.settings.envSystem;
+
+  // Emissive materials are lights the environment's integral knows nothing about: a disk of radiance 120
+  // seen in a mirror is a legitimate sample of 48, which a clamp sized for the environment alone would
+  // flatten into a dim, soft highlight. The brightest emitter of the area-light list (built when the scene
+  // is uploaded) is added to the threshold, the same way the sun's illuminance is added for the analytic
+  // skies below.
+  // Directional lights are bounded the same way (their illuminance, as for the sun). Point and spot lights
+  // are not: their radiance at a surface depends on its distance to the light, so they add nothing here.
+  const float emissivePeak = sceneLightPeak();
+
   if(env != shaderio::EnvSystem::eHdr && !isBakedEnvironment(env))
-    return 30.0f;
+    return 30.0f + emissivePeak;
 
   // The environment's own integral: the sum of max(R,G,B) over solid angle.
   float clamp = m_resources.hdrIbl.getIntegral();
@@ -3014,13 +3045,19 @@ float GltfRenderer::defaultFireflyClamp() const
   //
   // The gradient sky keeps its sun out of the bake for the same reason and needs the same
   // correction; there is just no atmosphere to ask, so the term is the sun this sky implies.
+  //
+  // When the scene has a marked sun light, that light is one of the scene's directional lights and its
+  // illuminance is already in `emissivePeak` below: adding the sky's term as well would count the sun twice.
   glm::vec3 sun(0.0f);
-  if(env == shaderio::EnvSystem::eSky)
-    sun = skySunIlluminanceAboveAtmosphere();
-  else if(env == shaderio::EnvSystem::eGradient)
-    sun = gradientSunIlluminance() * m_resources.settings.envIntensity();
+  if(m_skySun.lightIndex() < 0)
+  {
+    if(env == shaderio::EnvSystem::eSky)
+      sun = skySunIlluminanceAboveAtmosphere();
+    else if(env == shaderio::EnvSystem::eGradient)
+      sun = gradientSunIlluminance() * m_resources.settings.envIntensity();
+  }
   clamp += std::max({sun.x, sun.y, sun.z});
-  return clamp;
+  return clamp + emissivePeak;
 }
 
 //--------------------------------------------------------------------------------------------------
@@ -4649,6 +4686,7 @@ void GltfRenderer::reconcileAnimationGpuState(VkCommandBuffer cmd)
       markGpuTransformStaleAfterCpuSync(scn);
       (void)scnVk.syncFromScene(m_resources.staging, scn);
     }
+    followSceneLightPeak();
   }
 
   bool hasMorphOrSkin = scn.animation().hasMorphTargets() || scn.animation().hasSkinning();
@@ -5076,6 +5114,9 @@ bool GltfRenderer::updateSceneChanges(VkCommandBuffer cmd)
 
     updateSceneChanges_TlasUpdate(cmd, scene);
   }
+
+  // Both branches have uploaded the lights and emissive materials: the clamp follows an edit made in the UI too
+  followSceneLightPeak();
 
   updateSceneChanges_RasterizerInvalidate(renderNodeOrNodeDirty);
   updateSceneChanges_TangentUpload(cmd, scene, changed);

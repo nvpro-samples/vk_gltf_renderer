@@ -464,8 +464,8 @@ PathStepResult pathTraceOneBounce(IRaytracer raytracer, inout RayDesc ray, inout
         // factor (emissiveFactor * strength), NOT the texture-modulated pbrMat.emissive: the light
         // sampler selects triangles by the factor alone, so the pdf must too or the MIS weights
         // of the two techniques no longer sum to 1.
-        emissiveMis = computeEmitterHitMisWeight(pt.lastSamplePdf, materials[materialIndex].emissiveFactor,
-                                                 hit.geonrm, ray.Direction, payload.hitT);
+        emissiveMis = computeEmitterHitMisWeight(pt.lastSamplePdf, materials[materialIndex].emissiveFactor, hit.geonrm,
+                                                 ray.Direction, payload.hitT);
       }
       pt.radiance += emissiveMis * pbrMat.emissive * pt.throughput;
     }
@@ -517,6 +517,11 @@ PathStepResult pathTraceOneBounce(IRaytracer raytracer, inout RayDesc ray, inout
     // after the chain resets it, and samples light as usual)
     if(causticCovered(pt))
       bounce.nextEventValid = false;
+#endif
+
+#if GLTF_USE_DISPERSION
+    // Dispersion: the wavelength the path already carries (0 if none yet, see the BSDF sample below)
+    pbrMat.wavelength = pt.wavelength;
 #endif
 
     //-----------------------------------------------------------------------
@@ -572,11 +577,29 @@ PathStepResult pathTraceOneBounce(IRaytracer raytracer, inout RayDesc ray, inout
       BsdfSampleData sampleData;
       sampleData.k1 = -ray.Direction;                              // outgoing direction
       sampleData.xi = float3(rand(seed), rand(seed), rand(seed));  // random number
+#if GLTF_USE_DISPERSION
+      // A path that reaches dispersive glass without a wavelength proposes one for this sample. It keeps it
+      // only if the sample refracts (below): a reflection off the surface stays white.
+      const bool proposeWavelength = (pbrMat.dispersion > 0.0F && pt.wavelength <= 0.0F);
+      if(proposeWavelength)
+        pbrMat.wavelength = sampleWavelength(rand(seed));
+#endif
       bsdfSample(sampleData, pbrMat);
       // bsdfSampleSimple(sampleData, pbrMat);
 
       // Update the pt.throughput
       pt.throughput *= sampleData.bsdf_over_pdf;
+
+#if GLTF_USE_DISPERSION
+      // The path refracted into dispersive glass: from now on it carries this wavelength, and its throughput
+      // gets the wavelength's RGB weight once (the BSDF does not apply it for a path that carries one).
+      // Thin-walled transmission does not bend the ray, so the wavelength means nothing there.
+      if(proposeWavelength && sampleData.event_type == BSDF_EVENT_GLOSSY_TRANSMISSION && pbrMat.thickness > 0.0F)
+      {
+        pt.wavelength = pbrMat.wavelength;
+        pt.throughput *= wavelengthWeight(pt.wavelength);
+      }
+#endif
       ray.Direction    = sampleData.k2;  // new direction
       pt.lastSamplePdf = sampleData.pdf;
 

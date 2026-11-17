@@ -439,8 +439,9 @@ uint32_t nvvkgltf::SceneVk::syncFromScene(nvvk::CmdUploaderInterface& staging, n
     if(rlights.empty() && sizeChanged && m_bLights.buffer != VK_NULL_HANDLE)
     {
       destroyBufferDeferred(m_bLights);
-      m_bLights        = {};
-      m_sceneDescDirty = true;
+      m_bLights                    = {};
+      m_directionalPeakIlluminance = 0.0f;
+      m_sceneDescDirty             = true;
       df.lights.clear();
       result |= eSyncLights;
     }
@@ -766,10 +767,17 @@ void nvvkgltf::SceneVk::uploadRenderNodes(nvvk::CmdUploaderInterface& staging,
 void nvvkgltf::SceneVk::uploadLights(nvvk::CmdUploaderInterface& staging, const nvvkgltf::Scene& scn, const std::unordered_set<int>& dirtyIndices)
 {
   const std::vector<nvvkgltf::RenderLight>& rlights = scn.getRenderLights();
+  m_directionalPeakIlluminance                      = 0.0f;
   if(rlights.empty())
     return;
 
   std::vector<shaderio::GltfLight> shaderLights = getShaderLights(rlights, scn.getModel().lights);
+  for(const shaderio::GltfLight& light : shaderLights)
+  {
+    if(light.type == shaderio::eLightTypeDirectional)
+      m_directionalPeakIlluminance =
+          std::max(m_directionalPeakIlluminance, light.intensity * std::max({light.color.x, light.color.y, light.color.z}));
+  }
 
   const VkDeviceSize requiredBytes = std::span(shaderLights).size_bytes();
   const VkDeviceSize prevSize      = m_bLights.bufferSize;
@@ -864,6 +872,7 @@ void nvvkgltf::SceneVk::uploadEmissiveTriangles(nvvk::CmdUploaderInterface& stag
   std::vector<shaderio::EmissiveTriangle> tris;
   std::vector<float>                      triArea;  // parallel to tris (used by the CDF pass below)
   double                                  sumArea = 0.0, sumAreaLum = 0.0;
+  float                                   peakRadiance = 0.0f;
   for(uint32_t nodeIdx = 0; nodeIdx < static_cast<uint32_t>(renderNodes.size()); ++nodeIdx)
   {
     const nvvkgltf::RenderNode& rn = renderNodes[nodeIdx];
@@ -930,6 +939,7 @@ void nvvkgltf::SceneVk::uploadEmissiveTriangles(nvvk::CmdUploaderInterface& stag
         continue;  // skip degenerate (zero-area) triangles
       sumArea += area;
       sumAreaLum += static_cast<double>(area) * lum;
+      peakRadiance = std::max(peakRadiance, std::max({radiance.x, radiance.y, radiance.z}));
 
       shaderio::EmissiveTriangle et{};
       et.radiance     = radiance;
@@ -1010,6 +1020,7 @@ void nvvkgltf::SceneVk::uploadEmissiveTriangles(nvvk::CmdUploaderInterface& stag
   m_numEmissiveTriangles           = newCount;
   m_emissiveTotalWeight            = newWeight;
   m_emissiveMeanLum                = meanLum;
+  m_emissivePeakRadiance           = peakRadiance;
   const VkDeviceSize requiredBytes = std::span(tris).size_bytes();
 
   // Resize (or drop to empty) on count change. Mirrors uploadLights().

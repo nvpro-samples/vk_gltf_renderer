@@ -146,13 +146,13 @@ public:
   void recreatePreservingTextures(VkCommandBuffer cmd, nvvk::CmdUploaderInterface& staging, nvvkgltf::Scene& scn);
 
   // Getters
-  const nvvk::Buffer&               material() const { return m_bMaterial; }
-  const nvvk::Buffer&               primitiveBuffer() const { return m_bRenderPrim; }
-  const nvvk::Buffer&               renderNodeBuffer() const { return m_bRenderNode; }
-  const nvvk::Buffer&               sceneDesc() const { return m_bSceneDesc; }
+  const nvvk::Buffer& material() const { return m_bMaterial; }
+  const nvvk::Buffer& primitiveBuffer() const { return m_bRenderPrim; }
+  const nvvk::Buffer& renderNodeBuffer() const { return m_bRenderNode; }
+  const nvvk::Buffer& sceneDesc() const { return m_bSceneDesc; }
   // The materials as the shaders read them, for host code that needs their factors (no per-material glTF lookups)
   const std::vector<shaderio::GltfShadeMaterial>& shadeMaterials() const { return m_materialCache.getShadeMaterials(); }
-  uint64_t                          shadeMaterialsRevision() const { return m_materialCache.getRevision(); }
+  uint64_t shadeMaterialsRevision() const { return m_materialCache.getRevision(); }
   // The GltfTextureInfo slot through which material `materialIndex` uses `binding` (0 = none)
   uint16_t textureInfoSlot(int materialIndex, const tinygltf::Material& srcMat, const TextureBinding& binding) const
   {
@@ -190,6 +190,11 @@ public:
 
   // Number of emissive area-light triangles in the NEE emitter list (0 when no material emits).
   [[nodiscard]] uint32_t numEmissiveTriangles() const { return m_numEmissiveTriangles; }
+  // Brightest channel of any emitter in the area-light list (0 without emitters); the firefly clamp needs it.
+  [[nodiscard]] float emissivePeakRadiance() const { return m_emissivePeakRadiance; }
+  // Largest directional-light illuminance (intensity x brightest color channel, 0 without one). Point and
+  // spot lights have no such bound: their radiance depends on the distance to the surface they light.
+  [[nodiscard]] float directionalPeakIlluminance() const { return m_directionalPeakIlluminance; }
 
   // An image to be loaded and created.
   struct SceneImage
@@ -306,6 +311,8 @@ protected:
   uint32_t     m_numEmissiveTriangles = 0;
   float        m_emissiveTotalWeight  = 0.0f;  // Sum of per-triangle selection weights (area * defensive luminance)
   float        m_emissiveMeanLum      = 0.0f;  // Area-weighted mean emitter luminance (defensive sampling)
+  float        m_emissivePeakRadiance = 0.0f;  // Brightest channel of any listed emitter
+  float        m_directionalPeakIlluminance = 0.0f;  // Largest directional-light illuminance
   // What the emissive list takes from each material, as of its last build: the constant emitted
   // radiance, the doubleSided flag, and whether an emissive texture modulates the radiance (the
   // light sampler skips the texture read of a flat emitter). A material

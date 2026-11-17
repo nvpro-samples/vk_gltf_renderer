@@ -1430,6 +1430,9 @@ struct PathTracerState
 #if GLTF_USE_VOLUME
   VolumeMedium volumeMedium = {};
 #endif
+#if GLTF_USE_DISPERSION
+  float wavelength = 0.0F;  // nm, chosen once at the first refraction into dispersive glass; 0 = not yet
+#endif
 #if GLTF_USE_SCATTER
   int scatterBounces = 0;
 #endif
