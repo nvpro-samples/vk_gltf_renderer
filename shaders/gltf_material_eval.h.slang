@@ -437,13 +437,14 @@ PbrMaterial evaluateMaterial(in GltfShadeMaterial material, MeshState state, Tex
   // Perform tangent and bitangent updates if necessary
   if(needsTangentUpdate)
   {
-    // Ensure T, B, and N are orthonormal
-    pbrMat.B            = normalize(cross(pbrMat.N, pbrMat.T));
-    // Not sign(): it is 0 when the two bitangents are exactly perpendicular (which a normal-map texel
-    // can give), which zeroed B and made the normalize below NaN: a black pixel.
-    float bitangentSign = dot(state.B, pbrMat.B) < 0.0F ? -1.0F : 1.0F;
-    pbrMat.B            = pbrMat.B * bitangentSign;
-    pbrMat.T            = normalize(cross(pbrMat.B, pbrMat.N) * bitangentSign);
+    // Requires: pbrMat.N is already normalized
+    float3 c  = cross(pbrMat.N, pbrMat.T);
+    float  d  = dot(state.B, c);          // independent of rsqrt, so it can be computed in parallel
+    float  rl = rsqrt(dot(c, c));
+    float3 Bn = c * rl;
+
+    pbrMat.T = cross(Bn, pbrMat.N);       // unit length by construction
+    pbrMat.B = (d < 0.0F) ? -Bn : Bn;     // d == 0 -> +Bn, so B is never zeroed (same as the fix in the original)
   }
 
 #if GLTF_USE_SHEEN
