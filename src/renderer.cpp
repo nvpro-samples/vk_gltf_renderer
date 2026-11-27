@@ -344,6 +344,8 @@ GltfRenderer::GltfRenderer(nvutils::ParameterRegistry* paramReg, const nvutils::
                  Persist::eYes, -24.0F, 24.0F);
   m_settings.add({"tmEvMax", "Tonemapper: Auto-exposure maximum (EV100)"}, &m_resources.tonemapperData.evMaxValue,
                  Persist::eYes, -24.0F, 24.0F);
+  m_settings.add({"tmAverageMode", "Tonemapper: Average Mode [Mean:0, Median:1]"},
+                 &m_resources.tonemapperData.averageMode, Persist::eYes, 0, 1);
 
   // Panel visibility: persisted before, but not settable. Exposed now so a scripted capture can
   // hide the chrome (see docs/benchmarking.md).
